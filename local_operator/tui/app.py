@@ -5516,19 +5516,33 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
-        self._detach_or_stop_outgoing()
+        left_running = self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
-        notice(f"resuming session {resume_id}…")
+        # Name what happened to the session being LEFT (round 1, D5). This is
+        # the release's headline behaviour change and it INVERTS a prior
+        # guarantee: leaving a conversation used to end it, and now the
+        # runtime keeps working, keeps model calls in flight and keeps its
+        # memory resident. The old receipt was word-for-word identical, so the
+        # same sentence silently came to mean the opposite thing — a user
+        # switching between four conversations had four runtimes alive and was
+        # never told once.
+        if left_running:
+            notice(f"resuming session {resume_id}… (previous session left running)")
+        else:
+            notice(f"resuming session {resume_id}…")
         self._run_session_transition(self._reload_session())
 
-    def _detach_or_stop_outgoing(self) -> None:
+    def _detach_or_stop_outgoing(self) -> bool:
         """Decide what happens to the session being LEFT by a /resume.
+
+        Returns True when the outgoing session was left RUNNING, so the
+        caller's receipt can say so — see D5 at the call site.
 
         Under the viewer model this is a real choice for the first time.
         Disposing a viewer only closes its socket — the runtime keeps working
         — so switching conversations no longer ends the one you switch away
         from. That is the point of a session that outlives the terminal, and
-        it is the default (``session.background_on_resume``).
+        it is the default (``runtime.background_on_resume``).
 
         Set it False and /resume STOPS the outgoing session instead, for
         anyone who would rather a conversation they walked away from stop
@@ -5540,7 +5554,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None or not bool(getattr(session, "is_remote", False)):
-            return
+            # Nothing was left running: there was no runtime to leave.
+            return False
         try:
             from local_operator.session.runtime.control import (
                 DEFAULT_BACKGROUND_ON_RESUME,
@@ -5549,17 +5564,19 @@ class OperatorApp(App[None]):
             # Read at COMMAND time through the same accessor `/fork` uses,
             # which is what the section's LIVE scope promises: an edit takes
             # effect on the very next /resume in this same session.
-            section = self._config_values().get("session")
+            section = self._config_values().get("runtime")
             configured = DEFAULT_BACKGROUND_ON_RESUME
             if isinstance(section, dict) and "background_on_resume" in section:
                 configured = bool(section["background_on_resume"])
         except Exception:  # noqa: BLE001 — an unreadable setting keeps the default
             configured = True
         if configured:
-            return
+            return True
         probed = getattr(session, "request_stop", None)
         if not callable(probed):
-            return
+            # An owner too old to be asked keeps running whatever the setting
+            # says, so the receipt must not claim it was stopped.
+            return True
         request_stop = cast(Callable[[], Awaitable[Any]], probed)
 
         async def stop_outgoing() -> None:
@@ -5569,6 +5586,10 @@ class OperatorApp(App[None]):
                 logger.debug("stopping the outgoing session failed", exc_info=True)
 
         self.run_worker(stop_outgoing(), group="resume-stop", exclusive=False)
+        # A stop was REQUESTED. The receipt must not promise it is still
+        # running: the user opted out of backgrounding precisely so it would
+        # not be.
+        return False
 
     def _session_runs_elsewhere(self) -> bool:
         """Whether this session's runtime is on another machine.
@@ -14184,7 +14205,20 @@ class OperatorApp(App[None]):
             self._issued_own_stop = False
             if isinstance(error, asyncio.CancelledError):
                 raise
-            self._system_notice(f"could not stop the owner: {error}", "warning")
+            # A viewer bound to NOTHING has nothing to stop, and that is a
+            # normal state under this release rather than a failure — `lop`
+            # now opens a viewer that engages a runtime on the first message,
+            # so `/stop` before that message is simply early. Round 1 (U3)
+            # found this reported as `! could not stop the owner: not
+            # attached`: "owner" is the concept this release removes from the
+            # user's model, and "not attached" is the transport's reason, not
+            # the user's situation. On `/stop all` it also printed beside the
+            # correct "no sessions to stop", giving one action both an error
+            # and a benign result.
+            if isinstance(error, ConnectionError) and "not attached" in str(error):
+                self._system_notice("nothing is running in this session yet")
+                return
+            self._system_notice(f"could not stop this session: {error}", "warning")
             return
         # The owner's ack says the stop is UNDERWAY ("stopping …"); what
         # settles it is the announcement that follows, which paints the

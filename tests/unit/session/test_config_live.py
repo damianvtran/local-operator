@@ -293,7 +293,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: ``runtime`` is here for the same reason and a sharper one: its keys are
 #: read at COMMAND time by the surface that acts on them, so there is no
 #: session attribute for a probe to observe moving.
-#: ``session.background_on_resume`` is read by ``/resume`` in the TUI when it
+#: ``runtime.background_on_resume`` is read by ``/resume`` in the TUI when it
 #: decides what to do with the session being left, and
 #: ``runtime.unattended_gate_timeout`` is read by the RUNTIME's gate at the
 #: moment a question parks — a different process from the ``Session`` this

@@ -1871,6 +1871,15 @@ def wake_command(args: argparse.Namespace) -> int:
         return 0
 
     print(f"supervisor:  {'installed' if installed else 'not installed'}")
+    if installed is False and is_supported() and rows:
+        # The ACTIONABLE branch. Round 1 (D4): this command reported "not
+        # installed" beside three armed wakes and an overdue one, which is
+        # precisely the failure the subcommand exists to surface — and then
+        # stopped, leaving the user to find `--help` to act on the one fact it
+        # had just told them. The unsupported branch below already got two
+        # explanatory lines; the fixable one got none.
+        print("             (nothing will fire these while their sessions are")
+        print("              closed — run 'lop wake status --install')")
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole

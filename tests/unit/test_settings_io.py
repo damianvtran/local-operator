@@ -74,7 +74,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
-        "session.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "session.reap_unused": DEFAULT_REAP_UNUSED,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,

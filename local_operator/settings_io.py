@@ -705,8 +705,17 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- runtime ------------------------------------------------------------
     Setting(
-        key="session.background_on_resume",
-        path=("session", "background_on_resume"),
+        # `runtime.*`, matching the section it appears in and the other key in
+        # it. Round 1 (R5): filing it under `session.*` while showing it in the
+        # Runtime section made the file teach two rules — `session.reap_unused`
+        # stays in the Session section, so a user reading the Runtime page
+        # could not predict which YAML key they were editing. The scope
+        # argument for keeping it out of the Session SECTION (that section is
+        # NEW_SESSIONS, this key is LIVE) is sound and unaffected: the section
+        # is the scope boundary, the namespace is the section's name. New in
+        # this release, so there is no migration cost to settling it now.
+        key="runtime.background_on_resume",
+        path=("runtime", "background_on_resume"),
         section="runtime",
         label="Keep working after /resume",
         kind=Kind.BOOL,
