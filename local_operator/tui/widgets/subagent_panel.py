@@ -10,9 +10,13 @@ child session's retained events as a transcript.
 Rows are live by construction: the app repaints the panel on every Subagent*
 event AND on the 1 Hz job poll, and the panel advances its own spinner while
 anything is running — motion, not colour, says "alive": the accent green is
-spent at exactly four sites (see the tcss preamble) and a fifth spinner is
-not one of them. Settled rows follow the tool ledger's ink law: ✓ dim,
-✗ danger, nothing else.
+spent at exactly five sites (see the tcss preamble) and a sixth spinner is
+not one of them. Settled rows do NOT follow the tool ledger's "✓ success"
+ink law — that overturn (see `tool_card.py`) was deliberately bounded to the
+TOOL LEDGER; `status_glyph` keeps this panel's ✓ dim on completion, the same
+as ✗ and every other settled state, because a subagent's own transcript
+already carries the colour and this row is a job-manager summary, not the
+ledger.
 """
 
 from __future__ import annotations
