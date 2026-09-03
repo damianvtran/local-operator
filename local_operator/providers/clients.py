@@ -641,15 +641,25 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
 
     ``top_p_key`` exists only because Gemini spells it ``topP``; the capability
     itself is provider-independent and lives on the spec.
+
+    Each knob is resolved INDEPENDENTLY, and a ``None`` on the spec means OMIT
+    that key so the vendor's own default applies (see ``_SAMPLING_POLICY``).
+    Vendors diverge on the two constantly — Qwen documents temperature 0.7 with
+    top_p 0.8 — so a family may legitimately seed one and omit the other, and
+    an all-or-nothing pair would be unable to express that.
     """
     if not request.model.supports_sampling_params:
         return {}
-    return {
-        "temperature": (
-            request.temperature if request.temperature is not None else request.model.temperature
-        ),
-        top_p_key: request.top_p if request.top_p is not None else request.model.top_p,
-    }
+    params: dict[str, float] = {}
+    temperature = (
+        request.temperature if request.temperature is not None else request.model.temperature
+    )
+    if temperature is not None:
+        params["temperature"] = temperature
+    top_p = request.top_p if request.top_p is not None else request.model.top_p
+    if top_p is not None:
+        params[top_p_key] = top_p
+    return params
 
 
 #: Multiplier applied to a LOCAL token estimate before it is compared against a

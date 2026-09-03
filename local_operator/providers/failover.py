@@ -1553,15 +1553,42 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     ``supports_sampling_params`` needs no such care here, unlike in the
     clone-based version this replaced: it comes from the target's own
     ``build_model_spec`` rather than from the primary.
+
+    The temperature/top-p CARRY is conditional for the same "this knob belongs
+    to the model" reason as the effort clamp above. A sampling value is a
+    property of the MODEL (see ``_SAMPLING_POLICY``), so carrying the primary's
+    across a hop re-imposes a number the target's own vendor documents against
+    — falling back from a 0.2-configured primary onto a Gemini target would
+    reinstate precisely the value that makes it loop.
+
+    So the target's OWN policy is authoritative and the primary's values are
+    not carried at all. The knob cannot be treated as a session preference the
+    way it used to be, because a non-``None`` value on the base spec is
+    ambiguous: it may be a user's deliberate choice, but it is just as likely
+    the PRIMARY family's own seed (Gemini 2.5's 1.0/0.95), and propagating that
+    onto a target whose vendor documents 0.7/0.8 is the same category of error
+    this whole policy exists to stop.
+
+    The trade-off is deliberate and asymmetric: a session-level sampling
+    preference does not follow a hop onto a family that documents its own
+    value, whereas the reverse would re-impose a number documented to cause
+    looping or an HTTP 400 on the model that is supposed to RESCUE the turn.
+    A per-request override still reaches the wire through
+    ``ChatRequest.temperature``, which outranks the spec in
+    ``_sampling_params``.
     """
     from local_operator.model.configure import build_model_spec
 
     provider, model_id = parse_selector(target.selector)
     target_spec = build_model_spec(provider, model_id)
+    # `target_spec` already carries its own family's policy from
+    # `build_model_spec`, so the sampling knobs are simply left alone here --
+    # they are named explicitly rather than omitted so the next reader sees the
+    # decision instead of an absence.
     return target_spec.model_copy(
         update={
-            "temperature": base.temperature,
-            "top_p": base.top_p,
+            "temperature": target_spec.temperature,
+            "top_p": target_spec.top_p,
             "reasoning_effort": (
                 target.effort
                 if target.effort is not None
