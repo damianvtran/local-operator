@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -810,3 +811,157 @@ def test_retitle_is_a_wire_method_but_not_a_model_action() -> None:
     assert "retitle" in METHODS
     assert "retitle" in COMMAND_TIMEOUTS
     assert "retitle" not in builtin.BROWSER_ACTIONS
+
+
+@pytest.mark.asyncio
+async def test_retitle_against_an_old_extension_is_swallowed_end_to_end(monkeypatch) -> None:
+    """Mixed-version guard: a NEW runtime pushing ``retitle`` at an OLD extension.
+
+    ``retitle`` ships in a runtime release before every paired extension has
+    been updated, so the very first push a user's session makes may land on a
+    worker that has no such handler. That worker answers with a typed INTERNAL
+    ``unknown method: retitle``, and the whole point of the design is that this
+    costs nothing — no raise, no failed turn, no lost title, and the tab stays
+    drivable.
+
+    Deliberately NOT a monkeypatched ``_bridge_call``: this drives a REAL
+    loopback HTTP daemon speaking the wire protocol, so the client transport,
+    the timeout table, the ``Response`` envelope parsing and the ``BridgeError``
+    → ``format_error`` mapping are all genuinely exercised. Mocking the client
+    would assert only that the mock was called (review round 1, R5).
+    """
+    import json as _json
+    import secrets
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list[dict[str, Any]] = []
+
+    class OldExtensionDaemon(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's API
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            request = _json.loads(body)
+            seen.append(request)
+            # Byte-for-byte what worker.ts emits for an unknown method: a typed
+            # INTERNAL error, not a transport failure.
+            payload = _json.dumps(
+                {
+                    "id": request["id"],
+                    "ok": False,
+                    "error": {
+                        "code": "internal",
+                        "message": f"unknown method {request['method']}",
+                        "data": {},
+                    },
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            """Silence the stdlib access log so the suite stays readable.
+
+            The parameter is named ``format`` to match
+            ``BaseHTTPRequestHandler``'s signature, which pyright checks as a
+            keyword parameter; shadowing the builtin is the base class's choice,
+            not ours.
+            """
+
+    server = HTTPServer(("127.0.0.1", 0), OldExtensionDaemon)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        from local_operator.browser_bridge import state as state_store
+        from local_operator.browser_bridge.state import BridgeState
+
+        live = BridgeState(
+            pid=os.getpid(),
+            port=server.server_address[1],
+            session_key=secrets.token_hex(24),
+            proto=1,
+            extension_connected=True,
+            paired=True,
+        )
+        monkeypatch.setattr(state_store, "read", lambda root=None: live)
+
+        surface = BrowserSurface()
+        surface.surface_id = "bridge:5:n0nce"
+        context = ToolContext(session_id="mixed-version", session_name="A late title")
+
+        # Must not raise, and must return None rather than a ToolResult.
+        assert await builtin.retitle_browser_surface(surface, context) is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    # The push really did reach the wire (so this is not vacuously passing).
+    assert [request["method"] for request in seen] == ["retitle"]
+    assert seen[0]["params"]["requester"] == "session:mixed-version"
+    # The handle is untouched: a rejected rename must never drop the surface,
+    # which is what would strand the tab for every later command.
+    assert surface.surface_id == "bridge:5:n0nce"
+
+
+@pytest.mark.parametrize(
+    "invisible",
+    ["\u200b", "\ufeff", "\u2060", "\u200e", "\x01", "\u202e\u200b"],
+    ids=["zwsp", "bom", "word-joiner", "lrm", "c0", "bidi+zwsp"],
+)
+def test_a_title_of_only_invisible_characters_still_reaches_the_cwd_fallback(
+    invisible: str,
+) -> None:
+    """A name the user cannot see must not beat the cwd fallback.
+
+    ``str.strip()`` removes whitespace but NOT the Cf/Cc classes, so a title of
+    nothing but zero-width or bidi characters used to read as a real name,
+    survive to the sanitiser, empty there, and land on the bare ``Session`` —
+    skipping the very fallback this feature adds, and reproducing the original
+    "every group is called Session" symptom for a session that has a perfectly
+    good working directory (QA round 1, Q2).
+    """
+    context = ToolContext(
+        session_id="s",
+        cwd="/Users/damian/minervaai",
+        session_name="",
+        session_name_provider=lambda: invisible,
+    )
+    assert builtin._browser_session_label(context) == "minervaai"
+
+
+def test_an_invisible_title_at_a_filesystem_root_still_yields_the_bare_fallback() -> None:
+    # Both candidates sanitise to nothing, so the last-resort label is correct
+    # here — `LO · /` would name a session no better than `LO · Session`.
+    context = ToolContext(session_id="s", cwd="/", session_name="\u200b")
+    assert builtin._browser_session_label(context) == "Session"
+
+
+@pytest.mark.asyncio
+async def test_retitle_declines_rather_than_sending_a_constant_identity(monkeypatch) -> None:
+    """No session id ⇒ no push, instead of a shared ``call:retitle`` requester.
+
+    ``_browser_requester``'s fallback mints ``call:<tool_call_id>``, which is
+    unique only because a tool call id is. A rename is not a tool call, so the
+    fallback would put the CONSTANT ``call:retitle`` into an identity slot whose
+    documented purpose is to be distinct per session — harmless while
+    ``trustedOwner`` rejects non-``session:`` requesters, and a trap for whoever
+    relaxes that next (review round 1, R3).
+    """
+    calls: list[str] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface=""):
+        calls.append(str(params.get("requester", "")))
+        return {}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:5:n0nce"
+
+    await builtin.retitle_browser_surface(surface, ToolContext(session_name="Named"))
+    assert calls == [], "a session with no id must not push a rename at all"
+
+    await builtin.retitle_browser_surface(surface, ToolContext(session_id="real", session_name="N"))
+    assert calls == ["session:real"]

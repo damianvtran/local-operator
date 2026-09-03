@@ -300,7 +300,11 @@ test("retitle leaves a personal group the user moved the tab into alone", async 
     assert.equal(chrome.updateCalls.length, updatesBefore, "must not touch a personal group");
     assert.equal(chrome.groups.get(77).title, "Personal");
     assert.equal(chrome.groupCalls.length, 1, "must not re-home the tab");
-    assert.equal(result.title, "LO · Session", "still reports the last label LO applied");
+    // "" means "nothing was renamed", per the handler's contract. The stored
+    // groupAppliedLabel is deliberately NOT cleared on this path (it is how a
+    // later explicit resume recognises the group it once owned), so the handler
+    // must not echo it back as though this call had applied it.
+    assert.equal(result.title, "", "a declined rename reports nothing renamed");
   } finally { await bundle.close(); chrome.restore(); }
 });
 

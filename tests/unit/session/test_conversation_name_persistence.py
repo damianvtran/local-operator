@@ -24,6 +24,7 @@ and each has a test below:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from pathlib import Path
@@ -527,3 +528,57 @@ async def test_the_tool_context_reads_the_live_title_not_a_stale_snapshot(tmp_pa
     assert context.session_name == "", "the snapshot itself is expected to be stale"
     assert context.session_name_provider() == "Named mid-turn"
     await session.dispose()
+
+
+def test_naming_a_browsing_session_outside_a_loop_does_not_raise(tmp_path) -> None:
+    """A rename must never take down its caller for want of an event loop.
+
+    Deliberately NOT ``async``: the whole point is the loop-less case.
+    ``set_conversation_name`` is called from the TUI's SYNCHRONOUS paint path
+    (``_store_title``, ``_cmd_rename``), and a session can be constructed and
+    named outside a running loop — which is exactly the case
+    ``_spawn_conversation_name_write`` has always guarded. The browser rename
+    reaches ``_spawn_background`` -> ``asyncio.ensure_future``, which raises
+    ``RuntimeError`` there, and the swallow inside the pushed coroutine cannot
+    help because the raise happens at SCHEDULING time, before it ever runs.
+
+    Regression guard: on the first draft of this feature the call below raised
+    ``RuntimeError: There is no current event loop`` where ``main`` returned the
+    title, for any session that had a browser tab open.
+    """
+    session = _session(tmp_path)
+    # A session that IS browsing: the guard only matters once a surface exists,
+    # because the no-tab path returns before it ever tries to schedule.
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    stored = session.set_conversation_name("Named with no loop", user_set=True)
+
+    assert stored == "Named with no loop"
+    assert session.conversation_name == "Named with no loop"
+
+
+def test_a_loopless_spawn_leaves_no_unawaited_coroutine(tmp_path, recwarn) -> None:
+    """The declined rename must not be reported by asyncio at GC time.
+
+    ``_spawn_background`` builds its ``_guarded`` wrapper BEFORE calling
+    ``ensure_future``, so a raise there stranded two coroutines — the wrapper
+    and the caller's — and Python blames the session for work it deliberately
+    declined to schedule. Both are closed on that path now; this pins it,
+    because an un-awaited-coroutine warning surfaces at an unrelated GC point
+    and is miserable to trace back.
+    """
+    session = _session(tmp_path)
+    session._browser.surface_id = "bridge:5:n0nce"
+
+    session.set_conversation_name("Named with no loop", user_set=True)
+    gc.collect()
+
+    unawaited = [
+        w
+        for w in recwarn.list
+        if issubclass(w.category, RuntimeWarning) and "never awaited" in str(w.message)
+        # The title's own journal write has its own long-standing guard with the
+        # same shape; this test is about the browser rename's coroutines.
+        and "_persist_conversation_name" not in str(w.message)
+    ]
+    assert unawaited == [], [str(w.message) for w in unawaited]

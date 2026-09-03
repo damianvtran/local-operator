@@ -161,7 +161,15 @@ export async function retitle(params: Record<string, unknown>): Promise<Record<s
     // Re-read: reconcileTabGroup persists through its own serialized queue, so
     // the in-hand object may predate the write it just made.
     const updated = resolveSurfaceToken(params.tab, await getSurfaces());
-    return { title: updated?.groupAppliedLabel ?? "" };
+    const applied = updated?.groupAppliedLabel ?? "";
+    // Report the label only when it is the one this call asked for. On the
+    // user-moved-tab path the reconcile returns early WITHOUT clearing
+    // `groupAppliedLabel`, so the stored value is the previous title — echoing
+    // it would report a rename that deliberately did not happen, contradicting
+    // the contract above (QA round 1, Q3). Comparing against the wanted title
+    // keeps "" meaning exactly "nothing was renamed".
+    const wanted = appliedTitle(baseTitle(params), updated?.groupOrdinal ?? 1);
+    return { title: applied === wanted ? applied : "" };
   } catch {
     return { title: "" };
   }

@@ -6089,6 +6089,24 @@ def _browser_live_session_name(context: ToolContext | None) -> str:
     return context.session_name
 
 
+def _browser_clean_label(raw: str) -> str:
+    """``raw`` with control/format characters removed and whitespace collapsed.
+
+    Removing all control/format characters is intentionally broader than the
+    known bidi and zero-width set: browser tab chrome is too small to make
+    invisible direction changes attributable. Returns ``""`` for anything that
+    sanitises away to nothing, which is what lets callers treat "invisible" and
+    "absent" as the same state rather than shipping a title the user cannot see.
+    """
+    cleaned = "".join(
+        " " if char.isspace() else char
+        for char in raw
+        if unicodedata.category(char) not in {"Cf"}
+        and not (unicodedata.category(char) == "Cc" and not char.isspace())
+    )
+    return " ".join(cleaned.split())
+
+
 def _browser_session_label(context: ToolContext | None) -> str:
     """Display-only session title safe for compact browser chrome.
 
@@ -6104,16 +6122,17 @@ def _browser_session_label(context: ToolContext | None) -> str:
     chose the session for distinguishes three concurrent groups where three
     copies of ``Session`` do not.
     """
-    raw = _browser_live_session_name(context)
-    if not raw.strip() and context is not None:
-        raw = _browser_cwd_label(context.cwd)
-    cleaned = "".join(
-        " " if char.isspace() else char
-        for char in raw
-        if unicodedata.category(char) not in {"Cf"}
-        and not (unicodedata.category(char) == "Cc" and not char.isspace())
-    )
-    cleaned = " ".join(cleaned.split())
+    # Emptiness is decided by the SANITISED text, not by ``str.strip()``.
+    # ``strip()`` removes whitespace but NOT the Cf/Cc classes, so a title of
+    # nothing but zero-width or bidi characters (U+200B, U+FEFF, U+2060,
+    # U+200E, \x01) read as a real name, survived to the sanitiser, emptied
+    # there, and landed on the bare fallback — skipping the cwd substitution
+    # this function exists to make. Sanitising first is what makes "is there a
+    # usable name here?" and "what will the user actually see?" the same
+    # question (QA round 1, Q2).
+    cleaned = _browser_clean_label(_browser_live_session_name(context))
+    if not cleaned and context is not None:
+        cleaned = _browser_clean_label(_browser_cwd_label(context.cwd))
     if not cleaned:
         return _BROWSER_FALLBACK_LABEL
 
@@ -6722,6 +6741,19 @@ async def retitle_browser_surface(state: BrowserSurfaceProtocol, context: ToolCo
     """
     surface = state.surface_id
     if not surface.startswith("bridge:"):
+        return
+    # A rename REQUIRES a real session identity, so it declines rather than
+    # borrowing ``_browser_requester``'s tool-call fallback. That fallback mints
+    # ``call:<tool_call_id>``, which is unique only because a tool call id is;
+    # this is not a tool call, so it would put the CONSTANT ``call:retitle`` in
+    # an identity slot whose whole purpose is to be distinct per session (see
+    # ``_browser_requester``). Harmless today — ``trustedOwner`` ignores
+    # anything not prefixed ``session:``, so the reconcile would no-op — but a
+    # shared constant sitting in an identity field is a trap for whoever
+    # relaxes that check next (review round 1, R3). Nothing is lost by
+    # declining: without a session id the extension could not attribute the
+    # group anyway.
+    if context is None or not context.session_id:
         return
     identity = _browser_identity_params(context, "retitle")
     _result, problem = await _bridge_call(

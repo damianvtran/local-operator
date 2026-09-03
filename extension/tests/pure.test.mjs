@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { build } from "esbuild";
 import { pathToFileURL } from "node:url";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -501,4 +501,34 @@ test("reconnect timing: alarm is the guaranteed floor, setTimeout the alive-only
     assert.equal(shouldDialOnAlarm({ connected: true, connecting: false }), false);
     assert.equal(shouldDialOnAlarm({ connected: false, connecting: true }), false);
   } finally { await module.close(); }
+});
+
+// The wire protocol's own docstring (local_operator/browser_bridge/protocol.py)
+// promises that "a method added here without a handler fails a test rather than
+// timing out on the wire". Python's side of that is `set(METHODS) ==
+// set(COMMAND_TIMEOUTS)`; nothing checked the EXTENSION side, so a method could
+// reach the generated union with no handler behind it and only be discovered as
+// an opaque timeout against a real browser. This closes that half (review round
+// 1, R4).
+test("every wire method has a worker handler", async () => {
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  const union = generated.match(/export type Method = ([^;]+);/);
+  assert.ok(union, "protocol.gen.ts must declare the Method union");
+  const methods = [...union[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  assert.ok(methods.length > 10, `parsed too few methods: ${methods}`);
+
+  const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const table = worker.match(/const HANDLERS[\s\S]*?=\s*\{([\s\S]*?)\n\};/);
+  assert.ok(table, "worker.ts must declare the HANDLERS table");
+  // Keys are either `name,` (shorthand) or `name: fn,`; comments are ignored
+  // because they legitimately mention method names in prose.
+  const handlers = new Set(
+    table[1]
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .flatMap((line) => [...line.matchAll(/^\s{2}([A-Za-z_][A-Za-z0-9_]*)\s*[,:]/g)].map((m) => m[1])),
+  );
+
+  const missing = methods.filter((method) => !handlers.has(method));
+  assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
