@@ -3270,10 +3270,11 @@ class Session:
         """Best-effort rename of the open browser tab group; never raises.
 
         Skipped entirely when this session has no tab open, which is the common
-        case — the import and the RPC are both paid only by a session that is
-        actually browsing. The tool layer is imported lazily here for the same
-        reason ``_close_browser_surface`` does it: ``tools.builtin`` is
-        otherwise absent from the session's import graph.
+        case: a session that never browses issues no RPC at all. The import is
+        function-local to match ``_close_browser_surface`` next door rather than
+        to save anything — ``tools.builtin`` is already imported at module scope
+        here (see the top of this file), so unlike that sibling's claim there is
+        no import cost to defer (QA round 1).
         """
         if not self._browser.surface_id:
             return
