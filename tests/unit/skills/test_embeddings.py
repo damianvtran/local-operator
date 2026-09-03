@@ -113,6 +113,26 @@ class TestApiEmbedder:
         assert b"text-embedding-3-small" in captured["payload"]  # default model
 
     @pytest.mark.asyncio
+    async def test_openrouter_embeddings_include_attribution_headers(self) -> None:
+        """When targeting OpenRouter, ApiEmbedder sends app attribution headers."""
+        captured_headers: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_headers.update(dict(request.headers))
+            return httpx.Response(200, json={"data": [{"embedding": [0.6, 0.8]}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        embedder = ApiEmbedder(
+            base_url="https://openrouter.ai/api/v1", api_key="sk-or-test", client=client
+        )
+        await embedder.embed(["test text"])
+        assert captured_headers.get("http-referer") == "https://local-operator.com"
+        assert captured_headers.get("x-openrouter-title") == "Local Operator"
+        assert captured_headers.get("x-title") == "Local Operator"
+        assert captured_headers.get("x-openrouter-categories") == "cli-agent,personal-agent"
+        assert captured_headers.get("authorization") == "Bearer sk-or-test"
+
+    @pytest.mark.asyncio
     async def test_http_error_raises_embedding_error(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500, json={"error": "boom"})

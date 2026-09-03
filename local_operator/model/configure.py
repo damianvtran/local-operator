@@ -387,7 +387,15 @@ class ValidationDescriptor:
 VALIDATION_ENDPOINTS: dict[str, ValidationDescriptor] = {
     "deepseek": ValidationDescriptor("https://api.deepseek.com/v1/models"),
     "openai": ValidationDescriptor("https://api.openai.com/v1/models"),
-    "openrouter": ValidationDescriptor("https://openrouter.ai/api/v1/models"),
+    "openrouter": ValidationDescriptor(
+        "https://openrouter.ai/api/v1/models",
+        extra_headers={
+            "HTTP-Referer": "https://local-operator.com",
+            "X-OpenRouter-Title": "Local Operator",
+            "X-Title": "Local Operator",
+            "X-OpenRouter-Categories": "cli-agent,personal-agent",
+        },
+    ),
     "radient": ValidationDescriptor("https://api.radienthq.com/v1/models"),
     "anthropic": ValidationDescriptor(
         "https://api.anthropic.com/v1/models",

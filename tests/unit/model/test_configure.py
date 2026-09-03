@@ -2550,7 +2550,13 @@ async def test_recovery_probe_failure_leaves_the_block_standing(tmp_path) -> Non
             {"data": [{"id": "test_model"}]},
             True,
             "https://openrouter.ai/api/v1/models",
-            {"Authorization": "Bearer test_key"},
+            {
+                "HTTP-Referer": "https://local-operator.com",
+                "X-OpenRouter-Title": "Local Operator",
+                "X-Title": "Local Operator",
+                "X-OpenRouter-Categories": "cli-agent,personal-agent",
+                "Authorization": "Bearer test_key",
+            },
         ),
         (
             "anthropic",
