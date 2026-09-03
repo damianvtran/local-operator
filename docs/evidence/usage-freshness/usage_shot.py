@@ -11,12 +11,14 @@ own ``_usage_data_fetched_ms`` so the frame shows what the shipped code does,
 not what the script decides.
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        docs/evidence/usage-freshness/usage_shot.py out.svg [WxH] [end]
+        docs/evidence/usage-freshness/usage_shot.py out.svg [WxH] [end] [target]
 
 Run from the worktree root.
 
 A third argument ``end`` scrolls the body to the bottom first, which is where
-the stuck kimi block and its ``last known`` note live in a set this tall.
+the stuck kimi block and its ``last known`` note live in a set this tall. A
+fourth sets the panel's target, i.e. captures the scoped ``/usage <provider>``
+path — the one whose title has to give up cells before the stale count does.
 """
 
 from __future__ import annotations
@@ -112,6 +114,8 @@ async def main() -> None:
         # saw rather than "now minus a fixture stamp from 2026".
         panel.set_clock(NOW_MS)
         panel.display = True
+        if len(sys.argv) > 4:
+            panel._target = sys.argv[4]
         # The app's own header computation — this is the line under test.
         header_ms = app._usage_data_fetched_ms(reports)
         panel.show_reports(reports, now_ms=header_ms)

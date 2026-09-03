@@ -10,7 +10,8 @@ differ only by the code under test.
 | `before-stuck-account.svg` | The same frame scrolled to the bottom: `kimi cred:8 · last known 2h ago` — the one account the header was reporting |
 | `after.svg` | This branch, same state: the title reads `Usage  1m ago` |
 | `after-stuck-account.svg` | The same, scrolled: the header is fresh, carries `· 1 stale`, and the stuck block says `last known 2h ago` in amber with a dimmed status dot |
-| `before-short-pane.svg` / `after-short-pane.svg` | The 100x18 frame from design finding D1, where the row budget squeezes the note out: on `main` nothing marks the stale block; here the pinned `· 1 stale` and the dimmed dot survive |
+| `before-short-pane.svg` / `after-short-pane.svg` | The 100x18 frame from design finding D1. On `main` nothing marks the stale block. Here the note survives compaction beside the meter it qualifies — round 1 dropped it at this height and leaned on the title, which is what round 2's Q5 showed was not enough — and the pinned `· 1 stale` backs it up |
+| `after-scoped-narrow.svg` | `/usage anthropic` at 40x18 — the D6/Q5 frame. The title drops the target (which the user just typed, and every block header repeats) so `· 1 stale` cannot be truncated away |
 | `*.png` | The same frames rendered, so they are viewable inline |
 | `usage_shot.py` | Reproduces every frame (run from the worktree root) |
 | `rasterise.py` | SVG → PNG without collapsing the spacing (see below) |
@@ -129,3 +130,33 @@ XML whitespace collapsing unless the element opts out, then stretches what
 remains to satisfy `textLength`. `rasterise.py` adds `xml:space="preserve"` to a
 COPY before converting, so the committed SVGs stay byte-identical to Textual's
 export and remain authoritative.
+
+## Round 2 review follow-ups
+
+Round 2 found that the round-1 guarantee had two holes, both on paths the
+earlier sweeps never set `_target` for or never compacted hard enough to reach:
+
+```
+D6/Q5  scoped `/usage <provider>` at narrow widths lost BOTH layers
+         the note: `cuts.add` made it eligible, but `_window_rows` kept the
+         TAIL and the note is `data[0]`, so it was always dropped first
+         the suffix: the title truncates from the right and the target is
+         appended before it, so `· 1 stale` clipped to `· 1…`
+       scoped sweep: 32 / 180 misread  ->  0 / 180
+
+D7     the 60s threshold was anchored to `format_age`'s display resolution,
+       but the panel renders CACHED data with a 5-minute TTL, so a healthy
+       idle provider was reported as failing
+         idle rows 4.0 min old:  'Usage  just now  · 5 stale'  (5 notes)
+                             ->  'Usage  just now'             (0 notes)
+
+R8     the same defect from the other side: a slow sequential round
+         8 accounts @10s:  2 stale  ->  0 stale   (all had succeeded)
+        20 accounts @10s:  6 stale  ->  0 stale
+```
+
+The threshold is now derived from `USAGE_REPORT_TTL_MS` rather than a copied
+literal, so it cannot drift from the cache contract it describes. It still marks
+everything it must: the reported Kimi account (169 min), the `include_expired`
+and lease-loser rows (hours), and any account with a failure streak or
+`usage_unavailable` regardless of age.

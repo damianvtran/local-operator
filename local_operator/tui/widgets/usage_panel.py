@@ -121,12 +121,36 @@ PANEL_WIDTH_MARGIN = 4
 #: the one-row body floor overrides it on a terminal too short to grant both.
 PANEL_HEIGHT_MARGIN = 2
 
-#: How far behind the title's stamp a report must fall before it labels itself
-#: stale (see :func:`_account_status_note`). One minute because that is
-#: :func:`format_age`'s own resolution — under it the title and the row both
-#: render ``just now``, so a note would be contradicting a title that agrees
-#: with it.
-_STALE_BEHIND_MS = 60_000
+
+def _stale_behind_ms() -> int:
+    """How far behind the title's stamp a row must fall to be called stale.
+
+    Derived from the CACHE's freshness contract, not from :func:`format_age`'s
+    display resolution. This panel renders cached data: a row lives
+    ``USAGE_REPORT_TTL_MS`` (5 min, jittered ±25%) and the background warmer
+    only refreshes the ACTIVE provider, so an idle provider's row is *supposed*
+    to be minutes old — that is the cache working, not an account failing.
+
+    Anchored to the formatter's one minute instead, a completely healthy panel
+    reported ``5 stale`` and dimmed five healthy dots on most opens (measured at
+    97% of opens for a four-provider user). That both states something false and
+    burns the signal: marks the operator sees constantly stop meaning
+    "degraded", and the genuinely stuck account this panel exists to surface
+    ends up looking like every other block.
+
+    A row is unremarkable until it is older than the freshness the system
+    promised it, so the floor is one full TTL plus the ±25% jitter that TTL is
+    spread by — a row at the top of its jitter band has not outlived its
+    contract. Taken from the cache's own constant rather than a copied literal
+    so the two cannot drift; the import is function-local for the same reason
+    :func:`format_amount` keeps ``UNIT_LABELS`` off this module's import graph
+    (``tui.app`` imports this widget, so importing back through it at module
+    level would be a cycle).
+    """
+    from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
+
+    return int(USAGE_REPORT_TTL_MS * 1.25)
+
 
 #: Rows the pinned chrome costs: the title, the rule under it, the blank row
 #: that separates the report from the footer, the ``N of M`` position, and the
@@ -484,7 +508,7 @@ def _account_status_note(  # noqa: ANN001
     # `format_age` says `just now` for both stamps, so a note there would
     # contradict a title that is telling the same truth.
     behind_header = bool(
-        header_ms is not None and fetched_at and (header_ms - fetched_at) >= _STALE_BEHIND_MS
+        header_ms is not None and fetched_at and (header_ms - fetched_at) >= _stale_behind_ms()
     )
     if not unavailable and failures <= 0 and not behind_header:
         return ""
@@ -558,11 +582,19 @@ class UsageBody:
     ``cuts`` holds row counts at which a window may end. ``blocks`` holds
     ``(start, end)`` ranges for provider groups, allowing a short viewport to
     remove decorative air without separating meters from their provider.
+
+    ``notes`` holds the LINE INDICES of staleness notes. Compaction has to keep
+    those ahead of the meters they qualify (see :meth:`UsagePanel._window_rows`),
+    and identifying them by index rather than by matching the rendered string
+    keeps that decision with the code that knows which row is which — a
+    substring test would silently start matching an account whose identity
+    happens to contain the copy.
     """
 
     lines: list[Text]
     cuts: frozenset[int]
     blocks: tuple[tuple[int, int], ...] = ()
+    notes: frozenset[int] = frozenset()
 
 
 def build_usage_body(  # noqa: ANN001
@@ -586,6 +618,7 @@ def build_usage_body(  # noqa: ANN001
     lines: list[Text] = []
     cuts: set[int] = set()
     blocks: list[tuple[int, int]] = []
+    notes: set[int] = set()
     if not reports:
         return UsageBody(lines, frozenset({0}))
 
@@ -613,14 +646,15 @@ def build_usage_body(  # noqa: ANN001
             note = Text(f"  {account_note}", style=warning)
             note.truncate(max(1, width), overflow="ellipsis")
             lines.append(note)
-            # The note qualifies the meters below it, so it survives compaction
-            # with them. `_window_rows` keeps only rows whose index is a cut
-            # point when a block outruns a short viewport; without this the
-            # layout drops `last known 2h ago` while keeping the stale meter it
-            # describes, under a title that now reads `1m ago` — measured at 18
-            # of 40 swept sizes, every one of them a frame whose only visible
-            # numbers were the stale ones.
+            # The note qualifies the meters below it, so it survives
+            # compaction with them: a cut point makes it eligible for a short
+            # viewport, and `notes` makes `_window_rows` keep it AHEAD of the
+            # meters rather than dropping it as the first row of the tail slice.
+            # Both are needed — with only the cut point, the layout still
+            # rendered `last known 2h ago`'s meter under a title reading `1m
+            # ago` with nothing correcting it.
             cuts.add(len(lines))
+            notes.add(len(lines) - 1)
         if report.notes:
             note = Text(f"  {report.notes}", style=dim)
             note.truncate(max(1, width), overflow="ellipsis")
@@ -635,7 +669,7 @@ def build_usage_body(  # noqa: ANN001
             lines.append(_limit_row(limit, columns, now_ms, degraded=bool(account_note)))
             cuts.add(len(lines))
         blocks.append((block_start, len(lines)))
-    return UsageBody(lines, frozenset(cuts), tuple(blocks))
+    return UsageBody(lines, frozenset(cuts), tuple(blocks), frozenset(notes))
 
 
 class UsagePanel(Static):
@@ -1259,6 +1293,15 @@ class UsagePanel(Static):
 
         Same predicate the body uses, so the count and the `last known` notes
         can never disagree about which accounts are stale.
+
+        "Stale" here means "not confirmed by the round the title reports", which
+        is very nearly but not exactly "older". The title takes the newest
+        CONFIRMED stamp, so a failing account whose last-good happens to be more
+        recent than that — an old confirmed reading beside a newer unconfirmed
+        one — is still counted. The direction is conservative (the title
+        under-claims freshness and the block states its own true age, so no
+        number is misdated) and the alternative, counting only rows that are
+        literally older, would leave an unconfirmed block unmarked.
         """
         return sum(
             1
@@ -1273,19 +1316,37 @@ class UsagePanel(Static):
         warning = Style(color=theme_mod.semantic_color("warning"))
         row = Text()
         row.append("Usage", style=Style(color=theme_mod.semantic_color("fg")))
-        if self._target:
-            row.append(f"  {self._target}", style=muted)
+        stale = 0
+        age = ""
         if self._fetched_ms is not None and not self._loading and not self._error:
+            stale = self._stale_account_count()
+            age = f"  {format_age(self._now() - self._fetched_ms)}"
+        # The target is dropped when the row cannot hold both it and the stale
+        # count. The title truncates from the RIGHT, so whatever is appended
+        # first survives — and on a narrow scoped panel (`/usage anthropic` in a
+        # 40-column split) the target pushed `· N stale` off the end, restoring
+        # the unmarked stale meter this panel was reported for. The target is
+        # the one piece of the title the user already knows: they just typed it,
+        # and every block header repeats it. The stale count is the thing they
+        # did not know, so it is the target that yields.
+        target = f"  {self._target}" if self._target else ""
+        if target and stale:
+            wanted = cell_len("Usage") + cell_len(target) + cell_len(age)
+            wanted += cell_len(f"  · {stale} stale")
+            if wanted > self._content_width():
+                target = ""
+        if target:
+            row.append(target, style=muted)
+        if age:
             # A `·` between the age and the refreshing mark so "2m ago" and
             # "refreshing…" read as two facts rather than one running phrase.
-            row.append(f"  {format_age(self._now() - self._fetched_ms)}", style=dim)
+            row.append(age, style=dim)
             # The age is the NEWEST confirmation, so on a mixed set it does not
             # describe every block. A bare age never named its subject; unqualified
             # it reads as "all of this is one minute old", which is the same
             # misreading in the opposite direction from the one this panel was
             # reported for. The count makes the title self-correcting and points
             # at the blocks carrying their own `last known` line.
-            stale = self._stale_account_count()
             if stale:
                 row.append("  · ", style=faint)
                 row.append(f"{stale} stale", style=warning)
@@ -1422,17 +1483,30 @@ class UsagePanel(Static):
         """Visible rows plus the source position represented by their tail.
 
         A provider block taller than the short viewport is compacted
-        semantically: heading first, then the last meters that fit. Notes and
-        the decorative blank yield before identity or quota values.
+        semantically: heading first, then the last meters that fit. The
+        decorative blank yields before identity or quota values.
+
+        A staleness note is kept AHEAD of the meters rather than yielding with
+        the other air. Being a cut point only made it *eligible*: the tail slice
+        below keeps ``data[-(budget - 1):]`` and the note is ``data[0]``, so it
+        was still the first row discarded — which rendered a 169-minute-old
+        meter with nothing on the card saying so, the exact frame this panel was
+        reported for. The note qualifies the meters, so a budget that can show a
+        meter can show the sentence that says the meter is old; dropping a
+        *meter* to keep it is the honest trade, because an unlabelled stale
+        number is worse than one fewer number.
         """
         for start, end in body.blocks:
             if self._offset == start and end - start > budget:
-                data = [
-                    body.lines[index] for index in range(start + 1, end) if index + 1 in body.cuts
-                ]
                 if budget <= 1:
                     return [body.lines[start]], end
-                return [body.lines[start], *data[-(budget - 1) :]], end
+                indices = [index for index in range(start + 1, end) if index + 1 in body.cuts]
+                notes = [body.lines[i] for i in indices if i in body.notes]
+                meters = [body.lines[i] for i in indices if i not in body.notes]
+                # Notes first, then the last meters that still fit beside them.
+                room = max(0, budget - 1 - len(notes))
+                kept = [*notes[: budget - 1], *meters[-room:]] if room else notes[: budget - 1]
+                return [body.lines[start], *kept], end
         end = self._window_end(body, budget)
         return body.lines[self._offset : end], end
 

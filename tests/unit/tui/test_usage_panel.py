@@ -1635,21 +1635,60 @@ def test_a_silently_stale_row_is_marked_even_with_no_failure_streak() -> None:
 def test_a_row_level_with_the_header_is_not_marked_stale() -> None:
     """The other side of R1: the mark must mean something.
 
-    Reports fetched in the same round differ by milliseconds, and below a
-    minute ``format_age`` renders both the title and the row as ``just now``.
-    A note there would contradict a title that agrees with it.
+    A REALISTIC round, not a synthetic one. ``_fetch_provider`` probes accounts
+    sequentially with a 10s per-request timeout, so the stamps within a single
+    successful round spread by ``10s x (accounts - 1)`` — twelve accounts on one
+    provider span nearly two minutes. Pinned with millisecond offsets this test
+    passed while an eight-account round self-reported ``2 stale`` with every
+    account succeeding, which is what let that case through.
     """
     now = 200 * 60_000.0
     reports = [
         _aged(
             _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
-            now - 1.8 * 60_000 - index * 40,  # same round, milliseconds apart
+            now - 1.8 * 60_000 - index * 10_000,  # one round, 10s apart, all successful
         )
-        for index in range(3)
+        for index in range(12)
     ]
     header_ms = OperatorApp._usage_data_fetched_ms(reports)
 
     assert not any("last known" in line for line in _lines(reports, now=now, header_ms=header_ms))
+
+
+def test_a_row_inside_its_cache_lifetime_is_not_marked_stale() -> None:
+    """D7: the panel renders CACHED data, so minutes-old is not degraded.
+
+    A row lives ``USAGE_REPORT_TTL_MS`` (5 min, jittered ±25%) and the warmer
+    only refreshes the active provider, so an idle provider's row is supposed to
+    be minutes old. Thresholded at ``format_age``'s one-minute resolution
+    instead, a completely healthy panel reported ``5 stale`` and dimmed five
+    healthy dots on most opens — false, and it burns the signal that makes a
+    genuinely stuck account stand out.
+    """
+    from local_operator.providers.usage_cache import USAGE_REPORT_TTL_MS
+
+    now = 200 * 60_000.0
+    active = _aged(
+        _report(_percent("k:5h", "5 hour", 30.0, shared=True), provider="kimi", identity="cred:8"),
+        now,
+    )
+    # Idle behind the TTL: healthy, zero counters, simply not re-probed yet.
+    idle = [
+        _aged(
+            _report(_percent(f"a:5h:{index}", "5 hour", 20.0, shared=True), identity=f"a{index}@x"),
+            now - USAGE_REPORT_TTL_MS,
+        )
+        for index in range(5)
+    ]
+    reports = [*idle, active]
+    header_ms = OperatorApp._usage_data_fetched_ms(reports)
+
+    assert not any("last known" in line for line in _lines(reports, now=now, header_ms=header_ms))
+
+    # Past the cache's own contract it IS stale, so the guard still has teeth.
+    beyond = [_aged(report, now - USAGE_REPORT_TTL_MS * 1.25 - 1) for report in idle]
+    marked = _lines([*beyond, active], now=now, header_ms=header_ms)
+    assert sum("last known" in line for line in marked) == 5, marked
 
 
 def test_a_failed_probe_stamp_never_becomes_the_header() -> None:
@@ -1817,3 +1856,80 @@ def test_the_unavailable_note_keeps_its_age_on_a_narrow_card() -> None:
     assert "…" not in narrow, narrow
     # The full sentence is still preferred wherever it fits.
     assert wide.strip() == "usage unavailable — last known 2h ago", wide
+
+
+def test_the_note_survives_compaction_ahead_of_the_meters_it_qualifies() -> None:
+    """Q5/D6: being a cut point only made the note ELIGIBLE.
+
+    ``_window_rows`` kept ``data[-(budget - 1):]`` — the tail — and the note is
+    ``data[0]``, so it was always the first row dropped. A short pane therefore
+    rendered a 169-minute-old meter with nothing on the card saying so, which is
+    the frame this panel was reported for.
+    """
+    now = 200 * 60_000.0
+    stuck = _aged(
+        _report(
+            _percent("k:7d", "7 day", 64.0, shared=True),
+            _percent("k:5h", "5 hour", 20.0, shared=True),
+            provider="kimi",
+            identity="cred:8",
+        ),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    body = build_usage_body([stuck], WIDTH, now, now - 1.8 * 60_000)
+    start, end = body.blocks[0]
+
+    class _Offset(UsagePanel):
+        pass
+
+    panel = _Offset()
+    panel._offset = start
+    # Budget 2 is the tightest compaction that still shows a row beside the
+    # heading — the exact case the tail slice used to spend on a meter.
+    rows, _ = panel._window_rows(body, 2)
+    assert any("last known" in row.plain for row in rows), [r.plain for r in rows]
+    # And with room for both, the meter comes back alongside it.
+    rows, _ = panel._window_rows(body, 3)
+    text = "\n".join(row.plain for row in rows)
+    assert "last known" in text and "%" in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_panel_keeps_the_stale_count_over_the_provider_name() -> None:
+    """D6/Q5: the title truncates from the right, so order decides who survives.
+
+    ``/usage anthropic`` spends 11 cells on the target before the age and the
+    suffix, so on a 40-column split pane `· N stale` was clipped to `· 1…` and
+    the pinned-chrome guarantee that closed D1 did not hold on this path. The
+    target is what the user just typed and every block header repeats it; the
+    stale count is the thing they did not know, so the target yields.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    stuck = _aged(
+        _report(_percent("a:7d", "7 day", 64.0, shared=True), identity="stuck@x"),
+        now - 169 * 60_000,
+    )
+    stuck.consecutive_failures = 1
+
+    async with _panel_app(size=(40, 18)) as panel:
+        panel.set_clock(now)
+        panel.start_fetch("anthropic")
+        panel.show_reports([fresh, stuck], now_ms=fresh.fetched_at)
+        narrow = panel.render_lines_for_test()[0]
+
+    async with _panel_app(size=(100, 30)) as panel:
+        panel.set_clock(now)
+        panel.start_fetch("anthropic")
+        panel.show_reports([fresh, stuck], now_ms=fresh.fetched_at)
+        wide = panel.render_lines_for_test()[0]
+
+    assert "1 stale" in narrow and "…" not in narrow, narrow
+    # Where both fit, the target is still shown — it is only dropped under
+    # pressure, not removed from the design.
+    assert "anthropic" in wide and "1 stale" in wide, wide

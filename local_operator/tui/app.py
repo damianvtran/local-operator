@@ -16175,13 +16175,27 @@ class OperatorApp(App[None]):
         probe, on a report with no limits at all. Counting that stub would let
         the title read ``just now`` sourced from an account that has never once
         reported a number, which one new login during an outage is enough to
-        trigger. So reports with a failure streak are excluded from the maximum.
+        trigger. So a report is a confirmation only when it carries NEITHER a
+        failure streak nor ``usage_unavailable`` — the flag is reachable on its
+        own, since ``_reset_account_for_force`` zeroes the streak and a cache
+        round-trip can carry the flag alone, and such a report is no more a
+        confirmation than a counted failure is.
 
         Honest when the whole set is stale: if nothing is confirmed, the newest
-        stamp of the failing set is used instead, so a wholly-degraded panel
-        reports the true age of its last-good numbers rather than ``just now``.
-        Falls back to the wall clock (age ≈ 0) only when no report carries a
-        usable timestamp at all.
+        stamp among the failing reports THAT CARRY LIMITS is used instead, so a
+        wholly-degraded panel reports the true age of its last-good numbers
+        rather than ``just now``. The limits requirement is what keeps the stub
+        out of this branch too — with only the confirmation filter it simply won
+        here instead.
+
+        Falls back to the wall clock (age ≈ 0) when no usable stamp survives
+        those rules: an empty set, reports whose stamps are all zero, or — the
+        case worth naming because the prose has been wrong about it twice — a
+        set where nothing is confirmed and no failing report carries limits, in
+        which case real stamps exist but every one of them dates a failed probe
+        rather than a number. Nothing is misdated by that: such a frame has no
+        meters in it, and the ``N stale`` count plus the per-account notes
+        already say the accounts are not reporting.
         """
 
         def _stamp(report: Any) -> int:
