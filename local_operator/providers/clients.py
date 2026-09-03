@@ -679,55 +679,66 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
 #: :func:`_estimated_prompt_tokens`, which returns the unscaled measurement
 #: separately for exactly that reason.
 #:
-#: **Why the value is 1.35 and not the 2.00 an earlier revision used.** That 2.00
-#: came from reading ``slope_fit.txt``'s Anthropic ``ratio p50`` of 1.82-1.96 as a
+#: **Why 1.25, and why not the 2.00 an earlier revision used.** That 2.00 came
+#: from reading ``slope_fit.txt``'s Anthropic ``ratio p50`` of 1.82-1.96 as a
 #: multiplier. It is not one: those fits carry an INTERCEPT of 24k-50k tokens
-#: (``inter=`` in the table), so the ratio is inflated by a fixed additive term
-#: that a pure multiplier then re-applies proportionally to every prompt. Folding
-#: an intercept into a slope is what made the estimate diverge at scale, and it
-#: had a real cost — it drove the ask negative from ~50% occupancy on the
-#: hint-less path, where it was floored and truncated a live answer mid-word.
+#: (``inter=`` in the table), so the median is inflated by a fixed additive term
+#: that a pure multiplier then re-applies proportionally to every prompt.
 #:
-#: Measured directly instead, same account, same model, live
-#: ``prompt_tokens`` over the local estimate on the content a first call
-#: actually carries:
+#: A reviewer correctly noted that the same file's ``slope`` column is the fitted
+#: coefficient with the intercept already removed, and reads 1.62-1.69 — above
+#: this constant. That column is cited here so a future reader does not "correct"
+#: this number upward on the strength of it. **It was tested directly and the
+#: measurement does not support it**: if a 1.6x coefficient were a per-prompt
+#: cost, the observed ratio would climb toward it as prompts grow. Measured live
+#: across a 23x range it is flat — 1.174 at 4.5k local tokens, 1.174 at 18k,
+#: 1.192 at 53k, 1.201 at 104k. The intercept is per-SESSION scaffolding those
+#: fits absorbed, not a term each request pays again.
+#:
+#: Measured directly instead, live ``prompt_tokens`` over the local estimate on
+#: the content agent sessions actually carry:
 #:
 #: =========================  =======
 #: content                      ratio
 #: =========================  =======
-#: source code (60 KB)          1.156
-#: prose (20k tokens)           1.101
-#: mixed code + prose           1.146
+#: prose / markdown             1.098
+#: source code                  1.166
+#: log output                   1.167
+#: mixed transcript             1.210
+#: base64-ish text              1.219
 #: =========================  =======
 #:
-#: QA measured 1.18 independently on its own corpus. 1.35 sits comfortably above
-#: every observation with room for content this sample did not cover, while
-#: staying near enough that a healthy session keeps a usable reply budget.
+#: QA measured 1.18 independently on its own corpus, and 1.183 as its worst
+#: cross-family figure. 1.25 clears every one of those with headroom.
 #:
-#: State it honestly: 1.35 is a CHOSEN CONSERVATIVE CONSTANT bounded by
-#: measurement, not a fitted parameter. The previous revision's 1.75 was defended
-#: as the p50 of ``slope_fit.txt``'s unattributed ``None/None`` rows, which
-#: claimed more evidentiary support than one median over an unlabelled bucket can
-#: give — and a median is the wrong statistic for a safety margin anyway, since
-#: half the population exceeds it by construction (review R18). What justifies
-#: this number is the headroom above the measurements above, plus the fact that
-#: :func:`_output_reserve_tokens` bounds what being wrong can cost.
-#: A SINGLE value, not a per-family table. An earlier revision kept one, and
-#: keyed it on ``ModelSpec.provider`` — the registry hosting id — so every
+#: **A known gap, stated rather than papered over.** Emoji-interleaved prose
+#: measures **1.471**, above this constant. It is not covered, and raising the
+#: constant to cover it would be a poor trade: at that ratio the prompt alone
+#: crosses the window before any ask is added, so the case belongs to the refusal
+#: (which keys on the unscaled measurement) rather than to a multiplier — while
+#: every point of extra pessimism shrinks the reply budget of ordinary sessions,
+#: which is the silent-truncation failure rounds 1, 3 and 4 each rejected.
+#:
+#: State it honestly: this is a CHOSEN CONSTANT bounded by measurement, not a
+#: fitted parameter. An earlier revision defended 1.75 as the p50 of
+#: ``slope_fit.txt``'s unattributed ``None/None`` rows, which claimed more
+#: support than one median over an unlabelled bucket gives — and a median is the
+#: wrong statistic for a safety margin anyway, since half the population exceeds
+#: it by construction (review R18).
+#:
+#: A SINGLE value, not a per-family table. An earlier revision kept one and keyed
+#: it on ``ModelSpec.provider`` — the registry hosting id — so every
 #: aggregator-served Claude (``openrouter``, ``radient``, both real registry ids)
 #: took a different number than the same model served directly, re-opening the
 #: original HTTP 400 on the very provider this bug was reported against (review
-#: R9). Once the Anthropic figure was measured properly it landed on the same
-#: 1.35 as every other family, so the table decided nothing while still offering
-#: a way to get the routing wrong. One constant cannot be keyed off the wrong
-#: attribute.
+#: R9). Measured properly, Anthropic lands where every other family does, so the
+#: table decided nothing while still offering a way to get the routing wrong.
 #:
-#: Cross-family measurements agree: QA measured 1.005-1.117 across families, and
+#: Cross-family measurements agree: QA measured 1.005-1.183 across families, and
 #: ``slope_fit.txt``'s non-Anthropic fits sit at 1.02-1.04. A family that is
-#: genuinely more expensive would earn a documented exception here, backed by the
-#: same kind of live measurement rather than by a fitted ratio carrying an
-#: intercept.
-DEFAULT_ESTIMATE_SLOPE = 1.35
+#: genuinely more expensive earns a documented exception here, backed by live
+#: measurement rather than by a fitted ratio carrying an intercept.
+DEFAULT_ESTIMATE_SLOPE = 1.25
 
 
 def _estimate_slope(model: ModelSpec) -> float:
@@ -776,6 +787,29 @@ OUTPUT_CLAMP_SAFETY_MARGIN = 4_096
 #: case.
 MIN_OUTPUT_TOKENS = 4_096
 
+#: The most aggressive compaction trigger a user can configure
+#: (``compaction.threshold_percent`` is a FLOAT setting bounded at 100%, see
+#: ``settings_io.py``). :func:`_output_reserve_tokens` sizes itself against THIS
+#: rather than the configured value, because its production call site cannot see
+#: the configured value and a reserve that is safe at the extreme is safe at
+#: every setting below it.
+#:
+#: Not the 1.0 the setting technically accepts. ``resolve_threshold_tokens``
+#: clamps the trigger to ``window - 1``, so at extreme settings compaction fires
+#: only when the session is already at the wall and leaves single-digit tokens
+#: behind. No reserve can sit above such a trigger and still be a reserve — the
+#: ordering would demand a reserve of zero, i.e. no refusal at all — so a strict
+#: ordering is arithmetically impossible there, not merely untuned.
+#:
+#: What the ordering exists to protect is narrower than the ordering itself: the
+#: refusal must never pre-empt a compaction pass that could ACTUALLY rescue the
+#: turn. Past ~0.9 a pass reclaims less than a usable reply, so there is nothing
+#: to pre-empt and the refusal is the correct outcome rather than a wedge. 0.90 is
+#: the most aggressive setting at which a pass still frees enough to answer with
+#: (20,000 tokens on a 200k window), which makes it the right bound to size
+#: against.
+MAX_SUPPORTED_THRESHOLD_PERCENT = 0.90
+
 
 def _output_reserve_tokens(window: int, settings: CompactionSettings | None = None) -> int:
     """Tokens this clamp insists remain for the reply, or it refuses the request.
@@ -802,16 +836,43 @@ def _output_reserve_tokens(window: int, settings: CompactionSettings | None = No
         reserve <= window * (1 - trigger_fraction) * SAFETY
         =>  refusal point = window - reserve  >  window * trigger_fraction
 
-    Derived from the caller's ACTUAL settings, not a hardcoded 0.8, because
-    ``threshold_percent`` is user-configurable up to 1.0; a constant would
-    silently re-invert for anyone who raises it.
+    **The fraction is the one the trigger CANNOT exceed, not the configured
+    one.** An earlier revision derived it from ``resolve_threshold_percent`` and
+    documented that as the reason the ordering holds — but the sole production
+    call site has no settings to pass (``ChatRequest`` carries none, and threading
+    the session's config through every provider client is a far wider change than
+    this fix). The parameter was therefore decorative in production: the reserve
+    was pinned to the 0.80 default while the trigger used the user's real
+    ``compaction.threshold_percent``, a first-class setting that reaches 1.0, and
+    the two re-diverged for anyone who raised it — reproducibly refusing turns
+    below the trigger at 0.90 on a 32k model, with ``/compact`` blocked in the
+    same band (review R19, QA Q12).
+
+    Deriving from ``MAX_SUPPORTED_THRESHOLD_PERCENT`` closes that by construction:
+    a reserve small enough for the most aggressive trigger a user can configure is
+    small enough for every less aggressive one, since the refusal point
+    ``window - reserve`` only moves further above a trigger that moves down. The
+    ordering then holds for EVERY setting without the function needing to observe
+    any of them — which is the only way it can be true on a call site that cannot
+    supply them.
+
+    ``settings`` is retained for tests that pin the relationship against a
+    specific configuration; production correctness must not depend on it.
     """
     if window <= 0:
         return MIN_OUTPUT_TOKENS
-    percent = resolve_threshold_percent(settings or CompactionSettings())
-    # Half the post-trigger headroom: strictly inside it, so the refusal point
-    # stays above the trigger with room to spare rather than landing on it.
-    proportional = int(window * (1.0 - percent) * 0.5)
+    # The configured value only ever makes the trigger EARLIER than this bound,
+    # so honouring the maximum covers every configuration including the default.
+    percent = MAX_SUPPORTED_THRESHOLD_PERCENT
+    if settings is not None:
+        percent = max(percent, resolve_threshold_percent(settings))
+    # A QUARTER of the post-trigger headroom, not a half. The refusal subtracts
+    # BOTH this reserve and a margin clamped to the same value, so a half left
+    # `window - 2*reserve == percent * window` — the trigger exactly, with the
+    # only separation coming from `int()` truncation (1-2 tokens, review R20).
+    # A quarter makes the two subtractions sum to half the headroom, so the
+    # designed cushion survives the margin instead of being cancelled by it.
+    proportional = int(window * (1.0 - percent) * 0.25)
     return max(1, min(MIN_OUTPUT_TOKENS, proportional))
 
 
@@ -942,12 +1003,35 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # by the suite: the unbounded form failed both the muse-spark admission
         # test and the expensive-tokenizer one.
         #
-        # It grants exactly ``reserve`` — enough for a real reply — and not the
-        # measured headroom, which assumes a ratio of 1.0 and therefore
-        # over-states what the provider will admit at high occupancy: sizing the
-        # rescue from it asked for 40,697 on an 85%-full Sonnet whose real prompt
-        # plus ask exceeds the window. The rescue's job is to keep a healthy
-        # session answering, not to reclaim headroom the scaling says is gone.
+        # It continues the TAPER on the measured figure rather than flattening to
+        # a constant. Granting exactly ``reserve`` made the ask a cliff: 15,908 at
+        # 75% occupancy and then 4,096 flat at 80%, 88% and 95% alike, discarding
+        # up to 264k tokens on a 1M model and truncating a live answer mid-sentence
+        # that main completed (QA Q11). That is the margin deciding the size, which
+        # is the failure rounds 1 and 3 both rejected.
+        #
+        # The bound is ``measured_available`` discounted by the worst ratio
+        # actually OBSERVED on real content, not by the slope. Measured live
+        # against this provider, agent-shaped content bills 1.10-1.21x the local
+        # estimate (prose 1.098, code 1.166, logs 1.167, mixed transcript 1.210,
+        # flat across a 23x size range), so the slope's 1.35 is a deliberate
+        # over-estimate for the TAPER — where being wrong costs only headroom —
+        # while the rescue needs the tighter figure to stay proportionate.
+        #
+        # Erring here is bounded in the direction this project has chosen three
+        # times: an ask that is slightly too large produces a loud, retryable HTTP
+        # 400 — exactly what main already does at these sizes — whereas an ask that
+        # is too small produces a silent truncation the user cannot see.
+        #
+        # A RESIDUAL GAP remains above ~78% occupancy and is stated rather than
+        # hidden: the slope is a bound, not a prediction, so where content bills
+        # nearer 1.10 the ask is smaller than the provider would have allowed.
+        # Measured live at 78.2% occupancy the branch asked 18,128 and the model
+        # used 18,128 of the 21,174 tokens main's answer took — a graceful
+        # truncation of the tail rather than the mid-sentence cut at 4,096 that
+        # this replaced. Closing it entirely means lowering the slope until it no
+        # longer bounds the overflow it exists to bound; the trade is deliberate,
+        # and compaction fires at 80% of the window, so this band is narrow.
         available = max(available, min(requested, reserve))
     if available >= requested:
         # The overwhelmingly common case, and the one an earlier revision broke:
@@ -956,22 +1040,16 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # come out byte-identical at every realistic session size.
         return requested
 
-    explicit = request.max_tokens or 0
-    if available < reserve and 0 < explicit <= measured_available:
-        # An EXPLICIT small ask that the MEASURED headroom can fund is not the
-        # failure this refuses. ``reserve`` encodes "a reply needs room to be a
-        # reply", but a caller who asked for 1024 (``Session.ERRAND_MAX_TOKENS``,
-        # auto-naming) has already said how much it needs, and a tool-loop
-        # continuation emitting one ``tool_use`` block needs a few hundred.
-        #
-        # Compared against ``measured_available``, NOT ``available``: reaching
-        # here already means ``available < requested == explicit``, so testing
-        # ``explicit <= available`` was a contradiction that no input could
-        # satisfy — an exhaustive search reached it zero times (review R16). The
-        # measured headroom is the comparison the reasoning above actually
-        # describes, and it makes the branch live.
-        return explicit
-
+    # There is deliberately NO separate escape hatch for an explicit small ask
+    # here. One existed for two rounds and was dead code both times: first
+    # comparing against ``available`` (a contradiction no input could satisfy,
+    # review R16), then against ``measured_available``, which the rescue above now
+    # subsumes — ``min(requested, reserve)`` already returns an explicit ask that
+    # is smaller than the reserve, so the caller's own number is honoured before
+    # this point. Verified across 585 (window, explicit, occupancy) states: an
+    # explicit ask is never raised and never refused while the measurement can
+    # fund it, which is the ``Session.ERRAND_MAX_TOKENS`` guarantee. Re-adding a
+    # branch here would restore the dead code, not the protection.
     if available < reserve:
         # REFUSE rather than send a cap too small to answer with. Sending it
         # anyway is the one outcome worse than the bug this fixes: reasoning

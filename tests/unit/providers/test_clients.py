@@ -31,6 +31,7 @@ from local_operator.harness.types import (
 from local_operator.providers.clients import (
     DEFAULT_ESTIMATE_SLOPE,
     MIN_OUTPUT_TOKENS,
+    OUTPUT_CLAMP_SAFETY_MARGIN,
     AnthropicClient,
     GoogleClient,
     MockClient,
@@ -4460,20 +4461,208 @@ def test_a_healthy_session_keeps_its_full_ask_without_a_hint(occupancy: float) -
     assert _bodies(request)["anthropic"]["max_tokens"] == spec.max_output_tokens
 
 
-def test_an_explicit_small_ask_the_measured_headroom_can_fund_is_reachable() -> None:
-    """The R12 escape hatch, now with a comparison an input can actually satisfy.
+@pytest.mark.parametrize("window", [8_192, 32_768, 200_000])
+@pytest.mark.parametrize("explicit", [128, 1024])
+def test_an_explicit_small_ask_is_never_raised(window: int, explicit: int) -> None:
+    """The clamp only ever LOWERS, which is what keeps ``ERRAND_MAX_TOKENS`` small.
 
-    It previously tested ``explicit <= available`` while reaching the branch
-    required ``available < explicit`` — a contradiction, so an exhaustive search
-    hit it zero times and the comment claimed a protection that did not exist.
-    Comparing against the MEASURED headroom is what the reasoning always
-    described.
+    A caller that names its own budget (auto-naming asks for 1024) has already
+    said how much it needs. An earlier revision carried a dedicated escape hatch
+    for this and it was dead code twice over; the rescue clause subsumes it, so
+    what needs pinning is the GUARANTEE rather than the branch that used to
+    implement it.
     """
     spec = ModelSpec(
-        provider="anthropic", model_id="claude-x", context_window=8_192, max_output_tokens=4_096
+        provider="anthropic",
+        model_id="claude-x",
+        context_window=window,
+        max_output_tokens=64_000,
     )
-    # High occupancy: the scaled figure exhausts the window while the measured one
-    # still funds a small explicit ask.
-    request = ChatRequest(model=spec, messages=[Message.user(_prose(7_500))], max_tokens=256)
+    # Half-full: past the point where the scaled taper has started biting, but
+    # still a session the measurement calls healthy.
+    request = ChatRequest(
+        model=spec,
+        messages=[Message.user(_prose(window // 2))],
+        max_tokens=explicit,
+    )
 
-    assert _effective_max_tokens(request) == 256
+    assert _effective_max_tokens(request) <= explicit
+
+
+# --- the rescue bound, pinned so it cannot silently regress -------------------
+#
+# Round-4 review and QA both found that three of the mutations claimed for this
+# clause killed ZERO tests: reverting the rescue to a bare `MIN_OUTPUT_TOKENS`
+# floor passed the whole suite. The reason is that `_output_reserve_tokens`
+# saturates at `MIN_OUTPUT_TOKENS` on every window >= 40,960, so the two forms are
+# the same value everywhere the earlier tests looked. These pin the properties
+# that actually distinguish a correct bound from a constant.
+
+
+def test_the_ask_falls_monotonically_as_the_prompt_grows() -> None:
+    """A bigger prompt must never be handed a bigger reply budget.
+
+    This is what a constant grant breaks: flooring at the reserve made the ask
+    flat at 4,096 across 80%, 88% and 95% occupancy alike, so the curve stopped
+    carrying information about how full the session was. Monotonicity is the
+    property that distinguishes a taper from a cliff, and no earlier test had it.
+    """
+    spec = _sonnet_spec()
+
+    asks = []
+    for occupancy in (0.3, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85):
+        request = ChatRequest(
+            model=spec,
+            messages=[Message.user(_prose(int(spec.context_window * occupancy)))],
+        )
+        asks.append(_effective_max_tokens(request))
+
+    assert asks == sorted(asks, reverse=True), asks
+
+
+def test_a_mostly_full_session_still_gets_a_proportionate_ask() -> None:
+    """At 80% occupancy the ask must reflect the measured headroom, not a floor.
+
+    QA measured this live: the constant grant returned ``finish_reason='length'``
+    on an answer main completed, with tens of thousands of tokens of real
+    headroom in hand — up to 264k on a 1M-window model. The bound has to stay
+    well clear of the floor here or that truncation returns.
+    """
+    spec = _sonnet_spec()
+    request = ChatRequest(
+        model=spec,
+        messages=[Message.user(_prose(int(spec.context_window * 0.8)))],
+    )
+
+    ask = _effective_max_tokens(request)
+
+    assert ask > MIN_OUTPUT_TOKENS * 2, ask
+
+
+def test_the_ask_stays_admissible_at_the_worst_measured_ratio() -> None:
+    """The other side of the same bound: proportionate must still mean safe.
+
+    Live measurement puts realistic agent content at 1.098-1.219 against the local
+    estimate. The ask plus a prompt that bills at the top of that range must fit,
+    or the taper has simply traded truncation for the HTTP 400 this clamp exists
+    to prevent.
+    """
+    spec = _sonnet_spec()
+
+    for occupancy in (0.5, 0.6, 0.7, 0.75, 0.8, 0.85):
+        request = ChatRequest(
+            model=spec,
+            messages=[Message.user(_prose(int(spec.context_window * occupancy)))],
+        )
+        _, measured = _estimated_prompt_tokens(request)
+        ask = _effective_max_tokens(request)
+
+        assert measured * 1.219 + ask <= spec.context_window, (occupancy, ask)
+
+
+@pytest.mark.parametrize("percent", [0.5, 0.7, 0.8, 0.85, 0.9, 0.92, 0.95])
+def test_the_ordering_holds_through_the_production_call(percent: float) -> None:
+    """The refusal must sit above the trigger for a user's ACTUAL settings.
+
+    The predecessor of this test passed `settings` to `_output_reserve_tokens` —
+    an argument the production call site does not supply, since `ChatRequest`
+    carries no compaction config. It therefore asserted the property on an input
+    production cannot produce, and a raised `compaction.threshold_percent` (a
+    first-class setting) re-opened the wedge underneath it (R19/Q12). This calls
+    the helper the way production does: with no settings at all.
+    """
+    settings = CompactionSettings(threshold_percent=percent)
+
+    for window in (8_192, 16_385, 32_768, 65_536, 200_000, 1_000_000):
+        reserve = _output_reserve_tokens(window)  # production form
+        margin = min(OUTPUT_CLAMP_SAFETY_MARGIN, reserve)
+        trigger = resolve_threshold_tokens(window, settings)
+
+        # Only meaningful where a pass could actually fund a reply. Past that the
+        # trigger is so late that compaction reclaims less than a usable answer,
+        # so there is no rescue for the refusal to pre-empt.
+        if window - trigger < reserve:
+            continue
+
+        assert window - reserve - margin > trigger, (percent, window)
+
+
+# --- the same bounds, exercised BELOW the reserve's saturation point ----------
+#
+# `_output_reserve_tokens` saturates at `MIN_OUTPUT_TOKENS` from a ~163,840-token
+# window upward, so every assertion written against a 200k model compares two
+# forms that are numerically identical there. That is why three separately
+# claimed mutations killed nothing. These use small windows, where the forms
+# genuinely differ.
+
+
+@pytest.mark.parametrize("window", [16_385, 32_768, 65_536])
+def test_the_rescue_is_proportional_to_the_window_not_a_constant(window: int) -> None:
+    """Below saturation the rescue must scale, or it is a constant in disguise.
+
+    A bare ``MIN_OUTPUT_TOKENS`` floor hands a 16k model the same 4,096 it hands a
+    1M model — half that model's window as a reply reservation. The reserve is a
+    fraction precisely so a small window gets a small one.
+    """
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-x",
+        context_window=window,
+        max_output_tokens=window // 2,
+    )
+    # 0.92 is inside the band where the scaled taper has collapsed below the
+    # reserve and the RESCUE, not the taper, decides the ask (measured at
+    # 0.86-0.99 for every window here). Below it the taper is still positive and
+    # the clause under test never runs, which is how earlier versions of this
+    # assertion passed against a constant.
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(int(window * 0.92)))])
+
+    assert _effective_max_tokens(request) < MIN_OUTPUT_TOKENS
+
+
+@pytest.mark.parametrize("window", [16_385, 32_768, 65_536])
+def test_the_rescue_never_spends_the_measured_headroom_outright(window: int) -> None:
+    """The opposite bound, also invisible above saturation.
+
+    Granting ``measured_available`` assumes the provider bills exactly the local
+    estimate (ratio 1.0), which no measurement supports — it re-opens the overflow
+    the clamp exists to prevent. The ask must stay admissible when the prompt
+    bills at the top of the measured range.
+
+    Asserted just BELOW the compaction trigger rather than at an arbitrary high
+    occupancy. Past the trigger a pass fires and the session never presents such a
+    prompt; there the prompt alone can exceed the window at 1.219 and no ask is
+    admissible, so an assertion there would pin an unreachable state instead of
+    the property.
+    """
+    spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-x",
+        context_window=window,
+        max_output_tokens=window // 2,
+    )
+    trigger = resolve_threshold_tokens(window, CompactionSettings())
+    request = ChatRequest(model=spec, messages=[Message.user(_prose(int(trigger * 0.98)))])
+
+    _, measured = _estimated_prompt_tokens(request)
+    ask = _effective_max_tokens(request)
+
+    assert measured * 1.219 + ask <= window, (window, measured, ask)
+
+
+@pytest.mark.parametrize("window", [16_385, 32_768, 65_536])
+def test_the_refusal_keeps_its_cushion_above_the_trigger(window: int) -> None:
+    """The reserve and the margin must not sum to the whole post-trigger headroom.
+
+    Both are subtracted at the refusal, so halving the headroom for each left
+    ``window - 2*reserve == percent * window`` — the trigger exactly, with the
+    only separation coming from integer truncation (1-2 tokens, review R20). A
+    cushion that thin is consumed by any later change without a test noticing.
+    """
+    reserve = _output_reserve_tokens(window)
+    margin = min(OUTPUT_CLAMP_SAFETY_MARGIN, reserve)
+    trigger = resolve_threshold_tokens(window, CompactionSettings())
+
+    cushion = (window - reserve - margin) - trigger
+
+    assert cushion > window // 100, (window, cushion)
