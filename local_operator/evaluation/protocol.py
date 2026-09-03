@@ -413,7 +413,13 @@ class TypeAction(_Action):
     text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
 
 
-_NAMED_KEYS = frozenset(
+#: The named keys ``KeyAction`` accepts, case-insensitively. Public because
+#: the episode system prompt must state this vocabulary rather than imply it:
+#: a model told only that "key" takes named keys guesses plausible synonyms
+#: the validator does not accept ("control", "escape", "return"), and each
+#: guess is a rejected reply that costs a billed corrective re-prompt. Derived
+#: from the enforcing set so the prompt cannot drift from what parses.
+NAMED_KEYS = frozenset(
     {
         "ALT",
         "BACKSPACE",
@@ -456,7 +462,7 @@ class KeyAction(_Action):
         normalized: list[str] = []
         for key in keys:
             candidate = key.upper() if len(key) > 1 else key
-            if candidate not in _NAMED_KEYS and candidate not in _PRINTABLE_KEYS:
+            if candidate not in NAMED_KEYS and candidate not in _PRINTABLE_KEYS:
                 raise ValueError(f"unknown key: {key!r}")
             normalized.append(candidate)
         if len(normalized) != len(set(normalized)):

@@ -130,6 +130,7 @@ class DecisionRejected(Exception):
         self,
         diagnostic: str,
         *,
+        reply: str | None = None,
         route: RouteIdentity | None = None,
         usage: ModelUsage | None = None,
         cost_micros: int = 0,
@@ -142,6 +143,15 @@ class DecisionRejected(Exception):
     ) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
+        # WHAT the model actually said, not just why it was refused. The
+        # diagnostic alone cannot answer the question a post-mortem asks --
+        # "was it trying to type?" -- because a Pydantic error names the
+        # fields it disliked and not the intent behind them. A real paid
+        # episode's three rejections were only reconstructible as far as
+        # "something with a `key` field" and "trailing junk after the JSON";
+        # the replies themselves were discarded, so the failure class could
+        # not be diagnosed without paying for the run again.
+        self.reply = reply
         # The served route matters even for a rejected reply: a fallback that
         # answered badly still moved the run off its pinned route.
         self.route = route

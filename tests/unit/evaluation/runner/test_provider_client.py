@@ -31,6 +31,7 @@ from local_operator.evaluation.protocol import (
 )
 from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
+    MAX_REJECTED_REPLY_CHARS,
     DecisionParseError,
     ProviderModelClient,
     build_system_prompt,
@@ -284,7 +285,9 @@ async def test_system_prompt_states_the_schema_the_protocol_enforces() -> None:
         assert kind in prompt
     # A sequence field must read as an array. Told only "value", a model emits
     # "ctrl+c" for KeyAction.keys, which is a hard non-retryable parse failure.
-    assert "keys: [str, ...]" in prompt
+    # The name is QUOTED because a bare one reads as a label, not a JSON key:
+    # a real episode answered the bare form with the singular "key".
+    assert '"keys": [str, ...]' in prompt
 
 
 def test_prompt_does_not_restate_literals_it_already_derives() -> None:
@@ -618,6 +621,43 @@ def _framed_observation(root: Path, sequence: int, *, text: str = "a screen") ->
         frames=(
             FrameRef(
                 frame_id=f"frame-{sequence}",
+                artifact=ArtifactRef(sha256=digest, media_type="image/png", byte_count=len(data)),
+                geometry=FrameGeometry(
+                    native=FrameSize(width=1, height=1),
+                    model_visible=FrameSize(width=1, height=1),
+                ),
+            ),
+        ),
+    )
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+def _distinct_framed_observation(root: Path, sequence: int, pixel: bytes) -> Observation:
+    """A framed observation whose frame bytes differ per ``pixel``.
+
+    ``_framed_observation`` republishes one constant PNG, which is what makes
+    it useful for the identical-frames case and useless for its negative.
+    """
+
+    from local_operator.compaction.png import encode_grayscale_png
+    from local_operator.evaluation.protocol import (
+        ArtifactRef,
+        FrameGeometry,
+        FrameRef,
+        FrameSize,
+    )
+
+    data = encode_grayscale_png(1, 1, pixel)
+    digest = _publish_frame(root, data)
+    provisional = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=sequence,
+        observation_id="provisional",
+        text="a screen",
+        frames=(
+            FrameRef(
+                frame_id="screen",
                 artifact=ArtifactRef(sha256=digest, media_type="image/png", byte_count=len(data)),
                 geometry=FrameGeometry(
                     native=FrameSize(width=1, height=1),
@@ -1434,6 +1474,227 @@ async def test_unchanged_observation_text_is_marked_not_repeated(tmp_path: Path)
     second_user = fresh.requests[1].messages[2].content[0].text
     assert second_user.rstrip().endswith("(unchanged)")
     assert "identical" in fresh.requests[1].messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_absent_observation_text_is_not_reported_as_unchanged(tmp_path: Path) -> None:
+    """The defect from bundle ep-ffda3fc88f81: 15 of 17 turns read "(unchanged)".
+
+    That adapter publishes the task text on step 0 and screenshots only
+    thereafter, so ``text`` is ``None`` from step 1 on. Comparing ``None`` to
+    ``None`` made every later turn claim the state had not changed -- against
+    frames that Pillow measures as 0.02%-93% different -- which destroyed the
+    model's only textual progress signal AND told it, falsely, that its
+    actions were no-ops.
+    """
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(3):
+        current = _framed_observation(tmp_path, sequence).model_copy(update={"text": None})
+        current = current.model_copy(
+            update={"observation_id": observation_content_id(current)},
+        )
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rendered = [
+        message.content[0].text
+        for message in stream.requests[-1].messages
+        if message.role == "user" and isinstance(message.content[0], TextContent)
+    ]
+    assert len(rendered) == 3
+    for text in rendered:
+        assert text.rstrip().endswith("(no textual state)")
+        assert "(unchanged)" not in text
+
+
+@pytest.mark.asyncio
+async def test_identical_frames_are_declared_as_a_no_op(tmp_path: Path) -> None:
+    """A screenshot-only benchmark has no other way to say "nothing happened".
+
+    The real episode clicked pixel (674,44) four times. Nothing in its context
+    stated that two consecutive screenshots were the same image, so re-deciding
+    the same click was the rational reading rather than a lapse.
+    """
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    # ``_framed_observation`` republishes the SAME 1x1 PNG for every sequence,
+    # so consecutive frames are byte-identical by construction.
+    for sequence in range(2):
+        current = _framed_observation(tmp_path, sequence)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    first, second = (
+        message.content[0].text
+        for message in stream.requests[-1].messages
+        if message.role == "user" and isinstance(message.content[0], TextContent)
+    )
+    assert "byte-identical" not in first
+    assert "byte-identical to the previous observation's" in second
+    assert "Do not repeat it" in second
+    # The prompt has to teach the model what that sentence is for.
+    assert "did nothing" in stream.requests[-1].system_blocks[0]
+
+
+@pytest.mark.asyncio
+async def test_changed_frames_carry_no_no_op_note(tmp_path: Path) -> None:
+    """A false no-op note is worse than none: it would tell a model that a
+    working action failed."""
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence, pixel in enumerate((b"\x00", b"\x7f")):
+        current = _distinct_framed_observation(tmp_path, sequence, pixel)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rendered = [
+        message.content[0].text
+        for message in stream.requests[-1].messages
+        if message.role == "user" and isinstance(message.content[0], TextContent)
+    ]
+    assert not any("byte-identical" in text for text in rendered)
+
+
+@pytest.mark.asyncio
+async def test_frameless_turns_never_claim_an_unchanged_screen(tmp_path: Path) -> None:
+    """A benchmark with no screen has no screen to be unchanged."""
+
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(2):
+        current = observation(sequence)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rendered = [
+        message.content[0].text
+        for message in stream.requests[-1].messages
+        if message.role == "user" and isinstance(message.content[0], TextContent)
+    ]
+    assert not any("byte-identical" in text for text in rendered)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_reply_is_carried_on_the_exception_for_the_bundle(
+    tmp_path: Path,
+) -> None:
+    """Without the reply, a rejection class cannot be diagnosed after the fact.
+
+    The real episode's three ``decision-rejected`` errors recorded only the
+    Pydantic diagnostic, so "was the model trying to type?" was unanswerable
+    without paying for the run again.
+    """
+
+    current = _framed_observation(tmp_path, 0)
+    bad = json.dumps(
+        {
+            "actions": [
+                {"kind": "key", "observation_id": current.observation_id, "key": ["ctrl", "s"]}
+            ]
+        }
+    )
+    stream = RecordingStream(lambda _message: bad)
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    assert info.value.reply == bad
+    assert '"key": ["ctrl", "s"]' in (info.value.reply or "")
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_rejected_reply_is_bounded_on_the_exception(
+    tmp_path: Path,
+) -> None:
+    """A provider's max-token wall of prose must not ride into the bundle whole."""
+
+    current = _framed_observation(tmp_path, 0)
+    stream = RecordingStream(lambda _message: "x" * (MAX_REJECTED_REPLY_CHARS + 500))
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    assert info.value.reply is not None
+    assert len(info.value.reply) == MAX_REJECTED_REPLY_CHARS
+
+
+def test_prompt_teaches_how_to_type_and_how_to_press_keys() -> None:
+    """The real episode emitted 16 actions, none of them a type or a key.
+
+    Clicking cannot enter a calendar title or a search term, so a prompt that
+    lists "type" in a schema table without saying it exists, that it follows
+    focus, and that "key" is a chord leaves the vocabulary technically
+    complete and practically unreachable.
+    """
+
+    prompt = build_system_prompt()
+
+    assert "keyboard" in prompt
+    # Typing follows focus; a model that thinks type() clicks first will type
+    # into whatever had focus and see nothing happen.
+    assert "wherever the keyboard focus already is" in prompt
+    # Asserted against the unwrapped text: the prompt's line breaks are
+    # cosmetic and a test that pins them fails on a reflow, not a regression.
+    flat = " ".join(prompt.split())
+    assert "does not press Enter for you" in flat
+    # A chord, not a sequence -- the distinction that decides Ctrl+S.
+    assert "TOGETHER" in prompt
+    assert '["ctrl", "s"]' in prompt
+    # Multi-action batches are what make click-then-type one step.
+    assert "execute in order" in prompt
+
+
+def test_prompt_lists_the_key_vocabulary_the_validator_enforces() -> None:
+    """``KeyAction`` accepts a closed set; an unlisted synonym is a lost turn.
+
+    Probed against the real parser: ``["control", "k"]`` is refused with
+    ``unknown key: 'control'`` while ``["ctrl", "k"]`` parses. A prompt that
+    only shows examples leaves the model to guess which spelling is the
+    accepted one.
+    """
+
+    from local_operator.evaluation.protocol import NAMED_KEYS
+
+    prompt = build_system_prompt()
+    flat = " ".join(prompt.split())
+
+    # Derived from the enforcing set, so a new named key cannot drift out of
+    # the instructions -- the same guarantee _action_schema_lines gives.
+    for key in NAMED_KEYS:
+        if key.startswith("F") and key[1:].isdigit():
+            continue
+        assert key.lower() in flat, key
+    assert "f1 through f24" in flat
+    # The three synonyms a model actually reaches for are named as wrong.
+    assert '"ctrl" not "control"' in flat
+    assert '"esc" not "escape"' in flat
+    assert '"enter" not "return"' in flat
+
+
+def test_prompt_states_the_coordinate_convention() -> None:
+    """A model told a frame's size but not its origin is guessing at half the
+    contract; the protocol clamps and then REJECTS, so a wrong convention is a
+    lost turn rather than a near miss."""
+
+    prompt = build_system_prompt()
+
+    assert "TOP-LEFT" in prompt
+    assert "x grows" in prompt and "y grows down" in prompt
+    assert "width-1" in prompt
+    # The screenshot is the pixel space -- no rescaling, no 0-1 normalization.
+    assert "normalize to 0-1" in prompt
 
 
 @pytest.mark.asyncio

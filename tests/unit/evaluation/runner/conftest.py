@@ -341,6 +341,9 @@ class ScriptedModel:
             self.calls += 1
             raise DecisionRejected(
                 "Your previous reply was rejected: action references unknown frame_id '1'",
+                # A real client carries the reply so the bundle can record WHAT
+                # the model said, not only why it was refused.
+                reply='{"actions": [{"kind": "click", "frame_id": "1"}]}',
                 route=self.route,
                 usage=ModelUsage(input_tokens=10, output_tokens=5),
                 cost_micros=7,
