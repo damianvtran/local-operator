@@ -9,10 +9,11 @@ import tempfile
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, Field
@@ -1587,6 +1588,37 @@ class AgentRegistry:
         }
     )
 
+    @contextmanager
+    def exported_agent_archive(self, agent_id: str) -> Iterator[Tuple[Path, str]]:
+        """Export an agent as a ZIP and remove the temporary directory afterwards.
+
+        This is the form to reach for whenever the archive is consumed inside
+        the calling scope (uploading it, copying it somewhere durable). It
+        wraps :meth:`export_agent` and guarantees the enclosing temporary
+        directory is removed on both the success and the failure path.
+
+        ``export_agent`` itself cannot do this: the server's download route
+        hands the path to ``FileResponse``, which streams the file *after* the
+        handler returns, so removing it in a ``finally`` there would delete the
+        archive out from under the response. That route owns cleanup through a
+        ``BackgroundTask`` instead. Every other caller should use this manager
+        — the bare method leaked a full agent zip per export otherwise.
+
+        Args:
+            agent_id (str): The unique identifier of the agent to export
+
+        Yields:
+            Tuple[Path, str]: The path to the ZIP file and its filename. Both
+                become invalid once the context exits.
+        """
+        zip_path, filename = self.export_agent(agent_id)
+        try:
+            yield zip_path, filename
+        finally:
+            # ignore_errors: cleanup must never mask the caller's own failure,
+            # and a partially removed temp dir is not worth raising over.
+            shutil.rmtree(zip_path.parent, ignore_errors=True)
+
     def export_agent(self, agent_id: str) -> Tuple[Path, str]:
         """
         Export an agent's instruction set as a ZIP file.
@@ -1595,6 +1627,17 @@ class AgentRegistry:
         pickled runtime context are stripped. A published agent is the
         profile (``agent.yml`` + ``system_prompt.md`` and any other
         instruction files), not the operator's private sessions.
+
+        .. warning::
+            **The caller owns the returned path's parent directory and must
+            remove it.** The ZIP is written into a fresh ``mkdtemp()`` that
+            nothing else reclaims, so a caller that simply returns leaks the
+            directory and the full agent archive inside it, permanently.
+
+            Prefer :meth:`exported_agent_archive`, which does that cleanup for
+            you. Call this method directly only when the file must outlive the
+            calling scope (the server's streaming download route), and then
+            arrange removal explicitly — e.g. a FastAPI ``BackgroundTask``.
 
         Args:
             agent_id (str): The unique identifier of the agent to export

@@ -1668,6 +1668,74 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert imported_agent.last_message == ""
     assert imported_agent.tags == agent.tags
     assert imported_agent.categories == agent.categories
+    # export_agent hands ownership of the temp dir to the caller; this test is
+    # one of those callers, so it cleans up rather than adding to the leak the
+    # exported_agent_archive tests below exist to prevent.
+    shutil.rmtree(zip_path.parent, ignore_errors=True)
+
+
+def _export_fixture_agent(registry: AgentRegistry, name: str):
+    """Create a minimal agent for the export-cleanup tests."""
+    return registry.create_agent(
+        AgentEditFields(
+            name=name,
+            security_prompt="prompt",
+            hosting="host",
+            model="model",
+            description="desc",
+            last_message="msg",
+            tags=[],
+            categories=[],
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+
+def test_exported_agent_archive_removes_the_temp_dir(temp_agents_dir: Path):
+    """The context manager reclaims the export dir on the SUCCESS path.
+
+    Regression guard for a leak that reached users: ``export_agent`` removed
+    its temp dir only in the ``except`` branch, so every successful export left
+    a directory containing a full agent zip behind forever.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "ExportCleanup")
+
+    with registry.exported_agent_archive(agent.id) as (zip_path, filename):
+        assert zip_path.exists()
+        assert filename == "ExportCleanup.zip"
+        temp_dir = zip_path.parent
+
+    assert not temp_dir.exists()
+
+
+def test_exported_agent_archive_removes_the_temp_dir_on_error(temp_agents_dir: Path):
+    """A failure inside the block must not strand the directory either.
+
+    The upload callers raise from inside the ``with`` (a failed Radient push
+    becomes an HTTPException), so the error path is the common one in
+    production, not an edge case.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agent = _export_fixture_agent(registry, "ExportCleanupError")
+
+    temp_dir: Path | None = None
+    with pytest.raises(RuntimeError, match="upload failed"):
+        with registry.exported_agent_archive(agent.id) as (zip_path, _):
+            temp_dir = zip_path.parent
+            assert temp_dir.exists()
+            raise RuntimeError("upload failed")
+
+    assert temp_dir is not None
+    assert not temp_dir.exists()
 
 
 def test_export_strips_conversation_history(temp_agents_dir: Path):

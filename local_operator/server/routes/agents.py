@@ -483,14 +483,18 @@ async def upload_agent_to_radient(
             agent = agent_registry.get_agent(agent_id)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
-        zip_path, _ = agent_registry.export_agent(agent.id)
-
-        # Upload to Radient
-        try:
-            agent_registry.upload_agent_to_radient(radient_client, agent_id, zip_path)
-        except Exception as e:
-            logger.exception("Error uploading agent to Radient")
-            raise HTTPException(status_code=400, detail=f"Error uploading agent to Radient: {e}")
+        # The archive is consumed entirely within this handler, so the context
+        # manager owns its temp directory. Using the bare export_agent() here
+        # leaked a directory holding a full agent zip on every upload.
+        with agent_registry.exported_agent_archive(agent.id) as (zip_path, _):
+            # Upload to Radient
+            try:
+                agent_registry.upload_agent_to_radient(radient_client, agent_id, zip_path)
+            except Exception as e:
+                logger.exception("Error uploading agent to Radient")
+                raise HTTPException(
+                    status_code=400, detail=f"Error uploading agent to Radient: {e}"
+                )
 
         return CRUDResponse(
             status=200,
