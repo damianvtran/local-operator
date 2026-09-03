@@ -10,7 +10,7 @@ import { BridgeCommandError } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, getLocal } from "./state";
+import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
 import {
@@ -194,15 +194,32 @@ async function dispatch(request: { id: string; method: string; params: Record<st
       // Without it the daemon kept ONE global "driving" slot that the most
       // recent command overwrote, which framed a multi-tab world as a single
       // binding. `goto` returns no handle, so echo the request's own tab.
-      const handle = typeof result.tab === "string" ? result.tab : String(request.params.tab ?? "");
+      //
+      // Only a FULL handle may key a driven record. A handle-less `status`
+      // answers with a REDACTED token (an unproven caller must not receive the
+      // drive capability), and forwarding that string created a second key for
+      // a tab already tracked under its full token — a duplicate that survived
+      // the real close and advertised a dead URL forever, which is the phantom
+      // this change removes. A redacted token is therefore reported as no
+      // handle at all, so the daemon refreshes the most recent record instead
+      // of forking one.
+      const raw = typeof result.tab === "string" ? result.tab : String(request.params.tab ?? "");
+      const handle = isRedactedToken(raw) ? "" : raw;
       send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") });
     }
     // An explicit `close` retires the surface, so tell the daemon now rather
     // than relying on the onRemoved listener: chrome.tabs.remove fires
     // onRemoved too, but announcing here keeps the driven record accurate even
     // if the worker is torn down before that event is delivered.
+    // Prefer the handle the command RESOLVED (`closed`) over the one the
+    // request carried: `close` legitimately accepts no `tab` param (the
+    // pre-multi-tab shape that closes the sole surface), and announcing ""
+    // there tells the daemon to blank EVERY driven record, other sessions'
+    // live tabs included. The command knows exactly which surface it retired,
+    // so it says so and the daemon drops precisely that one.
     if (request.method === "close") {
-      send({ event: "tab_closed", tab: String(request.params.tab ?? "") });
+      const closed = typeof result.closed === "string" ? result.closed : String(request.params.tab ?? "");
+      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed });
     }
     await respond({ id: request.id, ok: true, result });
   } catch (error) {

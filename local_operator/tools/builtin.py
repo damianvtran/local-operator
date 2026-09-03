@@ -6039,7 +6039,21 @@ def bridge_browser_available() -> bool:
     return available()
 
 
-async def bridge_browser_reachable() -> bool:
+def bridge_browser_advertisable() -> bool:
+    """Tool-GATING discovery: cheap, file-only, but honest about a stale daemon.
+
+    Kept distinct from :func:`bridge_browser_available` because gating asks a
+    weaker question than backend selection does; see
+    :func:`local_operator.browser_bridge.state.advertisable`.
+    """
+    from local_operator.browser_bridge.backend import (
+        bridge_browser_advertisable as advertisable,
+    )
+
+    return advertisable()
+
+
+async def bridge_browser_reachable(classified: tuple[Any, Any] | None = None) -> bool:
     """Browser-path availability: the file probe, plus one socket confirmation.
 
     Used instead of :func:`bridge_browser_available` everywhere a browser
@@ -6049,7 +6063,9 @@ async def bridge_browser_reachable() -> bool:
 
     The cheap check runs FIRST and short-circuits, so the common case costs
     exactly what it did before and no socket is opened. The probe exists only
-    to ACQUIT a daemon the file was about to condemn.
+    to ACQUIT a daemon the file was about to condemn. ``classified`` is a
+    reading the caller already took; it is handed to the probe so that a
+    condemning action classifies the daemon once instead of once per consumer.
     """
     if bridge_browser_available():
         return True
@@ -6057,10 +6073,20 @@ async def bridge_browser_reachable() -> bool:
         bridge_browser_reachable as reachable,
     )
 
-    return await reachable()
+    return await reachable(classified=classified)
 
 
-def _bridge_demotion_hint() -> str:
+def _bridge_liveness() -> tuple[Any, Any]:
+    """Classify the daemon from the file, never raising at a diagnostic site."""
+    from local_operator.browser_bridge import state as state_store
+
+    try:
+        return state_store.liveness()
+    except Exception:  # noqa: BLE001 - a diagnostic may never raise
+        return None, None
+
+
+def _bridge_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
     """Why the extension is not being used, when it looked like it should be.
 
     A session that had been driving the extension and then finds it
@@ -6069,13 +6095,18 @@ def _bridge_demotion_hint() -> str:
     agent to conclude the bridge was "bound" by an orphan tab and abandon it
     for a whole session. Naming the demotion and the one-line repair turns an
     hour of guessing into a single command.
+
+    ``classified`` is the ``(status, state)`` the caller already computed. Each
+    demotion path had re-read the discovery file here, which cost a second read
+    per demoted action and, worse, could disagree with the classification that
+    caused the demotion: a heartbeat refreshed in between made this return ""
+    and silently dropped the diagnostic in exactly the race where the daemon
+    had just recovered. Reusing the caller's answer keeps the message and the
+    decision consistent by construction.
     """
     from local_operator.browser_bridge import state as state_store
 
-    try:
-        status, current = state_store.liveness()
-    except Exception:  # noqa: BLE001 - a diagnostic may never raise
-        return ""
+    status, current = classified if classified is not None else _bridge_liveness()
     if status is state_store.Liveness.STALE and current is not None:
         age = state_store.heartbeat_age(current)
         return (
@@ -6879,10 +6910,14 @@ async def execute_browser(
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
     cmux_available = cmux_browser_available()
+    # Classify the daemon ONCE per action and reuse that answer for both the
+    # backend decision and the demotion diagnostic, so they can never describe
+    # different readings of a file that may change between two reads.
+    bridge_liveness = _bridge_liveness()
     # The socket-confirming probe, not the bare file check: a healthy daemon
     # whose heartbeat writer stopped must not silently demote this session to
     # cmux. It costs a round-trip only in the stale-but-alive case.
-    bridge_available = await bridge_browser_reachable()
+    bridge_available = await bridge_browser_reachable(classified=bridge_liveness)
     if not cmux_available and not bridge_available:
         return _error(
             tool_call_id,
@@ -6913,7 +6948,7 @@ async def execute_browser(
                 f"'{action}' is not supported on the cmux backend — cmux has no "
                 "site-permission prompts; navigation works directly. This action only "
                 "exists for the Local Operator browser extension ('lop browser status' / "
-                "'lop browser install')." + _bridge_demotion_hint(),
+                "'lop browser install')." + _bridge_demotion_hint(bridge_liveness),
             )
         return await _bridge_access(tool_call_id, action, params, context)
 
@@ -6954,7 +6989,7 @@ async def execute_browser(
                 "'tabs' is not supported on the cmux backend — use the Local Operator "
                 "browser extension (run 'lop browser status' / 'lop browser install' to "
                 "set it up). cmux has no multi-tab surface registry, so this action only "
-                "works through the extension bridge." + _bridge_demotion_hint(),
+                "works through the extension bridge." + _bridge_demotion_hint(bridge_liveness),
             )
         return await _bridge_tabs(tool_call_id, state)
     if not state.surface_id:
@@ -6972,7 +7007,8 @@ async def execute_browser(
             f"'{action}' is not supported on the cmux backend — use the Local Operator "
             "browser extension (run 'lop browser status' / 'lop browser install' to set it "
             "up). cmux has no console-log tap or background-tab scroll primitive, so this "
-            "action only works through the extension bridge." + _bridge_demotion_hint(),
+            "action only works through the extension bridge."
+            + _bridge_demotion_hint(bridge_liveness),
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -7173,7 +7209,15 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     cmux and (outside this tool) playwright are fallbacks for hosts without the
     extension. The full setup/permissions playbook lives in ``guide://browser``.
     """
-    if not cmux_browser_available() and not bridge_browser_available():
+    # Gating deliberately uses the WEAKER `advertisable` test, not the
+    # backend-selection one: a stale-but-alive daemon must still put the tool
+    # in the inventory so `execute_browser`'s bounded socket probe can acquit
+    # it (or produce the typed demotion diagnostic). With the strict check
+    # here, an extension-only host whose heartbeat writer had died offered no
+    # browser tool at all for the whole session — no fallback and no way to
+    # discover the healthy daemon. Still file-only and still synchronous: this
+    # runs while constructing every session and opens no socket.
+    if not cmux_browser_available() and not bridge_browser_advertisable():
         return None
     return AgentTool(
         name="browser",

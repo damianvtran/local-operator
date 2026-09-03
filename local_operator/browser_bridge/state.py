@@ -41,6 +41,7 @@ class BridgeState(BaseModel):
 
 
 def run_dir(root: Path | None = None) -> Path:
+    """The run directory, CREATED and locked down. Only writers may call this."""
     directory = (root or config_dir()) / RUN_DIRNAME
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
@@ -48,7 +49,19 @@ def run_dir(root: Path | None = None) -> Path:
 
 
 def state_path(root: Path | None = None) -> Path:
-    return run_dir(root) / STATE_FILENAME
+    """Where the discovery file lives. Pure path arithmetic: creates NOTHING.
+
+    It used to route through :func:`run_dir`, which mkdirs and chmods, so every
+    READER and every diagnostic performed a write. That turned the ENOSPC log
+    line in ``BridgeService.publish_safely`` into a second ``OSError`` raised
+    from inside the handler for the first one: on a fresh config dir with a
+    full disk the daemon failed to boot, in precisely the disk-full scenario
+    this module is meant to survive. An error path may never perform the
+    operation that is failing, and detection may never mutate the filesystem
+    (see :func:`read`), so the path is now derived without touching disk and
+    only the writer (:func:`publish`) asks for the directory to exist.
+    """
+    return (root or config_dir()) / RUN_DIRNAME / STATE_FILENAME
 
 
 def publish(state: BridgeState, root: Path | None = None) -> Path:
@@ -144,17 +157,49 @@ def liveness(
 
 
 def available(root: Path | None = None, *, now: float | None = None) -> bool:
-    """Cheap file-only availability gate used while constructing every session.
+    """Cheap file-only availability gate: FRESH only, no socket, never probes.
 
-    Deliberately still FILE-ONLY and still false for a stale heartbeat: this
-    runs while constructing every session and on the `createIf` tool-gating
-    path, where a blocking socket probe would tax startup for every session on
-    the machine. A stale-but-alive daemon is rescued on the browser path
-    instead, by :func:`~local_operator.browser_bridge.backend.
+    Deliberately still FILE-ONLY and still false for a stale heartbeat. It
+    answers "is the bridge known-good right now", which is the question the
+    backend-selection paths ask. A stale-but-alive daemon is acquitted on the
+    browser path instead, by :func:`~local_operator.browser_bridge.backend.
     bridge_browser_reachable`, which pays for one bounded probe only when it is
     about to condemn the bridge.
+
+    For TOOL GATING use :func:`advertisable` instead — see why there.
     """
     return liveness(root, now=now)[0] is Liveness.FRESH
+
+
+def advertisable(root: Path | None = None, *, now: float | None = None) -> bool:
+    """Whether the `browser` TOOL should be offered. FRESH or STALE-but-alive.
+
+    Gating is a weaker commitment than execution: advertising the tool only
+    promises the agent can ASK, and `execute_browser` still decides — with a
+    real socket probe — whether the extension answers, falling back to cmux or
+    returning the typed demotion diagnostic. So the gate must not apply the
+    stricter :func:`available` test.
+
+    It did, and that is a hole in the RC2 rescue: gating ran the FRESH-only
+    check, so on an extension-only host (no cmux, the ordinary configuration
+    for the extension) a daemon whose heartbeat writer had died was never
+    advertised at all. The tool list is built once per session, so that session
+    had NO browser tool for its lifetime, `execute_browser` was never reached,
+    the socket probe never ran, and the demotion hint — whose every call site
+    is inside `execute_browser` — could not fire. The agent got no fallback and
+    no diagnostic: strictly worse than the incident this fixes, since it cannot
+    even discover that a healthy daemon is sitting there.
+
+    The CONSTRAINT that made the gate file-only still holds and is respected:
+    this is synchronous and runs while constructing EVERY session, so it must
+    not block or do unbounded I/O. It does neither. STALE is already
+    established by :func:`liveness` from one file read plus ``os.kill(pid, 0)``
+    — no socket is opened here and no subprocess is spawned, so the hot path
+    keeps its measured sub-millisecond cost. When in doubt this errs toward
+    advertising: a tool that explains why it cannot reach the bridge beats a
+    tool that silently does not exist.
+    """
+    return liveness(root, now=now)[0] in (Liveness.FRESH, Liveness.STALE)
 
 
 def remove(root: Path | None = None) -> None:

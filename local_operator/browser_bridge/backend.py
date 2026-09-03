@@ -68,12 +68,15 @@ HEALTH_PROBE_TIMEOUT_S = 1.5
 
 
 def bridge_browser_available(root: Path | None = None) -> bool:
-    """File-only createIf probe: no socket, no subprocess, never raises.
+    """File-only "known-good right now" probe: no socket, no subprocess, never raises.
 
-    Stays file-only on purpose: this runs while constructing EVERY session and
-    while gating the tool, where a socket round-trip would tax startup for
-    every session on the machine. The stale-but-alive rescue lives in
-    :func:`bridge_browser_reachable`, on the browser path.
+    Stays file-only on purpose: it runs while constructing EVERY session, where
+    a socket round-trip would tax startup for every session on the machine. The
+    stale-but-alive rescue lives in :func:`bridge_browser_reachable`, on the
+    browser path.
+
+    Use :func:`bridge_browser_advertisable` for tool GATING, which is a weaker
+    commitment and must not hide a stale-but-alive daemon.
     """
     try:
         return state_store.available(root)
@@ -81,7 +84,27 @@ def bridge_browser_available(root: Path | None = None) -> bool:
         return False
 
 
-async def bridge_browser_reachable(root: Path | None = None) -> bool:
+def bridge_browser_advertisable(root: Path | None = None) -> bool:
+    """File-only gate for whether the `browser` TOOL is offered at all.
+
+    Same cost and the same no-socket/no-subprocess contract as
+    :func:`bridge_browser_available`, but it also accepts a STALE heartbeat
+    whose pid is alive, so the RC2 rescue in ``execute_browser`` can actually
+    be reached on a host with no cmux. See
+    :func:`local_operator.browser_bridge.state.advertisable` for the full
+    reasoning and the hot-path constraint it preserves.
+    """
+    try:
+        return state_store.advertisable(root)
+    except Exception:  # noqa: BLE001 - session startup must not fail on discovery
+        return False
+
+
+async def bridge_browser_reachable(
+    root: Path | None = None,
+    *,
+    classified: tuple[state_store.Liveness, state_store.BridgeState | None] | None = None,
+) -> bool:
     """Availability for the BROWSER PATH: file first, socket only to acquit.
 
     The file heartbeat is a proxy that lies in both directions, and when it
@@ -100,9 +123,14 @@ async def bridge_browser_reachable(root: Path | None = None) -> bool:
       bounded ``/health`` request before condemning the bridge.
 
     A daemon that answers is available regardless of what the file says.
+
+    ``classified`` lets a caller that has ALREADY classified the daemon pass
+    its answer in, so one browser action performs one file read instead of
+    several and the demotion diagnostic cannot describe a different reading
+    than the decision it explains.
     """
     try:
-        status, current = state_store.liveness(root)
+        status, current = classified if classified is not None else state_store.liveness(root)
     except Exception:  # noqa: BLE001 - discovery must never raise at a call site
         return False
     if status is state_store.Liveness.FRESH:

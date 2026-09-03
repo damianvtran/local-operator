@@ -16,7 +16,9 @@ from local_operator.tools import builtin
 )
 def test_builder_selection(monkeypatch, cmux: bool, bridge: bool, advertised: bool) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: cmux)
-    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: bridge)
+    # Gating asks `advertisable`, not `available`: see
+    # test_stale_but_alive_daemon_still_advertises_the_browser_tool.
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: bridge)
     assert (builtin.build_browser_tool(None) is not None) is advertised
 
 

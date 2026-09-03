@@ -56,9 +56,13 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
-#: Ceiling on the supervisor's per-failure backoff. A loop whose iteration
-#: keeps raising must not spin a core or flood the log, but must still recover
-#: promptly once the cause clears, so the delay grows to this and stops.
+#: Ceiling on the supervisor's per-failure backoff. The delay is the number of
+#: CONSECUTIVE failures in seconds (1s, 2s, 3s …), clamped here: linear rather
+#: than exponential on purpose, because these loops recover the moment the
+#: cause clears and an exponential delay would keep the bridge unavailable long
+#: after the disk drained. A loop whose iteration keeps raising still must not
+#: spin a core or flood the log, which is what the clamp guarantees — it is
+#: reached after this many consecutive failures, not after a few.
 SUPERVISOR_BACKOFF_CAP_S = 30.0
 #: Poll granularity for the extendable command wait. A pending future is
 #: normally resolved by the receive loop the instant the response lands; this
@@ -118,6 +122,45 @@ def reset_pairing(root: Path | None = None) -> None:
 #: extension build). One reserved key keeps a mixed-version pair reporting a
 #: single driven tab rather than one phantom per navigation.
 _UNKEYED_TAB = ""
+
+#: Marks a REDACTED surface handle (`state.ts:redactToken` truncates the nonce
+#: and appends this). The extension redacts every handle that leaves it other
+#: than the caller's own `open` response, so a redacted token can arrive as a
+#: command result and must never be treated as a real handle: see
+#: :func:`_is_real_handle`.
+_REDACTION_MARK = "\u2026"
+
+
+def _handle_matches_listed(handle: str, listed: str) -> bool:
+    """Whether our full ``handle`` names the surface a listing entry describes.
+
+    The `tabs` listing redacts handles (the full token IS the drive capability,
+    so listing it would hand every session control of every tab), which still
+    leaves enough nonce to recognise one's OWN handle by prefix. This is the
+    daemon-side twin of `state.ts:ownsRedacted`; keep the two in step.
+    """
+    if listed.endswith(_REDACTION_MARK):
+        return handle.startswith(listed[: -len(_REDACTION_MARK)])
+    return handle == listed
+
+
+def _is_real_handle(tab: str) -> bool:
+    """Whether ``tab`` is a full surface handle that may KEY a driven record.
+
+    A handle-less `status` returns a redacted token (`bridge:7:abcdef\u2026`)
+    because an unproven caller must not receive the drive capability. That is
+    still a non-empty string, so it was accepted as a handle and became a
+    SECOND key for a tab already tracked under its full token — the driven
+    count over-reported, and after the tab genuinely closed `note_closed(full)`
+    dropped only the full key, leaving the redacted entry advertising a dead
+    URL forever. That is exactly the phantom this change exists to remove,
+    reintroduced one layer down.
+
+    A redacted handle proves nothing about which tab it names, so it is treated
+    as ABSENT: the update refreshes the most recent record instead of forking a
+    new one, which is the same safe reading a handle-less update already gets.
+    """
+    return bool(tab) and not tab.endswith(_REDACTION_MARK)
 
 
 @dataclass
@@ -193,9 +236,16 @@ class ExtensionLink:
           the same navigation. Creating an unkeyed entry there would double-
           count one tab. So when tabs are already tracked, a handle-less update
           REFRESHES the most recent one instead of adding to the map.
+
+        A REDACTED handle counts as absent for both purposes; see
+        :func:`_is_real_handle`. The daemon enforces this even though the
+        current extension no longer sends one, because the two run independent
+        release cycles and an old or third-party build must not be able to
+        plant a phantom.
         """
-        key = tab or _UNKEYED_TAB
-        if not tab and self.driven:
+        keyed = _is_real_handle(tab)
+        key = tab if keyed else _UNKEYED_TAB
+        if not keyed and self.driven:
             latest = self._latest_driven()
             key = next((k for k, v in self.driven.items() if v is latest), _UNKEYED_TAB)
         self.driven[key] = DrivenTab(url=url, title=title, updated_at=time.time())
@@ -203,15 +253,25 @@ class ExtensionLink:
     def note_closed(self, tab: str) -> None:
         """Drop one closed tab, or every tab when the handle is unknown.
 
-        A handle-less ``tab_closed`` comes either from an older extension or
-        from a teardown that could not name the surface; blanking everything is
-        the safe reading there, because the alternative (keeping entries alive)
-        is exactly the phantom this fixes. A handle-carrying event drops only
-        that tab, so one session closing its tab never blanks another's.
+        A handle-carrying event drops ONLY that tab, so one session closing its
+        tab never blanks another's. It deliberately does NOT also drop the
+        unkeyed record: that record belongs to a DIFFERENT, older peer (it only
+        exists in a mixed-version pair), and dropping it made a new session
+        closing its own tab blank an old extension's still-live entry — the
+        docstring promised isolation the code did not deliver. The unkeyed
+        record is cleared by its own handle-less close, by `disconnect`, or by
+        `repair`; a stale one is self-correcting on the peer's next update.
+
+        A handle-less (or redacted, which proves nothing — see
+        :func:`_is_real_handle`) ``tab_closed`` cannot name what went away, so
+        it blanks everything: the alternative, keeping entries alive, is
+        exactly the phantom this fixes. Callers that CAN name the surface must
+        do so — `worker.ts` resolves the sole-surface `close` shape to its real
+        handle before announcing, so this clear-all stays what it is documented
+        to be: the last resort for a peer that genuinely cannot say.
         """
-        if tab:
+        if _is_real_handle(tab):
             self.driven.pop(tab, None)
-            self.driven.pop(_UNKEYED_TAB, None)
         else:
             self.driven.clear()
 
@@ -355,9 +415,9 @@ class BridgeService:
                     failures,
                     exc_info=True,
                 )
-                # Back off a little on a persistently failing iteration so a
-                # synchronous failure cannot become a busy loop, capped so
-                # recovery is still prompt once the cause clears.
+                # Back off one second per consecutive failure so a synchronous
+                # failure cannot become a busy loop, clamped at
+                # SUPERVISOR_BACKOFF_CAP_S. Linear, so recovery stays prompt.
                 await asyncio.sleep(min(SUPERVISOR_BACKOFF_CAP_S, float(failures)))
 
     async def _heartbeat_tick(self) -> None:
@@ -892,11 +952,27 @@ class BridgeService:
                 raw = await self._dispatch_serialized(request)
                 payload: Any = json.loads(bytes(raw.body).decode("utf-8"))
                 listed = (payload.get("result") or {}).get("tabs", []) if payload.get("ok") else []
-                live_urls = {
-                    str(entry.get("url", "")) for entry in listed if isinstance(entry, dict)
-                }
+                entries = [entry for entry in listed if isinstance(entry, dict)]
+                live_handles = [str(entry.get("tab", "")) for entry in entries]
+                live_urls = {str(entry.get("url", "")) for entry in entries}
                 for key, tab in before.items():
-                    if tab.url and tab.url not in live_urls:
+                    # Match on the SURFACE HANDLE, which is stable, rather than
+                    # on the URL, which is not: the listing reads chrome.tabs at
+                    # call time, so a tab that navigated after its last
+                    # tab_update (or is still resolving a redirect) presents a
+                    # different URL and was dropped as a phantom while genuinely
+                    # live. Harmless-but-wrong is still wrong for a verb
+                    # advertised as safe to run while sessions are driving.
+                    if _is_real_handle(key):
+                        alive = any(
+                            _handle_matches_listed(key, listed_handle)
+                            for listed_handle in live_handles
+                        )
+                    else:
+                        # The unkeyed record (an older extension) has no handle
+                        # to match on, so the URL remains the only signal.
+                        alive = not tab.url or tab.url in live_urls
+                    if not alive:
                         self.link.driven.pop(key, None)
                         cleaned.append(tab.url)
             except Exception:  # noqa: BLE001 - repair must never fail loudly
