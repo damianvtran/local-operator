@@ -52,6 +52,7 @@ from local_operator.model.catalogue import (
     Listing,
     invalidate,
     invalidate_documents,
+    peek_listing,
     read_listing,
 )
 from local_operator.model.effort import EFFORT_ORDER
@@ -249,7 +250,12 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: aggregators, since they are the only transports whose wire carries the field
 #: at all (the anthropic/zai/xai/kimi/alibaba/codex documents and models.dev do
 #: not, so ``anthropic`` stays at 2 and every default-1 transport stays at 1).
-LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 5, "radient": 5}
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {
+    "anthropic": 2,
+    "openrouter": 5,
+    "radient": 5,
+    "radient-key": 5,
+}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
@@ -270,7 +276,7 @@ def listing_capture_version(provider_id: str) -> int:
 #: listing in the tree — OpenRouter serves ~340 models and is the one provider
 #: whose catalogue cannot be approximated from the registry, since its entry there
 #: is a single placeholder describing the router itself.
-PUBLIC_LISTING_PROVIDERS = frozenset({"openrouter", "radient"})
+PUBLIC_LISTING_PROVIDERS = frozenset({"openrouter", "radient", "radient-key"})
 
 #: What :func:`available_models` managed to do, for the UI to annotate:
 #: ``ok`` fetched live now, ``cached`` served a stored document with no fetch
@@ -1573,6 +1579,39 @@ def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> in
     definition = get_provider_definition(provider_id)
     storage_id = credential_provider_id(definition.id if definition else provider_id)
     return invalidate_documents(storage_id, cache_dir=cache_dir)
+
+
+def cached_available_models(
+    provider_id: str,
+    *,
+    cache_dir: Path | None = None,
+) -> tuple[list[DiscoveredModel], ListingStatus]:
+    """Every model cached on disk for ``provider_id`` with zero network calls.
+
+    Synchronous, non-blocking, and I/O-isolated: uses :func:`peek_listing` so it
+    never acquires fetch leases, spawns background revalidation threads, or
+    attempts network requests.
+
+    Returns:
+        ``(models, status)`` where status is ``"cached"`` if a valid cached
+        listing was found on disk, or ``"static"`` if no cache exists or the
+        cache payload is unusable, in which case the bundled static registry rows
+        are returned as fallback.
+    """
+    rows = _static_rows(provider_id)
+    definition = get_provider_definition(provider_id)
+    if definition is None:
+        return merge_models(rows, None), "static"
+
+    storage_id = credential_provider_id(definition.id)
+    key = _cache_key(storage_id)
+    listing = peek_listing(key, cache_dir=cache_dir)
+    capture = listing_capture_version(storage_id)
+    live_rows = _rows_from_payload(listing.payload, capture)
+    if not live_rows:
+        return merge_models(rows, None), "static"
+
+    return merge_models(rows, live_rows, include_static_only=True), "cached"
 
 
 def available_models(

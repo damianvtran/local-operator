@@ -30,6 +30,7 @@ from local_operator.model.configure import (  # noqa: F401  (used by callers)
 from local_operator.model.discovery import (
     DiscoveredModel,
     available_models,
+    cached_available_models,
     invalidate_listing,
 )
 from local_operator.model.naming import model_label
@@ -1025,6 +1026,52 @@ class ProviderController:
                 )
         return entries
 
+    def initial_catalogue(self, *, cache_dir: Any = None) -> list[CatalogueEntry]:
+        """First frame catalogue: shipped models layered with cached aggregator listings.
+
+        Synchronous, non-blocking, and network-free. While direct providers have
+        stable shipped static models in the registry, aggregator providers
+        (OpenRouter, Radient) have no hardcoded registry models and rely on their
+        dynamic catalogues. When a previous live listing exists on disk, reading it
+        via :func:`cached_available_models` allows hundreds of available models to
+        paint on the very first frame rather than appearing only after a network
+        round trip.
+        """
+        entries: list[CatalogueEntry] = []
+        usable = self.usable_providers()
+        for definition in PROVIDER_REGISTRY:
+            connected = usable is None or definition.id in usable
+            if definition.id in AGGREGATOR_PROVIDERS:
+                models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
+                for model in models:
+                    entries.append(
+                        CatalogueEntry(
+                            provider=definition.id,
+                            model_id=model.id,
+                            label=model_label(definition.id, model.id, model.name or "").full,
+                            context_window=max(0, model.context_window),
+                            input_price=_price(model.input_price, definition, free=model.free),
+                            output_price=_price(model.output_price, definition, free=model.free),
+                            connected=connected,
+                            aggregated=True,
+                        )
+                    )
+            else:
+                for model_id, info in static_models(definition.id).items():
+                    entries.append(
+                        CatalogueEntry(
+                            provider=definition.id,
+                            model_id=model_id,
+                            label=model_label(definition.id, model_id, info.name or "").full,
+                            context_window=max(0, info.context_window or 0),
+                            input_price=_price(info.input_price, definition),
+                            output_price=_price(info.output_price, definition),
+                            connected=connected,
+                            aggregated=False,
+                        )
+                    )
+        return entries
+
     def entry_for(
         self,
         provider: str,
@@ -1103,13 +1150,18 @@ class ProviderController:
 
         Each provider is isolated: discovery never raises by contract, but a
         credential resolution can (an OAuth refresh against a dead network), and
-        one broken provider must not empty the whole list.
+        one broken provider must not empty the whole list. Provider listings are
+        fetched concurrently via :func:`asyncio.gather` so overall latency bounds
+        to the single slowest provider rather than the sum of all provider round
+        trips.
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
-        listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
         usable = self.usable_providers()
-        for definition in PROVIDER_REGISTRY:
+
+        async def _fetch_provider(
+            definition: ProviderDefinition,
+        ) -> tuple[ProviderDefinition, bool, list[DiscoveredModel], str]:
             connected = usable is None or definition.id in usable
             api_key: str | None = None
             is_oauth = False
@@ -1127,11 +1179,17 @@ class ProviderController:
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
             # Off the event loop: discovery is synchronous httpx by design (it is
-            # also called from the CLI and the server), and a dozen sequential
-            # provider fetches on the loop would freeze a TUI's repaint.
+            # also called from the CLI and the server), and fetching on the loop
+            # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            return definition, connected, models, status
+
+        results = await asyncio.gather(*[_fetch_provider(defn) for defn in PROVIDER_REGISTRY])
+        listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
+        for definition, connected, models, status in results:
             statuses[definition.id] = status
             listed.append((definition, connected, models))
+
         # Prices for the rows no listing priced, from the same keyless chain the
         # status band resolves through (see :func:`_enrich_prices`). After the
         # listings rather than per provider so the two documents are read ONCE

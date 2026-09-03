@@ -749,7 +749,7 @@ class TestAggregatorKeysNeverSatisfyANamedProvider:
 
         # The set exists and is exactly the resellers -- a direct provider
         # appearing here would make it reachable as an implicit substitute.
-        assert AGGREGATOR_PROVIDERS == {"openrouter", "radient"}
+        assert AGGREGATOR_PROVIDERS == {"openrouter", "radient", "radient-key"}
 
 
 class TestDeprioritizationSurvivesTheOrderingItIsAppliedTo:

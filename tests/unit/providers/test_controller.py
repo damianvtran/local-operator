@@ -1732,3 +1732,85 @@ async def test_usable_providers_suppresses_secondary_flavour_when_oauth_active(
     assert usable is not None
     assert "radient" in usable
     assert "radient-key" not in usable
+
+
+def test_initial_catalogue_layers_cached_aggregators_without_network(
+    controller, store, tmp_path, monkeypatch
+) -> None:
+    """The first frame paints shipped registry models layered with cached aggregators.
+
+    Aggregators return {} from static_models(). When a listing was previously cached
+    on disk, initial_catalogue() includes those models synchronously so openrouter
+    and radient models appear on the first frame rather than popping in only after
+    live_catalogue().
+    """
+    import json
+    import time
+
+    # Plant a cached listing on disk for openrouter in tmp_path
+    cache_file = tmp_path / "openrouter.listing.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": 5,
+                    "models": [
+                        {
+                            "id": "meta/llama-3.3-70b",
+                            "name": "Meta Llama 3.3 70B",
+                            "context_window": 131072,
+                            "input_price": 0.12,
+                            "output_price": 0.30,
+                            "free": False,
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    initial = controller.initial_catalogue(cache_dir=tmp_path)
+    by_sel = {entry.selector: entry for entry in initial}
+
+    # OpenRouter model is present on the initial frame
+    assert "openrouter/meta/llama-3.3-70b" in by_sel
+    entry = by_sel["openrouter/meta/llama-3.3-70b"]
+    assert entry.aggregated is True
+    assert entry.input_price == 0.12
+    assert entry.output_price == 0.30
+    assert entry.context_window == 131072
+
+    # Direct shipped models are still present
+    assert "anthropic/claude-opus-5" in by_sel
+
+    # static_catalogue remains strictly static (no aggregators)
+    static = {entry.selector: entry for entry in controller.static_catalogue()}
+    assert "openrouter/meta/llama-3.3-70b" not in static
+    assert "anthropic/claude-opus-5" in static
+
+
+@pytest.mark.asyncio
+async def test_live_catalogue_fetches_providers_in_parallel(controller, store, monkeypatch) -> None:
+    """live_catalogue runs provider available_models checks concurrently with gather."""
+    import time
+
+    concurrency = 0
+    max_concurrency = 0
+
+    def slow_available_models(provider_id, **kwargs):
+        nonlocal concurrency, max_concurrency
+        concurrency += 1
+        if concurrency > max_concurrency:
+            max_concurrency = concurrency
+        time.sleep(0.01)
+        concurrency -= 1
+        return [], "static"
+
+    monkeypatch.setattr(
+        "local_operator.providers.controller.available_models", slow_available_models
+    )
+
+    entries, statuses = await controller.live_catalogue()
+    # Concurrency should be greater than 1 since providers are gathered
+    assert max_concurrency > 1, f"Expected concurrent calls, got max_concurrency={max_concurrency}"
