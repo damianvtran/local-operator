@@ -609,6 +609,17 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("animate the working line", "static working line"),
     ),
     Setting(
+        # Default changed to False by maintainer
+        key="display.comfortable_rows",
+        path=("display.comfortable_rows",),
+        section="appearance",
+        label="Comfortable action rows",
+        kind=Kind.BOOL,
+        default=False,
+        help="Pad tool and prompt rows so they are easier to click.",
+        choices=_bool_choices("padded, easier to click", "compact, more history"),
+    ),
+    Setting(
         key="display.nerd_icons",
         path=("display.nerd_icons",),
         section="appearance",
