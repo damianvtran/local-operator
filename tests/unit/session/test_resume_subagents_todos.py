@@ -269,9 +269,11 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     old_row = parent.jobs.get(old_id)
     assert old_row is not None
     old_row.usage = Usage(input_tokens=4, provider="test", model_id="m")
-    # ``usage`` is a durable roster field, so this announcement is what marks
-    # the sidecar dirty; the persist below is a no-op without it, and the
-    # tokens never reach disk (see AsyncJobManager.note_usage_changed).
+    # ``usage`` is a durable roster field, and this test mutates it DIRECTLY
+    # rather than through the relay, so nothing else announces it here. The
+    # announcement is what marks the sidecar dirty for the watermark-guarded
+    # writer (see AsyncJobManager.note_usage_changed, which also records why
+    # no shipped path depends on it).
     parent.jobs.note_usage_changed()
     await parent._persist_subagent_roster()
     await parent.dispose()
@@ -289,11 +291,13 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     # the-real-thing, and under load the fold has not landed when the
     # identity has (#463: ``assert 0 == 4`` on an otherwise-green commit).
     #
-    # This wait is reachable ONLY because the predecessor's usage actually
-    # reached the sidecar above. When it did not, the restored row billed 0,
-    # no later event could fix it, and this loop burned its whole timeout —
-    # the #548 CI failure. That is a durability bug, not a slow machine, so
-    # the fix is in the manager rather than in this deadline.
+    # This wait depends on the predecessor's usage having reached the sidecar
+    # above, which is why the direct mutation is announced. It is NOT the
+    # cause of the intermittent #548 CI failure in this file: reverting that
+    # announcement leaves this test passing (41/41 measured, including under
+    # concurrency). The flake was parent-turn quiescence in
+    # test_live_progress_never_schedules_the_roster_writer; see
+    # wait_for_settled_delivery.
     await wait_for(
         lambda: sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4,
         timeout=30.0,
@@ -321,16 +325,14 @@ async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path,
 
     ``usage`` is a durable roster field, but the session's writer is
     watermark-guarded: ``_persist_subagent_roster`` flushes only while
-    ``written_generation < generation``. So a usage mutation that announced
-    nothing on the roster seam left the very next persist a no-op and the
-    tokens off disk — the row came back from a resume billing 0.
+    ``written_generation < generation``. A mutation that announces nothing
+    therefore leaves the very next persist a no-op and the tokens off disk.
 
-    Whether it survived depended on a RACE with unrelated roster traffic: if
-    some other event had not yet drained the writer, the mutation rode along
-    on that pending flush and looked correct. This test pins the losing
-    interleaving deterministically by draining the writer FIRST, which is the
-    state a contended machine reaches on its own and is what made the sibling
-    accounting test fail intermittently in CI (#548).
+    Draining the writer FIRST is what makes this deterministic: it removes the
+    pending flush an unannounced mutation would otherwise ride along on. This
+    pins the manager seam's own contract — no shipped path depends on it
+    today (see ``AsyncJobManager.note_usage_changed`` for what covers it), and
+    this is NOT the cause of the #548 flake.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
@@ -358,6 +360,49 @@ async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path,
     resumed = _session(tmp_path, IdleStream())
     await resumed.async_init()
     assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 4
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_detach_persists_descendant_usage_when_the_writer_already_drained(
+    tmp_path, monkeypatch
+):
+    """``detach_child_manager`` announces its durable write too.
+
+    Same seam contract as the usage mutation above, on the other durable
+    accounting field: ``descendant_usage`` is in the roster projection, so
+    replacing the live child edge with the detached ledger has to mark the
+    sidecar dirty. Without the announcement the drained writer skips the
+    persist and the field lands as ``[]`` on disk.
+
+    Also covered incidentally in production (the runner detaches just before
+    the row settles, and settling persists), so this pins the seam rather than
+    a reachable loss.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    parent = _session(tmp_path, OneShotStream())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="nested", prompt="do a thing")
+    await wait_for(lambda: _status(parent, job_id) == "completed")
+
+    await parent._await_subagent_roster_writer()
+    assert parent._subagent_roster_written_generation == parent._subagent_roster_generation
+
+    parent.jobs.detach_child_manager(job_id, [Usage(input_tokens=7, provider="test", model_id="m")])
+    await parent._persist_subagent_roster()
+
+    sidecar = parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR
+    persisted = json.loads(sidecar.read_text())
+    assert [
+        [item.get("input_tokens") for item in (row.get("descendant_usage") or [])]
+        for row in persisted["jobs"]
+    ] == [[7]]
+    await parent.dispose()
+
+    resumed = _session(tmp_path, IdleStream())
+    await resumed.async_init()
+    assert sum(item.input_tokens for item in resumed.jobs.accounting_components()) == 7
     await resumed.dispose()
 
 

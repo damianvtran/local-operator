@@ -474,7 +474,21 @@ class AsyncJobManager:
         self._invalidate_accounting()
 
     def detach_child_manager(self, job_id: str, descendant_usage: list[Usage]) -> None:
-        """Replace a live child edge with its final detached durable ledger."""
+        """Replace a live child edge with its final detached durable ledger.
+
+        ``descendant_usage`` is a DURABLE roster field, so this has the same
+        shape as :meth:`note_usage_changed`: without the announcement the
+        watermark-guarded writer treats the next persist as a no-op, measured
+        on a drained writer as ``gen 8 -> 8`` with ``descendant_usage`` landing
+        as ``[]`` on disk.
+
+        As there, no shipped path loses data — the subagent runner's
+        ``finally`` calls this just before ``_run_job`` settles the row and
+        fires ``_notify_job_change(persist_roster=True)``, and dispose bumps
+        the generation unconditionally. The bump is here for the same reason:
+        the seam owns its own durability rather than depending on each caller
+        remembering a second call.
+        """
         job = self._jobs.get(job_id)
         if job is None:
             return
@@ -484,28 +498,38 @@ class AsyncJobManager:
         job.descendant_usage = [item.model_copy(deep=True) for item in descendant_usage]
         job.child_jobs = None
         self._invalidate_accounting()
+        self._notify_roster_change()
 
     def note_usage_changed(self) -> None:
         """Invalidate after an in-place Usage mutation owned by a child relay.
 
         ``usage`` is a DURABLE roster field (see ``_ROSTER_ROW_FIELDS`` in
         ``session.py``), so mutating it changes the projection the resume
-        sidecar stores — not merely the live cost aggregate. Announcing it on
-        the roster seam is what marks that sidecar dirty, and it is load-bearing
-        because the session's writer is WATERMARK-GUARDED: it flushes only while
-        ``written_generation < generation``. A usage mutation that bumped no
-        generation therefore left the next ``_persist_subagent_roster()`` a
-        no-op, and the new tokens stayed off disk until some unrelated roster
-        event happened to bump the generation. Whether an unrelated event had
-        already drained the writer is what decided if those tokens survived a
-        restart — a real durability race, and the mechanism behind the #548
-        flake (a resumed session's folded predecessor came back billing 0
-        instead of its settled spend).
+        sidecar stores, not merely the live cost aggregate. The session's
+        writer is WATERMARK-GUARDED — it flushes only while
+        ``written_generation < generation`` — so a durable mutation that
+        announces nothing leaves the next ``_persist_subagent_roster()`` a
+        no-op. Called directly on a drained writer that is measurable:
+        ``gen 7 -> 7``, and the new tokens do not reach disk.
 
-        The production relay already follows this call with its own
-        ``_notify_roster_change()``. The duplicate generation bump costs no
-        extra I/O: the writer loops on the watermark so both bumps coalesce into
-        one pass, and the fingerprint guard drops a byte-identical payload.
+        NO SHIPPED PATH IS KNOWN TO LOSE DATA, and this is deliberately not
+        claimed as a user-facing billing bug. Two independent things cover it
+        today, both incidental rather than by design:
+
+        * the only production caller (``subagent.py``'s relay, on
+          ``message_end``) calls ``_notify_roster_change()`` on the very next
+          statement, against this same manager;
+        * ``Session._final_persist_snapshots`` bumps the generation
+          unconditionally, so a graceful dispose repairs an unannounced
+          mutation even if a caller forgot.
+
+        Reverting this call and driving a real child with real provider usage
+        therefore still persists and re-bills correctly. The bump is here so
+        the seam is SELF-SUFFICIENT: a future caller that mutates usage without
+        knowing to follow it with a second call, or a crash before dispose,
+        must not silently drop a durable field. It is cheap — the writer loops
+        on the watermark so both bumps coalesce into one pass, and the
+        fingerprint guard drops a byte-identical payload.
         """
         self._invalidate_accounting()
         self._notify_roster_change()
