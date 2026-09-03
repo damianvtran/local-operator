@@ -1083,12 +1083,43 @@ class EpisodeRunner:
             category, reason, failure_kind = "model", "model_failure", "model"
         else:
             category, reason, failure_kind = "adapter", "crash", "crash"
+        # The bounded, redaction-scanned reason for the failure, not just its
+        # type. ``diagnostic_code`` is a StrictIdentifier derived from the
+        # exception CLASS ("rpcremoteerror"), which is enough to bucket a
+        # failure and never enough to diagnose one: the real episode
+        # ep-ffda3fc88f81 burned a paid 16-step run and left a reader nothing
+        # but that word and a null ``detail_artifact``. The rejected-decision
+        # path above already publishes its diagnostic as an artifact for
+        # exactly this reason; a fatal error deserves it at least as much,
+        # because there is no retry that will produce a second chance to look.
+        #
+        # ``_diagnostic`` is the same renderer used for the outcome's own
+        # diagnostic field: it strips pydantic's ``input_value=`` echo (the one
+        # place a resolved secret could surface) and truncates to 500 chars, and
+        # ``publish_artifact`` independently scans every byte against the
+        # episode's RedactionSet, so a leaked credential fails the write rather
+        # than reaching the bundle.
+        detail: Any = None
+        try:
+            detail = self._publish(_diagnostic(error).encode("utf-8"), media_type="text/plain")
+        except (_EvidenceFailure, OSError):
+            # Best-effort by design. This runs on the path that is already
+            # handling a failure, and an unpublishable detail must never be the
+            # reason a bundle loses its terminal -- the code, category and
+            # outcome diagnostic still reach the reader without it. ``OSError``
+            # is named alongside ``_EvidenceFailure`` because ``publish_artifact``
+            # poisons the writer and re-raises a RAW ``OSError`` on ambiguous I/O
+            # (ENOSPC/EIO), and ``_publish`` converts only ``EvidenceError`` -- so
+            # a disk failure here would otherwise escape ``_finalize_failure`` and
+            # cost the bundle its terminal: the exact shape this change removes.
+            detail = None
         self._append(
             "error",
             ErrorPayload(
                 error_id=f"err-{uuid.uuid4().hex[:12]}",
                 category=category,
                 diagnostic_code=_diagnostic_code(error),
+                detail_artifact=detail,
                 retryable=False,
             ),
         )
