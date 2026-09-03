@@ -1854,11 +1854,13 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     no other listing in the tree quotes a price, and once more at the modality
     gate on that flag (4) — ``free`` is stored COMPUTED, so a version-3 document
     carries the ungated ``true`` for the per-song-billed rows and the reader has
-    no modality left to re-judge it with.
+    no modality left to re-judge it with. And once more (5) at the
+    reasoning-effort ladder, a FIELD the version-4 writer never recorded, which
+    only the two aggregators' wire carries at all.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 4
-    assert discovery.listing_capture_version("radient") == 4
+    assert discovery.listing_capture_version("openrouter") == 5
+    assert discovery.listing_capture_version("radient") == 5
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
@@ -1993,3 +1995,178 @@ def test_invalidation_follows_the_credential_identity_not_the_provider_id(tmp_pa
 def test_invalidating_an_unknown_provider_does_not_raise(tmp_path) -> None:
     """A login path calls this; an unknown id must cost nothing, not an exception."""
     assert discovery.invalidate_listing("not-a-provider", cache_dir=tmp_path) == 0
+
+
+# ---------------------------------------------------------------------------
+# The listing's reasoning-effort ladder
+# ---------------------------------------------------------------------------
+
+
+def _effort_entry(**reasoning: object) -> dict[str, Any]:
+    """One OpenAI-compatible listing entry carrying a ``reasoning`` object."""
+    return {"id": "vendor/m", "reasoning": dict(reasoning)}
+
+
+@pytest.mark.parametrize(
+    ("supported", "expected"),
+    [
+        # The wire's own order is DESCENDING on every row measured, and the
+        # contract downstream is ascending: `next_effort` indexes the ladder and
+        # the loop's retreat walks it downward.
+        (["high", "medium", "low"], ("low", "medium", "high")),
+        # Sorted, not reversed — a reverse is a bet on the wire's ordering.
+        (["medium", "max", "low"], ("low", "medium", "max")),
+        # A word this build cannot RANK is dropped rather than carried: the
+        # nearest-rung clamp indexes EFFORT_ORDER for every rung, and an unknown
+        # one used to raise on the failover hop meant to rescue a turn.
+        (["high", "turbo", "low"], ("low", "high")),
+        # Case is the listing's, meaning is ours.
+        (["HIGH", "Low"], ("low", "high")),
+        # Entirely unrankable is UNSTATED, not a denial: `()` would strip the
+        # table's answer, and the table is better than nothing.
+        (["turbo", "warp"], None),
+        ([], None),
+        # A `reasoning` object that answers a different question is silence.
+        (None, None),
+    ],
+)
+def test_a_stated_ladder_is_normalised_at_ingest(supported, expected) -> None:
+    """Normalisation happens ONCE, in the parser, so the picker, the merge and
+    the spec builder cannot each normalise differently — and so a cache
+    round-trip is an identity rather than a re-sort."""
+    entry = _effort_entry() if supported is None else _effort_entry(supported_efforts=supported)
+    row = discovery._row_from_openai_entry(entry)
+
+    assert row is not None
+    assert row.reasoning_efforts == expected
+
+
+def test_a_reasoning_object_without_a_ladder_is_not_a_denial() -> None:
+    """The one place this departs from the `supports_images` analogy, and it is
+    deliberate. A stated `false` answers the yes/no question it was asked;
+    `{"mandatory": false}` answers a DIFFERENT question and omits ours. Reading
+    that omission as a denial would strip the o-series ladder — ten rows — on
+    the strength of a key that was never about efforts."""
+    row = discovery._row_from_openai_entry(_effort_entry(mandatory=False, default_enabled=True))
+
+    assert row is not None
+    assert row.reasoning_efforts is None, "silence must defer to the table, not deny"
+    assert row.reasoning_default_effort is None
+
+
+def test_a_default_off_its_own_ladder_is_dropped() -> None:
+    """A default the ladder does not contain can be neither selected by
+    `/effort` nor reached by `shift+tab`, so seeding it would strand the status
+    band on a level the cycle can never return to. No row on the wire violates
+    this today; the guard is for the day one does — including the day the rung
+    is real but was dropped above as unrankable."""
+    on_ladder = discovery._row_from_openai_entry(
+        _effort_entry(supported_efforts=["high", "low"], default_effort="high")
+    )
+    off_ladder = discovery._row_from_openai_entry(
+        _effort_entry(supported_efforts=["high", "low"], default_effort="medium")
+    )
+    dropped_rung = discovery._row_from_openai_entry(
+        _effort_entry(supported_efforts=["high", "turbo"], default_effort="turbo")
+    )
+
+    assert on_ladder is not None and on_ladder.reasoning_default_effort == "high"
+    assert off_ladder is not None and off_ladder.reasoning_default_effort is None
+    assert dropped_rung is not None and dropped_rung.reasoning_default_effort is None
+
+
+def test_the_merge_does_not_drop_the_ladder() -> None:
+    """`_merge_one` CONSTRUCTS a fresh row, so a field it forgets to carry
+    silently defaults — the exact class of bug this module's comments keep
+    recording. The registry has no ladder of its own to merge against, so the
+    live answer must simply survive."""
+    static = {"vendor/m": _info("vendor/m")}
+    live = [
+        DiscoveredModel(
+            id="vendor/m",
+            reasoning_efforts=("low", "medium"),
+            reasoning_default_effort="medium",
+        )
+    ]
+    merged = merge_models(static, live)
+
+    assert merged[0].reasoning_efforts == ("low", "medium")
+    assert merged[0].reasoning_default_effort == "medium"
+
+
+def test_a_registry_only_row_states_no_ladder() -> None:
+    """Nothing in the shipped registry can state one, so the row stays silent
+    and the spec builder falls back to the hand-transcribed table."""
+    merged = merge_models({"m": _info("m")}, None)
+
+    assert merged[0].reasoning_efforts is None
+
+
+def test_a_cache_round_trip_keeps_an_unstated_ladder_unstated(tmp_path) -> None:
+    """A stored `null` must read back as `None`, never as `()`. `()` would be a
+    denial the wire never issued, and it would strip the table's answer — the
+    same trap `supports_images` documents, in a field where the cost is a model
+    resolving differently from disk than it did live."""
+    body = {
+        "data": [
+            {
+                "id": "vendor/stated",
+                "reasoning": {
+                    "supported_efforts": ["high", "medium", "low"],
+                    "default_effort": "medium",
+                },
+            },
+            {"id": "vendor/silent"},
+        ]
+    }
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "openrouter", api_key="k", client=client, cache_dir=tmp_path
+    )
+    cached, cached_status = available_models(
+        "openrouter", api_key="k", client=client, cache_dir=tmp_path
+    )
+
+    assert (live_status, cached_status) == ("ok", "cached")
+    assert len(client.calls) == 1
+    stored = json.loads((tmp_path / "openrouter.listing.json").read_text())
+    by_stored = {row["id"]: row for row in stored["payload"]["models"]}
+    assert by_stored["vendor/silent"]["reasoning_efforts"] is None
+    assert by_stored["vendor/stated"]["reasoning_efforts"] == ["low", "medium", "high"]
+
+    for rows in (live, cached):
+        by_id = {row.id: row for row in rows}
+        assert by_id["vendor/silent"].reasoning_efforts is None
+        assert by_id["vendor/stated"].reasoning_efforts == ("low", "medium", "high")
+        assert by_id["vendor/stated"].reasoning_default_effort == "medium"
+
+
+def test_a_stale_document_degrades_to_the_table_rather_than_lying(tmp_path) -> None:
+    """What the version bump buys, from the other side. A version-4 document has
+    a perfectly valid shape in which every ladder is absent, and absent is
+    "unstated" — so the fix would be INVISIBLE for up to a day rather than
+    wrong. That invisibility is exactly what the stamp exists to prevent, which
+    is why the bump is required rather than optional."""
+    cached = tmp_path / "openrouter.listing.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {"capture": 4, "models": [{"id": "vendor/m"}]},
+            }
+        )
+    )
+    body = {
+        "data": [
+            {"id": "vendor/m", "reasoning": {"supported_efforts": ["high", "low"]}},
+        ]
+    }
+    client = _StubClient([_Response(200, body)])
+
+    rows, status = available_models("openrouter", api_key="k", client=client, cache_dir=tmp_path)
+
+    # The stale-stamped document is rejected and refetched rather than served.
+    assert status == "ok"
+    assert len(client.calls) == 1
+    assert rows[0].reasoning_efforts == ("low", "high")

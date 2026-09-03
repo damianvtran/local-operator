@@ -54,6 +54,7 @@ from local_operator.model.catalogue import (
     invalidate_documents,
     read_listing,
 )
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.model.ids import id_spellings, normalised_id
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
@@ -159,7 +160,24 @@ LYING_MAX_TOKENS = 4096
 #: install keeps making the false claim on screen until its listing TTL expires
 #: — the fix would ship and change nothing for a day. Same one-time synchronous
 #: refetch, paid by the same two aggregators.
-LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 4, "radient": 4}
+#:
+#: Version 5 for ``openrouter`` and ``radient`` is ``_row_from_openai_entry``
+#: reading ``reasoning.supported_efforts`` and ``reasoning.default_effort``
+#: into :attr:`DiscoveredModel.reasoning_efforts` and
+#: ``reasoning_default_effort`` — a FIELD the version-4 writer never recorded,
+#: which is the plain case for this stamp. A version-4 document parses to rows
+#: whose ladder is ``None``, and ``None`` is precisely "the listing said
+#: nothing", so the spec builder falls back to ``model.effort``'s table and the
+#: install behaves exactly as it does today: nothing crashes and nothing lies,
+#: the fix is simply INVISIBLE for up to a day. That invisibility is the whole
+#: reason the stamp exists, so the bump is required rather than optional — the
+#: reported bug (no effort segment on ``openrouter/google/gemini-3.8-flash``)
+#: would appear unfixed on every existing install until its TTL rolled. Same
+#: one-time synchronous refetch on the calling path, paid by the same two
+#: aggregators, since they are the only transports whose wire carries the field
+#: at all (the anthropic/zai/xai/kimi/alibaba/codex documents and models.dev do
+#: not, so ``anthropic`` stays at 2 and every default-1 transport stays at 1).
+LISTING_CAPTURE_VERSIONS: dict[str, int] = {"anthropic": 2, "openrouter": 5, "radient": 5}
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
@@ -227,6 +245,17 @@ class DiscoveredModel:
     picker renders those two opposite facts as a blank cell and the word ``free``
     respectively. Only the parser that read the wire knows which it saw, so it
     sets this flag rather than leaving the display to guess from a float.
+
+    ``reasoning_efforts`` is the third, and it is three-state for the reason
+    ``supports_images`` is: the listing's silence and its denial are different
+    answers. ``None`` means the listing said nothing about efforts and the
+    resolution defers to ``model.effort``'s hand-transcribed table; a populated
+    tuple is the router's own statement about the request it will accept, and it
+    WINS over that table. An empty tuple would read as a denial, and no listing
+    in this tree issues one — a ``reasoning`` object carrying ``mandatory`` but
+    no ``supported_efforts`` answers a different question and omits ours, so it
+    defers too. The parser therefore never produces ``()``: only ``None`` or a
+    populated tuple.
     """
 
     id: str
@@ -249,6 +278,21 @@ class DiscoveredModel:
     free: bool = False
     supports_images: bool | None = None
     supports_prompt_cache: bool = False
+    #: The effort ladder the LISTING stated, ASCENDING and normalised to
+    #: ``EFFORT_ORDER`` at ingest (see :func:`_effort_ladder`). Three-state —
+    #: see the class docstring. Deliberately shares its name with
+    #: ``ModelSpec.reasoning_efforts`` even though the two differ in exactly one
+    #: way: on the SPEC, ``()`` means "no knob" because the spec is the resolved
+    #: answer and has no silence left to record. Nothing may assign one to the
+    #: other without going through the resolution that collapses the third state.
+    reasoning_efforts: tuple[str, ...] | None = None
+    #: The rung the listing says the model runs at when nothing is sent, or
+    #: ``None`` when unstated. Only meaningful beside a populated ladder, and
+    #: the parser drops it when it is not a member of that ladder — a default
+    #: off its own ladder could be neither selected by ``/effort`` nor reached
+    #: by ``shift+tab``, so seeding it would strand the band on a level the
+    #: cycle can never return to.
+    reasoning_default_effort: str | None = None
 
 
 class _ListingUnavailable(RuntimeError):
@@ -400,6 +444,66 @@ def _stated_bool(value: object) -> bool | None:
     ``{}`` as False, which would turn "the key exists but is empty" into a denial.
     """
     return value if isinstance(value, bool) else None
+
+
+def _effort_ladder(value: object) -> tuple[str, ...] | None:
+    """A listing's effort list as an ASCENDING ladder, or ``None`` when unstated.
+
+    Sorted HERE, at ingest, rather than at each reader. ``EFFORT_ORDER`` is the
+    one place the word order is defined and ``ModelSpec.reasoning_efforts`` is
+    contractually ascending — ``next_effort`` indexes it and the loop's retreat
+    path walks it downward — so a row that reaches the picker, the merge and the
+    spec builder unsorted would be normalised three times and disagree once.
+    Sorting also makes a cache round-trip an identity instead of a re-sort.
+
+    Sorted, not reversed, even though every row on the wire arrives strictly
+    descending today: a reverse is a bet on the wire's ordering and a sort is
+    not.
+
+    DEDUPED on the way through, via the ``set`` the sort reads from. A listing
+    that repeats a rung (or states ``High`` beside ``high``, since the words are
+    lowercased first) would otherwise put a duplicate on the ladder, and the
+    ladder is a CYCLE: ``next_effort`` steps by index, so a repeated rung is a
+    ``shift+tab`` that appears not to move. Collapsing here keeps that a
+    property of ingest rather than something each reader has to defend against.
+
+    Words outside ``EFFORT_ORDER`` are DROPPED rather than kept or passed
+    through. The nearest-rung clamp indexes ``EFFORT_ORDER`` for every rung of
+    the ladder it is clamping toward, and an unknown word made that raise —
+    on a failover hop, i.e. on the request meant to rescue a turn. Dropping
+    costs one rung on a model whose vocabulary grew; keeping costs the turn.
+    Extending ``EFFORT_ORDER`` at runtime is not the alternative it looks like:
+    its POSITIONS encode the semantic ordering the clamp depends on, and a word
+    arriving from a listing carries no information about where it belongs. A new
+    rung is a human decision.
+
+    A list that is ENTIRELY unknown words returns ``None`` (unstated), not
+    ``()``: ``()`` is a denial this codebase does not want to invent, and the
+    table is a better answer than nothing.
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    known = {
+        word.lower() for word in value if isinstance(word, str) and word.lower() in EFFORT_ORDER
+    }
+    if not known:
+        return None
+    return tuple(sorted(known, key=EFFORT_ORDER.index))
+
+
+def _effort_default(value: object, ladder: tuple[str, ...] | None) -> str | None:
+    """The listing's default rung, but only when it is ON the stated ladder.
+
+    A default the ladder does not contain can be neither selected by ``/effort``
+    nor reached by ``shift+tab``, so seeding it would put a level on the status
+    band that the cycle can never return to. No row on the wire violates this
+    today (0 of 153 measured); the guard is for the day one does — including the
+    day the rung is real but got dropped above as unrankable.
+    """
+    if not ladder or not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    return lowered if lowered in ladder else None
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -560,8 +664,10 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
     pricing = _mapping(entry.get("pricing"))
     top_provider = _mapping(entry.get("top_provider"))
     architecture = _mapping(entry.get("architecture"))
+    reasoning = _mapping(entry.get("reasoning"))
 
     cache_read_price = _per_million(pricing.get("input_cache_read"))
+    effort_ladder = _effort_ladder(reasoning.get("supported_efforts"))
     return DiscoveredModel(
         id=model_id,
         name=_first_str(entry.get("name"), entry.get("display_name")),
@@ -599,6 +705,16 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
         # A priced cache-read leg is the only machine-readable evidence of prompt
         # caching in these listings; there is no capability flag for it.
         supports_prompt_cache=cache_read_price > 0,
+        # The router's own statement about which efforts it accepts for this
+        # model, which is the thing that returns 400 when we get it wrong. Only
+        # the OpenAI-compatible AGGREGATORS publish it (`_row_from_gemini_entry`
+        # and `_fetch_anthropic` are untouched: neither wire carries the field),
+        # and it overrules `model.effort`'s table because that table is
+        # second-hand by construction and its one extrapolating arm — one
+        # transcribed `gpt-5.4` ladder applied to every `gpt-[5-9]` id — is
+        # measurably wrong 34 times in BOTH directions against this listing.
+        reasoning_efforts=effort_ladder,
+        reasoning_default_effort=_effort_default(reasoning.get("default_effort"), effort_ladder),
     )
 
 
@@ -1198,6 +1314,16 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # there is no explicit denial to respect — only silence, and silence must
         # not disable ``cache_control`` on the most expensive models we ship.
         supports_prompt_cache=bool(row.supports_prompt_cache or info.supports_prompt_cache),
+        # Passed through, and that is not the no-op it reads as: this function
+        # CONSTRUCTS a fresh row, so an omitted field silently defaults — the
+        # exact class of bug the comments above keep recording. There is nothing
+        # to merge against, because the registry has no ladder of its own: no
+        # bundled row can state one, so silence here leaves ``None`` and the
+        # SPEC BUILDER falls back to ``model.effort``. The merge deliberately
+        # does not consult that table itself, so a row stays a faithful record
+        # of what the wire said and exactly one function owns the fallback.
+        reasoning_efforts=row.reasoning_efforts,
+        reasoning_default_effort=row.reasoning_default_effort,
     )
 
 
@@ -1294,6 +1420,9 @@ def _rows_from_payload(
         model_id = _first_str(entry.get("id"))
         if not model_id:
             continue
+        # Computed ONCE and handed to both fields: the default is only valid
+        # against its own ladder, so re-deriving it would let the two disagree.
+        stored_ladder = _effort_ladder(entry.get("reasoning_efforts"))
         rows.append(
             DiscoveredModel(
                 id=model_id,
@@ -1314,6 +1443,19 @@ def _rows_from_payload(
                 # model would resolve differently live than from disk.
                 supports_images=_stated_bool(entry.get("supports_images")),
                 supports_prompt_cache=bool(entry.get("supports_prompt_cache")),
+                # The SAME coercers the parser used, which is what makes the
+                # round-trip faithful rather than merely plausible: a stored
+                # ``null`` reads back as ``None`` (the listing's silence, which
+                # the table then answers) instead of as ``()``, and a stored
+                # list re-sorts and re-filters identically. Reading ``null`` as
+                # ``()`` would turn silence into a denial and strip the table's
+                # answer — the same trap ``supports_images`` documents two
+                # fields up, where the cost was a model resolving differently
+                # from disk than it did live.
+                reasoning_efforts=stored_ladder,
+                reasoning_default_effort=_effort_default(
+                    entry.get("reasoning_default_effort"), stored_ladder
+                ),
             )
         )
     return rows

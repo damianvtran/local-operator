@@ -4059,3 +4059,128 @@ def test_connectivity_config_bad_value_falls_back_to_default() -> None:
     )
     assert bad.connectivity_max_retries == CONNECTIVITY_MAX_RETRIES
     assert bad.connectivity_backoff_cap_ms == CONNECTIVITY_BACKOFF_CAP_MS
+
+
+def test_a_hop_clamps_against_the_targets_own_ladder_not_the_table(monkeypatch) -> None:
+    """The split brain this fix closes.
+
+    `spec_for_target` builds the target spec — whose ladder a provider listing
+    may have supplied — and then had to clamp with a table-keyed helper that
+    knew nothing about that listing. Where the two disagree the table could hand
+    back a rung the route rejects, which the wire client then drops on its own
+    membership check: a silent loss of depth beneath a status band still naming
+    the level. Worse than a 400, because nothing reports it.
+    """
+    # Patched at its SOURCE module: `spec_for_target` imports it inside the
+    # function body (a deliberate import cycle break), so the name never exists
+    # as a module attribute on `failover` to patch.
+    from local_operator.model import configure as configure_mod
+
+    # The target's REAL ladder, as a listing narrowed it: no `none`, no `low`.
+    narrowed = ModelSpec(
+        provider="openrouter",
+        model_id="openai/gpt-5.4-pro",
+        reasoning_efforts=("medium", "high", "xhigh"),
+        reasoning_effort="medium",
+        reasoning_default_effort="medium",
+    )
+    monkeypatch.setattr(
+        configure_mod, "build_model_spec", lambda provider, model_id: narrowed  # noqa: ARG005
+    )
+
+    # The table for this id still offers none/low/medium/high/xhigh, so a
+    # table-keyed clamp would have KEPT `low`.
+    from local_operator.model.effort import supported_efforts
+
+    assert "low" in supported_efforts("openai/gpt-5.4-pro"), "fixture drifted"
+
+    spec = spec_for_target(
+        ModelSpec(provider="anthropic", model_id="claude-opus-5", reasoning_effort="low"),
+        FallbackTarget("openrouter/openai/gpt-5.4-pro"),
+    )
+
+    assert spec.reasoning_effort == "medium"
+    assert spec.reasoning_effort in spec.reasoning_efforts
+
+
+def _hop_wire_effort(base: ModelSpec, selector: str) -> str | None:
+    """What the REAL wire builder would put on a request after hopping to ``selector``.
+
+    Goes through `clients._reasoning_effort` rather than reading
+    `spec.reasoning_effort` directly, because that function re-checks the level
+    against the target's ladder and is the last thing standing between a spec
+    and the request body — which is exactly where the seed used to survive.
+    """
+    from local_operator.providers.clients import _reasoning_effort
+
+    hopped = spec_for_target(base, FallbackTarget(selector))
+    return _reasoning_effort(ChatRequest(model=hopped, messages=[]))
+
+
+def test_a_seeded_effort_never_rides_a_hop_onto_an_aggregator() -> None:
+    """The no-seed rule holds on the FAILOVER path, not just at `build_model_spec`.
+
+    A direct Anthropic spec carries an automatic `high` that the user never
+    asked for (`reasoning_effort == reasoning_default_effort`). Carrying it onto
+    an aggregator target switched reasoning ON for a user who never touched the
+    dial — measured at 18 live `openrouter/anthropic/*` rows, and reachable only
+    because this branch gave those ids a ladder for the value to survive against.
+    """
+    seeded = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        reasoning_effort="high",
+        reasoning_default_effort="high",
+    )
+    assert _hop_wire_effort(seeded, "openrouter/anthropic/claude-opus-5") is None
+
+
+def test_an_explicit_choice_still_rides_a_hop_onto_an_aggregator() -> None:
+    """Dropping the SEED must not cost the user a level they actually picked."""
+    chosen = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        # The dial was MOVED: effort diverges from the build-time default, which
+        # is the documented signal that a user chose this.
+        reasoning_effort="low",
+        reasoning_default_effort="high",
+    )
+    assert _hop_wire_effort(chosen, "openrouter/anthropic/claude-opus-5") == "low"
+
+
+def test_a_hop_between_direct_routes_still_carries_the_seed() -> None:
+    """The rule is scoped to AGGREGATOR targets; direct-to-direct is untouched.
+
+    Deliberate: an Anthropic seed reaching a direct OpenAI target is arguable on
+    its own merits, but it predates this branch and changing it is a separate
+    wire change on routes this one does not otherwise touch.
+    """
+    seeded = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        reasoning_effort="high",
+        reasoning_default_effort="high",
+    )
+    assert _hop_wire_effort(seeded, "anthropic/claude-opus-4-5") == "high"
+
+
+def test_a_model_answers_the_same_way_however_it_is_reached() -> None:
+    """The sharpest form of the defect: one model, one route, two behaviours.
+
+    With the dial untouched, `openrouter/anthropic/claude-opus-5` sent nothing
+    when selected directly and `high` when reached via failover. Whichever way
+    the wire goes, the two must AGREE — that is the invariant, not the value.
+    """
+    from local_operator.providers.clients import _reasoning_effort
+
+    selector = "openrouter/anthropic/claude-opus-5"
+    direct = build_model_spec("openrouter", "anthropic/claude-opus-5")
+    direct_wire = _reasoning_effort(ChatRequest(model=direct, messages=[]))
+
+    seeded_base = build_model_spec("anthropic", "claude-opus-5")
+    assert seeded_base.reasoning_effort == seeded_base.reasoning_default_effort, "fixture drifted"
+
+    assert _hop_wire_effort(seeded_base, selector) == direct_wire
