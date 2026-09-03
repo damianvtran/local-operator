@@ -337,6 +337,16 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     #                                   'high'  164                 (min 146, max 176)
     #     anthropic/claude-opus-5       omitted  65   'high'  67.5   <- equivalent here
     #
+    # Those counts are PROMPT-DEPENDENT and are not constants of the model. The
+    # arms above share one reasoning-demanding prompt, which is what makes them
+    # comparable to each other; re-measured on a trivial one-line prompt, QA got
+    # 0 for BOTH arms of `opus-4.6` (n=10) and 0 vs 267 on a different demanding
+    # prompt. What reproduces is the DIRECTION and the asymmetry — omission
+    # yields no reasoning where `high` yields some — and that is the whole basis
+    # of the rule below. A future reader re-measuring with a one-liner will see
+    # smaller or zero figures on both arms and should not read that as the table
+    # being wrong, or "fix" the rule back on the strength of it.
+    #
     # So on that route sending `high` does not restate a default, it switches
     # reasoning ON — the same defect measured for listing defaults, arriving
     # through the table instead. We therefore assert the equivalence only on the

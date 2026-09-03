@@ -418,9 +418,19 @@ The change makes **91** more OpenRouter models carry a non-empty ladder.
 Vendors affected: google 21, anthropic 8, meta 7, deepseek 7, thinkingmachines
 6, z-ai 5, qwen 4, x-ai 4, nvidia 4, openai 4, and a tail.
 
-**No model gains a seeded `reasoning_effort`, and the wire is unchanged.** This
-section originally sized the radius as "~99 models begin sending the key"; both
-halves of that are now obsolete. Round-1 review recomputed the true figures
+**No model gains a seeded `reasoning_effort` on an aggregator route, and no
+shipped registry row changes what it sends.** Two qualifications this sentence
+once omitted, both established by later review rounds and stated exactly in
+§5.1 and in the `configure.py` comment. First, on the DIRECT Anthropic route
+the dotted spellings (`claude-opus-4.6` and friends) *do* newly seed `high`,
+because the ladder repair gives them a ladder the table previously denied them
+— reachable only by hand-typing a dotted id, and the route where Anthropic's
+documented `high` ≡ omission equivalence genuinely applies. Second, the wire is
+unchanged on the failover path only because §7 keeps it so: giving those ids a
+ladder let a seeded value survive a hop onto an aggregator, which measured 18
+live rows before `_carried_effort` closed it (F10). This section originally
+sized the radius as "~99 models begin sending the key"; both halves of that are
+now obsolete. Round-1 review recomputed the true figures
 against the live listing — **137** models would have started sending the key
 (not ~99, which counted ladder-gainers and missed 46 rows where the table
 already gave a ladder but `default_effort()` returned `None`), **60** of them
@@ -634,6 +644,40 @@ wrapper over it for the offline/table path. That keeps one clamping algorithm
 and makes the spec the single source of truth, which is the division
 `effort.py:5-8` already claims to enforce.
 
+**Qualification (F10), added after round 3.** "A hop clamps against the target
+spec's ladder" describes the clamp but not *what is clamped*, and the missing
+half is load-bearing: the value fed into the clamp is
+`base.reasoning_effort`, which on a direct Anthropic base is the automatic
+`high` **seed**, not a user's choice. Giving the dotted aggregator ids a ladder
+(§3) is what let that seed survive the wire client's membership re-check, so
+this section's own repair turned a hop into a second route to the wire that
+§5.1's no-seed rule does not cover — measured through the real
+`spec_for_target` and the real `clients._reasoning_effort` against the live
+424-row listing at **18 `openrouter/anthropic/*` rows on head against 8 on
+base**, with `openrouter/anthropic/claude-opus-5` sending nothing when selected
+directly and `high` when reached via failover.
+
+So the rule is: **a hop clamps against the target spec's ladder, and onto an
+aggregator target it carries only a level the user actually CHOSE.** The choice
+test is `reasoning_effort != reasoning_default_effort` — not a heuristic but the
+documented contract of the field pair added in §5.2, which are equal at build
+time and diverge exactly when the dial is moved. Direct→direct hops are
+deliberately untouched (144 of 144 measured cells identical): an Anthropic seed
+riding onto a direct OpenAI target is arguable on its own merits, but it
+predates this change, and re-scoping it is a separate wire change on routes this
+one does not otherwise touch.
+
+One case is knowingly accepted as ambiguous: a user who explicitly picks the
+level that *equals* the model's default produces a spec byte-identical to the
+seeded one (verified by comparing `model_dump()`), so that choice is dropped on
+a hop to an aggregator. Choosing the level the model already runs at asks for
+the behaviour omission produces, so the target's own default honours the ask.
+Separating the two would need a third `was_explicitly_set` field threaded
+through every writer, the session rebuild and the `/model` switch — real cost on
+every spec for a distinction that is unobservable on the direct route and that
+the no-seed rule forbids acting on for an aggregator. If those states ever must
+differ, that field is the fix; a sharper predicate cannot be.
+
 ### 5.4 `_lowest_effort` on errands
 
 `Session._lowest_effort` (`session.py:7303-7308`) forces the **bottom rung** for
@@ -692,7 +736,7 @@ whose merge rule is `default_enabled is not False`. It should not ride this PR.
 | `model/effort.py` | Dot/hyphen fix in the three Anthropic arms; `resolve_effort_in(levels, default, requested)` extracted; `resolve_effort` hardened against unrankable rungs |
 | `model/configure.py` | `_listing_effort(provider, model_id)` reading the memoized rows \u2014 the **ladder alone**, so a listing default cannot be seeded by accident (\u00a75.1); `build_model_spec` prefers it over the table; both constructors warm the memo (the discovery path and `_info_from_listing`, so the ladder is not a function of the caller); one bounded write enforces the memo ceiling; **no `_fill_from_row` change** |
 | `harness/types.py` | `ModelSpec.reasoning_default_effort` |
-| `providers/failover.py` | `spec_for_target` clamps against `target_spec.reasoning_efforts` |
+| `providers/failover.py` | `spec_for_target` clamps against `target_spec.reasoning_efforts` — and carries only a user's CHOICE onto an aggregator target, never the automatic seed (`_carried_effort`) |
 | `tui/app.py` | Two `/effort auto` sites read the spec's default, not `default_effort(model_id)` |
 
 Not changed, deliberately: `ModelInfo`, `_fill_from_row`, `prices.py`,

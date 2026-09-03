@@ -209,6 +209,27 @@ class TestTheCycleOrder:
         assert next_effort(("none", "high"), "high") == "none"
         assert next_effort(("none",), None) == "none"
 
+    def test_a_none_only_ladder_answers_none_from_every_entry_state(self) -> None:
+        """The one branch whose behaviour contradicts the function's headline promise.
+
+        `next_effort` promises never to hand a user `none` on a discovery press,
+        and a `('none',)` ladder is the documented exception: there is nothing
+        else to offer, so answering anything else would mean inventing a rung
+        the model rejects, and answering nothing would leave the key dead.
+
+        Pinned from ALL THREE entry states because they take three different
+        code paths — the unset fallback, the wrap arithmetic, and the
+        unrecognised-current reset — and the promise-contradicting answer has to
+        be the deliberate one on each, not an accident of one of them. No live
+        row has this shape today (0 of 21 distinct ladders in a 424-row pull),
+        which is exactly why prose alone was holding it.
+        """
+        assert next_effort(("none",), None) == "none"
+        assert next_effort(("none",), "none") == "none"
+        # A level the model no longer supports resets the cycle, and the reset
+        # lands on `none` here for want of anywhere else to land.
+        assert next_effort(("none",), "high") == "none"
+
     def test_a_level_the_model_no_longer_supports_restarts_the_cycle(self) -> None:
         """Stale state cannot wedge the key: an unrecognised current value is
         treated as unset rather than raising or sticking."""

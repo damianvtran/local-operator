@@ -16,7 +16,9 @@ exactly how `after-opus46` came to depict a superseded rule for a round.
 |---|---|
 | `before-gemini.png` | `openrouter/google/gemini-3.8-flash` on base: **no effort segment at all**. The reported bug. |
 | `after-gemini.png` | The same model on head: `▴ auto`, ladder `('low','medium','high')`, no wire key. The segment exists and cycles. |
+| `before-glm.png` | `z-ai/glm-5.3` on **base**: no effort segment — the listing's ladder was never read. |
 | `after-glm.png` | `z-ai/glm-5.3` — `▴ auto`, ladder from the listing, no wire key. |
+| `before-gpt54pro.png` | `openai/gpt-5.4-pro` on **base**: the segment already reads `\u25b4 auto`, so the visible band is unchanged by this work. What the frame cannot show is the ladder behind it \u2014 the table's un-narrowed `('none','low','medium','high','xhigh')`, printed alongside the capture \u2014 which is what `after-gpt54pro.png` narrows to the three rungs the route accepts. |
 | `after-gpt54pro.png` | `openai/gpt-5.4-pro` — `▴ auto`, ladder **narrowed** by the listing to `('medium','high','xhigh')`; the `none`/`low` rungs the route rejects are gone. |
 | `after-nonreasoning.png` | `llama-4-8b` — no segment at all, which is the honest answer for a model with no ladder. |
 
@@ -39,6 +41,16 @@ ladders that start at `none` and carry no `medium`.
 | `before-d4-first-press.png` | **Before the fix**: the first press lands on `▴ none` and puts `'none'` on the wire — a user pressing the key to discover the control had silently disabled reasoning. |
 | `after-d4-first-press.png` | **After the fix**: the first press lands on `▴ high`. The discovery press can no longer disable reasoning. |
 | `d4-press2-none.png` | `none` is still reachable by cycling (and by `/effort none`); it is a legitimate choice, just not one made on the user's behalf. |
+
+`before-d4-first-press.png` and `d4-press2-none.png` are **byte-identical**
+(md5 `76588b83…` both), and that is expected rather than a copy-paste. The two
+captions describe different situations — the pre-fix first press, and the
+post-fix second press — that reach the same band state `▴ none`, and the capture
+is otherwise deterministic, so the PNGs collide. Both claims are true of that
+one frame; it is the ROUTE to it that differs, and a still cannot show a route.
+Noted because a reviewer checksumming this directory finds two hashes repeated
+(this pair and the `opus46` pair below) and should be able to tell an intended
+collision from a substituted frame without re-deriving it.
 
 ## Cycling
 
