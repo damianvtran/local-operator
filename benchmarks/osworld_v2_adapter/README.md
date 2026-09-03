@@ -67,27 +67,58 @@ uv build --wheel --out-dir dist/
 #    `--copies` flag (that is uv pip's install link-mode). Use the stdlib
 #    venv, which DOES copy. `--without-pip` because uv pip installs the rest
 #    and the uv-managed interpreter's ensurepip can SIGABRT on macOS.
-python3.12 -m venv --copies --without-pip /opt/lop-adapters/osworld-v2/0.1.1/venv
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    -r <(uv export --frozen --no-emit-project)
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    local-operator==<harness version>
+#
+#    Invoke the venv module through the interpreter's REAL path, never through
+#    a ~/.local/bin shim: venv records the invoking argv[0]'s directory as
+#    `home` in pyvenv.cfg, and step 3a resolves libpython relative to it. A
+#    shim directory holds no lib/, so the copy silently finds nothing.
+VENV=/opt/lop-adapters/osworld-v2/0.1.1/venv
+BASE=$(python3.12 -c 'import sys; print(sys.base_prefix)')   # e.g. ~/.local/share/uv/python/cpython-3.12.13-...
+"$BASE/bin/python3.12" -m venv --copies --without-pip "$VENV"
 
-# 3b. for the PAID path only: OSWorld itself is an extra (~380 packages) that
-#     the cloud-free wheel does not need. Install it into the same venv.
-uv pip install --python /opt/lop-adapters/osworld-v2/0.1.1/venv/bin/python \
-    "lop-osworld-v2-adapter[osworld] @ dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl"
+# 3a. copy libpython beside the interpreter. REQUIRED on macOS and easy to
+#     miss: `--copies` copies the python binary but NOT the shared library it
+#     links, and the copied binary keeps `@rpath/libpython3.12.dylib` with an
+#     rpath of `<venv>/lib`. Without this the interpreter aborts on every
+#     invocation with "Library not loaded" (dyld) / SIGABRT, and uv reports
+#     the opaque "Failed to inspect Python interpreter". A framework or
+#     system python that links libpython by absolute path does not need it;
+#     the uv-managed CPython this recipe uses does.
+cp "$BASE/lib/libpython3.12.dylib" "$VENV/lib/" 2>/dev/null || true   # macOS only
+"$VENV/bin/python3.12" -V   # must print the version, not abort
+uv pip install --python "$VENV/bin/python3.12" \
+    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
+
+# 3b. install the locked set. For the PAID path export WITH the osworld extra
+#     (~380 packages the cloud-free wheel does not need); omit --extra for a
+#     cloud-free venv. Export to a FILE and keep it beside the venv: it is the
+#     record of what was actually installed, and the lock's own
+#     local-operator pin lags the harness (schema 1.2 and host_secrets only
+#     exist from 0.44.30+), so substitute the harness version you are running
+#     and note the substitution in the build record.
+uv export --frozen --no-emit-project --extra osworld --no-hashes \
+    -o "$VENV/build/requirements.locked.txt"
+sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
+    "$VENV/build/requirements.locked.txt"
+uv pip install --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
+
+# The one expected `uv pip check` incompatibility is the documented
+# requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).
 
 # 4. materialise the workspace from the verified inputs root (no download;
 #    writes adapter-release.json, benchmark_release.json, task_hashes.json,
 #    adapter-provider.json, inputs.json, tasks/, all read-only).
-python ~/local-operator/scripts/build_osworld_adapter.py \
+#    --out is the WORKSPACE directory itself, not its parent: it is what the
+#    selector's `workspace` field and workspace_digest address. Keep the
+#    selector and build-output.json in the parent so they are not inside the
+#    digest they describe.
+#    Run it with the venv's interpreter (it imports the harness), and note
+#    --version defaults to the adapter's own pyproject version.
+"$VENV/bin/python3.12" ~/local-operator/scripts/build_osworld_adapter.py \
     --benchmark-release osworld-v2-2026.08.08 \
     --inputs-root ~/worktrees/osworld \
     --package-digest <package_digest from step 5> \
-    --out ~/worktrees/osworld/workspaces/0.1.1
+    --out ~/worktrees/osworld/workspaces/0.1.1/workspace
 
 # 5. compute the three digests the AdapterSelector needs
 python - <<'PY'

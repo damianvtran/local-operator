@@ -67,6 +67,7 @@ import os
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,29 @@ _DEFAULT_PIN = (
     / "config"
     / "release-v2026.08.08.json"
 )
+
+
+_ADAPTER_PYPROJECT = (
+    Path(__file__).resolve().parents[1] / "benchmarks" / "osworld_v2_adapter" / "pyproject.toml"
+)
+
+
+def _adapter_version() -> str:
+    """The adapter distribution version declared in its pyproject.
+
+    Read from source rather than from ``importlib.metadata`` on purpose: this
+    script runs from the repository against a workspace that is built BEFORE
+    (or without) the wheel being installed into the caller's interpreter, so
+    the installed distribution is the wrong authority and may not exist at all.
+    A read failure is not fatal -- ``--version`` is still explicit on the
+    documented command line -- but it must not silently produce a wrong
+    attestation, so the fallback is an obviously-unreal marker.
+    """
+
+    try:
+        return str(tomllib.loads(_ADAPTER_PYPROJECT.read_text())["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "unknown"
 
 
 class VerificationFailed(Exception):
@@ -277,7 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(os.environ.get("OSWORLD_INPUTS_ROOT", _DEFAULT_INPUTS_ROOT)),
     )
     parser.add_argument("--release-pin", type=Path, default=_DEFAULT_PIN)
-    parser.add_argument("--version", default="0.1.0")
+    # Defaults to the adapter's OWN declared version rather than a literal.
+    # The version is an input to ``_release_digest``, so a stale literal here
+    # silently mints a workspace whose release_digest attests a distribution
+    # version that was never built -- a wrong attestation that no digest check
+    # can catch, because every digest is internally consistent with it. Read
+    # from pyproject.toml so the default cannot drift from the wheel again
+    # (it already had: the literal still said 0.1.0 after the 0.1.1 bump).
+    parser.add_argument("--version", default=_adapter_version())
     parser.add_argument("--package-digest", default="0" * 64)
     args = parser.parse_args(argv)
 
