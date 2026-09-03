@@ -518,7 +518,7 @@ def _write_png(
                 value = rng.randint(0, 255)
                 for offset in range(4):
                     pixels[x + offset, y] = (value, (value * 3) % 256, (value + 77) % 256)
-    image.save(path, format="PNG", optimize=True, compress_level=9)
+    image.save(path, format="PNG", compress_level=3)
     return path
 
 

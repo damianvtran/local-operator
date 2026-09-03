@@ -216,6 +216,14 @@ def supervise_worker(argv: Sequence[str]) -> int:
         pass_fds=(request_fd, response_fd),
         preexec_fn=_reset_child_signals,
     )
+    # The supervisor leader only passes the protocol fds to the worker; it must
+    # not hold them open itself, otherwise worker death does not send EOF to the
+    # parent and RPC calls hang waiting until the operation timeout expires.
+    for fd in (request_fd, response_fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
     child.wait()
     # Worker EOF must not release descendants.  The leader waits until owner EOF
     # and is then removed with the entire group after the bounded grace period.

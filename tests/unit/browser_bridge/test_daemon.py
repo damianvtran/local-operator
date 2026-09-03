@@ -232,17 +232,20 @@ async def test_cancelled_await_evicts_its_lock_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_await_lock_key_evicted_on_normal_and_error_exits(tmp_path: Path) -> None:
+async def test_await_lock_key_evicted_on_normal_and_error_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Round-3 M1: the two non-cancellation exits must evict too — normal
     completion and the daemon timeout on a never-answering extension."""
     import asyncio
 
+    from local_operator.browser_bridge import daemon as daemon_mod
     from local_operator.browser_bridge.daemon import BridgeService
-    from local_operator.browser_bridge.protocol import (
-        COMMAND_TIMEOUTS,
-        Request,
-        Response,
-    )
+    from local_operator.browser_bridge.protocol import Request, Response
+
+    # Monkeypatch COMMAND_TIMEOUTS for await_access to a fraction of a second so
+    # the test verifies timeout eviction without stalling the suite for 30 seconds.
+    monkeypatch.setitem(daemon_mod.COMMAND_TIMEOUTS, "await_access", 0.05)
 
     service = BridgeService(root=tmp_path)
 
@@ -264,7 +267,7 @@ async def test_await_lock_key_evicted_on_normal_and_error_exits(tmp_path: Path) 
     # Error exit (timeout): the extension never answers; the daemon's command
     # timeout fires inside _dispatch_locked.
     async def silent(payload: dict[str, object]) -> None:
-        await asyncio.sleep(COMMAND_TIMEOUTS["await_access"] + 5)
+        await asyncio.sleep(daemon_mod.COMMAND_TIMEOUTS["await_access"] + 0.5)
 
     service.link.send = silent  # type: ignore[method-assign]
     await service._dispatch_serialized(
