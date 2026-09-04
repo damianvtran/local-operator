@@ -368,6 +368,19 @@ class AwsProvider:
         volume_gb = plan.volume_gb
         if volume_gb is None:
             volume_gb = self._resolve_root_volume_size(plan.ami_id)
+        else:
+            # A pinned size is checked against the AMI's OWN snapshot before
+            # run_instances. AWS refuses a root volume smaller than the
+            # snapshot it is restored from, and does it with an
+            # InvalidBlockDeviceMapping message that names neither the AMI's
+            # size nor the one asked for -- so the operator learns only that
+            # something was wrong, mid-launch. Checking here costs one
+            # read-only describe_images on the path that already issues one in
+            # the None branch, and turns that into a message carrying both
+            # numbers. It cannot move to ``provisioning.resolve``: prepare is
+            # declarative and issues no I/O at all, which is exactly what lets
+            # it run before anything is allocated.
+            self._refuse_volume_smaller_than_ami(plan.ami_id, volume_gb)
         tags = [{"Key": key, "Value": value} for key, value in plan.tags]
         response = ec2.run_instances(
             MaxCount=1,
@@ -421,13 +434,31 @@ class AwsProvider:
         """
 
         default = 40
+        return max(default, self._ami_root_volume_size(ami_id))
+
+    def _ami_root_volume_size(self, ami_id: str) -> int:
+        """The AMI's root BlockDeviceMapping size in GiB, with no floor applied.
+
+        Split out from ``_resolve_root_volume_size`` because the two callers
+        need different numbers from the same lookup. The default path wants
+        OSWorld's 40 GiB floor; the override check wants the AMI's REAL size,
+        since that -- not the floor -- is what AWS refuses to shrink below. One
+        function returning max(40, ami) would accept a 35 GiB override against
+        a 30 GiB AMI and reject one against a 45 GiB AMI with the wrong number
+        in the message.
+
+        Returns 0 when the image declares no EBS root mapping, which makes the
+        floor check vacuous rather than wrong: an AMI whose size cannot be read
+        must not manufacture a constraint the operator cannot satisfy.
+        """
+
         response = self._clients.ec2.describe_images(ImageIds=[ami_id])
         images = response.get("Images", [])
         if not images:
             raise AllocationError(f"AMI {ami_id} is not visible in {self._region}")
         image = images[0]
         root = image.get("RootDeviceName")
-        size = default
+        size = 0
         for mapping in image.get("BlockDeviceMappings", []):
             ebs = mapping.get("Ebs")
             if not ebs:
@@ -436,6 +467,23 @@ class AwsProvider:
                 size = max(size, int(ebs.get("VolumeSize", 0)))
                 break
         return size
+
+    def _refuse_volume_smaller_than_ami(self, ami_id: str, volume_gb: int) -> None:
+        """Fail a root volume smaller than the AMI's snapshot, naming both sizes.
+
+        EBS cannot restore a snapshot into a volume smaller than itself, so
+        this launch is doomed; the only question is whether the operator finds
+        out from a message naming the two numbers or from botocore's
+        InvalidBlockDeviceMapping, which names neither.
+        """
+
+        ami_gb = self._ami_root_volume_size(ami_id)
+        if ami_gb and volume_gb < ami_gb:
+            raise AllocationError(
+                f"root volume {volume_gb} GiB is smaller than AMI {ami_id}'s own "
+                f"snapshot ({ami_gb} GiB); EBS cannot restore a snapshot into a "
+                f"smaller volume, so raise AWS_ROOT_VOLUME_SIZE to at least {ami_gb}"
+            )
 
     def _create_lease(self, instance_id: str, role_arn: str) -> None:
         fire_at = datetime.now(timezone.utc) + timedelta(seconds=self._ttl_seconds)
