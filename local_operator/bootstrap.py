@@ -180,7 +180,10 @@ async def initialize_operator(
     credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
-    sampling_overrides: Optional[dict[str, float]] = None,
+    # Values are Optional because a model whose family policy is to OMIT
+    # carries ``None`` on its spec; the filter below drops those so an absent
+    # knob is never turned into an explicit send.
+    sampling_overrides: Optional[dict[str, Optional[float]]] = None,
     scheduler_service: Optional[SchedulerService] = None,
     status_queue: Optional[StatusQueue] = None,
     request_hosting: Optional[str] = None,

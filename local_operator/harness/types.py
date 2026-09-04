@@ -1571,8 +1571,16 @@ class ModelSpec(BaseModel):
     # only chat/completions.
     supports_responses_api: bool = False
     base_url: str | None = None  # override for OpenAI-compatible endpoints
-    temperature: float = 0.2
-    top_p: float = 0.9
+    # ``None`` means OMIT: send no key at all and let the vendor's own default
+    # apply. That is now the common case rather than an exotic one — most
+    # current families either reject the pair, ignore it, or document a default
+    # this app has no business overriding (see ``_SAMPLING_POLICY``). Optional
+    # rather than a magic float because there is no in-band float that means
+    # "unset", and the wire clients must distinguish "send 0.0" from "send
+    # nothing". Derived in ``build_model_spec`` so no wire client needs
+    # model-name knowledge.
+    temperature: float | None = None
+    top_p: float | None = None
     reasoning: bool = False
     # Explicit provider reasoning level. Fallback routes may change providers,
     # so the effort rides on the resolved spec rather than global session state.

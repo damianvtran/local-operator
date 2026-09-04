@@ -126,8 +126,14 @@ async def create_agent_speech(
             hosting=hosting,
             model_name=model_name,
             credential_manager=credential_manager,
-            temperature=agent.temperature or 0.2,
-            top_p=agent.top_p or 0.9,
+            # Pass the agent's knobs THROUGH, including "unset". The former
+            # `or 0.2`/`or 0.9` re-asserted the app-wide constants that the
+            # per-family sampling policy exists to stop sending, so an agent
+            # with no stored preference had one invented for it here — and it
+            # also silently rewrote a deliberate 0.0 into 0.2, `or` being false
+            # for a legitimate zero.
+            temperature=agent.temperature,
+            top_p=agent.top_p,
             top_k=agent.top_k,
             max_tokens=agent.max_tokens,
             stop=agent.stop,

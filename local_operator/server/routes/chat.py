@@ -86,7 +86,7 @@ EDIT_FILE_INSTRUCTIONS_TEMPLATE = "edit_file_instructions.md"
                                 "hosting": "openrouter",
                                 "model": "google/gemini-2.0-flash-001",
                                 "context": [],
-                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "options": {"temperature": 1.0, "top_p": 0.95},
                             },
                         }
                     }
@@ -214,7 +214,7 @@ async def chat_endpoint(
                                 "prompt": "How do I implement a binary search in Python?",
                                 "hosting": "openrouter",
                                 "model": "google/gemini-2.0-flash-001",
-                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "options": {"temperature": 1.0, "top_p": 0.95},
                                 "persist_conversation": False,
                             },
                         }
@@ -328,7 +328,7 @@ async def chat_with_agent(
                                 "hosting": "openrouter",
                                 "model": "google/gemini-2.0-flash-001",
                                 "context": [],
-                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "options": {"temperature": 1.0, "top_p": 0.95},
                             },
                         }
                     }
@@ -452,7 +452,7 @@ async def chat_async_endpoint(
                                 "prompt": "How do I implement a binary search in Python?",
                                 "hosting": "openrouter",
                                 "model": "google/gemini-2.0-flash-001",
-                                "options": {"temperature": 0.2, "top_p": 0.9},
+                                "options": {"temperature": 1.0, "top_p": 0.95},
                                 "persist_conversation": False,
                                 "user_message_id": "",
                             },

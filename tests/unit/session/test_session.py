@@ -2927,7 +2927,13 @@ async def test_the_naming_errand_leaves_the_session_isolated_and_cheap(tmp_path,
     assert request.replayable is False, "a title is worth one attempt, not a replay"
     assert request.max_tokens == Session.ERRAND_MAX_TOKENS
     assert Session.ERRAND_MAX_TOKENS == 1024
-    assert request.temperature == 0
+    # The errand follows the MODEL's sampling policy instead of hardcoding 0.
+    # A request value outranks the spec in ``_sampling_params``, so a literal 0
+    # here re-asserted the exact number the per-family policy exists to stop
+    # sending, on the families it was written for. `MODEL` reaches the OMIT
+    # fallback, so the errand asserts nothing and the vendor's default applies.
+    assert request.temperature == request.model.temperature
+    assert request.temperature is None
     assert request.model == session._errand_model()
     assert request.model.model_id == MODEL.model_id, "no `lo` tier is configured here"
     assert request.tools == [] and request.tool_choice == "none"

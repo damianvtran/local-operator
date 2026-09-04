@@ -23,10 +23,12 @@ from unittest import mock
 import httpx
 import pytest
 
+from local_operator.harness.types import ChatRequest, Message
 from local_operator.model import catalogue
 from local_operator.model import configure as configure_mod
 from local_operator.model import effort
 from local_operator.model.catalogue import cached_listing
+from local_operator.providers.clients import OpenAICompatClient
 
 
 def _payload(model_id: str = "vendor/model", window: int = 1_000_000) -> dict[str, Any]:
@@ -1358,6 +1360,15 @@ def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypa
         # The id shape is kimi's, not the world's: a k-something on another
         # provider keeps its parameters.
         ("openrouter", "moonshotai/kimi-k2", True),
+        # Gemini stays True on BOTH generations, and that is the point of the
+        # flag: this is the hard-REJECTION capability (a 400), not the
+        # "should we assert a value" question. Google ignores an unwanted
+        # temperature rather than rejecting it, so the pair is dropped by the
+        # sampling POLICY (a `None` on the spec) instead — which is also what
+        # keeps a deliberate user override sendable. See
+        # `test_gemini_3_omits_sampling_on_every_route`.
+        ("google", "gemini-3.8-flash", True),
+        ("google", "gemini-2.5-pro", True),
     ],
 )
 def test_the_spec_knows_which_models_reject_sampling_parameters(
@@ -1371,6 +1382,330 @@ def test_the_spec_knows_which_models_reject_sampling_parameters(
 
     spec = configure_mod.build_model_spec(provider, model_id)
     assert spec.supports_sampling_params is supported
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, temperature, top_p",
+    [
+        # OMIT rows: send nothing and let the vendor's own default apply.
+        #
+        # Gemini 3+ — "we recommend removing this parameter", and 3.6+ ignores
+        # a custom value outright (ai.google.dev/gemini-api/docs/gemini-3).
+        ("google", "gemini-3.8-flash", None, None),
+        ("google", "gemini-3-flash", None, None),
+        ("google", "gemini-3.1-pro-preview", None, None),
+        # Forward-reading over the generation digit.
+        ("google", "gemini-4-pro", None, None),
+        # Model-keyed, not provider-keyed: the same weights behind an
+        # aggregator behave identically. A provider-keyed rule would have fixed
+        # the direct route and left these two asserting 0.2.
+        ("openrouter", "google/gemini-3.8-flash", None, None),
+        ("radient", "google/gemini-3-pro", None, None),
+        # Anthropic 4.7+ — "Models released after Claude Opus 4.6 do not
+        # support setting temperature ... all other values will be rejected
+        # with a 400 error." The app sent 0.2, so this was a live outage.
+        ("anthropic", "claude-opus-4-7", None, None),
+        ("anthropic", "claude-opus-4-8", None, None),
+        ("anthropic", "claude-sonnet-4.7", None, None),
+        # OpenAI GPT-6 — "Remove `temperature`, `top_p`, and `top_logprobs`."
+        # The literal `gpt-5` arm in _NO_SAMPLING_PARAMS never matched this.
+        ("openai", "gpt-6-astra", None, None),
+        # DeepSeek V4 — thinking on by default, where the pair is inert.
+        ("deepseek", "deepseek-v4-pro", None, None),
+        # Moonshot/Kimi — pinned to fixed values across the current lineup.
+        ("kimi", "kimi-k2-0711-preview", None, None),
+        # Z.AI/GLM — per-SERIES defaults (1.0 vs 0.6), so no single seed is
+        # right for all of them.
+        ("zai", "glm-5.3", None, None),
+        # Mistral — publishes no static default by design.
+        ("mistral", "mistral-large-latest", None, None),
+        # xAI — defaults are UNKNOWN in the vendor's own reference.
+        ("xai", "grok-4", None, None),
+        # Ollama — never overrule the publisher's Modelfile.
+        ("ollama", "qwen3:32b", None, None),
+        # The fallback, and the most consequential row: an unknown model gets
+        # silence rather than an invented 0.2.
+        ("openrouter", "some-vendor/model-nobody-has-characterised", None, None),
+        # SEED rows: the vendor documents a value silence would not reproduce.
+        ("google", "gemini-2.5-pro", 1.0, 0.95),
+        ("google", "gemini-2.0-flash", 1.0, 0.95),
+        # The `reasoning` markers must not divert a 2.x model into an OMIT row.
+        ("google", "gemini-2.5-flash-thinking", 1.0, 0.95),
+        # A snapshot date must not read as a generation number — the trap
+        # `_EFFORT_TABLE` documents and the `\d{2,3}` bound closes.
+        ("google", "gemini-2.5-pro-20250314", 1.0, 0.95),
+        # Qwen documents temperature 0.7 with top_p 0.8 — the pair diverges,
+        # which is why the knobs are decided independently.
+        ("alibaba", "qwen3-coder-plus", 0.7, 0.8),
+        # Anthropic 4.5/4.6 and gpt-4o still HONOUR the pair — they keep
+        # `supports_sampling_params=True` and must not regress into the
+        # hard-rejection arm — but they still stop being TOLD 0.2. Their
+        # vendors document 1.0, so the app-wide constant was an assertion over
+        # a documented default here exactly as it was everywhere else; these
+        # fall through to the fallback and let the vendor decide.
+        ("anthropic", "claude-sonnet-4-5", None, None),
+        ("anthropic", "claude-3-5-sonnet-latest", None, None),
+        ("openai", "gpt-4o", None, None),
+    ],
+)
+def test_the_sampling_policy_answers_per_family(provider, model_id, temperature, top_p) -> None:
+    """The app shipped temperature 0.2 / top_p 0.9 to every provider on every
+    turn — an invented pair asserted over each vendor's own documented default,
+    which no major vendor sets anywhere near. `None` here means the key is
+    omitted so the vendor's default applies; a number means the vendor
+    documents something silence would not reproduce."""
+    from local_operator.model import configure as configure_mod
+
+    spec = configure_mod.build_model_spec(provider, model_id)
+    assert spec.temperature == temperature
+    assert spec.top_p == top_p
+
+
+@pytest.mark.parametrize(
+    "dotted, hyphenated",
+    [
+        ("gemini-3.0-flash", "gemini-3-flash"),
+        ("gemini-2.5-pro", "gemini-2-5-pro"),
+    ],
+)
+class TestADotAndAHyphenNameTheSameGeneration:
+    """Vendors ship both spellings, and a rule that reads only one silently
+    misclassifies the other on exactly the models it exists to protect."""
+
+    def test_both_spellings_get_the_same_sampling_policy(self, dotted, hyphenated) -> None:
+        from local_operator.model import configure as configure_mod
+
+        one = configure_mod.build_model_spec("google", dotted)
+        other = configure_mod.build_model_spec("google", hyphenated)
+        assert one.temperature == other.temperature
+        assert one.top_p == other.top_p
+
+
+def test_configure_model_does_not_stomp_the_models_own_sampling_policy() -> None:
+    """Trap: ``configure_model`` used to copy ``temperature``/``top_p`` onto the
+    spec unconditionally from parameters defaulting to the app-wide 0.2/0.9,
+    overwriting the model's own policy on the MAIN construction path. Without
+    this fix the whole table is dead on arrival."""
+    from local_operator.model.configure import configure_model
+
+    seeded = configure_model("google", "gemini-2.5-pro")
+    assert seeded.spec.temperature == 1.0
+    assert seeded.spec.top_p == 0.95
+    # ...and the legacy scalar attributes report what will actually be sent.
+    assert seeded.temperature == 1.0
+    assert seeded.top_p == 0.95
+
+    omitted = configure_model("google", "gemini-3.8-flash")
+    assert omitted.spec.temperature is None
+    assert omitted.spec.top_p is None
+
+
+def test_an_explicit_override_still_wins_on_every_family() -> None:
+    """The escape hatch. A user or agent record that deliberately sets a value
+    — and the server's per-request ``options`` — must still win, including on
+    families whose policy is to omit. Determinism-seeking users must not be
+    stranded by a table written for the default case."""
+    from local_operator.model.configure import configure_model
+
+    for provider, model_id in (
+        ("google", "gemini-3.8-flash"),
+        ("anthropic", "claude-opus-4-7"),
+        ("ollama", "qwen3:32b"),
+        ("google", "gemini-2.5-pro"),
+    ):
+        overridden = configure_model(provider, model_id, temperature=0.0, top_p=0.5)
+        assert overridden.spec.temperature == 0.0, model_id
+        assert overridden.spec.top_p == 0.5, model_id
+
+    # A partial override leaves the other knob on the model's own policy.
+    partial = configure_model("google", "gemini-2.5-pro", temperature=0.3)
+    assert partial.spec.temperature == 0.3
+    assert partial.spec.top_p == 0.95
+
+
+def test_a_providers_listing_may_narrow_the_sampling_policy_but_never_widen_it() -> None:
+    """OpenRouter publishes a ``supported_parameters`` allowlist, and 81 of 425
+    live models omit ``temperature`` from it — a per-model fact the curated
+    table cannot keep up with, so an unknown model gets it right for free.
+
+    But it may only NARROW. The listing answers "will the aggregator forward
+    this", not "will the model honour it": `google/gemini-3.8-flash` DOES list
+    temperature as supported, because OpenRouter forwards it and Google then
+    ignores it. A listing must therefore never turn a curated OMIT back into a
+    send.
+    """
+    from pydantic import BaseModel, ConfigDict
+
+    from local_operator.model import configure as configure_mod
+
+    class _Entry(BaseModel):
+        # Mirrors the real listing schemas, which declare no sampling fields and
+        # carry them as extras; built via `model_validate` so the undeclared
+        # keys are the extras the production path actually reads.
+        model_config = ConfigDict(extra="allow")
+
+    configure_mod._sampling_support_memo.clear()
+    try:
+        # NARROWING: a family the table seeds, whose listing denies the key.
+        seeded = configure_mod.build_model_spec("openrouter", "alibaba/qwen3-coder-plus")
+        assert seeded.temperature == 0.7
+        configure_mod._remember_listing_sampling_support(
+            "openrouter",
+            "alibaba/qwen3-coder-plus",
+            _Entry.model_validate(
+                {
+                    "id": "alibaba/qwen3-coder-plus",
+                    "supported_parameters": ["max_tokens", "tools"],
+                }
+            ),
+        )
+        narrowed = configure_mod.build_model_spec("openrouter", "alibaba/qwen3-coder-plus")
+        assert narrowed.temperature is None
+        assert narrowed.top_p is None
+
+        # NO WIDENING: the listing says temperature is supported, but Google
+        # ignores it, so the curated OMIT must survive.
+        configure_mod._remember_listing_sampling_support(
+            "openrouter",
+            "google/gemini-3.8-flash",
+            _Entry.model_validate(
+                {
+                    "id": "google/gemini-3.8-flash",
+                    "supported_parameters": ["temperature", "top_p", "max_tokens"],
+                }
+            ),
+        )
+        still_omitted = configure_mod.build_model_spec("openrouter", "google/gemini-3.8-flash")
+        assert still_omitted.temperature is None
+        assert still_omitted.top_p is None
+
+        # SILENCE defers to the table: a listing with no allowlist at all (the
+        # Radient case, whose passthrough semantics are unverified) changes
+        # nothing.
+        configure_mod._remember_listing_sampling_support(
+            "radient",
+            "google/gemini-2.5-pro",
+            _Entry.model_validate({"id": "google/gemini-2.5-pro"}),
+        )
+        untouched = configure_mod.build_model_spec("radient", "google/gemini-2.5-pro")
+        assert untouched.temperature == 1.0
+        assert untouched.top_p == 0.95
+    finally:
+        configure_mod._sampling_support_memo.clear()
+
+
+@pytest.mark.parametrize(
+    "provider, model_id",
+    [
+        # "all other values will be rejected with a 400 error"
+        ("anthropic", "claude-opus-4-7"),
+        ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-sonnet-4.7"),
+        # "Unsupported parameters: Remove `temperature`, `top_p`"
+        ("openai", "gpt-6-astra"),
+        # The aggregator routes reach the same weights and must agree.
+        ("openrouter", "anthropic/claude-opus-4-7"),
+        ("radient", "openai/gpt-6-astra"),
+    ],
+)
+def test_a_reject_family_suppresses_an_override_instead_of_400ing(provider, model_id) -> None:
+    """REGRESSION (R1): dropping only our own default is not enough on a family
+    whose vendor REJECTS the parameter. A stored agent temperature — the shape
+    the server's own API examples advertise — would otherwise ride to the wire
+    and fail every single turn, which is the PR's headline outage relocated
+    from the default path onto the override path.
+
+    This is the distinction between "the vendor ignores it" (an override is
+    harmless) and "the vendor rejects it" (an override is a failed turn).
+    """
+    from local_operator.model.configure import configure_model
+
+    configured = configure_model(provider, model_id, None, temperature=0.2, top_p=0.9)
+    assert configured.spec.supports_sampling_params is False
+
+    request = ChatRequest(model=configured.spec, messages=[Message.user("hi")])
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert "temperature" not in body
+    assert "top_p" not in body
+
+
+@pytest.mark.parametrize(
+    "provider, model_id",
+    [
+        # Ignores an unwanted value, so an override costs nothing.
+        ("google", "gemini-3.8-flash"),
+        # Genuinely honours the pair.
+        ("anthropic", "claude-sonnet-4-5"),
+        ("google", "gemini-2.5-pro"),
+        # Legacy Kimi ids accept the pair; only the documented coding-host ids
+        # are hard-suppressed, via _KIMI_PINNED_SAMPLING.
+        ("kimi", "kimi-k2-0711-preview"),
+    ],
+)
+def test_an_ignore_or_honour_family_still_forwards_an_override(provider, model_id) -> None:
+    """The other half of R1: suppression must not spread. A user who asks for
+    determinism on a family that ignores or honours the value still gets it."""
+    from local_operator.model.configure import configure_model
+
+    configured = configure_model(provider, model_id, None, temperature=0.2, top_p=0.9)
+    request = ChatRequest(model=configured.spec, messages=[Message.user("hi")])
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert body["temperature"] == 0.2
+    assert body["top_p"] == 0.9
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, expected",
+    [
+        # OMIT families: the errand must not re-assert a value the main turn
+        # deliberately stopped sending.
+        ("openai", "gpt-6-astra", None),
+        ("google", "gemini-3.8-flash", None),
+        ("deepseek", "deepseek-v4-pro", None),
+        ("anthropic", "claude-opus-4-7", None),
+        # A seeded family still gets its documented value on the errand.
+        ("google", "gemini-2.5-pro", 1.0),
+        ("alibaba", "qwen3-coder-plus", 0.7),
+    ],
+)
+def test_the_title_errand_follows_the_same_sampling_policy_as_a_turn(
+    provider, model_id, expected
+) -> None:
+    """REGRESSION (Q1): the conversation-titling errand built its own
+    ``ChatRequest(temperature=0)``, and a request value OUTRANKS the spec in
+    ``_sampling_params`` — so the errand re-asserted 0.0 on exactly the families
+    the policy table exists for, while the main turn correctly sent nothing.
+
+    The failure mode is quiet: the errand is ``isolated`` with one attempt and
+    no fallback, so a rejected request surfaces only as a conversation that
+    never gets a title.
+
+    Mirrors the construction at ``session.py``'s ``_title_via_model``.
+    """
+    spec = configure_mod.build_model_spec(provider, model_id)
+    request = ChatRequest(
+        model=spec,
+        messages=[Message.user("t")],
+        tools=[],
+        tool_choice="none",
+        max_tokens=32,
+        temperature=spec.temperature,
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    if expected is None:
+        assert "temperature" not in body
+    else:
+        assert body["temperature"] == expected
+
+
+def test_a_hard_rejection_still_beats_an_explicit_override() -> None:
+    """The one place an override does NOT win, and deliberately so: a family
+    that answers HTTP 400 makes the turn fail rather than honour a preference.
+    ``supports_sampling_params`` is that separate, stronger capability."""
+    from local_operator.model.configure import configure_model
+
+    rejected = configure_model("anthropic", "claude-opus-5", temperature=0.7)
+    assert rejected.spec.supports_sampling_params is False
 
 
 def test_concurrent_cold_misses_fetch_exactly_once(tmp_path, monkeypatch) -> None:

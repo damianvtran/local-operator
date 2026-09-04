@@ -21,7 +21,6 @@ from pydantic import SecretStr
 from local_operator.credentials import CredentialManager
 from local_operator.harness.types import ChatRequest, Message, ModelSpec
 from local_operator.model.configure import (
-    DEFAULT_TEMPERATURE,
     build_model_spec,
     calculate_cost,
     configure_model,
@@ -146,7 +145,11 @@ def test_configure_model_anthropic_spec(mock_credential_manager):
     config = configure_model("anthropic", "claude-3-5-sonnet-latest", mock_credential_manager)
     assert config.spec.provider == "anthropic"
     assert config.spec.base_url == "https://api.anthropic.com"
-    assert config.temperature == DEFAULT_TEMPERATURE
+    # No caller-supplied value, so the per-family sampling policy decides. This
+    # model falls through to the OMIT fallback: the app no longer asserts its
+    # own 0.2 over a vendor default it never established. DEFAULT_TEMPERATURE
+    # remains exported for the explicit-override path.
+    assert config.temperature is None
 
 
 def test_configure_model_kimi_base_url(mock_credential_manager):
