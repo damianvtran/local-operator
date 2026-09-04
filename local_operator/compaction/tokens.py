@@ -512,9 +512,7 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
             # :func:`_argument_bytes` for why that distinction is load-bearing.
             total += len(call.name)
             total += (
-                len(call.raw_arguments)
-                if call.raw_arguments
-                else _argument_bytes(call.arguments)
+                len(call.raw_arguments) if call.raw_arguments else _argument_bytes(call.arguments)
             )
     return total
 
