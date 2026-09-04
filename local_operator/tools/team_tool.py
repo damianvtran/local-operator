@@ -112,8 +112,11 @@ def _row(team: Any) -> str:
     # wrong count in the agent's own reasoning about a roster it may staff.
     slots = team.member_count()
     summary = (team.description or "").strip() or "(no description)"
-    role_word = "role" if slots == 1 else "roles"
-    row = f"- {team.name} [{slots} {role_word}, led by {team.manager}]: {summary}"
+    # "members", matching the number (R6): `member_count()` excludes the
+    # manager, whom this row names separately, so "roles" implied he was
+    # counted and put the model one ahead of the roster it can actually staff.
+    member_word = "member" if slots == 1 else "members"
+    row = f"- {team.name} [{slots} {member_word}, led by {team.manager}]: {summary}"
     return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 

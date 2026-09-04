@@ -6354,7 +6354,22 @@ class OperatorApp(App[None]):
                 ArgumentChoice(
                     team.name,
                     description,
-                    # ROLES ONLY, no manager (D1). The picker reserves the
+                    # "MEMBERS", not "roles" (R6). The word has to match the
+                    # NUMBER: `member_count()` excludes the manager, and the
+                    # org chart's own badge (`org_render._member_badge`) counts
+                    # exactly the same leaves the same way and calls them
+                    # members, as do `org_chart._team_detail` and `lop teams`.
+                    # Labelling that number "roles" implied the manager was in
+                    # it, so a manager-off-roster team read one short against
+                    # the boxes the chart draws — D2's contradiction pointing
+                    # the other way.
+                    #
+                    # Count and label are taken from the same place on purpose:
+                    # this is the second defect in this arithmetic, and both
+                    # came from a producer answering a slightly different
+                    # question than the surface it sits beside.
+                    #
+                    # No manager in the detail (D1). The picker reserves the
                     # detail column BEFORE the description and drops the
                     # description first, so a 44-cell
                     # "<n> roles · led by <manager>" silenced the description
@@ -6362,7 +6377,7 @@ class OperatorApp(App[None]):
                     # ordinary terminal sits in. The manager is one keystroke
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
-                    detail=f"{slots} {'role' if slots == 1 else 'roles'}",
+                    detail=f"{slots} {'member' if slots == 1 else 'members'}",
                 )
             )
         return choices
@@ -6633,10 +6648,14 @@ class OperatorApp(App[None]):
             # picker and the org chart must agree.
             slots = team.member_count()
             rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
-            role_word = "role" if slots == 1 else "roles"
+            # "members", matching the number (R6) — see the picker's note. This
+            # row names the manager separately ("Led by <manager> · N
+            # members"), so calling the roster count "roles" also double-counted
+            # him in the reader's head.
+            member_word = "member" if slots == 1 else "members"
             rows.append(
                 Padding(
-                    Text(f"Led by {team.manager} · {slots} {role_word}", style=body),
+                    Text(f"Led by {team.manager} · {slots} {member_word}", style=body),
                     (0, 0, 0, 4),
                 )
             )
@@ -7007,13 +7026,20 @@ class OperatorApp(App[None]):
             out.append(Padding(Text(facts, style=body), (0, 0, 0, 4)))
             if summary:
                 out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
-        out.append(Text())
         # D6, same rule as the team listing: only offer what THIS session can
         # do. Both of these lines name the attach seam, so on a viewer they
         # invited the user into the refusal the listing sits above. The detach
         # verb goes with them — there is nothing to detach where nothing can
         # attach.
+        #
+        # The SPACER is inside the guard too (D7). Left outside, the viewer's
+        # listing ended on a blank row separating the entries from nothing at
+        # all — measured block-local as 29 rows against 28 of content, where
+        # the owner's listing and both `/team` cases are flush. A spacer that
+        # outlives the thing it was spacing is the same drift D6 is about, so
+        # it is keyed to the same seam rather than left to be re-noticed.
         if callable(getattr(self._session, "attach_agent_profile", None)):
+            out.append(Text())
             out.append(Text("Send: /agent <name> <message>", style=body))
             # The detach verb belongs in the listing so a user who attached a
             # profile can find their way back to base instructions without
@@ -19712,7 +19738,7 @@ class OperatorApp(App[None]):
                 (
                     team.name,
                     f"Led by {team.manager} · {team.member_count()} "
-                    f"{'role' if team.member_count() == 1 else 'roles'}",
+                    f"{'member' if team.member_count() == 1 else 'members'}",
                     (team.description or "").strip(),
                 )
                 for team in teams

@@ -346,9 +346,13 @@ async def test_bare_team_lists_without_a_user_row() -> None:
         painted = _painted(app)
     assert rows == [], rows
     assert "feature-release" in painted, painted
-    # D2: `member_count()` — one member is one role. The old assertion pinned
-    # `len(members) + 1`, which counted a manager that is not on this roster.
-    assert "Led by manager · 1 role" in painted, painted
+    # D2/R6: `member_count()` with the label that matches it. One roster member
+    # is "1 member" — the manager is named by "Led by" in the same line and is
+    # deliberately not in the count, exactly as the org chart badges it. The
+    # original assertion pinned `len(members) + 1` ("2 roles"), which counted
+    # the manager twice over; calling the corrected number "roles" then read
+    # one short against the chart.
+    assert "Led by manager · 1 member" in painted, painted
     assert "Ship a change" in painted, painted
     assert "Send: /team <name> <message>" in painted, painted
     assert "manager=" not in painted, painted
@@ -2085,7 +2089,7 @@ async def test_the_roster_count_matches_the_chart_it_opens(tmp_path) -> None:
         assert team is not None
         assert team.member_count() == expected
         # The picker's number and the chart's number are the SAME number.
-        assert details[name] == f"{expected} roles", details[name]
+        assert details[name] == f"{expected} members", details[name]
         assert f"{expected} members" in _team_detail(team), _team_detail(team)
 
 
@@ -2128,6 +2132,120 @@ async def test_the_detail_column_leaves_room_for_the_description(tmp_path) -> No
     # The manager's name is what made this column wide, and it is not a fact
     # the row needs to carry.
     assert "led by" not in detail, detail
-    assert detail == "1 role", detail
+    assert detail == "1 member", detail
     # Comfortably inside `/agent`'s 15-cell detail, which never had this bug.
     assert len(detail) <= 15, detail
+
+
+@pytest.mark.asyncio
+async def test_the_picker_count_equals_the_boxes_the_chart_draws(tmp_path) -> None:
+    """The invariant BOTH count bugs violated, pinned directly.
+
+    D2 counted `len(members) + 1`, which overcounted a team whose manager is
+    also a roster member. R6 then labelled `member_count()` "roles", which read
+    one SHORT for a team whose manager is not — the same contradiction pointing
+    the other way. Neither existing test expressed the property the two
+    surfaces actually have to share, so each fix could satisfy its own test
+    while disagreeing with the chart.
+
+    The property: the number `/team ` renders for a team is the number of
+    member boxes `/team chart <name>` draws for it — the manager excluded from
+    both, because the chart draws him as a structural node and badges the rest
+    (`org_render._member_badge`). Exercised with the manager ON the roster and
+    OFF it, which is exactly the pair that separates the two arithmetics.
+    """
+    from local_operator.org_chart import resolve_org
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tui.org_render import _member_badge
+
+    registry = TeamRegistry(tmp_path)
+    # manager NOT on the roster — the shape R6 got wrong.
+    registry.create_team(
+        TeamEditFields(name="mgr-off", manager="boss", members=[TeamMember(role="coder")])
+    )
+    # manager ALSO on the roster — the shape D2 got wrong.
+    registry.create_team(
+        TeamEditFields(
+            name="mgr-on",
+            manager="manager",
+            members=[TeamMember(role="manager"), TeamMember(role="coder")],
+        )
+    )
+    # A multi-count slot, which `len(members)` collapses either way.
+    registry.create_team(
+        TeamEditFields(
+            name="doubled", manager="boss", members=[TeamMember(role="reviewer", count=2)]
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        details = {choice.name: choice.detail for choice in app._team_choices()}
+
+    for name, expected in (("mgr-off", 1), ("mgr-on", 2), ("doubled", 2)):
+        # What the picker row says.
+        word = "member" if expected == 1 else "members"
+        assert details[name] == f"{expected} {word}", details[name]
+
+        # What the chart actually draws for the same team, counted from the
+        # resolved tree rather than restated from the same helper — otherwise
+        # this asserts a function equals itself.
+        root = resolve_org(name, teams=registry, agents=None)
+        leaf_kinds = ("role", "specialist", "seed", "unresolved", "cycle", "depth")
+        drawn = sum(child.count for child in root.children if child.kind in leaf_kinds)
+        assert drawn == expected, f"{name}: picker says {expected}, chart draws {drawn}"
+        # And the badge the collapsed box carries agrees too.
+        assert _member_badge(root).strip() == f"·{expected}", _member_badge(root)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_listing_does_not_end_on_a_dangling_spacer(tmp_path) -> None:
+    """D7: the blank row must go with the footer it was spacing.
+
+    The D6 remediation made the `Send:`/`Detach:` footer conditional on the
+    attach seam but left the `Text()` spacer above it unconditional, so a
+    viewer's `/agent` listing ended on a blank row separating the entries from
+    nothing at all. The owner's listing and both `/team` listings are flush;
+    only this one drifted, because it is the only listing whose footer can be
+    absent.
+    """
+    from rich.console import Console
+
+    from local_operator.agents import AgentRegistry
+
+    class NoAttachSession(FakeSession):
+        attach_agent_profile = None  # type: ignore[assignment]
+
+    def _trailing_blanks(app: OperatorApp) -> tuple[int, list[str]]:
+        block = app._agent_list_block([("architect", "role", "Decide how")])
+        console = Console(width=100, no_color=True)
+        with console.capture() as captured:
+            console.print(getattr(block, "_renderable", None) or block.renderable)
+        lines = captured.get().rstrip("\n").split("\n")
+        blanks = 0
+        for line in reversed(lines):
+            if line.strip():
+                break
+            blanks += 1
+        return blanks, lines
+
+    for session_cls, expects_footer in ((FakeSession, True), (NoAttachSession, False)):
+        session = session_cls()
+        session.agent_registry = AgentRegistry(tmp_path)
+        app = OperatorApp(lambda s=session: _factory(s))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            blanks, lines = _trailing_blanks(app)
+
+        assert blanks == 0, f"{session_cls.__name__} listing ends on {blanks} blank row(s): {lines}"
+        # The spacer is only correct when it is actually spacing something.
+        assert ("Send: /agent <name> <message>" in "\n".join(lines)) is expects_footer, lines

@@ -291,10 +291,39 @@ class RemoteSession:
         # on EVERY keystroke, so an unreadable registry would put a directory
         # walk plus a recovery probe on the typing path — the exact cost
         # `teams.py` keeps off that loop ("a reader that waited turned an
-        # ordinary keystroke into a multi-second freeze"). Construct at most
-        # once per session, whichever way it goes.
-        self._team_registry_failed = False
-        self._agent_registry_failed = False
+        # ordinary keystroke into a multi-second freeze").
+        #
+        # The latch is a COOLDOWN, not a tombstone (R7). A permanent latch
+        # makes any transient failure — a full disk that clears, a directory
+        # being rewritten by a concurrent `lop team` — cost `/team` and
+        # `/agent` for the entire life of the session, silently and with no way
+        # back short of restarting. Timestamps rather than a bool, so a burst
+        # of keystrokes still pays exactly one construction while a genuinely
+        # repaired registry heals on its own.
+        #
+        # Same shape and the same budget as `TeamRegistry`'s own read-path
+        # recovery cooldown (`_READ_RECOVERY_COOLDOWN_S`), deliberately: one
+        # retry convention in the codebase, not a second one invented here.
+        self._team_registry_failed_at: float | None = None
+        self._agent_registry_failed_at: float | None = None
+
+    def _within_registry_cooldown(self, failed_at: float | None) -> bool:
+        """Whether a failed registry construction is still too recent to retry.
+
+        Keeps a burst of keystrokes to ONE construction (the picker re-derives
+        its rows per character) while letting a repaired registry recover
+        without restarting the session — see the constructor's note on why a
+        permanent latch is the wrong trade.
+
+        ``monotonic`` because this is an elapsed-time question: a wall-clock
+        source would let an NTP correction either suppress the retry for hours
+        or defeat the cooldown entirely.
+        """
+        if failed_at is None:
+            return False
+        from local_operator.teams import _READ_RECOVERY_COOLDOWN_S
+
+        return (time.monotonic() - failed_at) < _READ_RECOVERY_COOLDOWN_S
 
     @property
     def team_registry(self) -> Any | None:
@@ -312,14 +341,14 @@ class RemoteSession:
         half-truth (see ``TeamRegistry._raise_if_recovery_failed``).
         """
         if self._team_registry_cache is None:
-            if self._team_registry_failed:
+            if self._within_registry_cooldown(self._team_registry_failed_at):
                 return None
             from local_operator.teams import TeamRegistry
 
             try:
                 self._team_registry_cache = TeamRegistry(self._config_dir)
             except Exception:  # noqa: BLE001 — one feature must not break the session
-                self._team_registry_failed = True
+                self._team_registry_failed_at = time.monotonic()
                 return None
         return self._team_registry_cache
 
@@ -350,14 +379,14 @@ class RemoteSession:
         also happens on a viewer.
         """
         if self._agent_registry_cache is None:
-            if self._agent_registry_failed:
+            if self._within_registry_cooldown(self._agent_registry_failed_at):
                 return None
             from local_operator.agents import AgentRegistry
 
             try:
                 self._agent_registry_cache = AgentRegistry(self._config_dir)
             except Exception:  # noqa: BLE001 — one feature must not break the session
-                self._agent_registry_failed = True
+                self._agent_registry_failed_at = time.monotonic()
                 return None
         return self._agent_registry_cache
 

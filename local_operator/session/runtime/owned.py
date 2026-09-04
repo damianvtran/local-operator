@@ -1588,7 +1588,7 @@ class OwnedSessionHandle(SessionHandle):
             (
                 team.name,
                 f"Led by {team.manager} · {team.member_count()} "
-                f"{'role' if team.member_count() == 1 else 'roles'}",
+                f"{'member' if team.member_count() == 1 else 'members'}",
                 (team.description or "").strip(),
             )
             for team in teams

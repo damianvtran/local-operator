@@ -213,17 +213,24 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
     # absence caused the bug, and the guard would pass while blind to its own
     # subject. Parsed rather than instantiated because building a real Session
     # needs a model, a transcript and a config tree.
-    assigned_in_init = set(
+    # Scans the WHOLE class, not just `__init__` (R8). Restricting the scan to
+    # the constructor is the same class of blindness as the class-level
+    # `hasattr` this test was first written with: an attribute assigned in any
+    # other method — a lazy cache, a late-wired handle — would be invisible to
+    # the guard while being perfectly reachable from `app.py`. No public
+    # attribute is assigned outside `__init__` today, so this is latent rather
+    # than live, which is exactly when it is cheap to close.
+    assigned_on_self = set(
         re.findall(
             r"^\s+self\.([a-z_][a-z_0-9]*)\s*(?:[:=])",
-            inspect.getsource(Session.__init__),
+            inspect.getsource(Session),
             re.M,
         )
     )
-    session_surface = assigned_in_init | {
+    session_surface = assigned_on_self | {
         name for name in dir(Session) if not name.startswith("__")
     }
-    assert "team_registry" in session_surface, "the __init__ scan missed a known attribute"
+    assert "team_registry" in session_surface, "the self-assignment scan missed a known attribute"
 
     # Private names are implementation details of one side or the other, and
     # the shared contract is what this guards.
@@ -289,5 +296,52 @@ async def test_a_failed_registry_is_constructed_once_not_once_per_keystroke(
 
     assert constructions["count"] == 1, (
         f"a broken registry was rebuilt {constructions['count']} times for 25 reads; "
-        "the failure must be latched so it costs one construction per session"
+        "the failure must be latched so a keystroke burst costs one construction"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_transient_registry_failure_recovers_without_a_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The latch is a COOLDOWN, not a tombstone (R7).
+
+    A permanent latch means any transient failure — a full disk that clears, a
+    directory momentarily being rewritten by a concurrent `lop team` — costs
+    `/team` and `/agent` for the whole life of the session, silently, with no
+    way back short of restarting. The cooldown keeps R3's guarantee (a burst of
+    keystrokes pays one construction) while letting a repaired registry heal.
+    """
+    import time as _time
+
+    from local_operator.teams import _READ_RECOVERY_COOLDOWN_S
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    real = TeamRegistry
+    attempts = {"count": 0}
+
+    def _flaky(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise OSError("a transient blip")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("local_operator.teams.TeamRegistry", _flaky)
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.team_registry is None
+        # Still inside the cooldown: no re-entry, so typing stays cheap.
+        for _ in range(25):
+            assert viewer.team_registry is None
+        assert attempts["count"] == 1, "the cooldown must absorb a keystroke burst"
+
+        _time.sleep(_READ_RECOVERY_COOLDOWN_S + 0.05)
+        assert viewer.team_registry is not None, (
+            "a repaired registry must recover on a later read rather than staying "
+            "dead for the life of the session"
+        )
+    finally:
+        await viewer.dispose()

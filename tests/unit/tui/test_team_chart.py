@@ -259,14 +259,15 @@ async def test_picker_first_slot_offers_teams_first_then_chart_subcommand() -> N
     # U3: a team literally named `chart` still appears, completing to the `=chart`
     # ESCAPE (not the bare name, which would route to the subcommand); its detail
     # names the talk path, so the collision is resolvable from the picker.
-    # Detail is the D1/D2 shape: roster size only (`member_count()`, manager
-    # excluded), no "led by" — the manager's name is what made this column wide
-    # enough to silence descriptions at ordinary widths.
-    assert ("=chart", "talk to team · 1 role") in rows
+    # Detail is the D1/D2/R6 shape: roster size only (`member_count()`, manager
+    # excluded) labelled "member(s)" to match that number, and no "led by" —
+    # the manager's name is what made this column wide enough to silence
+    # descriptions at ordinary widths.
+    assert ("=chart", "talk to team · 1 member") in rows
     # A non-colliding team keeps its plain name.
     assert any(name == "org" for name, _ in rows)
     # The bare `chart` name is NOT offered as a team row (it would mis-route).
-    assert ("chart", "1 role") not in rows
+    assert ("chart", "1 member") not in rows
 
 
 @pytest.mark.asyncio
