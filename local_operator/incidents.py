@@ -90,11 +90,22 @@ CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
     # Vendors that describe the same overflow by COUNTING tokens rather than by
     # naming the context. Added after an audit found the list recognised 6 of
     # 10 real vendor wordings: google/vertex ("input token count ... exceeds"),
-    # mistral ("too many tokens"), and bedrock ("input is too long") all fell
-    # through, which for the provider layer meant a deterministic overflow was
-    # retried as though it were upstream weather.
-    "token count",
-    "too many tokens",
+    # mistral ("too many tokens in prompt"), and bedrock ("input is too long")
+    # all fell through, which for the provider layer meant a deterministic
+    # overflow was retried as though it were upstream weather.
+    #
+    # Qualified rather than bare, because this list is the FIRST rule in
+    # `_RULES` and therefore outranks "rate-limit". A bare "token count"
+    # swallows a TPM message that happens to quote one ("Limit 90000 token
+    # count per min"), and a bare "too many tokens" is verbatim AWS Bedrock's
+    # ThrottlingException -- both are rate limits, and miscategorising them
+    # tells the user to /compact a request whose only problem is that it
+    # arrived too soon. The qualifiers name the INPUT, which a throttle never
+    # does.
+    "input token count",
+    "prompt token count",
+    "too many tokens in prompt",
+    "too many input tokens",
     "input is too long",
 )
 

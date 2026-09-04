@@ -1739,12 +1739,28 @@ class TestRelayedUpstream404:
             )
             assert (error.kind, error.retryable) == ("request", False), text
 
-    def test_relayed_401_still_reaches_credential_rotation(self) -> None:
-        """401/403 are deliberately OUT of the relayed set: they describe the
-        caller's credential and must keep reaching rotation rather than being
-        retried as weather."""
-        error = self._error(httpx.Response(401, json=self._relay(401, "ERROR")))
-        assert error.kind == "auth"
+    def test_caller_status_bodies_never_become_retryable(self) -> None:
+        """Review finding M1 (round 3), pinned.
+
+        401/403/402 describe the CALLER's standing, not a request, and each has
+        its own recovery: rotation, or a bill. A draft that short-circuited a
+        bare sentinel to retryable before checking the status bought a 401 ten
+        same-credential retries (~51s) before rotation was reached, because the
+        driver's ladder returns early on ``not retryable``.
+
+        Asserts ``retryable`` as well as ``kind`` deliberately: the previous
+        version of this test checked only the kind, so it passed throughout the
+        regression and did not test the thing its name promised. 429 is
+        included to pin the other direction -- it was already retryable by
+        status and must stay so."""
+        for status, kind, retryable in (
+            (401, "auth", False),
+            (403, "auth", False),
+            (402, "quota", False),
+            (429, "quota", True),
+        ):
+            error = self._error(httpx.Response(status, json=self._relay(status, "ERROR")))
+            assert (error.kind, error.retryable) == (kind, retryable), status
 
     def test_an_absurdly_long_provider_name_is_not_rendered(self) -> None:
         """Review finding M3, pinned.

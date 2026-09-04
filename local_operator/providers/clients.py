@@ -428,6 +428,19 @@ _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
 #: what made the previous attempt fragile: new provider, new dialect, same bug.
 _RELAYED_UPSTREAM_STATUSES = frozenset({404})
 
+#: Statuses this predicate may reclassify AT ALL, whatever the body says.
+#:
+#: Everything outside it keeps the meaning its status already carries, because
+#: those statuses are about the CALLER rather than about a request: 401/403 are
+#: the credential (recovered by rotation), 402 is billing, 429 is quota (a wait
+#: the driver already honours). Marking any of them retryable sends the request
+#: back down the same-credential ladder ahead of the recovery that would
+#: actually work.
+#:
+#: 5xx is excluded for the opposite reason: it is already transient, so passing
+#: it through here would change nothing while widening the blast radius.
+_RELAY_ELIGIBLE_STATUSES = frozenset({400, 404})
+
 #: Raw bodies short enough to prove nobody tried to say anything. Retained from
 #: the ORIGINAL opaque-aggregator fix (session e13d092c093c): a relayed 400
 #: whose ``metadata.raw`` is a bare sentinel carries no diagnostics at all, so
@@ -506,56 +519,55 @@ def _strip_quote_pair(text: str) -> str:
 
 
 def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> bool:
-    """Is this 4xx an UPSTREAM failure the aggregator merely relayed?
+    """Is this failure an UPSTREAM blip the aggregator merely relayed?
 
     OpenRouter forwards an origin provider's failure as ``{"message":
-    "Provider returned error", "metadata": {"raw": ...}}``. The presence of
-    that envelope is the load-bearing signal: the aggregator's OWN refusals
-    (an unknown model slug, a routing preference it cannot satisfy) are flat
-    bodies that name the problem and carry no ``metadata.raw`` at all. So a
-    wrapped 4xx describes something that happened at the ORIGIN, on the far
-    side of a network hop the caller cannot see or influence.
+    "Provider returned error", "metadata": {"raw": ...}}``. That envelope is
+    the entry condition: the aggregator's OWN refusals (an unknown model slug,
+    a routing preference it cannot satisfy) are flat bodies that name the
+    problem and carry no ``metadata.raw``, so they never reach this predicate.
 
-    Two shapes take this path, for the same reason — the status line is the
-    aggregator's relay choice rather than evidence our request was wrong:
+    The envelope establishes PROVENANCE only. It says the failure happened at
+    the origin; it says nothing about whether a retry could help, and an early
+    draft that stopped there retried malformed requests 12 times over ~35s for
+    defects no wait can fix. Three gates narrow it, in this order:
 
-    - ``raw`` is a bare sentinel (observed: ``"ERROR"``, provider "Stealth"),
-      so the body says nothing a caller could act on.
-    - ``raw`` holds real upstream prose that nevertheless describes the
-      PROVIDER's state rather than our bytes. Session 2be018a98088 recorded
-      ``"The requested model was not found."`` relayed under a 404 from Meta
-      for ``meta/muse-spark-1.3`` — twice in 75 seconds, with six successful
-      calls on the identical model id in between, on a model whose single
-      endpoint reported 99.98% uptime. Read literally the text looks like an
-      answer, which is why the old wording-only predicate missed it; but a
-      model id that works either side of the failure cannot be the cause, and
-      classifying it ``request`` killed the turn with no retry and no
-      failover.
+    1. **Status eligibility** (:data:`_RELAY_ELIGIBLE_STATUSES`). Only 400 and
+       404 may be reclassified at all. 401/403/402/429 describe the CALLER's
+       standing and each has its own recovery -- rotation, a bill, a wait --
+       which marking them retryable would push behind a pointless retry ladder.
+    2. **A body that says NOTHING** (:data:`_OPAQUE_RAW_SENTINELS`) is weather
+       on either eligible status, 400 included. This is the original
+       opaque-aggregator fix (session e13d092c093c): a bare ``"ERROR"`` from a
+       provider named "Stealth", arriving intermittently on a request that
+       answered 200 seconds later. A body with no diagnostics cannot be a
+       complaint about our request.
+    3. **A body that says something real** is weather only on a **404**. Every
+       relayed complaint about our request observed across six model families
+       is a **400**, in every vendor dialect, because "the request was bad" is
+       what 400 MEANS -- an origin reaching for 404 is describing a resource on
+       its own side. An intermediate draft tried to narrow by the OpenAI-dialect
+       ``param`` field instead and was blind to anthropic, google and cohere,
+       which do not send it; the status line is the only part of the contract
+       every provider agrees on.
 
-    The envelope alone is NOT enough, and an earlier draft of this function
-    that stopped there was wrong. ``metadata.raw`` establishes provenance —
-    the failure happened at the origin — but says nothing about whether a
-    retry could help: live probes showed malformed requests arriving fully
-    wrapped, and treating the envelope as sufficient retried each of them 12
-    times over ~35s for a defect no wait can fix.
+    The failure this exists for, on the 404 path: session 2be018a98088 recorded
+    ``"The requested model was not found."`` relayed under a 404 from Meta for
+    ``meta/muse-spark-1.3`` -- twice in 75 seconds, with six successful calls on
+    the identical model id in between, on a model whose single endpoint reported
+    99.98% uptime. Read literally the text looks like an answer, which is why a
+    wording-only predicate missed it; but a model id that works either side of
+    the failure cannot be the cause, and classifying it ``request`` killed the
+    turn with no retry and no failover.
 
-    The narrowing that works is the STATUS, per
-    :data:`_RELAYED_UPSTREAM_STATUSES`: only a relayed **404** is treated as
-    weather. Every relayed complaint about our request observed across six
-    model families is a **400**, in every vendor dialect, so excluding 400
-    fails those fast without parsing anyone's error schema. A second draft
-    tried to narrow by the OpenAI-dialect ``param`` field instead and was blind
-    to anthropic, google and cohere, which do not send it — the status line is
-    the only part of the contract every provider agrees on.
+    Two carve-outs then guard the 404 path itself, both meaning "this describes
+    our bytes, not the provider's state":
 
-    Two further carve-outs then guard the 404 path itself, both meaning "this
-    describes our bytes, not the provider's state":
-
-    - :data:`_UPSTREAM_REQUEST_FIELD_KEY` — a 404 that nevertheless names the
+    - :data:`_UPSTREAM_REQUEST_FIELD_KEY` -- a 404 that nevertheless names the
       offending field of our request is believed on the more specific evidence.
-    - :data:`~local_operator.incidents.CONTEXT_LENGTH_MARKERS` — an overflow
-      complaint is deterministic however it is delivered, and the canonical
-      list is shared with the harness so the two cannot drift.
+    - :data:`~local_operator.incidents.CONTEXT_LENGTH_MARKERS` -- an overflow is
+      deterministic however it is delivered, and the canonical list is shared
+      with the harness so the two cannot drift.
 
     Two deliberate widenings remain, both toward "treat no-information as
     transient":
@@ -563,15 +575,13 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     - The outer message is matched after trimming and case-folding, so
       ``"Provider returned error "`` matches too. The casing and padding on the
       wire are the aggregator's formatting, not part of the signal.
-    - A body whose ``raw`` is a bare sentinel (observed: ``"ERROR"``, provider
-      "Stealth") carries no ``param`` and no overflow wording, so it lands here
-      naturally rather than needing a rule of its own. This is the case most
-      likely to shadow a real upstream error whose message happens to be one
-      word; the cost of that collision is bounded retries, and the cost of the
-      opposite mistake is a dead turn.
+    - The sentinel rule (gate 2) may shadow a real upstream error whose message
+      happens to be the single word "error". The cost of that collision is
+      bounded retries; the cost of the opposite mistake is a dead turn, so the
+      tie is broken toward retrying.
 
     The price is latency, not correctness, and it is not small: a genuinely
-    broken request that gets past both carve-outs saturates the driver's
+    broken request that gets past every gate saturates the driver's
     server-fault budget (12 requests per target) before surfacing. MEASURED at
     the production defaults (``maxRetries`` 10, 500ms base, 8s cap): **33.5s on
     a single target and 100.1s across a 3-target chain**, at 12 requests per
@@ -583,7 +593,7 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     accepted trade-off, and an unverified number in it is the same defect it
     criticises an earlier draft for.
 
-    That is the accepted trade: a shape that survives both carve-outs is by
+    That is the accepted trade: a shape that survives every gate is by
     construction unattributable, so the alternative is killing a turn that
     rotation or a fallback could have served.
     """
@@ -596,11 +606,20 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
         # evidence of an upstream hop at all, so the body keeps whatever its
         # status already meant. It is necessary but NOT sufficient.
         return False
+    if status is not None and status not in _RELAY_ELIGIBLE_STATUSES:
+        # Auth (401/403), payment (402) and quota (429) describe the CALLER's
+        # standing with the provider, not the health of a request, and each has
+        # its own recovery -- rotation, a bill, a wait. This gate must come
+        # BEFORE the sentinel check: an earlier draft short-circuited a bare
+        # sentinel to `retryable` on any status, which bought a 401 ten
+        # same-credential retries (~51s) before rotation was even reached,
+        # because the driver's retry ladder returns early on `not retryable`.
+        return False
     text = _strip_quote_pair(_openrouter_upstream_text(error).strip()).lower()
     if text in _OPAQUE_RAW_SENTINELS:
-        # Says NOTHING. Whatever the status, a body with no diagnostics cannot
-        # be a complaint about our request, so it is weather on any status --
-        # which is what the original opaque-aggregator fix established.
+        # Says NOTHING. A body with no diagnostics at all cannot be a complaint
+        # about our request, so it is weather even on a 400 -- which is what the
+        # original opaque-aggregator fix established and what this preserves.
         return True
     if status is not None and status not in _RELAYED_UPSTREAM_STATUSES:
         # It said something real. Only a relayed 404 is weather; a relayed 400
