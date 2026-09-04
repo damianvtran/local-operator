@@ -42,6 +42,22 @@ def run_dir(root: Path | None = None) -> Path:
     return path
 
 
+def record_path(pid: int, root: Path | None = None) -> Path:
+    """Where one session's record lives. Keyed by pid, like every reader here.
+
+    The ``<pid>.json`` spelling was inline in three places (publish, unpublish,
+    and every caller that wanted to NAME the file). It is named once now
+    because a host that publishes a record may need to tell an external
+    supervisor where to read it — ``exec --control`` prints exactly this path
+    on stderr so the supervisor can pick the control key out of a file only
+    the owning account can open, rather than being handed the key in a log.
+
+    Creating the directory is :func:`run_dir`'s job and happens here too, so
+    the returned path's parent always exists with the right mode.
+    """
+    return run_dir(root) / f"{pid}.json"
+
+
 def publish(record: SessionRecord, root: Path | None = None) -> Path:
     """Write (or refresh) a session's record, staged so scanners see either
     the old file or the new one, never a half-written one."""
@@ -67,7 +83,7 @@ def unpublish(pid: int, root: Path | None = None) -> None:
     """Remove a session's record on clean exit. Best-effort: an exit path
     must never raise over a missing file."""
     try:
-        (run_dir(root) / f"{pid}.json").unlink()
+        record_path(pid, root).unlink()
     except OSError:
         pass
 

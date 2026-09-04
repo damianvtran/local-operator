@@ -49,6 +49,7 @@ TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobSta
 _AGENT_EVENT_NAMES: Dict[str, str] = {
     "agent_start": EventName.AGENT_START,
     "agent_end": EventName.AGENT_END,
+    "provider_turn_start": EventName.PROVIDER_START,
     "turn_start": EventName.TURN_START,
     "turn_end": EventName.TURN_END,
     "message_update": EventName.MESSAGE_DELTA,
@@ -56,6 +57,7 @@ _AGENT_EVENT_NAMES: Dict[str, str] = {
     "tool_execution_update": EventName.TOOL_DELTA,
     "tool_execution_end": EventName.TOOL_END,
     "notice": EventName.NOTICE,
+    "steering_delivered": EventName.STEERING_DELIVERED,
     "compaction_start": EventName.COMPACTION_START,
     "compaction_end": EventName.COMPACTION_END,
     "retry_start": EventName.RETRY_START,

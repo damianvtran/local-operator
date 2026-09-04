@@ -19,6 +19,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEndEvent,
+    StreamStartEvent,
     StreamTextDelta,
     StreamUsageEvent,
     Usage,
@@ -4449,3 +4450,59 @@ def test_a_model_answers_the_same_way_however_it_is_reached() -> None:
     assert seeded_base.reasoning_effort == seeded_base.reasoning_default_effort, "fixture drifted"
 
     assert _hop_wire_effort(seeded_base, selector) == direct_wire
+
+
+class _StartThenFail:
+    """Announces the acceptance boundary, then dies BEFORE any content.
+
+    The exact shape of a real Anthropic 529 or an in-band error chunk on an
+    HTTP-200 stream: the provider accepted the request and said so, then failed
+    with nothing rendered.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        self.calls += 1
+        yield StreamStartEvent(response_id=f"resp-{self.calls}")
+        raise self._exc
+
+
+async def test_a_content_free_start_event_does_not_block_the_retry() -> None:
+    """A boundary event must not count as "output the user has already seen".
+
+    ``forwarded_any`` exists to stop a retry replaying deltas someone has read.
+    ``StreamStartEvent`` renders nothing, so a failure landing after acceptance
+    but before the first token has to stay retryable — otherwise every
+    pre-content provider failure silently bypasses credential rotation and the
+    whole fallback chain.
+    """
+    failing = _StartThenFail(ProviderError(401, "invalid api key", auth_error=True))
+    succeeding = ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def client_for(spec: ModelSpec) -> Any:
+        def wrapper(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            return (failing if api_key == "bad-key" else succeeding).stream(request, api_key)
+
+        return _FnClient(wrapper)
+
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request(), FakeAuth({"openai": ["bad-key", "good-key"]}), None, client_for
+        )
+    ]
+
+    # The retry happened: the good key served the turn.
+    assert any(isinstance(event, StreamTextDelta) for event in got), (
+        "a pre-content failure must still rotate the credential and retry; "
+        "a content-free boundary event must not gate it"
+    )
+    # The failing key was actually tried (the retry is real, not vacuous).
+    assert failing.calls >= 1

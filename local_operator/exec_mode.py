@@ -68,6 +68,14 @@ class ExecArgs:
     #: through so `exec` continues a session rather than silently starting a new
     #: one and reporting success against the wrong history.
     resume: str | None = None
+    #: Publish a discovery record and serve the control socket for this run, so
+    #: an external supervisor can steer, cancel and answer gates mid-run. OFF by
+    #: default — the reasoning for opt-in (session-list pollution, daemon
+    #: adoption, heartbeat cadence, import weight) is in
+    #: :mod:`local_operator.session.runtime.exec_control`, which owns the
+    #: mechanism. Carried through to the worker so `--background --control` is
+    #: the same request run elsewhere, exactly like ``resume``.
+    control: bool = False
 
 
 def slugify(command: str, max_length: int = 40) -> str:
@@ -101,6 +109,12 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
         argv.extend(["--hosting", exec_args.hosting])
     if exec_args.model:
         argv.extend(["--model", exec_args.model])
+    if exec_args.control:
+        # A detached run is the one that most needs steering — nobody is
+        # watching its log — so the flag has to survive the process boundary.
+        # Dropped here it would be accepted by the front end and silently lost,
+        # the identical failure the ``resume`` note below records.
+        argv.append("--control")
     if exec_args.resume:
         # Serialized like every other field, because `--background` is supposed to
         # be the same request run elsewhere. Omitted, `exec --background --resume`
@@ -330,6 +344,30 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
     return factory
 
 
+#: The conventional "read the prompt from stdin" argument, as codex and other
+#: CLI harnesses spell it. Supervisors pipe a composed prompt file rather than
+#: passing it in argv, which is both visible in ``ps`` and bounded by ARG_MAX.
+STDIN_PROMPT_SENTINEL = "-"
+
+
+def resolve_prompt(command: str, *, stdin_text: str | None = None) -> str:
+    """Return the prompt to run, reading stdin when ``command`` is ``-``.
+
+    Resolved BEFORE the ``--background`` branch on purpose: the background
+    worker receives its prompt through argv (:func:`build_worker_argv`), so a
+    stdin prompt left unresolved would spawn a worker whose prompt is the
+    literal ``-`` — the same class of silent-wrong-input bug the ``resume``
+    field documents having already been fixed once, one process boundary out.
+
+    ``stdin_text`` is injectable so the behaviour is testable without a real
+    pipe on the process.
+    """
+    if command != STDIN_PROMPT_SENTINEL:
+        return command
+    text = sys.stdin.read() if stdin_text is None else stdin_text
+    return text.strip()
+
+
 def run_exec(command: str, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
@@ -340,7 +378,18 @@ def run_exec(command: str, args: ExecArgs) -> int:
     first, prompt once, map error/abort to exit 1. A ``prompt()`` that
     RAISES also maps to exit 1 with the error on stderr (CL-19), never the
     interactive red banner: exec is machine-driven.
+
+    A ``command`` of ``-`` means "read the prompt from stdin"; it is resolved
+    here so the foreground and ``--background`` paths run the same text.
+
+    ``--control`` wraps the foreground run in a session runtime (record +
+    control socket) so a supervisor can steer and cancel it; the endpoint goes
+    to STDERR because stdout is the payload stream.
     """
+    command = resolve_prompt(command)
+    if not command:
+        print("exec failed: empty prompt", file=sys.stderr)
+        return 1
     if args.background:
         return _spawn_background(command, args)
 
@@ -354,7 +403,37 @@ def run_exec(command: str, args: ExecArgs) -> int:
         session = factory()
         if asyncio.iscoroutine(session):
             session = await session
-        return await run_print_mode(session, [command], json_mode=args.json_mode)
+        # Function-local by contract: the runtime pulls asyncio and the owned
+        # handle's composition root, and ``tests/unit/test_import_graph.py``
+        # pins what ``import local_operator.cli`` may load. Imported even when
+        # the flag is off is still too early — this module is imported by the
+        # CLI dispatch — so the import sits inside the run, not at module scope.
+        from local_operator.session.runtime.exec_control import maybe_start_exec_control
+
+        control = await maybe_start_exec_control(
+            session,
+            enabled=args.control,
+            cwd=os.getcwd(),
+            yolo=args.yolo,
+        )
+        if control is not None:
+            # STDERR: stdout carries the NDJSON event stream (or the final
+            # assistant text), and a supervisor parsing it line-by-line would
+            # choke on a chrome line. Same rule headless_print states for every
+            # other progress line.
+            print(control.endpoint_line, file=sys.stderr, flush=True)
+        # The surface must close BEFORE run_print_mode disposes the session, and
+        # that dispose is inside run_print_mode's own ``finally`` — so the
+        # ordering cannot be expressed from out here and is handed in as the
+        # ``before_dispose`` hook instead. A short run that finishes before the
+        # first 15 s heartbeat therefore still announces its stop and unpublishes
+        # its record; nothing is left for a scanner to reap.
+        return await run_print_mode(
+            session,
+            [command],
+            json_mode=args.json_mode,
+            before_dispose=(control.aclose if control is not None else None),
+        )
 
     try:
         return asyncio.run(runner())
