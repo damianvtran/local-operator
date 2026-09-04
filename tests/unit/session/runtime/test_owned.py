@@ -868,8 +868,8 @@ async def test_a_parked_gate_spawns_no_desktop_notifier_under_the_suite_gate(
     ("watching", "expect_toast"),
     [
         (frozenset({"attach"}), False),
-        (frozenset({"daemon"}), False),
-        (frozenset({"attach", "daemon"}), False),
+        (frozenset({"viewer"}), False),
+        (frozenset({"attach", "viewer"}), False),
         (frozenset(), True),
     ],
 )
@@ -888,6 +888,13 @@ async def test_a_pending_announcement_routes_to_whoever_is_watching(
     surfaces already deliver this card (the terminal paints it in-band, the
     mobile relay carries it in the projection push ``_notify`` has already
     made), which is why routing is a predicate and not a second transport.
+
+    NOTE the kinds here: ``viewer`` is a phone with the session actually
+    OPEN, never the relay's mere presence. This test injects the set as a
+    premise, which is deliberately not enough on its own — see
+    ``test_watching_surfaces_is_derived_from_real_connections`` in
+    ``test_server.py``, which derives it from a real dial and is what catches
+    the class of defect this parametrisation cannot (round 3, B1).
     """
     import local_operator.tui.notify as notify_mod
 

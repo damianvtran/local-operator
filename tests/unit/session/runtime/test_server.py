@@ -1148,3 +1148,52 @@ class TestLiveStateReachesTheRecord:
         server._republish_detached()  # still 0 clients -> True: one publish
         server._republish_detached()  # unchanged: no publish
         assert len(publishes) == 1
+
+
+@pytest.mark.asyncio
+async def test_watching_surfaces_is_derived_from_real_connections() -> None:
+    """A relay's presence is not a person. Derived from REAL dials.
+
+    ``"daemon"`` is the default kind for an auth frame with no ``client``
+    field, which is exactly what the mobile daemon's ADOPTION dial sends
+    (`mobile/daemon.py::_dial`) — for every session on the machine, held open
+    permanently. Counting that as "the phone is watching" meant that on any
+    machine running ``lop mobile`` a parked approval sent NO notification, the
+    gate held ~283 MB for 24 h, and the model was told a human was watching
+    (round 3, B1).
+
+    This test dials the server the way production does instead of injecting a
+    kind set as a premise. That distinction is the whole point: four committed
+    tests asserted ``frozenset({"daemon"}) -> the phone is watching`` and all
+    four passed while the product was broken, because they asserted the
+    premise rather than deriving it.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    daemon_writer = attach_writer = None
+    try:
+        record = await _wait_record()
+
+        assert runtime.watching_surfaces() == frozenset()
+
+        # The adoption dial: no `client` field, exactly as the daemon sends.
+        _daemon_reader, daemon_writer = await _dial(record)
+        assert (
+            runtime.watching_surfaces() == frozenset()
+        ), "a daemon adoption dial is a transport connection, not a person watching"
+
+        # A phone with the session actually open says so, and it EXPIRES.
+        runtime.note_viewer_active()
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+        runtime.note_viewer_active(ttl_s=0.0)
+        assert runtime.watching_surfaces() == frozenset(), "the signal must lapse on its own"
+
+        # A real terminal.
+        _attach_reader, attach_writer = await _dial(record, client="attach")
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+    finally:
+        for writer in (daemon_writer, attach_writer):
+            if writer is not None:
+                writer.close()
+        runtime.close()

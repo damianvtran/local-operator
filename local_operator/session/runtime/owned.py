@@ -28,7 +28,7 @@ import uuid
 from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
 
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -126,6 +126,12 @@ class OwnedSessionHandle(SessionHandle):
         # the gate is answered ``True`` inline instead. Stored so a future
         # per-session toggle can flip it without reconstructing the handle.
         self._auto_approve = auto_approve
+        #: The (kind, title, detail) of the gate currently parked, or None.
+        #: Kept so the announcement can be re-run when the last viewer
+        #: detaches — the routing decision is made when the gate opens, and
+        #: without this a gate opened under a watching terminal is never
+        #: announced after that terminal closes (round 3, B2).
+        self._parked_announcement: tuple[str, str, str] | None = None
         #: The RuntimeServer serving this handle, set by its constructor. The
         #: gate path needs it for two things only a server knows: how many
         #: front ends could present a card right now, and how to publish the
@@ -1089,6 +1095,20 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the denial still stands
             logger.debug("could not record the unattended gate timeout", exc_info=True)
 
+    def reannounce_pending(self) -> None:
+        """Re-run the announcement for a gate that is STILL parked.
+
+        Called by the registrant when the last viewer detaches. The routing
+        decision is made once, when the gate opens, so a gate opened while
+        somebody was watching correctly sent no toast — and then the user
+        closed the terminal and was never told (round 3, B2). This re-runs
+        the decision against the surfaces watching NOW.
+        """
+        parked = self._parked_announcement
+        if parked is None:
+            return
+        self._announce_pending(*parked)
+
     def _announce_pending(self, kind: str, title: str, detail: str) -> None:
         """Publish that this session is WAITING FOR A PERSON, and say so.
 
@@ -1098,6 +1118,10 @@ class OwnedSessionHandle(SessionHandle):
         the user out of band. A parked gate nobody can see is a process nobody
         can find.
         """
+        # Remembered so a later detach can re-run this decision (B2). Held
+        # until the gate settles, which is the only point the question stops
+        # being owed.
+        self._parked_announcement = (kind, title, detail)
         server = self._registrant
         setter = getattr(server, "set_record_pending", None)
         if callable(setter):
@@ -1133,6 +1157,9 @@ class OwnedSessionHandle(SessionHandle):
 
     def _announce_settled(self) -> None:
         """Clear the waiting-for-a-person state once the gate resolves."""
+        # Cleared FIRST and unconditionally: the question is no longer owed,
+        # so a later detach must not resurrect a toast for it (B2).
+        self._parked_announcement = None
         server = self._registrant
         setter = getattr(server, "set_record_pending", None)
         if not callable(setter):
@@ -1141,6 +1168,285 @@ class OwnedSessionHandle(SessionHandle):
             setter(None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
+
+    def _publish_pending_gate(self) -> None:
+        """Mirror the fold's FRONT card into the canonical full-TUI contract.
+
+        There are two consumers of a parked gate and they read different
+        places. The phone reads the projection fold (`push_pending` /
+        `pop_pending`, a queue so a parallel tool batch keeps one card per
+        approval). A full TUI attaching reads
+        `Session.frontend_state.pending_gate` — and nothing on this path ever
+        set it, so the user summoned by the toast arrived at a session with
+        no question on screen and no way to answer it (round 3, U8). The
+        gate then expired 24 h later as a denial.
+
+        `TuiSessionHandle._publish_pending_gate` always published to both;
+        the capability did not survive gate ownership moving into the
+        runtime. Publishing the FRONT of the queue (rather than replacing the
+        queue with a single slot) keeps the concurrent-approval property the
+        fold exists for while giving the attach contract the card it needs.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            # `_sync_pending` already fronts the queue onto `projection.pending`
+            # for the phone's "1 of N" badge; reuse that rather than reaching
+            # into the queue, so both surfaces can never disagree about which
+            # card is current.
+            front = self._projection.pending
+            store.mutate(pending_gate=front.to_json() if front is not None else None)
+        except Exception:  # noqa: BLE001 — a card is never worth failing a gate
+            logger.debug("could not publish the pending gate", exc_info=True)
+
+    def cancel_subagents_count(self) -> int:
+        """Cancel every running subagent and return the REAL count.
+
+        Esc's second job. `RemoteSession.cancel_subagents` swallows a failure
+        to ``stopped = -1``, so a handle without this method makes Esc quietly
+        do less than it says on a detached session (round 3, U9) — the turn
+        ends but the children keep burning tokens.
+
+        Re-homed from ``TuiSessionHandle``: that version hopped to the app
+        loop because the session lived there. Here the session is on THIS
+        loop, so the call is direct — the same reason the rest of this class
+        does not need ``run_coroutine_threadsafe``.
+        """
+        cancel = getattr(self._session, "cancel_subagents", None)
+        if not callable(cancel):
+            return 0
+        result = cancel("interrupted")
+        stopped = result if isinstance(result, int) else 0
+        self._notify()
+        return stopped
+
+    async def run_slash_authoritative(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Run one shared slash command against the session and answer as data.
+
+        The owner-side backend for a viewer's ``route_shared_slash``. These
+        commands MUTATE SHARED SESSION STATE (the goal, the model, the
+        approval mode, the conversation name), so they have to run where the
+        session lives; a viewer-local copy would either drive nothing or
+        drive a second, divergent copy of the orchestration state.
+
+        Re-homed from ``TuiSessionHandle``, which delegated to
+        ``OperatorApp.run_slash_authoritative``. A detached runtime has NO
+        app — that is the whole point of this release — so the handlers are
+        implemented here against the session directly. Without them every
+        typed slash command answered ``this owner cannot run typed slash
+        results`` on every detached session (round 3, U9): eleven commands,
+        in developer vocabulary, on the branch's main path.
+
+        The returned shape is a ``SlashResult`` dump the INVOKING terminal
+        renders locally, so the receipt reads the same whether the session is
+        local or detached.
+        """
+        from local_operator.session.frontend_state import SlashResult
+
+        result = await self._slash_result(command, args, SlashResult)
+        return result.model_dump(mode="json")
+
+    async def _slash_result(self, command: str, args: str, SlashResult: Any) -> Any:
+        """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
+
+        Only the commands a viewer ROUTES reach here; process- and
+        terminal-local ones (``/quit``, ``/resume``, pickers) never leave the
+        viewer. Anything not handled falls through to an honest notice rather
+        than the transport's ``unknown op``, because a user typing a command
+        this runtime does not implement needs to know what to do instead.
+        """
+        session = self._session
+        if command == "goal":
+            return self._goal_slash(session, args, SlashResult)
+        if command == "rename":
+            return self._rename_slash(session, args, SlashResult)
+        if command == "effort":
+            return self._effort_slash(session, args, SlashResult)
+        if command == "approvals":
+            return self._approvals_slash(session, args, SlashResult)
+        if command == "compact":
+            return self._compact_slash(session, SlashResult)
+        if command == "loop":
+            # The goal loop is an OperatorApp worker; a detached runtime has
+            # no loop to stop, so saying "no loop is running" is the truth
+            # rather than a stub. A loop started in a viewer is stopped there.
+            if args.lower() in ("stop", "cancel", "abort"):
+                return SlashResult(kind="notice", text="no loop is running", style="info")
+            return SlashResult(
+                kind="notice",
+                text="/loop runs from an attached terminal — reattach and run it there",
+                style="warning",
+            )
+        return SlashResult(
+            kind="notice",
+            text=f"/{command} is not available on a detached session — reattach to run it",
+            style="warning",
+        )
+
+    def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        if not hasattr(session, "set_goal"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not arg:
+            current = getattr(session, "goal", "")
+            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
+            return SlashResult(kind="notice", text=text, style="info")
+        if arg.lower() in ("clear", "none", "reset"):
+            session.set_goal("")
+            self._notify()
+            return SlashResult(kind="notice", text="goal cleared", style="info")
+        stored = session.set_goal(arg)
+        self._notify()
+        from local_operator.session.goal import MAX_GOAL_CHARS
+
+        if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
+                    "applies from the next turn"
+                ),
+                style="warning",
+                data={"stored": stored},
+            )
+        return SlashResult(
+            kind="notice",
+            text="goal set — applies from the next step",
+            style="info",
+            data={"stored": stored},
+        )
+
+    def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        name = (arg or "").strip()
+        if not name:
+            current = getattr(session, "conversation_name", "") or ""
+            text = f"name: {current}" if current else "no name set — /rename <text> to set one"
+            return SlashResult(kind="notice", text=text, style="info")
+        setter = getattr(session, "set_conversation_name", None)
+        if not callable(setter):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        stored = setter(name)
+        # The name is on the discovery record, so `lop sessions` and the
+        # picker must see the rename without waiting for the next heartbeat.
+        # `_notify` refreshes the projection; the registrant owns the record.
+        self._notify()
+        republish = getattr(self._registrant, "_republish", None)
+        if callable(republish):
+            try:
+                republish()
+            except Exception:  # noqa: BLE001 — a stale name is not worth a failure
+                logger.debug("could not republish the renamed record", exc_info=True)
+        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
+
+    def _effort_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Report the reasoning effort; changing it stays with the viewer.
+
+        The app's version drives `_apply_effort`, which reaches into the
+        model picker's widget state and the machine's saved default — neither
+        of which exists in a runtime. Reporting is genuinely session state
+        and is answered here; the mutation is declined in the same vocabulary
+        `/approvals default` uses for machine-local settings, rather than
+        pretending to apply and silently not.
+        """
+        spec = getattr(session, "model", None)
+        label = getattr(session, "model_label", "") or "this model"
+        if spec is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        current = getattr(spec, "reasoning_effort", None)
+        if not arg.strip():
+            text = (
+                f"effort: {current} on {label}"
+                if current
+                else f"effort is not adjustable on {label}"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+        return SlashResult(
+            kind="notice",
+            text="/effort changes the model selection, which lives in a terminal — "
+            "reattach and run it there",
+            style="warning",
+        )
+
+    def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Report or switch the gate the RUNTIME's tools actually consult.
+
+        `self._auto_approve` is the real gate here (see `_install_gates`), so
+        unlike the viewer's own widget flag this switch is the one the engine
+        honours. The persist half is declined for the same machine-locality
+        reason the app gives: a default belongs to the terminal that launches
+        sessions, not to a runtime that outlives it.
+        """
+        argument = (arg or "").strip().lower()
+        if argument == "default" or argument.startswith("default "):
+            return SlashResult(
+                kind="notice",
+                text="/approvals default persists to the local machine's config — run it "
+                "on a terminal; /approvals ask|auto switches this session now",
+                style="warning",
+            )
+        if not argument:
+            live = "auto" if self._auto_approve else "ask"
+            effect = (
+                "every tool runs without asking"
+                if self._auto_approve
+                else "write and command tools prompt before running"
+            )
+            return SlashResult(
+                kind="notice",
+                text=f"tool approvals: {live} — {effect}",
+                style="warning" if self._auto_approve else "info",
+            )
+        if argument in ("ask", "on", "prompt"):
+            wanted_auto = False
+        elif argument in ("auto", "off", "yolo"):
+            wanted_auto = True
+        else:
+            return SlashResult(
+                kind="notice",
+                text=f"unknown approval mode {argument!r} — use ask or auto",
+                style="warning",
+            )
+        self._auto_approve = wanted_auto
+        self._notify()
+        return SlashResult(
+            kind="notice",
+            text=(
+                "tool approvals: auto — every tool runs without asking"
+                if wanted_auto
+                else "tool approvals: ask — write and command tools prompt before running"
+            ),
+            style="warning" if wanted_auto else "info",
+        )
+
+    def _compact_slash(self, session: Any, SlashResult: Any) -> Any:
+        """Kick the real pass; the ACCEPT receipt is the answer.
+
+        A long conversation compacts for minutes, which cannot be awaited
+        inside a request/response op without the socket reporting failure for
+        work that is actually running. The settled outcome reaches every
+        terminal through the canonical compaction events instead — the same
+        vocabulary a local trigger produces.
+        """
+        compact = cast(
+            "Callable[[], Coroutine[Any, Any, Any]] | None", getattr(session, "compact_now", None)
+        )
+        if not callable(compact):
+            return SlashResult(
+                kind="notice",
+                text="no session yet — there is no context to compact",
+                style="warning",
+            )
+        task = self._loop.create_task(compact())
+        # Same retention discipline as the gate tasks above: an un-retained
+        # task can be collected mid-flight and the pass would vanish silently.
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return SlashResult(kind="notice", text="compacting context…", style="info")
 
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.
@@ -1187,6 +1493,11 @@ class OwnedSessionHandle(SessionHandle):
 
     def _notify(self) -> None:
         self._publish_busy()
+        # Published HERE rather than beside each push/pop: `_notify` already
+        # follows every gate mutation, so one seam keeps the phone's fold and
+        # the full TUI's `pending_gate` in step and a future gate cannot
+        # forget to publish one of the two (round 3, U8).
+        self._publish_pending_gate()
         if self._on_projection is not None:
             self._on_projection()
 

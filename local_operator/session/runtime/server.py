@@ -117,6 +117,15 @@ _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
 
+#: How long a phone's "I am looking at this session" signal counts for.
+#: EXPIRING by design: the relay's transport connection is permanent and says
+#: nothing about attention, so live viewing has to be refreshed to stay true
+#: and lapses on its own when the phone is pocketed. Sized well above the
+#: relay's own refresh cadence so ordinary jitter never blinks a watching
+#: phone off, and far below a gate's park window so a forgotten phone cannot
+#: suppress a notification for a whole day.
+VIEWER_ACTIVE_TTL_S = 90.0
+
 #: Rows one ``job_trajectory`` reply may carry. The whole retained window is
 #: 500 events with no size bound per event, which is what overflows the frame
 #: limit in the first place, so the viewer pages rather than asking for all of
@@ -350,6 +359,9 @@ class RuntimeServer:
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
         # the phone bridge and a follower terminal at once.
         self._clients: dict[int, _ClientConn] = {}
+        #: Monotonic deadline for a relay-side viewer being actively watched.
+        #: Zero means "never signalled", which reads as not watching.
+        self._viewer_active_until: float = 0.0
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -883,6 +895,21 @@ class RuntimeServer:
             return
         self._detached = detached
         self._republish()
+        if detached and self._pending:
+            # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
+            # closed the terminal. The routing decision was made once, at
+            # announce time, and correctly sent no toast then — so without
+            # this the question waits up to 24 h and the user is never told
+            # (round 3, B2). "I approved something, shut the laptop, came back
+            # to a session that had been waiting all day" is the ordinary
+            # shape of it. Re-announcing on the transition is what turns the
+            # one-shot decision into a live one.
+            announce = getattr(self._handle, "reannounce_pending", None)
+            if callable(announce):
+                try:
+                    announce()
+                except Exception:  # noqa: BLE001 — a toast never breaks teardown
+                    logger.debug("could not re-announce the parked gate", exc_info=True)
 
     def set_busy(self, busy: bool) -> None:
         """Record whether a turn is running, for the picker's liveness marker."""
@@ -924,21 +951,49 @@ class RuntimeServer:
         return sum(1 for c in self._clients.values() if c.kind == "attach")
 
     def watching_surfaces(self) -> frozenset[str]:
-        """Which KINDS of surface are watching this session right now.
+        """Which KINDS of surface have a HUMAN watching this session right now.
 
         Notification routing needs the kind, not the count: a question goes to
         whatever is actually watching, and only falls out to the OS when
-        nothing is. ``attach`` is a terminal viewer, which paints the card
-        in-band; ``daemon`` is the mobile relay, which carries the same card
-        to the phone through the projection it is already subscribed to. A
-        count cannot tell those apart, which is why ``_announce_pending``
-        used to send a desktop toast to a user whose phone was watching.
+        nothing is.
+
+        **A ``daemon`` connection is NOT somebody watching.** ``"daemon"`` is
+        the default kind for an auth frame with no ``client`` field, which is
+        exactly what the mobile daemon's ADOPTION dial sends — and that dial
+        covers every session on the machine and is held open permanently
+        (`mobile/daemon.py::_dial`). Counting it meant that on any machine
+        running ``lop mobile`` no parked approval ever sent a notification,
+        the gate held ~283 MB for 24 h, and the model was told a human was
+        watching (round 3, B1). ``process.py::_viewer_attached`` reads this
+        same table and counts only ``"attach"`` for exactly this reason.
+
+        A phone that is genuinely being looked at registers interest through
+        :meth:`note_viewer_active` below — an explicit signal with a lifetime,
+        not the presence of a transport connection.
 
         Deliberately the live connection table rather than a cached flag:
         surfaces come and go constantly, and a stale answer here means a
         notification delivered to a surface that has gone away.
         """
-        return frozenset(c.kind for c in self._clients.values())
+        watching = {c.kind for c in self._clients.values() if c.kind == "attach"}
+        if self._viewer_active_until > time.monotonic():
+            # A phone with the session actually open. Reported as ``viewer``
+            # rather than ``daemon`` so a reader cannot confuse "a relay is
+            # connected" with "a person is looking".
+            watching.add("viewer")
+        return frozenset(watching)
+
+    def note_viewer_active(self, ttl_s: float = VIEWER_ACTIVE_TTL_S) -> None:
+        """Record that a human is actively viewing through the relay.
+
+        The mobile relay's transport connection says nothing about whether
+        anyone is looking, so live viewing is an explicit, EXPIRING signal:
+        the phone refreshes it while a session is open on screen, and it
+        lapses on its own when the phone is pocketed or the app is closed. A
+        flag with no lifetime would fail the same way the daemon connection
+        did — stuck true forever, suppressing every notification.
+        """
+        self._viewer_active_until = time.monotonic() + max(0.0, ttl_s)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")
