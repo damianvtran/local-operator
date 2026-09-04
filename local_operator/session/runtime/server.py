@@ -117,7 +117,7 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "credential"}
 
 
 def _accepts_locality(fn: Any) -> bool:
@@ -1432,6 +1432,32 @@ class RuntimeServer:
                 result = run(*args, locality=locality)
             else:
                 result = run(*args)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        if op == "credential":
+            # A DEDICATED op rather than a `slash_result` with the secret in
+            # its `args` string. The value must never sit in a general-purpose
+            # field that other code paths echo, log, or put in a transcript —
+            # `args` is the same field that carries `/goal` text. Here the
+            # secret has exactly one named home and one consumer.
+            #
+            # The store lives on the owner because that is where the agent's
+            # bash commands run and read it from the environment; a follower
+            # storing it locally would tell the model about a key that no tool
+            # on the executing side can use.
+            #
+            # Optional capability, getattr-probed like `cancel` above: a
+            # reduced handle or an older runtime answers the unknown-op error
+            # rather than silently accepting a secret it will not store.
+            credential = getattr(h, "credential_op", None)
+            if not callable(credential):
+                raise ValueError("this owner cannot hold session credentials")
+            result = credential(
+                str(frame.get("action", "")),
+                str(frame.get("key", "")),
+                str(frame.get("value", "")),
+            )
             if inspect.isawaitable(result):
                 result = await result
             return result
