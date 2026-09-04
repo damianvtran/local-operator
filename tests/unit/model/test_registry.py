@@ -475,6 +475,22 @@ def test_an_aggregator_router_resolves_to_a_real_window_and_accepts_images(
     assert info.max_tokens == -1
 
 
+def test_the_two_router_id_sets_stay_in_agreement() -> None:
+    """R3: the same two literals live in two modules, deliberately.
+
+    ``registry`` is the leaf ``discovery`` imports, so the registry cannot
+    import the discovery set without a cycle — the duplication is the right
+    call. What was missing is anything holding the copies together: adding a
+    third router to one side only produces a row whose picker LABEL and whose
+    resolved CONTEXT WINDOW disagree, which is silent and confusing rather than
+    loud. This pins the invariant so that drift fails here instead.
+    """
+    from local_operator.model.discovery import _META_ROUTE_IDS
+    from local_operator.model.registry import AGGREGATOR_ROUTER_MODEL_IDS
+
+    assert AGGREGATOR_ROUTER_MODEL_IDS == _META_ROUTE_IDS
+
+
 @pytest.mark.parametrize("provider", ["radient", "openrouter"])
 def test_an_arbitrary_aggregator_model_keeps_the_unknown_sentinels(provider: str) -> None:
     """The router's numbers must NOT leak onto the aggregator's other ids.

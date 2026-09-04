@@ -165,12 +165,23 @@ def format_window(tokens: int) -> str:
 #: beside the window it sits next to.
 #:
 #: Measured against the layout before it was chosen, because it is materially
-#: longer than ``free`` and this column is width-constrained. At the picker's
-#: floor (``_NUMBERS_MIN_WIDTH``, 56 cells) the numbers run costs 11 cells
-#: instead of 4, which comes out of the id budget and truncates a LONG
-#: aggregator id ~7 characters earlier; ids short enough to matter
-#: (``radient/auto``) are unaffected at every width, and below 56 the whole
-#: numbers run is already dropped. The trade is deliberate: the alternative
+#: longer than ``free`` and this column is width-constrained. What the extra
+#: seven cells actually cost, swept across 120->56 columns for both router ids:
+#:
+#: * NOT id truncation. No router id truncates under ANY label length (0, 5, 6
+#:   or 11 cells) at any width in that range — the ids are short enough that
+#:   the budget never binds. An earlier version of this comment claimed a long
+#:   id truncated ~7 characters earlier; that was wrong, and it mattered
+#:   because this is where a future maintainer looks to judge whether a longer
+#:   label is affordable.
+#: * The DISPLAY-NAME PARENTHETICAL drops earlier, and that is the whole cost.
+#:   ``openrouter/openrouter/auto  (Auto Router)`` keeps its name down to 61
+#:   columns with ``usage-based`` against a 56-column floor with a 4-6 cell
+#:   label — a five-column band, inside which the row loses a secondary aid
+#:   and keeps everything it is chosen by.
+#:
+#: Below ``_NUMBERS_MIN_WIDTH`` (56) the whole numbers run is dropped anyway,
+#: so nothing here is reachable further down. The trade is deliberate: the
 #: spellings that fit in 4-6 cells (``usage``, ``routed``, ``varies``) all
 #: answer a different question than the one a user reading a price column is
 #: asking, and a shorter word that has to be decoded is not cheaper than a

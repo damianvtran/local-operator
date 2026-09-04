@@ -59,6 +59,7 @@ from local_operator.model.effort import EFFORT_ORDER
 from local_operator.model.ids import id_spellings, normalised_id
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
+    AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
     WireFormat,
     credential_provider_id,
@@ -797,8 +798,8 @@ def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
 _META_ROUTE_IDS = frozenset({"auto", "openrouter/auto"})
 
 
-def is_meta_route_id(model_id: str) -> bool:
-    """Whether ``model_id`` names a ROUTER endpoint rather than a model.
+def is_meta_route_id(model_id: str, provider_id: str) -> bool:
+    """Whether ``provider_id``/``model_id`` names a ROUTER rather than a model.
 
     The id half of :func:`_is_meta_route`, exported for the one caller that
     has no listing row to read a price from: the controller's rescue entry,
@@ -808,13 +809,18 @@ def is_meta_route_id(model_id: str) -> bool:
     exist there — and it is the path a user on ``radient/auto`` with a cold
     cache actually hits.
 
+    Takes the provider for the same reason :func:`_is_meta_route` does, and it
+    is not hypothetical here either: ``ollama/auto`` reaches the rescue entry
+    by exactly the same route as ``radient/auto``, so an ungated id test would
+    mislabel a local model the user happened to name ``auto``.
+
     Kept as one exported predicate over one module-private set so the two
     layers cannot drift into disagreeing about what a router is.
     """
-    return model_id in _META_ROUTE_IDS
+    return model_id in _META_ROUTE_IDS and provider_id in AGGREGATOR_PROVIDERS
 
 
-def _is_meta_route(model_id: str, pricing: Mapping[str, object]) -> bool:
+def _is_meta_route(model_id: str, provider_id: str, pricing: Mapping[str, object]) -> bool:
     """Whether this entry is a ROUTER whose cost depends on where it dispatches.
 
     Two signals, either of which is sufficient, and the second exists only
@@ -823,37 +829,64 @@ def _is_meta_route(model_id: str, pricing: Mapping[str, object]) -> bool:
     The PRICE is the principled signal: a quoted negative leg means exactly
     this and nothing else (:func:`_stated_routed_price`), it is what OpenRouter
     publishes for ``openrouter/auto``, and it keeps working for any router any
-    aggregator adds later without this module being told about it.
+    aggregator adds later without this module being told about it. It needs no
+    provider gate — a quoted negative is self-describing wherever it appears.
 
-    The ID is the fallback, and it is here rather than in the renderer on
-    purpose. Radient's listing currently declares ``auto`` with
+    The ID is the fallback, and it is gated on the provider being an
+    AGGREGATOR. Radient's listing currently declares ``auto`` with
     ``{"prompt": "0", "completion": "0"}``, and a symmetric quoted zero is
     INDISTINGUISHABLE from a genuinely free route by price alone — that is the
     whole reason ``_stated_zero_price`` exists. So for that one shape there is
-    no principled signal to read, and the honest options are to name the
-    router or to let it keep claiming to be free. Naming it is bounded (two
-    ids), sits in the layer that already knows which aggregator's wire it is
-    parsing, and expires on its own: once the server quotes ``"-1"`` the price
-    test carries the row and this set is redundant for it.
+    no principled signal to read, and the honest options are to name the router
+    or to let it keep claiming to be free.
+
+    WHY the gate is load-bearing rather than defensive: this parser serves the
+    ``openai-compat`` wire GENERALLY, not just the two aggregators — ollama,
+    deepseek, mistral, kimi, xai, zai, alibaba and openai all reach it. On
+    Ollama the "listing" is the user's own filesystem, so the id space is
+    user-controlled and a local model named ``auto`` is a thing a user can
+    simply have. Ungated, that row rendered ``usage-based`` where it had
+    correctly read ``free`` — and ``ollama`` is the ONE provider with
+    ``allows_missing_api_key``, whose genuine zero is exactly what ``_price``
+    exists to preserve. So the mislabel landed on the honest-pricing axis this
+    module is most careful about.
+
+    The blast radius was the PRICE CELL ONLY, and the bound is worth stating so
+    nobody re-derives it: ``get_model_info`` dispatches the router's 1M row on
+    its own aggregator-scoped set, so no session ever ran on wrong metadata —
+    a local model kept its real window and its real image capability. A
+    cosmetic mislabel on the one column that must not lie, rather than a
+    correctness bug in the spec.
 
     The set is checked against the LISTING id, which is the id as that
     aggregator spells it (``auto`` on Radient, ``openrouter/auto`` on
-    OpenRouter). A direct provider that shipped a model literally called
-    ``auto`` would be a false positive; none exists in any listing in this
-    tree, and the cost would be one row reading ``usage-based`` instead of its
-    real price rather than anything a session runs on.
+    OpenRouter). The fallback expires on its own: once the Radient server
+    quotes ``"-1"`` (radient-ml/agent-server #8) and cached listings have
+    rolled past the capture bump, the price leg carries the row and the id leg
+    can be deleted.
     """
-    return model_id in _META_ROUTE_IDS or (
-        # BOTH legs, matching the stated-zero rule directly above it: a
-        # half-negative row is a listing bug, not a router, and reading one
-        # leg would let it suppress a real price on the other.
-        _stated_routed_price(pricing.get("prompt"))
-        and _stated_routed_price(pricing.get("completion"))
+    if model_id in _META_ROUTE_IDS and provider_id in AGGREGATOR_PROVIDERS:
+        return True
+    # BOTH legs, matching the stated-zero rule directly above it: a
+    # half-negative row is a listing bug, not a router, and reading one
+    # leg would let it suppress a real price on the other.
+    return _stated_routed_price(pricing.get("prompt")) and _stated_routed_price(
+        pricing.get("completion")
     )
 
 
-def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+def _row_from_openai_entry(
+    entry: Mapping[str, object], provider_id: str = ""
+) -> DiscoveredModel | None:
     """One OpenAI-compatible listing entry, or ``None`` when it has no id.
+
+    ``provider_id`` says whose wire this entry came off, which only
+    :func:`_is_meta_route`'s router-id fallback needs. It DEFAULTS TO EMPTY and
+    that direction is deliberate: ``""`` is not in ``AGGREGATOR_PROVIDERS``, so
+    a caller that omits it gets the price-only answer — the conservative one —
+    rather than a router label it did not ask for. The alternative, a required
+    argument, would fail closed too but at import time for every existing
+    caller; this fails closed at the only place the value changes an answer.
 
     Nothing beyond ``id`` is standardised: OpenRouter nests the real limits under
     ``top_provider`` and the modalities under ``architecture``, while leaner
@@ -907,12 +940,12 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
         # for ``auto`` today — drops out of this expression rather than
         # advertising a frontier-model dispatch as costing nothing.
         free=(
-            not _is_meta_route(model_id, pricing)
+            not _is_meta_route(model_id, provider_id, pricing)
             and _stated_zero_price(pricing.get("prompt"))
             and _stated_zero_price(pricing.get("completion"))
             and _bills_in_tokens(architecture)
         ),
-        routed=_is_meta_route(model_id, pricing),
+        routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
         supports_images=_has_image_input(architecture),
         # A priced cache-read leg is the only machine-readable evidence of prompt
@@ -1065,7 +1098,11 @@ def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     entries = _entry_list(body, "data", "models")
     if entries is None:
         return None
-    rows = (_row_from_openai_entry(entry) for entry in entries)
+    # The provider is threaded in because the ROUTER-id fallback in
+    # ``_is_meta_route`` is only valid for an aggregator: this same parser
+    # serves every ``openai-compat`` provider, and on Ollama the listing is the
+    # user's own filesystem (see R1).
+    rows = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
     return [row for row in rows if row is not None]
 
 

@@ -74,7 +74,10 @@ def _router_row(provider: str, payload: dict[str, object], label: str) -> ModelR
     """
     definition = get_provider_definition(provider)
     assert definition is not None
-    row = _row_from_openai_entry(payload)
+    # The provider is required for the router-id fallback to apply: it is
+    # aggregator-scoped, because this parser also serves ollama and the other
+    # direct openai-compat providers (see `_is_meta_route`).
+    row = _row_from_openai_entry(payload, provider)
     assert row is not None
     context_window = row.context_window or build_model_spec(provider, row.id).context_window
     return ModelRow(

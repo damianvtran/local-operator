@@ -337,6 +337,48 @@ def test_a_meta_route_is_flagged_routed_by_either_price_shape_or_id() -> None:
     assert {row.id: row.free for row in rows}["google/gemma:free"] is True
 
 
+def test_the_router_id_fallback_is_scoped_to_aggregators() -> None:
+    """R1: this parser serves the ``openai-compat`` wire GENERALLY.
+
+    ollama, deepseek, mistral, kimi, xai, zai, alibaba and openai all reach
+    ``_row_from_openai_entry``, so an ungated id test is not confined to the two
+    aggregators it was reasoned about. Ollama is the case that bites: its
+    "listing" is the user's own filesystem, so a local model named ``auto`` is
+    something a user can simply have — and ollama is the ONE provider with
+    ``allows_missing_api_key``, whose quoted zero is a REAL free that
+    ``_price`` deliberately preserves. Ungated, that row rendered
+    ``usage-based`` where it had correctly read ``free``.
+
+    The PRICE leg stays unscoped on purpose: a quoted ``-1`` is self-describing
+    whoever sent it, so a hypothetical direct provider publishing one is
+    telling the truth about itself.
+    """
+    body = {"data": [{"id": "auto"}, {"id": "qwen3:8b"}]}
+
+    local = fetch_models("ollama", api_key=None, client=_StubClient([_Response(200, body)]))
+    assert local is not None
+    assert {row.id: row.routed for row in local} == {"auto": False, "qwen3:8b": False}
+    assert {row.id: row.free for row in local} == {
+        # The genuine free survives, which is the regression this guards.
+        "auto": False,
+        "qwen3:8b": False,
+    }
+
+    # The SAME id on an aggregator is a router, which is the whole point of the
+    # fallback: the two differ only by which wire the entry came off.
+    routed = fetch_models("radient", api_key=None, client=_StubClient([_Response(200, body)]))
+    assert routed is not None
+    assert {row.id: row.routed for row in routed} == {"auto": True, "qwen3:8b": False}
+
+    # The price leg needs no provider: a stated ``-1`` is unambiguous anywhere.
+    priced_body = {"data": [{"id": "x", "pricing": {"prompt": "-1", "completion": "-1"}}]}
+    direct = fetch_models(
+        "deepseek", api_key="k", client=_StubClient([_Response(200, priced_body)])
+    )
+    assert direct is not None
+    assert direct[0].routed is True
+
+
 def test_the_routed_flag_survives_a_cache_round_trip(tmp_path) -> None:
     """Same argument as the ``free`` round trip: the reader is a different
     function from the parser, and a field it forgets reverts to the unstated

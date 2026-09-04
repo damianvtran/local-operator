@@ -1156,7 +1156,8 @@ class ProviderController:
             # had at all. That makes it the path a user running `radient/auto`
             # on a cold cache actually takes, so leaving it False here would
             # blank the label on exactly the surface that reported the bug.
-            routed=is_meta_route_id(model_id),
+            # Provider-scoped: `ollama/auto` reaches this same branch (R1).
+            routed=is_meta_route_id(model_id, definition.id),
         )
 
     async def live_catalogue(

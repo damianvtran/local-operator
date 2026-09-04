@@ -571,6 +571,56 @@ def test_an_aggregator_current_model_is_rebuilt_from_the_resolved_spec(controlle
     assert controller.entry_for("radient", spec.model_id, spec=spec) is None
 
 
+def test_the_rescue_entry_labels_a_router_but_only_on_an_aggregator(controller) -> None:
+    """The rescue path decides ``routed`` from the ID, and nothing else covered it.
+
+    This is the branch the reported bug actually takes: a user on
+    ``radient/auto`` whose live listing could not be had gets their current
+    model rebuilt here, with no listing row to read a ``-1`` off. So the label
+    has to come from the id — and that is bespoke logic no other construction
+    site shares, which is why it needs its own assertion rather than riding on
+    the parser's tests.
+
+    The negative case is the R1 scoping fix at this call site: ``ollama/auto``
+    reaches this same branch, and a local model the user happened to name
+    ``auto`` must keep its genuine ``free`` rather than being relabelled.
+    """
+    router_spec = ModelSpec(
+        provider="radient",
+        model_id="auto",
+        display_name="Automatic",
+        context_window=1_048_576,
+    )
+    entry = controller.entry_for("radient", "auto", spec=router_spec)
+    assert entry is not None
+    assert entry.routed is True, "the router must carry its label without a listing"
+
+    # A non-router id on the SAME aggregator: the flag is about this endpoint,
+    # not about the provider being an aggregator.
+    other_spec = ModelSpec(
+        provider="radient",
+        model_id="vendor/model",
+        display_name="Vendor Model",
+        context_window=32_000,
+    )
+    other = controller.entry_for("radient", "vendor/model", spec=other_spec)
+    assert other is not None
+    assert other.routed is False
+
+    # R1: the id leg is aggregator-scoped. Ollama's listing is the user's own
+    # filesystem, so `auto` is a name a user can simply give a local model, and
+    # ollama is the one provider whose zero price is a REAL free.
+    ollama_spec = ModelSpec(
+        provider="ollama",
+        model_id="auto",
+        display_name="auto",
+        context_window=8_192,
+    )
+    local = controller.entry_for("ollama", "auto", spec=ollama_spec)
+    assert local is not None
+    assert local.routed is False, "a local model named `auto` is not a meta-route"
+
+
 def test_an_unknown_price_is_not_reported_as_free(controller, monkeypatch) -> None:
     """The picker renders a genuine pair of zeroes as `free`, so an unknown price
     passed through as zero would advertise a paid model as costing nothing.
