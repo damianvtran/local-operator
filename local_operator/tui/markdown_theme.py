@@ -31,6 +31,7 @@ from rich.text import Text
 from rich.theme import Theme
 
 from local_operator.tui import bindings
+from local_operator.tui.settings import settings_get
 
 #: Root of the pygments token hierarchy — the terminal fallback for a token
 #: whose whole ancestry is absent from the ramp.
@@ -113,14 +114,20 @@ def install_markdown_theme() -> None:
 
     def _flat_heading(self: Heading, console, options):  # type: ignore[no-untyped-def]
         text = self.text
-        # Restore the `#` markers rich strips at parse time. Without them the
-        # level has to be inferred from ink alone, which is six levels on one
-        # channel: h3/h4 collided in all 54 themes, and no hue assignment
-        # fixes it without either spending a reserved token or inverting the
-        # ramp in a saturated palette (measured: h3 above h2 in 26 of 54).
-        # The marker is the channel markdown already uses — its LENGTH scales
-        # with the level, so all six are distinguishable by construction, in
-        # every theme, independent of the palette entirely.
+        # Optionally restore the `#` markers rich strips at parse time.
+        #
+        # OFF by default. The marker was introduced when h1-h6 resolved to two
+        # greys (h3/h4 shared `muted`, h5/h6 shared `dim`) and the level
+        # genuinely could not be read from ink. The ramp now spends a hue per
+        # level, which gives six mutually distinct (ink, weight) pairs in all
+        # 54 themes — so the marker stopped being load-bearing and would
+        # otherwise be permanent chrome on every heading of every answer.
+        #
+        # It stays available because it is the one channel that survives a
+        # colourless terminal, `NO_COLOR`, and colour-vision deficiency: for
+        # those readers ink carries nothing and the marker is the difference
+        # between six levels and one. That is a user-specific need, which is
+        # exactly what a setting is for.
         #
         # The heading's own ink arrives as a SPAN over `text` (rich enters the
         # `markdown.hN` style in `on_enter`), not as `text.style`, so the
@@ -132,11 +139,15 @@ def install_markdown_theme() -> None:
         # The tag is `h1`-`h6`, so the level is the digit after the `h`. An
         # unexpected tag falls back to 6 rather than 1: the marker is a CLAIM
         # about rank, and the quietest wrong claim beats the loudest one.
-        suffix = self.tag[1:]
-        level = min(6, max(1, int(suffix))) if suffix.isdigit() else 6
-        rendered = Text("", justify="left", end=text.end)
-        rendered.append(f"{'#' * level} ", style="markdown.heading_marker")
-        rendered.append_text(text)
+        if settings_get("display.heading_markers", False):
+            suffix = self.tag[1:]
+            level = min(6, max(1, int(suffix))) if suffix.isdigit() else 6
+            rendered = Text("", justify="left", end=text.end)
+            rendered.append(f"{'#' * level} ", style="markdown.heading_marker")
+            rendered.append_text(text)
+        else:
+            rendered = text
+            rendered.justify = "left"
         # Leading ABOVE a heading, scaled by level. Every gap in a rendered
         # answer measured 48.8px — one uniform rhythm from h1 to body prose —
         # so when two levels shared an ink there was no second channel holding

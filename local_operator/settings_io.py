@@ -650,6 +650,16 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
+        key="display.heading_markers",
+        path=("display.heading_markers",),
+        section="appearance",
+        label="Heading markers",
+        kind=Kind.BOOL,
+        default=False,
+        help="Show the literal ### before a heading, as the markdown source writes it.",
+        choices=_bool_choices("show ### markers", "colour and weight only"),
+    ),
+    Setting(
         key="display.terminal_title",
         path=("display.terminal_title",),
         section="appearance",

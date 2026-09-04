@@ -279,6 +279,27 @@ def test_a_numeric_table_header_never_claims_a_body_row(width: int) -> None:
         )
 
 
+@pytest.fixture
+def _markers_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn `display.heading_markers` ON for one test.
+
+    The flag defaults OFF — the colour ramp gives six distinct levels on its
+    own — but the alignment must keep working for the users who enable it,
+    which is precisely the case that regressed once already.
+    """
+    import local_operator.tui.markdown_theme as _mt
+
+    real = _mt.settings_get
+    monkeypatch.setattr(
+        _mt,
+        "settings_get",
+        lambda key, default=None: (
+            True if key == "display.heading_markers" else real(key, default)
+        ),
+    )
+
+
+@pytest.mark.usefixtures("_markers_on")
 @pytest.mark.parametrize("width", [40, 60, 80])
 def test_headings_copy_with_their_markers(width: int) -> None:
     """Every heading level survives a copy, marker intact.
@@ -318,6 +339,7 @@ def test_headings_copy_with_their_markers(width: int) -> None:
         )
 
 
+@pytest.mark.usefixtures("_markers_on")
 def test_each_heading_level_paints_its_own_marker_width() -> None:
     """``h3`` paints ``###``, not ``#``.
 
@@ -338,3 +360,27 @@ def test_each_heading_level_paints_its_own_marker_width() -> None:
         "#####",
         "######",
     ], f"heading markers did not scale with level: {markers}"
+
+
+def test_headings_copy_cleanly_with_markers_off() -> None:
+    """The DEFAULT path: no markers rendered, headings still copy as markdown.
+
+    `display.heading_markers` defaults OFF, so the rendered row is bare text
+    while its source line still carries `##`. The alignment has to hold in
+    BOTH directions — the marker-aware strip added for the on-case must not
+    break the off-case, which is the one every user gets.
+    """
+    source = (
+        "# Title\n\n"
+        "Some prose that will wrap across a couple of rendered rows here.\n\n"
+        "## Section\n\n"
+        "- item one\n\n"
+        "### Deep\n"
+    )
+    rows = _rows(source, 60)
+    assert not any(
+        row.lstrip().startswith("#") for row in rows
+    ), f"markers rendered while the flag is off: {rows}"
+    copied = slice_markdown(source, align(source, rows), 0, len(rows) - 1)
+    for heading in ("# Title", "## Section", "### Deep"):
+        assert heading in copied, f"{heading!r} was dropped from the copied markdown"
