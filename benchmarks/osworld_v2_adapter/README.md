@@ -184,7 +184,24 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    key works but should not be the one a worker subprocess holds.
 5. **Guest settings** → infra `OSWORLD_CLIENT_PASSWORD`, `OSWORLD_FILE_BASE_URL`;
    optional `OSWORLD_INPUTS_ROOT` (default `~/worktrees/osworld`) and
-   `OSWORLD_TTL_SECONDS` (default 7200).
+   `OSWORLD_TTL_SECONDS` (default 7200). Optional `AWS_INSTANCE_TYPE`
+   (purpose `benchmark_compute`) replaces the EC2 instance type for the
+   benchmark VM; it **overrides a task's own `instance_type`**, because the
+   task files are content-hash verified and cannot be edited to escape an
+   infrastructure problem their author never saw. Omitting it reproduces the
+   previous behaviour exactly. A malformed value is refused at `prepare`,
+   before anything is allocated (shape only — a well-formed but nonexistent
+   type still reaches `run_instances`). Reach for it when the default
+   burstable `t3.xlarge` runs out of CPU credits — see "Burstable credit
+   exhaustion" in `docs/benchmarks/osworld_2/README.md`.
+
+   **This value requires a workspace built from adapter source that supports
+   it.** The source here gained it without a version bump (the bump would
+   falsify the pilot's pinned attestation), so the shipped source and the
+   digest-pinned `0.1.1` wheel are different code under one version string.
+   Supplying it to a build that does not declare it is refused by the runner
+   before `prepare` rather than silently ignored — an ignored override would
+   put a false hardware claim into a sealed bundle.
 6. **Judged tasks only** → secret `OSWORLD_EVAL_MODEL_API_KEY` plus infra
    `OSWORLD_EVAL_MODEL_PROVIDER` / `OSWORLD_EVAL_MODEL_NAME` (purpose
    `benchmark_judge`). A task whose source imports the judge client is

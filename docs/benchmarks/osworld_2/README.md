@@ -152,6 +152,83 @@ but **the wall budget is not on the adapter wire today**: the adapter passes
 Setting `OSWORLD_TTL_SECONDS` to the wall budget plus 900 is therefore the
 operator's job, and is what bounds a leaked instance's worst-case cost.
 
+### Burstable credit exhaustion, and `AWS_INSTANCE_TYPE`
+
+The default `t3.xlarge` is a **burstable** instance, and that silently
+destroyed five paid episodes with
+`ObservationError: environment returned no screenshot frame`. An instrumented
+run identified the cause: at the failure moment CloudWatch reported
+`CPUCreditBalance 4.2` with `CPUSurplusCreditBalance 0.0` and CPU dipping to
+**10.3%** — the guest was throttled to its baseline, not idle. A starved guest
+cannot answer its screenshot HTTP server, so the episode dies at step 9–32
+having already spent $0.12–$0.32. AWS status checks stay `ok` throughout,
+because from the hypervisor's side nothing is wrong; the failure is only
+visible as credit metrics plus a suspiciously low CPU floor.
+
+The escape hatch is the optional infra value `AWS_INSTANCE_TYPE`, which
+replaces the instance type for the benchmark VM:
+
+```sh
+--infra AWS_INSTANCE_TYPE=m5.xlarge
+```
+
+It is infra rather than a task field because the task files are **content-hash
+verified** against the release pin — editing one to change `instance_type`
+invalidates the digest that makes a score reproducible. For the same reason
+the override **beats a task's own pinned `instance_type`**: the task author
+chose a size against hardware they could reach, while the operator is working
+around an infrastructure failure they never saw and cannot fix from inside a
+hash-pinned file. A malformed value is refused at `prepare`, before anything
+is allocated, rather than surfacing as an opaque botocore error midway through
+a paid run.
+
+Omitting it reproduces the previous behaviour exactly, which is what keeps a
+default run comparable. When it **is** set, `scripts/run_episode.py` stamps
+`aws_instance_type_override` into the evidence manifest's metadata, so a score
+produced on non-default hardware is disclosable from the sealed bundle alone
+rather than from operator memory. A run on non-default hardware is not
+directly comparable to one on the release default and should be reported as
+such.
+
+That key records the value **requested** on the command line. It is only
+honest because the runner refuses the one case that would make it a lie — see
+below.
+
+#### The adapter source and the pinned wheel both call themselves `0.1.1`
+
+**Read this before running with `AWS_INSTANCE_TYPE`.** The adapter source in
+this repository gained the override *without* a distribution version bump. The
+bump was withheld on purpose: the adapter version feeds `_release_digest`, so
+bumping it would have falsified the committed attestation of what the paid
+pilot actually ran on. The consequence is that **two materially different
+adapter code bodies now both report version `0.1.1`**, and the wheel installed
+in the pilot interpreter (`~/worktrees/osworld/venvs/0.1.1/`) is the one
+*without* override support. The committed selectors still pin that artifact by
+`package_digest`.
+
+The digest pin catches a *mismatched* wheel. It cannot catch a *correctly
+pinned old* one — so version alone cannot tell an operator which build they
+are about to run.
+
+Because a stale build would silently ignore the override while the manifest
+recorded it as applied — a false statement sealed inside a `verify_bundle`-valid
+bundle, which is worse than no disclosure at all — the runner fails closed.
+`EpisodeRunner._refuse_undeclared_disclosed_infra` compares the value against
+the adapter's own `inspect_requirements` response, which distinguishes the two
+builds exactly, and refuses **before `prepare`**, so nothing is allocated and no
+bundle exists to mislead a reader:
+
+```
+UndeclaredDisclosedInfra: adapter 'osworld-v2' version '0.1.1' does not
+declare ['AWS_INSTANCE_TYPE'], so the value would be silently ignored while
+the evidence bundle recorded it as applied; rebuild the adapter workspace and
+selector, or drop the value
+```
+
+Seeing that error means the workspace and selector need rebuilding against the
+current adapter source (§ the build recipe in
+`benchmarks/osworld_v2_adapter/README.md`), not that the flag is wrong.
+
 ### Upstream is sealed after the first reset
 
 One `reset` per episode is the contract. Upstream's own allocation paths — a
