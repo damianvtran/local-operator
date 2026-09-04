@@ -51,6 +51,7 @@ from local_operator.evaluation.adapters.api import (
     ScoreParams,
     SecretRef,
 )
+from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
@@ -60,7 +61,6 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
-from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     BudgetCommitmentPayload,
