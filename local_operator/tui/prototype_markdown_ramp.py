@@ -103,6 +103,12 @@ class Variant:
     blurb: str
     #: element -> (token, bold). Only overrides; absent = shipped value.
     overrides: dict[str, tuple[str, bool]]
+    #: Ground token for the code fence. `bg` (the shipped value) means the
+    #: fence is invisible AS A BLOCK — it is the same paper as the prose
+    #: around it. `raised`/`surface` give it an actual slab, which is the
+    #: single largest unspent token in the palette: `raised` is visibly
+    #: distinct from `bg` in 53 of 54 themes and still holds `fg` at 6.09:1.
+    fence_ground: str = "bg"
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +210,42 @@ VARIANTS: list[Variant] = [
             "tool.diff.hunk": ("label", False),
         },
     ),
+    Variant(
+        "E",
+        "Maximal + elevation (uses the unspent grounds)",
+        "Everything in D, plus the 12 tokens the table never touches. The "
+        "code fence gets a real `raised` slab instead of sitting on the same "
+        "paper as the prose — the single biggest unspent token, visibly "
+        "distinct from `bg` in 53/54 themes and still holding `fg` at "
+        "6.09:1. Colour AND depth, not just colour.",
+        {
+            "markdown.h1": ("label", True),
+            "markdown.h2": ("signal", True),
+            "markdown.h3": ("string", True),
+            "markdown.h4": ("success", False),
+            "markdown.h5": ("muted", False),
+            "markdown.h6": ("dim", False),
+            "markdown.item.bullet": ("success", False),
+            "markdown.item.number": ("success", False),
+            "markdown.block_quote": ("warning", False),
+            "markdown.hr": ("label", False),
+            "markdown.strong": ("string", True),
+            "markdown.code": ("signal", False),
+            "code.keyword": ("label", True),
+            "code.name_function": ("signal", False),
+            "code.name_class": ("warning", False),
+            "code.name_builtin": ("accent", False),
+            "code.operator": ("label", False),
+            "code.string": ("success", False),
+            "code.number": ("warning", False),
+            "tool.row.name_settled": ("signal", True),
+            "tool.row.icon_settled": ("signal", False),
+            "tool.row.chip_settled": ("label", False),
+            "tool.args.value": ("string", False),
+            "tool.diff.hunk": ("label", False),
+        },
+        fence_ground="raised",
+    ),
 ]
 
 THEMES = [
@@ -257,6 +299,20 @@ def _apply(variant: Variant) -> None:
             cur = b.BY_ELEMENT.get(element)
             if cur is not None:
                 b.BY_ELEMENT[element] = replace(cur, token=token, bold=bold)
+
+    # The fence's SLAB. `code.background` is a Role.GROUND binding, so it is
+    # read through `ground_hex()` rather than `style()` — it paints the
+    # surface instead of ink on one. Repointing it is how the fence stops
+    # being the same paper as the prose around it.
+    ground = b.BY_ELEMENT.get("code.background")
+    if ground is not None:
+        b.BY_ELEMENT["code.background"] = replace(
+            ground, token=variant.fence_ground, ground=variant.fence_ground
+        )
+        b._CODE_BINDINGS = tuple(
+            b.BY_ELEMENT["code.background"] if x.element == "code.background" else x
+            for x in b._CODE_BINDINGS
+        )
 
 
 def _ansi_to_html(text: str) -> str:
