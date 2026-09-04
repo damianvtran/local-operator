@@ -613,7 +613,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # tool path uses, so `40s` / `8h30m` mean the same thing from either
         # entry point — including its deliberate rejection of a bare number
         # and of a zero interval, both of which are runaway loops.
-        help='repeat every DURATION after the first fire ("40s", "1h", "8h30m")',
+        help='repeat every DURATION after the first fire ("5m", "1h", "8h30m")',
+    )
+    wake_create.add_argument(
+        "--until",
+        default="",
+        metavar="WHEN",
+        # Bounds a recurrence in TIME. `WakeSchedule.until_at` and
+        # `advance_wake_schedule`'s `retired: until` have always honoured it;
+        # only the CLI could not express it, so a scheduled automation could
+        # only ever be unbounded (round 4, R4).
+        help='stop repeating after this time ("in 7d", "at 09:30")',
+    )
+    wake_create.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop repeating after N fires",
     )
     wake_create.add_argument("--json", action="store_true", help="machine-readable output")
     wake_serve = wake_sub.add_parser(
@@ -1786,12 +1803,49 @@ def _wake_create(args: argparse.Namespace) -> int:
             )
             return 1
 
+    until_at: int | None = None
+    until_raw = str(getattr(args, "until", "") or "").strip()
+    if until_raw:
+        # Both prepositions are stripped here rather than taught to the two
+        # parsers, exactly as the `when` argument above does it — the help
+        # promises "in 7d" and "at 09:30", so both have to reach a bare
+        # duration/clock parser.
+        lowered = until_raw.lower()
+        if lowered.startswith("in "):
+            body = until_raw[3:].strip()
+        elif lowered.startswith("at "):
+            body = until_raw[3:].strip()
+        else:
+            body = until_raw
+        duration = parse_wake_duration(body)
+        until_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+        if until_at is None:
+            print(
+                f"could not read an end time from {until_raw!r} (try 'in 7d' or 'at 09:30')",
+                file=sys.stderr,
+            )
+            return 1
+
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        print("--limit must be at least 1", file=sys.stderr)
+        return 1
+
+    # Both bounds only mean something for a repeat: a one-shot already fires
+    # exactly once, so silently accepting them would promise a behaviour the
+    # schedule does not have.
+    if every_ms is None and (until_at is not None or limit is not None):
+        print("--until and --limit bound a repeat — add --every", file=sys.stderr)
+        return 1
+
     schedule = WakeSchedule(
         id=f"w{len(existing) + 1}",
         message=str(args.message),
         next_due_at=due_at,
         created_at=now_ms,
         every_ms=every_ms,
+        until_at=until_at,
+        limit=limit,
     )
     combined = [*existing, schedule.model_dump()]
 
@@ -1879,6 +1933,16 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     "next_due_at": due,
                     "due_in_s": (due - now_ms) / 1000.0,
                     "dormant": dormant,
+                    # RECURRENCE, so a listing can distinguish an automation
+                    # from a one-shot. The store has always carried these; the
+                    # lister dropped them, which meant a user who scheduled
+                    # "regular disk cleaning" had no CLI way to confirm it
+                    # repeats — in either the human or the --json form
+                    # (round 4, R3/Q2/U14).
+                    "every_ms": raw.get("every_ms"),
+                    "until_at": raw.get("until_at"),
+                    "limit": raw.get("limit"),
+                    "fired_count": raw.get("fired_count") or 0,
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -1917,11 +1981,22 @@ def wake_command(args: argparse.Namespace) -> int:
         if not rows:
             print("no scheduled wakes")
             return 0
+        from local_operator.harness.wake import format_duration
+
         for row in rows:
             when = _format_due(row["due_in_s"])
             mark = " (dormant — session stopped)" if row["dormant"] else ""
             name = row["session_id"]
-            print(f"{when:>12}  {name}  {row['message']}{mark}")
+            # `every …` reuses the same renderer the tool listing and the wake
+            # panel use, so one wake reads identically wherever it is shown.
+            repeat = ""
+            if row.get("every_ms"):
+                repeat = f" · every {format_duration(int(row['every_ms']))}"
+                if row.get("limit"):
+                    repeat += f", {int(row['fired_count'])}/{int(row['limit'])} fired"
+                elif row.get("fired_count"):
+                    repeat += f", {int(row['fired_count'])} fired"
+            print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
         return 0
 
     # status

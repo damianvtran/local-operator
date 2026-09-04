@@ -37,6 +37,8 @@ def _args(**kwargs: object) -> argparse.Namespace:
         "message": "check the build",
         "json": True,
         "every": "",
+        "until": "",
+        "limit": None,
     }
     base.update(kwargs)
     return argparse.Namespace(**base)
@@ -164,3 +166,42 @@ def test_an_unusable_repeat_interval_is_refused_in_words(
     err = capsys.readouterr().err
     assert "Traceback" not in err
     assert "interval" in err
+
+
+def test_a_bound_recurrence_stores_its_bounds(tmp_path: Path) -> None:
+    """`--until` and `--limit` bound a repeat; the store has always honoured
+    them (`advance_wake_schedule` retires on both) and only the CLI could not
+    express one, so a scheduled automation could only be unbounded (R4)."""
+    import json
+
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(every="1h", limit=5)) == 0
+    entry = json.loads((tmp_path / "wakes" / "wakecreate01.json").read_text())
+    assert entry["schedules"][0]["limit"] == 5
+
+    assert _wake_create(_args(every="1h", until="in 7d")) == 0
+    entry = json.loads((tmp_path / "wakes" / "wakecreate01.json").read_text())
+    assert entry["schedules"][1]["until_at"] is not None
+
+
+@pytest.mark.parametrize("until", ["in 7d", "at 09:30", "7d"])
+def test_every_advertised_until_form_parses(tmp_path: Path, until: str) -> None:
+    """The help promises `in 7d` and `at 09:30`; both prepositions are stripped
+    by the command, exactly as the `when` argument does it."""
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(every="1h", until=until)) == 0
+
+
+def test_a_bound_without_a_repeat_is_refused(tmp_path: Path) -> None:
+    """A one-shot already fires exactly once, so accepting `--limit` on one
+    would promise a behaviour the schedule does not have."""
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(limit=3)) == 1
+    assert _wake_create(_args(until="in 7d")) == 1
+    assert _wake_create(_args(every="1h", limit=0)) == 1

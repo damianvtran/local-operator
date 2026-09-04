@@ -951,3 +951,51 @@ async def test_an_old_registrant_without_surface_kinds_keeps_the_previous_behavi
 
     handle._registrant = _OldIdle()
     assert handle._watching_surfaces() == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("tool", "description", "expected"),
+    [
+        # `describe_approval` already leads with the action word, and the
+        # title IS the tool name, so prefixing rendered every approval toast
+        # as "write: write: /path" — on the release's headline surface, every
+        # time (round 4, Q3).
+        ("write", "write: /tmp/notes.txt", "write: /tmp/notes.txt"),
+        ("bash", "bash: rm -rf build/", "bash: rm -rf build/"),
+        # A tool whose description does NOT name itself still gets the prefix.
+        ("browser", "https://example.com", "browser: https://example.com"),
+        # No description: the tool name alone says less than the shared
+        # vocabulary, so BODIES answers instead of a bare "write".
+        ("write", "", "Waiting for approval"),
+    ],
+)
+def test_the_toast_body_never_repeats_the_tool_name(
+    tool: str, description: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a user reads on the banner when nothing is attached."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "local_operator.tui.notify.detached_notify",
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
+    )
+    monkeypatch.setattr("local_operator.tui.notify.notifications_enabled", lambda *a, **k: True)
+
+    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle._session = SimpleNamespace(conversation_name="a session")  # type: ignore[attr-defined]
+    handle._registrant = None  # type: ignore[attr-defined]
+    handle._parked_announcement = None  # type: ignore[attr-defined]
+    handle._loop = asyncio.new_event_loop()  # type: ignore[attr-defined]
+    handle._session_id_for_resume = lambda: "abc123def456"  # type: ignore[attr-defined]
+
+    try:
+        handle._announce_pending("approval", tool, description)
+    finally:
+        handle._loop.close()  # type: ignore[attr-defined]
+
+    assert sent, "no notification was produced"
+    assert sent[0][1] == expected

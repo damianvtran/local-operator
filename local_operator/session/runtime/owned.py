@@ -1173,7 +1173,20 @@ class OwnedSessionHandle(SessionHandle):
             # back to the shared vocabulary — an `ask` with no text used to
             # render as the bare word "question" with no hint it was a
             # question rather than an approval.
-            subject = f"{title}: {detail}".strip().rstrip(":").strip()
+            #
+            # NOT `f"{title}: {detail}"`. A tool's `describe_approval` already
+            # leads with its own action word (`_describe_path_approval` emits
+            # "write: /path"), and the title IS the tool name, so prefixing
+            # rendered every approval toast as "write: write: /path" — on the
+            # release's headline surface, every time (round 4, Q3).
+            subject = (detail or "").strip()
+            if not subject:
+                # No description at all: the tool name alone ("write") says
+                # less than the shared vocabulary below, so leave it empty and
+                # let BODIES answer.
+                subject = ""
+            elif title and not subject.lower().startswith(title.lower()):
+                subject = f"{title}: {subject}".strip().rstrip(":").strip()
             detached_notify(
                 name,
                 subject or BODIES.get(kind, ""),
