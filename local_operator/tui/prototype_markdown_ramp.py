@@ -319,6 +319,7 @@ def _ansi_to_html(text: str) -> str:
     text = _OSC8.sub("", text)
     out: list[str] = []
     fg = None
+    bg = None
     bold = italic = underline = False
     live = False
 
@@ -333,6 +334,8 @@ def _ansi_to_html(text: str) -> str:
         css = []
         if fg:
             css.append(f"color:{fg}")
+        if bg:
+            css.append(f"background:{bg}")
         if bold:
             css.append("font-weight:700")
         if italic:
@@ -354,7 +357,8 @@ def _ansi_to_html(text: str) -> str:
         while i < len(codes):
             c = int(codes[i])
             if c == 0:
-                fg, bold, italic, underline = None, False, False, False
+                fg = bg = None
+                bold = italic = underline = False
             elif c == 1:
                 bold = True
             elif c == 3:
@@ -372,6 +376,19 @@ def _ansi_to_html(text: str) -> str:
                 i += 4
             elif c == 39:
                 fg = None
+            # 48;2;r;g;b — the BACKGROUND. Rich emits it on every cell of a
+            # code fence (the slab), immediately after the foreground in the
+            # same escape. Not consuming it here left `i` pointing into the
+            # middle of the triplet, so the next loop read `2`/`39`/`34` as
+            # fresh SGR codes — and `39` is "default foreground", which
+            # silently CLEARED the colour rich had just set. That is why the
+            # fence rendered bold-but-colourless while every other surface
+            # was fine: only fences carry a background.
+            elif c == 48 and i + 4 < len(codes) and codes[i + 1] == "2":
+                bg = "#%02x%02x%02x" % tuple(int(codes[i + j]) for j in (2, 3, 4))
+                i += 4
+            elif c == 49:
+                bg = None
             i += 1
         pos = m.end()
     if pos < len(text):
