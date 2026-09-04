@@ -1,0 +1,24 @@
+teams on disk: ['lopdev']
+viewer attached: RemoteSession
+
+--- capability probe on the live viewer instance ---
+  team_registry   present=True
+  attach_team     present=False
+  active_team     present=False
+  variables       present=False
+
+--- routed /team lopdev <request> (owner-side result) ---
+  outcome = {'kind': 'noop', 'text': '', 'style': 'info', 'data': {'type': 'team_mutate', 'args': 'lopdev build the thing'}}
+  kind='noop' data.type='team_mutate'
+  >>> RENDERER DROPS THIS: _render_authoritative_slash returns on noop
+  >>> user sees NOTHING. This is the silent failure.
+
+--- routed bare /team (listing works, for contrast) ---
+  kind='block' -> listing renders fine
+
+--- /credential test on the viewer ---
+  viewer.variables = None
+  >>> _cmd_credential emits "session is still starting…"
+  >>> but the session is FULLY ATTACHED. The wait never ends.
+
+scratch config dir: /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/teamfix-repro-6sdu29_e
