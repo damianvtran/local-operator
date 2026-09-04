@@ -76,14 +76,13 @@ def test_markdown_heading_levels_are_mutually_distinct(theme_name: str) -> None:
     levels.
     """
     theme.set_theme(theme_name)
-    levels = [
-        (
-            (lambda s: (s.color.triplet.hex if s.color else None, bool(s.bold)))(
-                bindings.style(f"markdown.h{n}")
-            )
-        )
-        for n in range(1, 7)
-    ]
+
+    def _level(element: str) -> tuple[str | None, bool]:
+        style = bindings.style(element)
+        triplet = style.color.get_truecolor() if style.color else None
+        return (triplet.hex if triplet else None, bool(style.bold))
+
+    levels = [_level(f"markdown.h{n}") for n in range(1, 7)]
     duplicates = {level for level in levels if levels.count(level) > 1}
     assert not duplicates, (
         f"{theme_name}: heading levels are not mutually distinct — "
