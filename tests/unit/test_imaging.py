@@ -710,13 +710,15 @@ def test_a_repair_keeps_png_when_jpeg_would_be_bigger() -> None:
 
     Exercised at the REPAIR bound rather than through ``read``: bounding ingest
     to :data:`IMAGE_INGEST_MAX_EDGE` caps the delivered area at 1024x1024, and
-    at that area JPEG is always the smaller encode — 48-colour palette noise
-    measures 1.71 MiB of PNG against 0.74 MiB of JPEG, so the lossy rung fires
-    and WINS rather than declining itself. The rung closes for `read` because
-    PNG stops winning at this area, NOT because PNG stays inside the budget
-    (it does not). It is still reachable whenever a caller passes an explicit
-    ``max_edge`` (``rebound_oversize_image`` does), which is where the branch
-    now needs its cover.
+    the rung needs BOTH conditions at once and 1024x1024 never
+    supplies them together: below ~32 palette colours PNG is the smaller encode
+    but stays inside the budget (0.96 MiB at its worst, 48 colours), and above
+    that PNG exceeds the budget but JPEG has already become smaller (1.06 MiB
+    against 0.80 MiB at 64 colours). The two conditions pass each other without
+    ever overlapping. Swept 2-256 colours to
+    confirm the branch is unreachable there rather than merely rare. It is
+    still reachable whenever a caller passes an explicit ``max_edge``
+    (``rebound_oversize_image`` does), which is where the branch needs cover.
     """
     rng = random.Random(1234)
     palette = [

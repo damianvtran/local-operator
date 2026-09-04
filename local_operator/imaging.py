@@ -113,39 +113,44 @@ from local_operator.optional import missing_extra_error
 #: passes any byte cap easily — costs 16,257 tokens untouched against 2,459
 #: resized (6.6x).
 #:
-#: PASTE/READ INGEST uses a tighter bound (:data:`IMAGE_INGEST_MAX_EDGE`).
-#: Anthropic bills an image by pixel AREA (~w*h/750 tokens), so after the 1568
+#: Images ENTERING the context take the tighter :data:`IMAGE_INGEST_MAX_EDGE`
+#: instead; this constant stays the correctness ceiling and a repair is still
+#: measured against it.
+IMAGE_MAX_EDGE = 1568
+#: Long-edge ceiling for images ENTERING the context (``read`` tool, pasted
+#: screenshots), and the bound the cost argument below is measured on.
+#:
+#: Tighter than :data:`IMAGE_MAX_EDGE`, which stays the CORRECTNESS ceiling —
+#: the many-image refusal line and the snapcompact billing geometry both answer
+#: to it and are deliberately not re-decided here. Ingest is the one site free
+#: to move: 1024 sits below every provider refusal line (2000px many-image,
+#: 5 MB base64 wall) with wide margin.
+#:
+#: Providers bill an image by pixel AREA (~w*h/750 tokens), so after the 1568
 #: server-side downsample there is still a billed region between 1024 and 1568
-#: where pixels cost tokens without buying legibility: a real 4-up document
-#: collage from this machine's own traffic measured 3,184 tokens at 1568
-#: against 1,359 at 1024 (57% cheaper), and a vision model reading the 1024
-#: render recovered appendix titles, a 5-column score matrix, page numbers and
-#: 7pt header prose. Below 1024 the margin thins — dense 6-7pt table body text
-#: is at the edge at 768 — so 1024 is the floor that keeps document work
-#: legible.
+#: where pixels cost tokens without buying legibility. Measured on a real 4-up
+#: document collage from this machine's own traffic: 3,184 visual tokens at
+#: 1568 against 1,359 at 1024 (57% cheaper), with a vision model reading the
+#: 1024 render recovering appendix titles, a 5-column score matrix, page
+#: numbers and 7pt header prose. Below 1024 the margin thins — dense 6-7pt
+#: table body text is at the edge at 768 — so 1024 is the floor that keeps
+#: document work legible.
 #:
 #: ONE MEASURED LOSS, so nobody re-derives it: on a 4-up COLLAGE the footer's
 #: 24-character hex report id degrades from a 4-row ink span to 1 and stops
-#: being transcribable (design round 1, D1). Prose survives; a long opaque
-#: identifier does not. It is specific to multi-page collages — a page captured
-#: alone measures ~784x1006 and is not resized at all — and the escape hatch is
-#: to crop the region and re-read it, which passes through unresized.
+#: being transcribable (design round 1, D1). Prose survives a downscale because
+#: a reader reconstructs it from context; a long opaque identifier has no
+#: context to reconstruct from. It is specific to multi-page collages — a page
+#: captured alone measures ~784x1006 and is not resized at all — and the escape
+#: hatch is to crop the region and re-read it, which passes through unresized.
 #:
-#: LINE ART IS EXEMPT and keeps :data:`IMAGE_MAX_EDGE`. The measurement above
-#: is photographic content, which has no one-pixel strokes to lose; bilevel
+#: LINE ART IS EXEMPT and keeps :data:`IMAGE_MAX_EDGE`. The measurement above is
+#: photographic content, which has no one-pixel strokes to lose; bilevel
 #: renderings of a small pixel font do, and shrinking them to 1024 destroys the
-#: legibility the font was chosen for. That is not hypothetical — a snapcompact
-#: archive frame is exactly such a rendering (PR #603 review round 1, F1). The
-#: exemption uses the same ``_is_line_art`` predicate the repair path does.
-IMAGE_MAX_EDGE = 1568
-#: Long-edge ceiling for images ENTERING the context (``read`` tool, pasted
-#: screenshots). Tighter than :data:`IMAGE_MAX_EDGE`, which stays the
-#: correctness ceiling — the many-image refusal line and the snapcompact
-#: billing geometry both answer to it and are deliberately not re-decided
-#: here. Ingest is the one site that may move independently: 1024 sits below
-#: every provider refusal line (2000px many-image, 5 MB base64 wall) with
-#: wide margin, and the legibility evidence above says the pixels between
-#: 1024 and 1568 cost tokens without buying readability on document content.
+#: legibility the font was chosen for — a snapcompact archive frame is exactly
+#: such a rendering, and at 1024 it renders "compacted" as "conpacted" (PR #603
+#: review round 1, F1; QA round 1). The exemption uses the same
+#: ``_is_line_art`` predicate the repair path does.
 IMAGE_INGEST_MAX_EDGE = 1024
 #: The provider ceiling a REPAIR is measured against, which is deliberately not
 #: :data:`IMAGE_MAX_EDGE`. Anything this module CREATES is bounded to 1568 for
