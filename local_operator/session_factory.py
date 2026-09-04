@@ -39,6 +39,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from local_operator.ansi import sanitize_prompt_line
+
+# Stdlib-only and tiny, like ``paths`` below: safe at module level on the
+# startup path that ``test_import_graph`` guards.
+from local_operator.ecosystem_instructions import (
+    content_digest,
+    load_ecosystem_instructions,
+)
 from local_operator.harness.types import AgentMessage, Message
 
 # Imported as an alias: ``config_dir`` is a parameter/local name in other
@@ -83,6 +90,15 @@ MAX_USER_INSTRUCTIONS_CHARS = 64_000
 #: slice: whichever source is smaller than its share leaves the remainder to
 #: the other, so neither is taxed for room the other never uses.
 _AGENT_INSTRUCTIONS_RESERVE = 16_000
+
+#: Floor held for imported user-scope instructions (``~/.agents/AGENTS.md``;
+#: see :mod:`local_operator.ecosystem_instructions`). Its OWN share, because
+#: adding a third source to a two-way split silently converts one of the two
+#: existing guarantees into a shared one — the operator's file and the selected
+#: profile would start evicting each other because of a file neither of them
+#: knows about. Sized to match the profile's reserve: an imported file is
+#: standing preference of the same kind and the same order of magnitude.
+_ECOSYSTEM_INSTRUCTIONS_RESERVE = 16_000
 
 
 #: Modules whose import dominates :func:`create_session`, measured rather than
@@ -670,6 +686,15 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     operator's machine-wide preferences, and a profile that genuinely must
     override one can say so in its own text.
 
+    Instructions shared with other agent tools (``~/.agents/AGENTS.md``, see
+    :mod:`local_operator.ecosystem_instructions`) are read too, PREPENDED so
+    the operator's own file is read last and wins on conflict, and skipped
+    entirely when their content is identical to ``system_prompt.md`` — the
+    common case for anyone who currently generates the native file from the
+    shared one with a sync script. Those files are never written by lop, so
+    ``system_prompt.md`` remains the single write target of Settings →
+    Instructions and ``GET``/``PATCH /v1/config/system-prompt``.
+
     Failures degrade instead of breaking startup: an unreadable file is
     skipped, and undecodable bytes are REPLACED rather than dropping the whole
     file, because a stray bad byte in a long instructions file should cost the
@@ -712,25 +737,47 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     # down to its own guaranteed share.
     global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
     agent_raw = agent_prompt.strip()
-    # The "\n\n" join is only emitted when BOTH sources survive, so the two
+    # The digest is handed down so a shared file byte-identical to the native
+    # one is dropped rather than duplicated into every cached request.
+    ecosystem_raw = load_ecosystem_instructions(
+        skip_digests=frozenset({content_digest(global_raw)} if global_raw else ())
+    ).strip()
+
+    # The "\n\n" joins are only emitted between sources that SURVIVE, so the
     # characters are only withheld then. Keyed off the agent text alone, a
     # profile that fits the documented cap exactly was truncated by two
     # characters while a global file of the same size passed whole.
-    separator = 2 if (agent_raw and global_raw) else 0
+    present = sum(1 for raw in (ecosystem_raw, global_raw, agent_raw) if raw)
+    separator = 2 * max(0, present - 1)
+    # Bounded in ascending order of ownership: the imported file first, then
+    # the profile, and the operator's own file takes the remainder. Each may
+    # spend what the others leave, down to its own floor — so a lone 64k source
+    # is still whole, and no source is taxed for room the others never use.
+    ecosystem_text = _bound_instructions(
+        ecosystem_raw,
+        "imported user-scope instructions",
+        max(
+            _ECOSYSTEM_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - len(agent_raw) - separator,
+        ),
+    )
     agent_text = _bound_instructions(
         agent_raw,
         "the selected agent's profile",
         max(
             _AGENT_INSTRUCTIONS_RESERVE,
-            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - separator,
+            MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(global_raw) - separator,
         ),
     )
     global_text = _bound_instructions(
         global_raw,
         str(path),
-        MAX_USER_INSTRUCTIONS_CHARS - len(agent_text) - separator,
+        MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(agent_text) - separator,
     )
-    return "\n\n".join(part for part in (global_text, agent_text) if part)
+    # Imported first, native second, profile last: later text is read as the
+    # more specific instruction, so lop's own file outranks the shared one and
+    # the chosen profile outranks both.
+    return "\n\n".join(part for part in (ecosystem_text, global_text, agent_text) if part)
 
 
 def _bound_instructions(text: str, source: str, limit: int) -> str:

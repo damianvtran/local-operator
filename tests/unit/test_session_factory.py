@@ -2054,6 +2054,253 @@ def test_truncation_marker_is_counted_inside_the_budget() -> None:
     assert "truncated" not in tiny
 
 
+# --- Imported user-scope instructions (~/.agents/AGENTS.md) -----------------
+
+
+def _write_ecosystem_file(home: Path, text: str) -> Path:
+    path = home / ".agents" / "AGENTS.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_ecosystem_instructions_reach_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issue in one assertion: instructions kept for other agent tools no
+    longer have to be copied into a lop-specific filename to be seen."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ecosystem_file(tmp_path, "- Shared with every agent tool.")
+
+    assert session_factory.load_user_instructions() == "- Shared with every agent tool."
+
+
+def test_the_native_file_is_read_after_the_imported_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order IS the precedence rule. lop's own file lands last so it is read
+    as the more specific instruction and wins on conflict — the same ranking
+    native skills have over imported ones."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED")
+
+    out = session_factory.load_user_instructions()
+
+    assert out.index("- IMPORTED") < out.index("- NATIVE")
+
+
+def test_all_three_sources_layer_imported_native_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED")
+
+    assert session_factory.load_user_instructions("- PROFILE") == (
+        "- IMPORTED\n\n- NATIVE\n\n- PROFILE"
+    )
+
+
+def test_an_imported_copy_of_the_native_file_is_not_paid_for_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync-script workaround this feature replaces leaves both files on
+    disk with identical content. Injecting both would double the cost of the
+    exact thing being fixed, on every cached request of every session."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- One rule.\n", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- One rule.")
+
+    assert session_factory.load_user_instructions() == "- One rule."
+
+
+def test_ecosystem_instructions_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED")
+    monkeypatch.setenv("LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS", "")
+
+    assert session_factory.load_user_instructions() == "- NATIVE"
+
+
+def test_a_huge_imported_file_cannot_crowd_out_the_other_two_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A third source must not be able to evict the two that already had
+    guarantees — least of all a file lop imported rather than one the operator
+    pointed it at."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text(
+        "- NATIVE RULE MUST SURVIVE", encoding="utf-8"
+    )
+    _write_ecosystem_file(tmp_path, "e" * 64_000)
+
+    out = session_factory.load_user_instructions("- PROFILE RULE MUST SURVIVE")
+
+    assert "NATIVE RULE MUST SURVIVE" in out
+    assert "PROFILE RULE MUST SURVIVE" in out
+    assert len(out) <= session_factory.MAX_USER_INSTRUCTIONS_CHARS
+
+
+def test_a_huge_native_file_cannot_crowd_out_the_imported_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror: the imported file holds its own floor, so a full-size
+    native file cannot silently discard it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("n" * 64_000, encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED RULE MUST SURVIVE")
+
+    out = session_factory.load_user_instructions()
+
+    assert "IMPORTED RULE MUST SURVIVE" in out
+    assert len(out) <= session_factory.MAX_USER_INSTRUCTIONS_CHARS
+
+
+def test_no_imported_file_leaves_the_whole_budget_to_the_other_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flat-tax bug this loader has already been fixed for twice: a
+    reserve subtracted unconditionally hands a slice to nobody. With no
+    imported file present, a full-size native file must still pass whole."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    text = "z" * session_factory.MAX_USER_INSTRUCTIONS_CHARS
+    (tmp_path / "config" / "system_prompt.md").write_text(text, encoding="utf-8")
+
+    out = session_factory.load_user_instructions()
+
+    assert len(out) == session_factory.MAX_USER_INSTRUCTIONS_CHARS
+    assert "truncated" not in out
+
+
+def test_a_broken_imported_file_does_not_cost_the_native_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    (tmp_path / ".agents" / "AGENTS.md").mkdir(parents=True)  # a directory, not a file
+
+    assert session_factory.load_user_instructions() == "- NATIVE"
+
+
+def test_lop_never_writes_the_imported_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``system_prompt.md`` stays the SOLE write target of Settings →
+    Instructions and ``GET``/``PATCH /v1/config/system-prompt``; loading an
+    imported file must not create a second, ambiguous one."""
+    from local_operator.server.routes.config import system_prompt_file
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _write_ecosystem_file(tmp_path, "- Shared rule.")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+
+    session_factory.load_user_instructions()
+
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert system_prompt_file() == tmp_path / "config" / "system_prompt.md"
+
+
+@pytest.mark.asyncio
+async def test_a_real_session_carries_imported_instructions(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins the WIRING, not just the loader — the same reason the native
+    file's own end-to-end test exists. Drives the real composition root and
+    reads the blocks the provider actually returns."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    # The fixture points LOCAL_OPERATOR_CONFIG_DIR at tmp_path while returning
+    # tmp_path/.local-operator; HOME follows it so the imported path resolves
+    # under the same scratch tree.
+    monkeypatch.setenv("HOME", str(tmp_config_dir.parent))
+    _write_ecosystem_file(tmp_config_dir.parent, "- IMPORTED RULE REACHES THE PROMPT")
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        produced = session._system_blocks_provider()
+        blocks = await produced if inspect.isawaitable(produced) else produced
+    finally:
+        await session.dispose()
+
+    assert "IMPORTED RULE REACHES THE PROMPT" in blocks[0]
+    assert "<user_instructions>" in blocks[0]
+    assert not any("IMPORTED RULE" in block for block in blocks[1:])
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_inherits_imported_instructions(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child must behave like the thing the imported file extends. It gets
+    this for free by re-reading through the same loader — which is exactly why
+    it needs pinning: a future split of the ecosystem read out of
+    ``load_user_instructions`` would silently give children a different set of
+    standing rules than their parent, with the suite green."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.harness.subagent import _build_child_session
+
+    monkeypatch.setenv("HOME", str(tmp_config_dir.parent))
+    _write_ecosystem_file(tmp_config_dir.parent, "- IMPORTED RULE BINDS CHILDREN TOO")
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+    assert "- IMPORTED RULE BINDS CHILDREN TOO" in blocks[0]
+
+
 @pytest.mark.asyncio
 async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     tmp_config_dir: Path,
