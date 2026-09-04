@@ -270,6 +270,18 @@ async def start_grant(
             # has already destroyed the credential, so "cancelled" alone reads
             # as "nothing changed" and sends the user back to a server that can
             # no longer connect (review F6). Name the state and the recovery.
+            #
+            # Both branches speak ONLY about this grant, never about the
+            # server's overall state. ``forgotten`` is scoped to this
+            # ``start_grant`` call, so it cannot see a delete performed by an
+            # earlier one: after `/mcp reauth notion` (deletes, then parks) is
+            # superseded by `/mcp login notion` (which deletes nothing), a
+            # cancellation of the SECOND grant would truthfully report "this
+            # grant changed nothing" while `notion` has no credential at all.
+            # Saying "the stored credential is unchanged" there asserts
+            # something this scope cannot know, and it is the LAST line the
+            # user reads (QA Q2). Both branches therefore end on the same
+            # recovery instruction, which is correct either way.
             if forgotten:
                 notify(
                     f"MCP {sub} for {name!r} was cancelled after its old credential "
@@ -280,7 +292,8 @@ async def start_grant(
             else:
                 notify(
                     f"MCP {sub} for {name!r} cancelled before the browser completed it; "
-                    "the stored credential is unchanged.",
+                    f"this attempt changed nothing — run /mcp login {name} to "
+                    "authenticate the server.",
                     "warning",
                 )
             raise

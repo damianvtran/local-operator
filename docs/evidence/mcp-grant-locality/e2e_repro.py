@@ -334,6 +334,28 @@ async def main() -> int:
             failures += 1
         else:
             print("    PASS  : the loss is named, with the recovery step\n")
+
+        # --- 7. the LAST notice must never claim a deleted credential is
+        #        intact (QA Q2) -------------------------------------------
+        # The reauth above already deleted `notion` and was cancelled. The
+        # user retries with a login, which deletes nothing and is itself
+        # cancelled: its notice is the last word, on a server that has no
+        # credential.
+        await send_slash(reader, writer, 12, "login notion")
+        await asyncio.sleep(0.1)
+        await send_slash(reader, writer, 13, "login third")
+        await asyncio.sleep(0.2)
+        last = session.notices[-1][0] if session.notices else ""
+        print("[7] retry-then-cancel; the LAST line the user reads")
+        print(f"    last  : {last}")
+        if "the stored credential is unchanged" in last:
+            print("    FAIL  : claims intact while the credential is gone")
+            failures += 1
+        elif "/mcp login" not in last:
+            print("    FAIL  : no recovery step")
+            failures += 1
+        else:
+            print("    PASS  : no false claim about the server's state\n")
         writer.close()
     finally:
         runtime.close()

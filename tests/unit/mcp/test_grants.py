@@ -475,5 +475,53 @@ async def test_a_grant_cancelled_before_its_delete_says_nothing_changed() -> Non
     await asyncio.gather(task, return_exceptions=True)
 
     body, _style = notices[-1]
-    assert "unchanged" in body, body
+    assert "this attempt changed nothing" in body, body
     assert "unauthenticated" not in body, body
+    # It speaks only about THIS grant. Claiming the server's stored credential
+    # is intact would assert something this scope cannot know (QA Q2).
+    assert "the stored credential is unchanged" not in body, body
+
+
+@pytest.mark.asyncio
+async def test_the_last_notice_never_claims_a_deleted_credential_is_intact(
+    _no_real_credential_writes: list[str],
+) -> None:
+    """Q2: `forgotten` is scoped to ONE grant, but the user reads the server.
+
+    Reachable in three ordinary actions: `/mcp reauth n` deletes and parks, the
+    user retries with `/mcp login n` (superseding it), and that login is itself
+    cancelled. The second grant deleted nothing, so a notice claiming "the
+    stored credential is unchanged" would be the LAST thing the user reads
+    while the server has no credential at all — defeating the point of F6.
+
+    Neither branch may make a claim about the server's overall state.
+    """
+    manager = _Manager()
+    manager.connect_gate = asyncio.Event()  # both grants park
+    notices: list[tuple[str, str]] = []
+    session = _Session(manager)
+
+    async def _run_and_cancel(sub: str) -> None:
+        await start_grant(
+            session,
+            sub,
+            "notion",
+            browser_is_reachable=True,
+            notify=lambda body, style: notices.append((body, style)),
+            spawn=lambda coro: asyncio.ensure_future(coro),
+        )
+        task = next(t for t in asyncio.all_tasks() if "_settle" in str(t.get_coro()))
+        for _ in range(6):
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    await _run_and_cancel("reauth")  # deletes, then is cancelled
+    assert _no_real_credential_writes == ["notion"]
+    await _run_and_cancel("login")  # deletes nothing, then is cancelled
+
+    # The credential really is gone, and this is the last line the user sees.
+    last, _style = notices[-1]
+    assert "the stored credential is unchanged" not in last, last
+    # Whatever it says, it must leave the user with the step that fixes it.
+    assert "/mcp login notion" in last, last
