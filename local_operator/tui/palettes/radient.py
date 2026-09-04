@@ -70,9 +70,17 @@ PALETTES: list[ThemeSpec] = [
             "accent": "#51a2f8",
             "signal": "#75baff",  # accent-hover
             # Meta labels (tips, skills) are quiet by design in the kit —
-            # eyebrow/label text renders in fg-muted — so `label` follows
-            # rather than importing a hue the site never uses.
-            "label": "#b7bec8",  # fg-muted
+            # eyebrow/label text renders in fg-muted — so `label` stays on
+            # that ink's LIGHTNESS rather than importing a hue the site never
+            # uses. It carries the kit's own blue as a TINT instead of
+            # matching `muted` exactly: bound identically, `label` and `muted`
+            # were the same hex, which collapsed every element that
+            # distinguishes meta from prose onto one ink — h2 against h3, a
+            # block quote against body text, a bullet against the item it
+            # marks. radient was the only theme where those pairs were
+            # indistinguishable. Same L*, 8.9 dE from `muted`: quiet enough to
+            # stay eyebrow-like, separate enough to read as meta.
+            "label": "#a8bfdb",  # fg-muted, cooled toward the kit blue
             # States are the kit's semantic trio, verbatim; string rides
             # success as in the brand ramps.
             "success": "#4bc680",

@@ -277,3 +277,64 @@ def test_a_numeric_table_header_never_claims_a_body_row(width: int) -> None:
             f"width {width}: row {row!r} was placed on {lines[placed]!r}, a body row "
             f"it does not open — the header would copy a body row's markdown."
         )
+
+
+@pytest.mark.parametrize("width", [40, 60, 80])
+def test_headings_copy_with_their_markers(width: int) -> None:
+    """Every heading level survives a copy, marker intact.
+
+    ``markdown_theme._flat_heading`` paints the ``#`` markers rich strips at
+    parse time, so a heading row arrives here as ``## Section`` while its
+    source line is also ``## Section``. Until ``_RENDERED_PREFIX_RE`` and
+    ``_MARKER_TOKEN_RE`` knew about the marker, the rendered side anchored on
+    ``#`` and the source side on ``section``: the two never matched, the row
+    was left unplaced, and EVERY heading vanished from the copied markdown.
+    """
+    source = (
+        "# Title\n\n"
+        "Some prose that will wrap across a couple of rendered rows here.\n\n"
+        "## Section\n\n"
+        "- item one\n\n"
+        "### Deep\n\n"
+        "#### Deeper\n\n"
+        "##### Deepest\n\n"
+        "###### Deepest still\n"
+    )
+    rows = _rows(source, width)
+    mapping = align(source, rows)
+    copied = slice_markdown(source, mapping, 0, len(rows) - 1)
+
+    for heading in (
+        "# Title",
+        "## Section",
+        "### Deep",
+        "#### Deeper",
+        "##### Deepest",
+        "###### Deepest still",
+    ):
+        assert heading in copied, (
+            f"width {width}: {heading!r} was dropped from the copied markdown; "
+            "the heading row failed to anchor to its source line."
+        )
+
+
+def test_each_heading_level_paints_its_own_marker_width() -> None:
+    """``h3`` paints ``###``, not ``#``.
+
+    The level is parsed off the ``hN`` tag. Deriving it from the tag's LENGTH
+    instead (``len("h2") - 1`` is 1, not 2) silently painted a single ``#`` at
+    every level, which is the one failure mode that defeats the whole point of
+    the marker: six levels rendered as one. The alignment tests above still
+    passed, because a uniform marker anchors just as well as a correct one.
+    """
+    source = "# One\n\n## Two\n\n### Three\n\n#### Four\n\n##### Five\n\n###### Six\n"
+    rows = [row for row in _rows(source, 60) if row.strip()]
+    markers = [row.split(" ", 1)[0] for row in rows]
+    assert markers == [
+        "#",
+        "##",
+        "###",
+        "####",
+        "#####",
+        "######",
+    ], f"heading markers did not scale with level: {markers}"
