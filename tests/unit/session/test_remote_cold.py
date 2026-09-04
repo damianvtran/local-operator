@@ -813,3 +813,81 @@ async def test_an_unreadable_checkpoint_degrades_loudly(
         assert [getattr(m, "text", "") for m in viewer.history()] == ["still here?"]
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_restored_roster_unions_the_sidecar_and_the_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Neither store alone is the full roster, so the restore reads both.
+
+    The sidecar is written on every roster move and the checkpoint at turn
+    end, so they disagree whenever a child settles after the last turn
+    boundary. On the reference session they differ in BOTH directions — 18
+    rows against 17, two children only the sidecar knows and one only the
+    checkpoint knows — so a resume that read either alone dropped a child that
+    really ran (UX round 1, U4).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    import json
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        JobState,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("go"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        jobs=[
+            JobState(id="shared", type="task", label="in both", status="completed"),
+            JobState(id="checkpoint-only", type="task", label="older store", status="completed"),
+        ],
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+    (directory / SUBAGENT_ROSTER_SIDECAR).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 4,
+                "records": [],
+                "jobs": [
+                    # The sidecar is fresher: its copy of the shared row wins.
+                    {"id": "shared", "type": "task", "label": "in both", "status": "failed"},
+                    {
+                        "id": "sidecar-only",
+                        "type": "task",
+                        "label": "settled after the turn",
+                        "status": "completed",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        jobs = {job.id: job for job in viewer.frontend_state.jobs}
+        assert set(jobs) == {
+            "shared",
+            "checkpoint-only",
+            "sidecar-only",
+        }, "a child recorded by only one store still ran; the roster is the union"
+        # Where both know a row, the fresher store wins.
+        assert jobs["shared"].status == "failed"
+    finally:
+        await viewer.dispose()

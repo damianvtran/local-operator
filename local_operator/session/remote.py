@@ -80,6 +80,7 @@ from local_operator.session.frontend_state import (
     FrontendStateStore,
     FrontendSync,
     FrontendUpdate,
+    JobState,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotSubagentComms,
@@ -584,7 +585,7 @@ class RemoteSession:
                 # Everything the last runtime knew and this process cannot
                 # derive. The panel reads these directly, so restoring them is
                 # what puts the session's details on the FIRST frame.
-                "jobs": _restored_job_rows(durable.jobs),
+                "jobs": _restored_job_rows(self._durable_roster(durable)),
                 "todos": list(durable.todos),
                 "conversation_title": durable.conversation_title,
                 "conversation_title_user_set": durable.conversation_title_user_set,
@@ -621,6 +622,45 @@ class RemoteSession:
                 **self._restored_model_specs(state, durable),
             }
         )
+
+    def _durable_roster(self, durable: FrontendSessionState) -> Sequence[Any]:
+        """The roster to restore: the SIDECAR's rows, falling back to the
+        checkpoint's.
+
+        The two stores are written on different triggers — the sidecar on every
+        roster move (``_persist_subagent_roster``), the checkpoint at turn end
+        (``FrontendStateStore.checkpoint``) — so they disagree whenever a child
+        settles after the last turn boundary. On the reference session they
+        differ in BOTH directions: 18 rows against 17, with two children only
+        the sidecar knows and one only the checkpoint knows (UX round 1, U4).
+
+        The sidecar wins because it is the roster's own store and the fresher
+        of the two, which is the same reason ``_load_subagent_roster`` reads it
+        first on the owner path. Its rows are merged OVER the checkpoint's
+        rather than replacing them, so a child the sidecar has since dropped
+        but the checkpoint still records is not silently lost — a resumed
+        session should show every child it ever had, and neither store alone is
+        a complete list.
+
+        Best-effort: an unreadable or absent sidecar leaves the checkpoint's
+        rows exactly as they were.
+        """
+        from local_operator.session.session import (
+            SUBAGENT_ROSTER_SIDECAR,
+            _read_roster_sidecar,
+        )
+
+        rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
+        try:
+            payload = _read_roster_sidecar(
+                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+            )
+            for raw in (payload or {}).get("jobs") or []:
+                job = JobState.model_validate(raw)
+                rows[str(job.id)] = job
+        except Exception:  # noqa: BLE001 — a bad sidecar must not stop the open
+            logger.debug("cold state could not read the roster sidecar", exc_info=True)
+        return list(rows.values())
 
     @staticmethod
     def _consistent_context(
