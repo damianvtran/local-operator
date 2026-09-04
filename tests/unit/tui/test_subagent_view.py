@@ -4308,15 +4308,25 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
         reads = 0
+        failed = 0
+        succeeded = 0
         real_read = subagent_view.read_transcript_page
 
         def flaky(*args, **kwargs):
-            nonlocal reads
+            nonlocal reads, failed, succeeded
             reads += 1
             # Transient, and on the FIRST probe only — a network home
             # directory hiccuping once is the reachable production shape.
+            #
+            # Counted by OUTCOME rather than by total, because the total is a
+            # scheduling detail: a loaded shard can settle an extra refresh
+            # before an assertion is reached. "One probe failed" and "a later
+            # read succeeded" are the two facts this test is actually about,
+            # and both are stable under load.
             if reads == 1:
+                failed += 1
                 raise OSError("transient NFS hiccup")
+            succeeded += 1
             return real_read(*args, **kwargs)
 
         monkeypatch.setattr(subagent_view, "read_transcript_page", flaky)
@@ -4325,9 +4335,28 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         transcript = Transcript(child_dir)
         await transcript.append_message(Message.assistant("durable row", id="durable-1"))
         app._refresh_subagent_view(view.job_id)
-        await _wait_history(pilot, view)
+        # Wait on the PROBE HAVING RUN, not on a frame budget. `_wait_history`
+        # only awaits workers that ALREADY exist, so a refresh whose worker has
+        # not been spawned yet returns having waited on nothing and leaves
+        # `reads` at 0 — which is exactly how this went red on a loaded CI
+        # shard. Bounded by loop turns, so contention stretches how long a turn
+        # takes rather than how many the probe needs.
+        for _ in range(200):
+            await _wait_history(pilot, view)
+            if failed:
+                break
+        else:
+            raise AssertionError("the probe never ran")
 
-        assert reads == 1, "the probe must actually have run and failed"
+        # `>= 1`, not `== 1`: the probe having run and failed is the
+        # precondition this test needs, and pinning the exact COUNT pins a
+        # scheduling detail instead. A loaded shard can settle two refreshes
+        # (the explicit one and the spinner's) before the assertion is
+        # reached, which is not a defect in anything this test is about --
+        # the count itself is owned by
+        # `test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh`,
+        # where a ceiling is the actual subject.
+        assert failed == 1, "the probe must actually have run and failed"
         # The failed peek concluded nothing, so the previous conclusion stands
         # rather than being replaced by an error the reader never provoked.
         assert HISTORY_ERROR_NOTE not in view._history_state_text()
@@ -4336,9 +4365,19 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
 
         # The point of the fix: the page is STILL looking. No Home, no keypress.
         app._refresh_subagent_view(view.job_id)
-        await _wait_history(pilot, view)
+        # Same edge as above: the re-look happening IS the fix, so wait on it
+        # rather than on a fixed number of frames.
+        for _ in range(200):
+            await _wait_history(pilot, view)
+            if succeeded:
+                break
+        else:
+            raise AssertionError("the re-look never ran after the failed probe")
 
-        assert reads == 2, "a transient probe failure must not stop the re-look"
+        # Same reason as above: what this pins is that the re-look HAPPENED
+        # after a failed probe, which is the whole point of the fix. One more
+        # read than the failed probe proves it; the exact total does not.
+        assert succeeded >= 1, "a transient probe failure must not stop the re-look"
         assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
         assert "durable row" in " ".join(view.rendered_rows())
 
