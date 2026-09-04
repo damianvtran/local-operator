@@ -1164,6 +1164,119 @@ async def test_opaque_aggregator_400_in_band_fails_over_instead_of_aborting() ->
     assert len(primary_requests) <= 12
 
 
+async def test_relayed_upstream_404_recovers_instead_of_killing_the_turn() -> None:
+    """The session 2be018a98088 failure, end to end.
+
+    An aggregator answered the PRIMARY with HTTP 404 and the RELAYED upstream
+    words "The requested model was not found." for a model id that worked six
+    times in the surrounding 75 seconds. Classified ``request`` on the strength
+    of that wording, the turn was aborted instantly with no retry and no
+    failover; classified as the relayed upstream blip it is, the same transient
+    machinery that serves an opaque sentinel must serve it and the turn must
+    still produce an answer.
+
+    Built through the real wire mapper so the test pins the behaviour against
+    the exact bytes OpenRouter sent, not a hand-stamped classification."""
+    from local_operator.providers.clients import raise_for_status
+
+    def _relayed_404() -> ProviderError:
+        try:
+            raise_for_status(
+                httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "message": "Provider returned error",
+                            "code": 404,
+                            "metadata": {
+                                "raw": json.dumps(
+                                    {
+                                        "error": {
+                                            "message": "The requested model was not found.",
+                                            "type": "invalid_request_error",
+                                        }
+                                    }
+                                ),
+                                "provider_name": "Meta",
+                                "is_byok": False,
+                            },
+                        }
+                    },
+                )
+            )
+        except ProviderError as exc:
+            return exc
+        raise AssertionError("raise_for_status must raise")
+
+    # Precondition: the frame the user reads names the upstream host rather
+    # than the ambiguous generic "Provider".
+    assert "Meta returned error" in str(_relayed_404())
+
+    attempts: list[str | None] = []
+    served = ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    def fail_like_the_session(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise _relayed_404()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return served
+        return _FnClient(fail_like_the_session)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 2,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k1", "k2"], "anthropic": ["k3"]})
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
+    assert served.calls == 1, "the turn must be served instead of dying on the 404"
+    assert len(attempts) >= 2, "the 404 must be retried, not aborted on first sight"
+    assert auth.rotations, "the sibling rotation must actually have run"
+
+
+async def test_flat_unknown_model_404_still_aborts_immediately() -> None:
+    """The other side of the line, end to end.
+
+    A model id the AGGREGATOR itself rejects is flat (no ``metadata.raw``) and
+    actionable, so it must still abort the turn at once. Without this the
+    widening would trade a dead turn for minutes of pointless backoff on a
+    request no retry can fix."""
+    from local_operator.providers.clients import raise_for_status
+
+    attempts: list[str | None] = []
+
+    def refuse(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise_for_status(
+            httpx.Response(
+                400,
+                json={"error": {"message": "openai/nope-9.9 is not a valid model ID", "code": 400}},
+            )
+        )
+        raise AssertionError("unreachable")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(refuse)
+
+    auth = FakeAuth({"openai": ["k1", "k2"]})
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 2, "fallbackChains": {}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(_request(), auth, settings, client_for):
+            pass
+    assert excinfo.value.kind == "request"
+    assert "is not a valid model ID" in str(excinfo.value)
+    assert len(attempts) == 1, "a bad model id must surface at once, not after a cascade"
+
+
 async def test_transport_retries_honor_budget_same_key_first() -> None:
     """PR-06: retryable 5xx consumes retry.maxRetries on the SAME key with
     backoff BEFORE any credential rotation."""

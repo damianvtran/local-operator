@@ -1379,7 +1379,7 @@ class TestErrorMessageExtraction:
             )
         )
         assert error.message == (
-            "Provider returned error: Quota exceeded for quota metric 'Requests'"
+            "Google returned error: Quota exceeded for quota metric 'Requests'"
         )
         assert error.kind == "quota"
 
@@ -1429,8 +1429,10 @@ class TestOpaqueAggregator400:
         """The exact wire body from the session: bare "ERROR" in ``raw``."""
         error = self._error(httpx.Response(400, json=self._openrouter_body("ERROR")))
         assert (error.kind, error.retryable) == ("transient", True)
-        # The frame still shows what the wire said — no invented diagnostics.
-        assert error.message == "Provider returned error: ERROR"
+        # The frame still shows what the wire said — no invented diagnostics —
+        # but the generic "Provider" is replaced by the origin host the
+        # aggregator named, so the reader knows WHO failed.
+        assert error.message == "Stealth returned error: ERROR"
 
     def test_a_quoted_json_string_sentinel_is_transient_too(self) -> None:
         """``raw`` is defined as JSON-encoded, so the sentinel can arrive as
@@ -1488,19 +1490,144 @@ class TestOpaqueAggregator400:
         error = self._error(httpx.Response(400, json=body))
         assert (error.kind, error.retryable) == ("transient", True)
 
-    def test_unbalanced_quote_runs_stay_request(self) -> None:
-        """Only MATCHED quote pairs are peeled. ``str.strip`` would take any run
-        of either character and reduce this to the sentinel; an unbalanced body
-        is malformed rather than empty, so it keeps its ``request`` answer."""
+    def test_unbalanced_quote_runs_are_transient_too(self) -> None:
+        """Only MATCHED quote pairs are peeled, so this does NOT reduce to the
+        sentinel — and under the relay rule it no longer needs to. A malformed
+        run of quotes inside the relay envelope still describes nothing the
+        caller could fix, so it takes the same transient path as the sentinel.
+
+        This inverts the previous expectation deliberately. The old predicate
+        could only reach transient through an exact sentinel match, which made
+        "unbalanced ⇒ request" the accidental default; the rule now keys on the
+        envelope, and only :data:`_DETERMINISTIC_UPSTREAM_MARKERS` pulls a
+        relayed body back to ``request``."""
         error = self._error(httpx.Response(400, json=self._openrouter_body("'''ERROR\"\"")))
-        assert (error.kind, error.retryable) == ("request", False)
+        assert (error.kind, error.retryable) == ("transient", True)
 
     def test_opaque_5xx_shape_is_unchanged(self) -> None:
-        """The predicate only widens 400s: a 5xx carrying the same opaque body
-        was already retryable by status and must stay that way."""
+        """A 5xx carrying the same opaque body was already retryable by status
+        and must stay that way."""
         body = self._openrouter_body("ERROR")
         body["error"]["code"] = 502
         error = self._error(httpx.Response(502, json=body))
+        assert (error.kind, error.retryable) == ("transient", True)
+
+
+class TestRelayedUpstream404:
+    """A relayed upstream 404 whose text READS like an answer but is weather.
+
+    Session 2be018a98088 (2026-09-04) died twice in 75 seconds on
+    ``openrouter/meta/muse-spark-1.3`` with HTTP 404 and the upstream words
+    "The requested model was not found." Six successful calls on the IDENTICAL
+    model id landed between the two failures, and the model's single endpoint
+    reported 99.98% 30-minute uptime, so the id cannot have been the cause: it
+    was Meta transiently failing to resolve its own snapshot, relayed by
+    OpenRouter under a 404.
+
+    The old predicate missed it on two counts \u2014 it was gated on 400, and it
+    demanded a bare sentinel where this body carried plausible prose \u2014 so the
+    failure was classified ``request`` and the turn was aborted with no retry
+    and no failover.
+
+    The discrimination pinned here is STRUCTURAL, verified against the live API
+    on 2026-09-04: OpenRouter answers a model id it does not know with a flat
+    400 naming the slug, and a routing refusal with a flat 404 naming the
+    preference. Neither carries ``metadata.raw``. Only a genuine relay does.
+    """
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    @staticmethod
+    def _relay(status: int, raw: str, provider: str = "Meta") -> dict[str, Any]:
+        return {
+            "error": {
+                "message": "Provider returned error",
+                "code": status,
+                "metadata": {"raw": raw, "provider_name": provider, "is_byok": False},
+            }
+        }
+
+    def test_the_recorded_404_is_transient_and_names_the_upstream(self) -> None:
+        """The exact wire body from the session."""
+        raw = json.dumps(
+            {
+                "error": {
+                    "message": "The requested model was not found.",
+                    "type": "invalid_request_error",
+                }
+            }
+        )
+        error = self._error(httpx.Response(404, json=self._relay(404, raw)))
+        assert (error.kind, error.retryable) == ("transient", True)
+        # The frame must name Meta rather than the ambiguous "Provider": the
+        # user is looking at an aggregator, so "provider" alone does not say
+        # whether the gateway or the model host failed.
+        assert str(error) == (
+            "transient provider error (HTTP 404): "
+            "Meta returned error: The requested model was not found."
+        )
+
+    def test_flat_unknown_model_400_still_fails_fast(self) -> None:
+        """OpenRouter's OWN refusal of a bad slug: flat body, no relay
+        envelope, names the slug. This is the case a user really can fix, so it
+        must keep failing immediately instead of burning the retry budget."""
+        body = {"error": {"message": "meta/muse-spark-9.9 is not a valid model ID", "code": 400}}
+        error = self._error(httpx.Response(400, json=body))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_flat_routing_404_still_fails_fast(self) -> None:
+        """The aggregator's own routing refusal, also flat and also actionable
+        (the caller's provider preference is wrong)."""
+        body = {
+            "error": {
+                "message": (
+                    "No allowed providers are available for the selected model. "
+                    "Providers serving meta/muse-spark-1.3-20260902: meta, but your "
+                    "request's provider.only preference permits only: groq."
+                ),
+                "code": 404,
+                "metadata": {"available_providers": ["meta"], "requested_providers": ["groq"]},
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_relayed_body_about_our_bytes_stays_request(self) -> None:
+        """The carve-out. A relayed complaint about the REQUEST fails
+        identically on every retry and every fallback target, so it keeps
+        ``request`` and surfaces at once \u2014 this is what bounds the latency cost
+        of the widening to the failures a retry could actually have served."""
+        for text in (
+            "This model's maximum context length is 16385 tokens",
+            "`max_output_tokens` The number must be `>= 16`.",
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": {"message": text}})))
+            )
+            assert (error.kind, error.retryable) == ("request", False), text
+
+    def test_relayed_401_still_reaches_credential_rotation(self) -> None:
+        """401/403 are deliberately OUT of the relayed set: they describe the
+        caller's credential and must keep reaching rotation rather than being
+        retried as weather."""
+        error = self._error(httpx.Response(401, json=self._relay(401, "ERROR")))
+        assert error.kind == "auth"
+
+    def test_message_without_provider_name_keeps_its_wording(self) -> None:
+        """Attribution is never invented: a relay body that omits
+        ``provider_name`` keeps the aggregator's original wording."""
+        body = {
+            "error": {
+                "message": "Provider returned error",
+                "code": 404,
+                "metadata": {"raw": json.dumps({"error": {"message": "upstream exploded"}})},
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert error.message == "Provider returned error: upstream exploded"
         assert (error.kind, error.retryable) == ("transient", True)
 
 
@@ -1550,7 +1677,7 @@ class TestOpaqueAggregator400InBand:
         error = await self._stream_error(self._chunk("ERROR"))
         assert error.status == 400
         assert (error.kind, error.retryable) == ("transient", True)
-        assert "Provider returned error" in str(error)
+        assert "Stealth returned error" in str(error)
 
     async def test_in_band_actionable_diagnostics_stay_request(self) -> None:
         """Real upstream diagnostics in-band are still an answer, not weather."""
