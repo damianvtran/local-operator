@@ -1662,6 +1662,39 @@ class FrontendStateStore:
         return values
 
 
+def format_context_tokens(tokens: int) -> str:
+    """Compact context estimate: ``12.4k`` / ``1.2m`` style, plain under 1k.
+
+    Lives HERE rather than in `tui/widgets/status_line.py` because both a TUI
+    and a headless runtime render `/context` rows now, and importing the
+    widget module to reach it costs 478 ms and drags all of Textual into a
+    detached runtime that has no terminal (round 4, R2/U13). `status_line`
+    re-exports it, so the two surfaces cannot drift into two different
+    roundings of the same number.
+    """
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:.1f}m"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:.1f}k"
+    return str(tokens)
+
+
+def format_window(window: int) -> str:
+    """Abbreviate a context window for the denominator: ``1M``, ``200k``.
+
+    Capital ``M`` and lower-case ``k`` are the conventional units for model
+    windows, and a whole window renders without a decimal (``1M``, not
+    ``1.0M``) — the denominator is a label, not a measurement.
+    """
+    if window >= 1_000_000:
+        scaled = window / 1_000_000
+        return f"{scaled:.0f}M" if scaled == int(scaled) else f"{scaled:.1f}M"
+    if window >= 1_000:
+        scaled = window / 1_000
+        return f"{scaled:.0f}k" if scaled == int(scaled) else f"{scaled:.1f}k"
+    return str(window)
+
+
 def _slash_capabilities() -> list[SlashCapability]:
     # Imported lazily so module import remains headless-safe; a full frontend
     # store needs the authoritative registry rather than a duplicated name list.

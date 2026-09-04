@@ -1359,12 +1359,22 @@ class OwnedSessionHandle(SessionHandle):
         this runtime does not implement needs to know what to do instead.
         """
         session = self._session
+        if command == "context":
+            return self._context_slash(session, SlashResult)
+        if command == "team":
+            return self._team_slash(session, args, SlashResult)
+        if command == "agent":
+            return self._agent_slash(args, SlashResult)
+        if command == "mcp":
+            return self._mcp_slash(session, args, SlashResult)
+        if command == "model":
+            return await self._model_slash(session, args, SlashResult)
         if command == "goal":
             return self._goal_slash(session, args, SlashResult)
         if command == "rename":
             return self._rename_slash(session, args, SlashResult)
         if command == "effort":
-            return self._effort_slash(session, args, SlashResult)
+            return await self._effort_slash(session, args, SlashResult)
         if command == "approvals":
             return self._approvals_slash(session, args, SlashResult)
         if command == "compact":
@@ -1377,12 +1387,23 @@ class OwnedSessionHandle(SessionHandle):
                 return SlashResult(kind="notice", text="no loop is running", style="info")
             return SlashResult(
                 kind="notice",
-                text="/loop runs from an attached terminal — reattach and run it there",
+                text="/loop is driven by the terminal that starts it — run /loop in "
+                "the terminal you want to watch it from",
                 style="warning",
             )
+        # NEVER TELL AN ATTACHED USER TO REATTACH. Every session on this
+        # release is detached, and the viewer routes these before its own
+        # local handling — so a user sitting at a terminal was told to take an
+        # action they had already taken and could not take again, which reads
+        # as a bug rather than a limitation (round 4, R2/U13). `/mcp`,
+        # `/team` and `/agent` are a fair "not here": they read registry and
+        # profile data that has no session-side home. Say that instead, and
+        # name where the command does work.
         return SlashResult(
             kind="notice",
-            text=f"/{command} is not available on a detached session — reattach to run it",
+            text=f"/{command} reads this machine's configuration, which the session "
+            f"process does not hold — run it from a terminal on the machine you "
+            f"want to configure",
             style="warning",
         )
 
@@ -1440,34 +1461,218 @@ class OwnedSessionHandle(SessionHandle):
                 logger.debug("could not republish the renamed record", exc_info=True)
         return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
 
-    def _effort_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """Report the reasoning effort; changing it stays with the viewer.
+    def _context_slash(self, session: Any, SlashResult: Any) -> Any:
+        """The routed ``/context``: the token breakdown, computed HERE.
 
-        The app's version drives `_apply_effort`, which reaches into the
-        model picker's widget state and the machine's saved default — neither
-        of which exists in a runtime. Reporting is genuinely session state
-        and is answered here; the mutation is declined in the same vocabulary
-        `/approvals default` uses for machine-local settings, rather than
-        pretending to apply and silently not.
+        `Session.context_breakdown()` is plain session state, so the numbers
+        can only be right on the process that holds the session — which is
+        the whole reason the command is routed. Returned as a ``block`` whose
+        rows the invoking terminal renders locally, identically to the app's
+        own handler (`app.py::_context_slash_result`), so the two surfaces
+        cannot drift into two different answers.
+        """
+        from local_operator.session.frontend_state import (
+            format_context_tokens,
+            format_window,
+        )
+
+        breakdown = getattr(session, "context_breakdown", None)
+        if not callable(breakdown):
+            return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
+        try:
+            data = cast("dict[str, int]", breakdown())
+        except Exception:  # noqa: BLE001 — a breakdown is never worth an error
+            logger.debug("context breakdown failed", exc_info=True)
+            return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
+
+        total = int(data.get("total", 0))
+        window = max(int(data.get("context_window", 0)), 1)
+        pct = total / window * 100
+
+        def estimated(value: int) -> str:
+            return f"~{format_context_tokens(int(value))}"
+
+        rows = [
+            ("Instructions", estimated(data.get("instructions", 0))),
+            ("Tool inventory", estimated(data.get("tool_inventory", 0))),
+            ("Tool schemas", estimated(data.get("tool_schemas", 0))),
+            ("Environment", estimated(data.get("environment", 0))),
+            ("Skills / MCP / goal", estimated(data.get("knowledge_mcp_goal", 0))),
+            ("Messages", estimated(data.get("messages", 0))),
+            ("Total", f"{estimated(total)} / {format_window(window)} ({pct:.1f}%)"),
+        ]
+        if data.get("cache_read"):
+            rows.append(("Last cache read (exact)", format_context_tokens(int(data["cache_read"]))))
+        return SlashResult(
+            kind="block",
+            data={"type": "context", "items": rows, "title": "Estimated next request"},
+        )
+
+    def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/team``: list from the SESSION's registry.
+
+        `Session.team_registry` is session state, so the listing is answered
+        here and the mutating forms return ``noop`` for the invoking terminal
+        to open its own picker — the same split `app.py::_team_slash_result`
+        makes, so a viewer renders one shape regardless of who ran it.
+        """
+        registry = getattr(session, "team_registry", None)
+        if registry is None or not hasattr(registry, "list_teams"):
+            return SlashResult(
+                kind="notice",
+                text="teams are unavailable in this session. Ask the agent to create one.",
+                style="warning",
+            )
+        if arg:
+            return SlashResult(kind="noop", data={"type": "team_mutate", "args": arg})
+        try:
+            teams = list(registry.list_teams())
+        except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
+            return SlashResult(kind="notice", text=f"could not list teams: {exc}", style="warning")
+        if not teams:
+            return SlashResult(
+                kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
+            )
+        items = [
+            (
+                team.name,
+                f"Led by {team.manager} · {len(team.members) + 1} "
+                f"{'role' if len(team.members) == 0 else 'roles'}",
+                (team.description or "").strip(),
+            )
+            for team in teams
+        ]
+        return SlashResult(kind="block", data={"type": "team_list", "items": items})
+
+    def _agent_slash(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/agent``: the invoker renders it.
+
+        Both shapes return ``noop`` so the terminal builds the listing from
+        its own registry. That is deliberate rather than a gap: the rows carry
+        role/specialist facts assembled by the frontend's own profile
+        resolver, and a second assembly here would be a second source of
+        truth for the same list. The mutating form already worked this way.
+        """
+        return SlashResult(
+            kind="noop",
+            data={"type": "agent_mutate" if arg else "agent_list", "args": arg},
+        )
+
+    def _mcp_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/mcp``: status from the session's own manager.
+
+        The bare listing is kept LOCAL by the viewer's dispatch (it reads the
+        identical rows from its mcp facade), so what reaches here is either
+        the empty case or a grant subcommand. A grant awaits a browser round
+        trip on the machine the user is sitting at, not on the session's
+        host, so it is declined in the same machine-locality vocabulary
+        `/approvals default` uses rather than being silently dropped.
+        """
+        from local_operator.session.frontend_state import _MCP_GRANT_SUBCOMMANDS
+
+        parts = (arg or "").split()
+        sub = parts[0].lower() if parts else ""
+        if sub in _MCP_GRANT_SUBCOMMANDS:
+            # A grant awaits a browser round trip on the machine the USER is
+            # sitting at, and stores credentials there. Declined in the same
+            # machine-locality vocabulary `/approvals default` uses rather
+            # than opening a browser nobody is looking at.
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp {sub} opens a browser and stores credentials on the machine "
+                "running the terminal — run it from a terminal on that machine",
+                style="warning",
+            )
+        # Anything else is a LISTING (bare, or `list`). The bare form never
+        # reaches here — the viewer pulls it back to local because its own
+        # facade holds the identical rows — so this answers the explicit
+        # `list` and the empty case from the session's own manager.
+        manager = getattr(session, "mcp_manager", None)
+        servers = getattr(manager, "servers", None) if manager is not None else None
+        if not servers:
+            return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
+        return SlashResult(kind="block", data={"type": "mcp"})
+
+    async def _model_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/model <provider>/<id>``: a REAL switch on this session.
+
+        Routed through :meth:`set_model` — the same op the phone's and the
+        picker's switches already use — so a typed command and a picked row
+        cannot diverge. Refusing this while the picker's identical mutation
+        succeeded over the same socket was the sharpest edge of R2/U13.
+
+        The persist half is declined for the machine-locality reason
+        `/approvals default` gives: a default belongs to the terminal whose
+        launches it governs, not to a runtime that outlives it.
+        """
+        target = (arg or "").strip()
+        lowered = target.lower()
+        if not target:
+            # The bare form opens the viewer's own picker; it should never
+            # have been routed here, but answering with the current model is
+            # more useful than an error.
+            return SlashResult(
+                kind="notice",
+                text=f"model: {getattr(session, 'model_label', '') or 'unknown'}",
+                style="info",
+            )
+        if lowered == "default" or lowered.startswith("default "):
+            return SlashResult(
+                kind="notice",
+                text="/model default persists to the local machine's config — run it "
+                "on the terminal whose launches it should govern; /model <p>/<id> "
+                "switches the shared session now",
+                style="warning",
+            )
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            return SlashResult(
+                kind="notice",
+                text="usage: /model <provider>/<model-id> "
+                "(e.g. openrouter/deepseek/deepseek-chat)",
+                style="warning",
+            )
+        old_label = getattr(session, "model_label", "")
+        try:
+            await self.set_model(provider.lower(), model_id)
+        except Exception as error:  # noqa: BLE001 — an unknown model is a user error
+            return SlashResult(kind="notice", text=f"cannot switch model: {error}", style="error")
+        return SlashResult(
+            kind="notice",
+            text=f"model: {old_label} → {getattr(session, 'model_label', '')} (this session)",
+            style="info",
+        )
+
+    async def _effort_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Report the reasoning effort, and CHANGE it — the mutation is ours.
+
+        Round 3 declined the mutation on the grounds that it "reaches into the
+        model picker's widget state and the machine's saved default". That was
+        wrong, and the reviewer was right to overrule it: :meth:`set_effort`
+        on this same handle performs exactly this mutation against this same
+        session, and `server.py` already routes an op to it. Only the app's
+        extra bookkeeping (the picker's row highlight, the saved default) is
+        terminal-local, and none of it is required to change the effort.
         """
         spec = getattr(session, "model", None)
         label = getattr(session, "model_label", "") or "this model"
         if spec is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        rungs = list(getattr(spec, "reasoning_efforts", []) or [])
         current = getattr(spec, "reasoning_effort", None)
-        if not arg.strip():
-            text = (
-                f"effort: {current} on {label}"
-                if current
-                else f"effort is not adjustable on {label}"
-            )
-            return SlashResult(kind="notice", text=text, style="info")
-        return SlashResult(
-            kind="notice",
-            text="/effort changes the model selection, which lives in a terminal — "
-            "reattach and run it there",
-            style="warning",
-        )
+        wanted = arg.strip().lower()
+        if not wanted:
+            if not rungs:
+                return SlashResult(
+                    kind="notice", text=f"effort is not adjustable on {label}", style="info"
+                )
+            ladder = ", ".join(f"[{r}]" if r == current else r for r in rungs)
+            return SlashResult(kind="notice", text=f"effort on {label}: {ladder}", style="info")
+        try:
+            detail = await self.set_effort(wanted)
+        except Exception as error:  # noqa: BLE001 — a bad rung is a user error
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        return SlashResult(kind="notice", text=str(detail), style="info")
 
     def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.

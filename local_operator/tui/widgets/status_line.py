@@ -39,6 +39,10 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.model.naming import model_label as model_label_forms
+from local_operator.session.frontend_state import (
+    format_context_tokens as _format_context_tokens,
+)
+from local_operator.session.frontend_state import format_window as _format_window
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
@@ -489,29 +493,12 @@ def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[
     return _DROP_LADDER_QUIET_ESTIMATE if context_estimated else _DROP_LADDER_QUIET
 
 
-def format_context_tokens(tokens: int) -> str:
-    """Compact context estimate: ``12.4k`` / ``1.2m`` style, plain under 1k."""
-    if tokens >= 1_000_000:
-        return f"{tokens / 1_000_000:.1f}m"
-    if tokens >= 1_000:
-        return f"{tokens / 1_000:.1f}k"
-    return str(tokens)
-
-
-def format_window(window: int) -> str:
-    """Abbreviate a context window for the denominator: ``1M``, ``200k``.
-
-    Capital ``M`` and lower-case ``k`` are the conventional units for model
-    windows, and a whole window renders without a decimal (``1M``, not
-    ``1.0M``) — the denominator is a label, not a measurement.
-    """
-    if window >= 1_000_000:
-        scaled = window / 1_000_000
-        return f"{scaled:.0f}M" if scaled == int(scaled) else f"{scaled:.1f}M"
-    if window >= 1_000:
-        scaled = window / 1_000
-        return f"{scaled:.0f}k" if scaled == int(scaled) else f"{scaled:.1f}k"
-    return str(window)
+# Re-exported from `session.frontend_state`, which is import-light: a
+# detached runtime renders the same `/context` rows and must not pull Textual
+# to format a number (round 4, R2/U13). Kept importable from here because
+# every existing caller in this package reads them from this module.
+format_context_tokens = _format_context_tokens
+format_window = _format_window
 
 
 def format_context_usage(tokens: int, window: int) -> str:
