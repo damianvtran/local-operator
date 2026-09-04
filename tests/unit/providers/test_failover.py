@@ -252,6 +252,39 @@ def test_structured_fallback_entry_carries_effort() -> None:
     assert spec.reasoning_effort == "high"
 
 
+def test_failover_hop_does_not_reimpose_the_primarys_sampling_on_the_target() -> None:
+    """Trap: ``spec_for_target`` carried ``base.temperature``/``top_p`` onto the
+    target unconditionally, so a hop from a 0.2-configured primary re-imposed
+    on the target exactly the value its own vendor documents against — a live
+    wire bug on any target that still sends the pair.
+
+    A sampling value belongs to the MODEL, so the target's own policy wins; the
+    session's value rides only into a knob the target leaves open.
+    """
+    base = ModelSpec(
+        provider="anthropic",
+        model_id="claude-sonnet-4-5",
+        temperature=0.2,
+        top_p=0.9,
+    )
+
+    # A target that documents its own values keeps them across the hop.
+    two_x = spec_for_target(base, FallbackTarget("google/gemini-2.5-pro", None))
+    assert two_x.temperature == 1.0
+    assert two_x.top_p == 0.95
+
+    # A target whose policy is to omit is not handed the primary's 0.2.
+    three_x = spec_for_target(base, FallbackTarget("google/gemini-3.8-flash", None))
+    assert three_x.temperature is None
+    assert three_x.top_p is None
+
+    # Per-knob, not per-pair: Qwen seeds both, but a family that seeded only one
+    # must not have the other clobbered.
+    qwen = spec_for_target(base, FallbackTarget("alibaba/qwen3-coder-plus", None))
+    assert qwen.temperature == 0.7
+    assert qwen.top_p == 0.8
+
+
 def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     """The name is the assertion: dropped, and NOT silently.
 

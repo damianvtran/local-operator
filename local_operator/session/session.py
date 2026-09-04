@@ -7410,11 +7410,24 @@ class Session:
             tools=[],
             tool_choice="none",
             max_tokens=self.ERRAND_MAX_TOKENS,
-            # Titling is extraction, not generation. Backends that default
-            # temperature high otherwise garble names. ``_sampling_params``
-            # already drops the key when the spec rejects sampling, so this
-            # cannot 400 a Claude-5 / o-series errand.
-            temperature=0,
+            # Titling is extraction, not generation, and a backend that
+            # defaults temperature high otherwise garbles names — but only
+            # where the model's own family accepts a value from us at all.
+            #
+            # Deferred to the spec's policy rather than hardcoded: a request
+            # value OUTRANKS the spec in ``_sampling_params``, so a literal 0
+            # here re-asserted the very number the sampling policy exists to
+            # stop sending, on exactly the families it was written for (Gemini
+            # 3.x, GPT-6, DeepSeek V4 all received 0.0 on this errand while the
+            # main turn correctly sent nothing). ``supports_sampling_params``
+            # covers the outright REJECTIONS, but not the families we merely
+            # stopped asserting over, so gating on the seed is what keeps the
+            # errand consistent with the turn.
+            #
+            # The failure mode this protects is quiet: the errand is
+            # ``isolated`` with one attempt and no fallback, so a rejected
+            # request surfaces only as a conversation that never gets a title.
+            temperature=model.temperature,
             replayable=False,
             isolated=True,
         )

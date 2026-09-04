@@ -29,7 +29,9 @@ class ChatOptions(BaseModel):
     Attributes:
         temperature: Controls randomness in responses. Higher values like 0.8 make output more
             random, while lower values like 0.2 make it more focused and deterministic.
-            Default: 0.8
+            Accepts 0.0-2.0, the range the vendors themselves document (Google states
+            0.0-2.0 for Gemini, Qwen [0, 2)); omitted means the model's own family
+            default applies rather than a value this app invents.
         top_p: Controls cumulative probability of tokens to sample from. Higher values (0.95) keep
             more options, lower values (0.1) are more selective. Default: 0.9
         top_k: Limits tokens to sample from at each step. Lower values (10) are more selective,
@@ -44,7 +46,11 @@ class ChatOptions(BaseModel):
         seed: Random number seed for deterministic generation. Default: None
     """
 
-    temperature: Optional[float] = Field(None, ge=0.0, le=1.0)
+    # Upper bound 2.0, not 1.0: the previous cap made a vendor-legal value
+    # unrepresentable, so a caller asking for 1.5 on a Gemini model got a 422
+    # from our own schema rather than an answer from the provider. top_p stays
+    # at 1.0, which is a probability mass and genuinely cannot exceed it.
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(None, ge=0.0, le=1.0)
     top_k: Optional[int] = None
     max_tokens: Optional[int] = None

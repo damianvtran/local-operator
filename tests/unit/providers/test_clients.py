@@ -2037,6 +2037,88 @@ def test_sampling_params_omitted_when_model_rejects_them(wire: str, top_p_key: s
     assert '"temperature"' not in serialised and f'"{top_p_key}"' not in serialised
 
 
+@pytest.mark.parametrize(
+    "provider,model_id",
+    [
+        # Google: documented looping below 1.0, and "remove this parameter".
+        ("google", "gemini-3.8-flash"),
+        ("google", "gemini-3-flash"),
+        # The aggregator routes to the SAME weights — what a provider-keyed
+        # rule would have missed.
+        ("openrouter", "google/gemini-3.8-flash"),
+        ("radient", "google/gemini-3-pro"),
+        # Anthropic 4.7+: a documented HTTP 400 on any value but 1.0. The app
+        # sent 0.2, so this row was a live outage.
+        ("anthropic", "claude-opus-4-7"),
+        # OpenAI GPT-6: "Remove `temperature`, `top_p`, and `top_logprobs`."
+        ("openai", "gpt-6-astra"),
+        # Accepted-but-inert, pinned, per-series, or undocumented defaults.
+        ("deepseek", "deepseek-v4-pro"),
+        ("zai", "glm-5.3"),
+        ("mistral", "mistral-large-latest"),
+        ("xai", "grok-4"),
+        # Never overrule a local publisher's Modelfile.
+        ("ollama", "qwen3:32b"),
+        # The fallback: an uncharacterised model gets silence, not 0.2.
+        ("openrouter", "some-vendor/model-nobody-has-characterised"),
+    ],
+)
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_families_that_omit_sampling_send_neither_key(
+    wire: str, top_p_key: str, provider: str, model_id: str
+) -> None:
+    """The keys must be ABSENT from the real body, not null: a provider that
+    ignores or rejects a value is not helped by receiving an explicit one, and
+    omission is what lets the vendor's own default apply."""
+    from local_operator.model.configure import build_model_spec
+
+    spec = build_model_spec(provider, model_id)
+    body = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))[wire]
+    assert "temperature" not in body
+    assert top_p_key not in body
+    serialised = json.dumps(body)
+    assert '"temperature"' not in serialised and f'"{top_p_key}"' not in serialised
+
+
+@pytest.mark.parametrize(
+    "provider,model_id,temperature,top_p",
+    [
+        # Google's own getModel reports these as the 2.x defaults.
+        ("google", "gemini-2.5-pro", 1.0, 0.95),
+        # Qwen's per-model table: the pair DIVERGES, which is why the knobs are
+        # resolved independently rather than as an all-or-nothing pair.
+        ("alibaba", "qwen3-coder-plus", 0.7, 0.8),
+    ],
+)
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_families_that_seed_send_the_vendors_documented_values(
+    wire: str, top_p_key: str, provider: str, model_id: str, temperature: float, top_p: float
+) -> None:
+    """Where a vendor documents a value silence would not reproduce, the pair is
+    still sent — at the vendor's number, never the app's invented 0.2/0.9."""
+    from local_operator.model.configure import build_model_spec
+
+    spec = build_model_spec(provider, model_id)
+    body = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))[wire]
+    assert body["temperature"] == temperature
+    assert body[top_p_key] == top_p
+
+
+@pytest.mark.parametrize("wire,top_p_key", WIRES)
+def test_an_explicit_request_value_still_reaches_the_wire(wire: str, top_p_key: str) -> None:
+    """The escape hatch, asserted at the WIRE rather than on the spec: a user
+    who deliberately asks for determinism must still get it on a family whose
+    default policy is to stay silent."""
+    from local_operator.model.configure import build_model_spec
+
+    spec = build_model_spec("google", "gemini-3.8-flash")
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], temperature=0.0, top_p=0.5)
+    body = _bodies(request)[wire]
+    # 0.0 in particular: a falsy value that an `or`-style default would eat.
+    assert body["temperature"] == 0.0
+    assert body[top_p_key] == 0.5
+
+
 @pytest.mark.parametrize("wire,top_p_key", WIRES)
 def test_sampling_params_still_sent_when_model_accepts_them(wire: str, top_p_key: str) -> None:
     """The regression guard for the fix itself: sampling is a real feature, and

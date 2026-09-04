@@ -26,7 +26,7 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
 
@@ -136,8 +136,10 @@ class ModelConfiguration:
     instance: Any
     info: ModelInfo
     api_key: Optional[SecretStr]
-    temperature: float
-    top_p: float
+    # ``None`` mirrors the spec's OMIT: no value is sent and the vendor's own
+    # default applies. See ``_SAMPLING_POLICY``.
+    temperature: Optional[float]
+    top_p: Optional[float]
     top_k: Optional[int]
     max_tokens: Optional[int]
     frequency_penalty: Optional[float]
@@ -153,8 +155,8 @@ class ModelConfiguration:
         instance: Any = None,
         info: ModelInfo | None = None,
         api_key: Optional[SecretStr] = None,
-        temperature: float = DEFAULT_TEMPERATURE,
-        top_p: float = DEFAULT_TOP_P,
+        temperature: Optional[float] = DEFAULT_TEMPERATURE,
+        top_p: Optional[float] = DEFAULT_TOP_P,
         top_k: Optional[int] = None,
         max_tokens: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
@@ -230,6 +232,230 @@ _NO_SAMPLING_PARAMS = re.compile(
 #: the endpoint that pins the values. Anchored at the start:
 #: ``kimi-k2-0711-preview`` must not match on its ``k2`` fragment.
 _KIMI_PINNED_SAMPLING = re.compile(r"^(?:k\d+(?:-|$)|kimi-for-coding)")
+
+
+#: The per-family SAMPLING POLICY table: what this app may assert about
+#: ``temperature``/``top_p``, keyed on the MODEL id.
+#:
+#: **The defect this table exists to fix.** The app shipped a hardcoded
+#: ``temperature=0.2``/``top_p=0.9`` to every provider on every turn. That pair
+#: is not a conservative default — it is an INVENTED number asserted over each
+#: vendor's own documented one, and a survey of the primary docs found not a
+#: single major vendor whose default is anywhere near it (essentially all are
+#: 1.0, with top_p 0.95). Several current families reject the parameter with a
+#: hard 400, and several more accept it and silently ignore it. The reported
+#: symptom was Gemini 3 looping, but that was one visible face of a general bug.
+#:
+#: **Why OMIT is the default answer rather than a seeded number.** An absent key
+#: resolves to whatever the vendor currently considers correct, so a vendor
+#: retune reaches users for free and the value can never drift stale. It is also
+#: literally what Google's migration guide prescribes ("removing this
+#: parameter"), and it drops an assertion this app never earned. Sending an
+#: explicit value is not even neutral on aggregators: OpenRouter notes a sent
+#: value "may differ from omitting it (for example, it can affect provider-side
+#: cache keys)". A row therefore SEEDS a number only where the vendor documents
+#: something we cannot obtain by staying silent.
+#:
+#: **Why the rows are keyed on the model, not the provider.** Same reasoning
+#: already argued for :data:`_NO_SAMPLING_PARAMS` below: a sampling contract is
+#: a property of the model, and the same weights answer on the direct route, on
+#: OpenRouter and on Radient. A provider-keyed rule would fix one route and
+#: leave the aggregator routes carrying the bug — which is what users actually
+#: hit.
+#:
+#: **Independent knobs.** ``temperature`` and ``top_p`` are decided separately
+#: per row because vendors diverge on them constantly (Qwen documents 0.7 with
+#: top_p 0.8; Gemini 2.5 is 1.0/0.95). ``None`` means OMIT.
+#:
+#: Patterns read FORWARD over the generation digit (``[7-9]|\d{2,3}``) rather
+#: than pinning to today's numbers: a newer generation is far likelier to keep a
+#: restriction than to revert it, and the failure directions are asymmetric — a
+#: false negative is a 400 or a loop on every turn, a false positive only falls
+#: back to the vendor's own default. ``[.-]`` matches both spellings vendors
+#: ship (``gemini-3-flash`` and ``gemini-3.8-flash``), mirroring
+#: ``model/effort.py``; the ``\d{2,3}`` bound and ``(?!\d)`` guard stop an
+#: 8-digit snapshot date reading as a generation number, the exact trap
+#: ``_EFFORT_TABLE`` documents. Unanchored, so an aggregator prefix
+#: (``google/…``) and ``:free``/``-preview``/``-thinking`` suffixes still match.
+#:
+#: SCOPED TO CHAT/COMPLETION sampling. Every row is derived from a vendor's
+#: chat-model documentation, and ``routes/speech.py`` is a second consumer that
+#: resolves speech ids (``whisper-1``, ``gpt-4o-mini-tts``) through the same
+#: table. Today they all reach the OMIT fallback, which is correct for them, so
+#: this is a caveat rather than a defect — but a speech id sharing a prefix with
+#: a chat family would inherit reasoning that was never about speech endpoints,
+#: and that is the point at which this table needs a speech-aware branch rather
+#: than another row.
+#:
+#: FIRST MATCH WINS, so a narrower row must precede a broader one.
+#: A family's sampling rule: the seeded ``temperature``/``top_p`` (``None``
+#: meaning "send no key"), plus whether the vendor REJECTS a value it did not
+#: ask for.
+#:
+#: ``rejects`` is a third state rather than a second ``None``, because the two
+#: reasons to send nothing have opposite consequences for an explicit override,
+#: and conflating them reopens the exact outage this table exists to close:
+#:
+#: * Vendor IGNORES the value (Gemini 3.x). Our default assertion is pointless,
+#:   so we drop it — but a user or agent that deliberately sets one loses
+#:   nothing by having it sent, so the escape hatch stays open.
+#: * Vendor REJECTS the value (Anthropic ≥4.7: "all other values will be
+#:   rejected with a 400 error"; OpenAI GPT-6: "Remove `temperature`,
+#:   `top_p`"). An override here is not a preference, it is a turn that fails
+#:   EVERY time. A stored agent ``temperature`` is the shape the server's own
+#:   API examples advertise, so this is an ordinary path, not an exotic one.
+#:
+#: Note this cannot be expressed by comparing against a ``(None, None)``
+#: sentinel: equal constant tuples are interned to one object, so two such
+#: sentinels would be indistinguishable by identity and silently collapse into
+#: each other.
+class _SamplingPolicy(NamedTuple):
+    temperature: Optional[float]
+    top_p: Optional[float]
+    rejects: bool = False
+
+
+#: Send neither key and let the vendor's own default apply. An explicit user or
+#: agent value STILL RIDES on top of this.
+_OMIT_SAMPLING = _SamplingPolicy(None, None)
+
+#: Send neither key, and SUPPRESS an explicit override too — the same judgement
+#: :data:`_NO_SAMPLING_PARAMS` already makes for Claude 5+ and the o-series,
+#: kept here so each family's rule sits beside the vendor citation for it.
+_REJECT_SAMPLING = _SamplingPolicy(None, None, rejects=True)
+
+_SAMPLING_POLICY: tuple[tuple[re.Pattern[str], _SamplingPolicy], ...] = (
+    # -- Google ------------------------------------------------------------
+    # Gemini 3+: the reported bug. "For all Gemini 3 models, we strongly
+    # recommend keeping the temperature parameter at its default value of 1.0
+    # ... Changing the temperature (setting it below 1.0) may lead to
+    # unexpected behavior, such as looping or degraded performance, particularly
+    # in complex mathematical or reasoning tasks." — and, in the migration
+    # checklist, "we recommend removing this parameter"
+    # (https://ai.google.dev/gemini-api/docs/gemini-3). 3.6+ goes further and
+    # ignores custom values outright. Omitting satisfies every one of those
+    # readings at once, including the cell we could not resolve (whether
+    # 3.1-pro honours or ignores the value).
+    (re.compile(r"gemini-(?:[3-9]|\d{2,3})(?:[.-]\d+)?(?!\d)"), _OMIT_SAMPLING),
+    # Gemini <=2.5 genuinely HONOURS the pair, so dropping it would trade a
+    # working feature for nothing — the "worse bug" the note below warns about.
+    # Seeded rather than omitted because these are the documented per-model
+    # defaults the API's own getModel reports (temperature 1.0, topP 0.95), and
+    # keeping the keys present preserves a real, tunable knob.
+    (re.compile(r"gemini"), _SamplingPolicy(1.0, 0.95)),
+    # -- Anthropic ---------------------------------------------------------
+    # "Models released after Claude Opus 4.6 do not support setting
+    # temperature. A value of 1.0 will be accepted for backwards compatibility,
+    # all other values will be rejected with a 400 error."
+    # (https://platform.claude.com/docs/en/api/messages.md). This is a LIVE
+    # OUTAGE on 4.7/4.8: the app sent 0.2, which is exactly the rejected case.
+    #
+    # REJECT, not OMIT: "rejected with a 400" means an override cannot be
+    # honoured either. Dropping only our own default would leave a stored agent
+    # temperature failing every turn on this family — the same outage, moved
+    # from the default path to the override path.
+    #
+    # The arm starts at 4.7 and reads forward so it cannot reach back over
+    # 4.5/4.6, which genuinely honour the pair (see the fallback note below for
+    # what actually happens to them). Generation 5+ is already covered by
+    # _NO_SAMPLING_PARAMS.
+    (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _REJECT_SAMPLING),
+    # -- OpenAI ------------------------------------------------------------
+    # GPT-6 Astra: "Unsupported parameters: Remove `temperature`, `top_p`, and
+    # `top_logprobs`."
+    # (https://developers.openai.com/api/docs/guides/latest-model.md).
+    # Forward-reading over the generation digit, because the pre-existing
+    # literal `gpt-5` in _NO_SAMPLING_PARAMS does not match `gpt-6-astra`.
+    # UNKNOWN: GPT-5.6 is not covered by primary docs; it keeps the suppression
+    # by precaution, which is both the safe direction and the already-shipped
+    # behaviour (the literal `gpt-5` arm in _NO_SAMPLING_PARAMS already strips
+    # the pair for the 5.x line).
+    #
+    # REJECT, not OMIT: "Unsupported parameters: Remove ..." is a rejection, so
+    # an override must be suppressed rather than forwarded into a 400.
+    (re.compile(r"gpt-(?:[5-9]|\d{2,})"), _REJECT_SAMPLING),
+    # -- DeepSeek ----------------------------------------------------------
+    # V4 runs with thinking ON by default, and "Thinking mode does not support
+    # the temperature, top_p, presence_penalty, or frequency_penalty parameters
+    # ... setting these parameters will not trigger an error but will also have
+    # no effect" (https://api-docs.deepseek.com/guides/thinking_mode). Sending
+    # them is pure noise.
+    #
+    # NOTE for future readers: DeepSeek's older task-table page recommends
+    # temperature 0.0 for coding. It predates V4 and thinking mode, and
+    # DeepSeek's own coding-agent benchmarks are run at 1.0/0.95 — so that row
+    # is stale and must not be revived here.
+    (re.compile(r"deepseek"), _OMIT_SAMPLING),
+    # -- Moonshot / Kimi ---------------------------------------------------
+    # The whole current lineup PINS the pair rather than honouring it: K3
+    # "`temperature=1.0`, `top_p=0.95` ... are fixed; omit them from requests",
+    # and K2.7 Code "will use a fixed value 1.0. Any other value will result in
+    # an error." This generalises what _KIMI_PINNED_SAMPLING below already
+    # established live on the coding host (HTTP 400 "invalid temperature: only
+    # 1 is allowed for this model") from a host quirk to the family. That
+    # narrower provider-keyed rule is retained: it is the one case with a
+    # documented ROUTE difference, and it still guards ids like `k3` that carry
+    # no vendor name at all.
+    #
+    # OMIT rather than REJECT, deliberately, even though the CURRENT lineup
+    # does reject: this row also catches legacy ids (`kimi-k2-0711-preview`,
+    # `moonshot-v1-128k`) that accept the pair, and a mainland-specific policy
+    # is UNVERIFIED. Suppressing an override for the whole name-space would
+    # take a working setting away from models that honour it, on evidence that
+    # only covers the current models. The ids whose rejection IS documented and
+    # was observed live keep their hard suppression through
+    # _KIMI_PINNED_SAMPLING above, which is scoped to exactly those.
+    (re.compile(r"kimi|moonshot"), _OMIT_SAMPLING),
+    # -- Alibaba / Qwen ----------------------------------------------------
+    # The one vendor publishing a real per-model default table: "Qwen3-Coder
+    # series, qwen-max series ... 0.7" temperature, with top_p 0.8. Seeded
+    # rather than omitted because those are model-specific numbers that differ
+    # from the 1.0 the rest of the industry uses, so silence would not
+    # reproduce them.
+    #
+    # Deliberately the DEFAULT row (0.7/0.8), not Qwen's separate coding row
+    # (temperature 0.2): this app runs summarisation, commit messages and
+    # compaction through the same spec as its coding turns, and 0.2 is the
+    # exact assertion this table exists to stop making. Note that qwen3.8 with
+    # thinking on auto-clamps temperature below 0.6 regardless.
+    (re.compile(r"qwen|qwq|qvq"), _SamplingPolicy(0.7, 0.8)),
+    # -- Z.AI / GLM --------------------------------------------------------
+    # Honoured, but RANGE-rejected (temperature [0.0, 1.0], top_p [0.01, 1.0])
+    # and silently ignored when `do_sample=false`. The defaults are per-series
+    # — 1.0 for GLM-5.x/4.7/4.6 but 0.6 for the GLM-4.5 series
+    # (https://docs.z.ai/api-reference/llm/chat-completion) — so any single
+    # seeded number would be wrong for one series or the other. Omission is the
+    # only answer correct for every series at once, and it also honours their
+    # guidance to "recommend choosing only one for tuning".
+    (re.compile(r"glm"), _OMIT_SAMPLING),
+    # -- Mistral -----------------------------------------------------------
+    # Mistral deliberately publishes no static default: it exposes
+    # `default_model_temperature` per model card and directs callers to the
+    # /models listing. We cannot hardcode what the vendor refuses to fix, and
+    # omission lets their served default apply.
+    (re.compile(r"mistral|magistral|ministral|codestral|devstral|pixtral"), _OMIT_SAMPLING),
+    # -- xAI / Grok --------------------------------------------------------
+    # UNKNOWN defaults: xAI's REST reference types both parameters as
+    # `number | null` and states no default anywhere. Omission is the only
+    # honest option; inventing 1.0 here would repeat the original mistake in a
+    # new place.
+    (re.compile(r"grok"), _OMIT_SAMPLING),
+)
+
+#: Providers whose models are USER-SUPPLIED, whose publisher tuning we must not
+#: overrule. Keyed on the PROVIDER because that is genuinely what decides it:
+#: the ids are arbitrary (``qwen3:32b``, custom Modelfiles, quantised
+#: rebrands), so no id pattern can establish family membership — and the `qwen`
+#: row above would otherwise seize a locally-served Qwen whose Modelfile has
+#: already been tuned by whoever published it.
+#:
+#: Ollama's own defaults are temperature 0.8 / top_p 0.9; a model's Modelfile
+#: ``PARAMETER temperature`` overrides those, and a per-request value overrides
+#: the Modelfile — there is no "unset" sentinel. So sending 0.2/0.9 silently
+#: DISCARDED whatever the model's publisher tuned it to (Qwen3 ships 0.7/0.8, a
+#: DeepSeek-R1 Modelfile 0.6). We cannot know what the user pulled, so we must
+#: not overrule what its publisher set.
+_USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 
 #: OpenAI introduced the public Responses route for the GPT-5 generation. The
 #: direct `/v1/models` listing exposes ids but no capability flags, so an
@@ -408,6 +634,57 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # pair on the mainland host — see _KIMI_PINNED_SAMPLING.
     if canonical == "kimi" and _KIMI_PINNED_SAMPLING.match(lowered):
         supports_sampling_params = False
+    # The per-family policy. Most of these families accept the pair and then
+    # ignore it, or honour it at a value nothing here should be inventing, so a
+    # `None` here only means "we stop asserting" and an explicit override still
+    # rides. A row marked `rejects` is the stronger case and clears
+    # `supports_sampling_params` below; see _SAMPLING_POLICY for each row's
+    # citation.
+    #
+    # A user-supplied model (ollama) never consults the id-keyed table: its ids
+    # are arbitrary and its publisher's Modelfile has already set the tuning we
+    # would be overwriting.
+    #
+    # No initial value: every branch below assigns, and seeding this with
+    # DEFAULT_TEMPERATURE/DEFAULT_TOP_P left the app-wide constants looking like
+    # a live default in the one file whose job is to stop them being one.
+    policy: _SamplingPolicy
+    if canonical in _USER_SUPPLIED_MODEL_PROVIDERS:
+        policy = _OMIT_SAMPLING
+
+    else:
+        for pattern, matched_policy in _SAMPLING_POLICY:
+            if pattern.search(lowered):
+                policy = matched_policy
+                break
+        else:
+            # The FALLBACK, and the most consequential row of all. Every vendor
+            # default established in the survey is 1.0 or unpublished, and not
+            # one is near 0.2 — so asserting the app-wide constant over a model
+            # nobody has characterised is the very defect this table fixes.
+            # Silence is the honest answer for an unknown model.
+            #
+            # This is also where Anthropic 4.5/4.6 land. They HONOUR the pair,
+            # and deliberately get no row of their own: omitting yields
+            # Anthropic's own 1.0, which is exactly what a row would have to
+            # seed, so a row would add a maintained constant that could only
+            # drift. The 4.7+ arm above is written forward purely so it cannot
+            # reach back over them.
+            policy = _OMIT_SAMPLING
+    sampling_temperature, sampling_top_p = policy.temperature, policy.top_p
+    # A vendor that REJECTS an unrequested value cannot honour an override
+    # either: forwarding one is a documented HTTP 400 on every turn, which is
+    # the same outage this table closes, merely moved onto the override path.
+    # `supports_sampling_params` is the existing mechanism for exactly that, so
+    # a rejecting row clears it rather than inventing a second suppression.
+    if policy.rejects:
+        supports_sampling_params = False
+    # The provider's own listing may only NARROW what the table decided: a
+    # stated allowlist that omits `temperature` is the aggregator telling us
+    # it will not forward the key. Silence never widens an OMIT back into a
+    # send — see `_listing_forbids_sampling`.
+    if _listing_forbids_sampling(canonical, model_name):
+        sampling_temperature = sampling_top_p = None
     # A GUARDED read, not `info.name`. `info` is duck-typed here — the legacy
     # public helpers and the tests hand in stand-ins, and `name` is the one
     # attribute name that collides with something that is not a string on almost
@@ -461,6 +738,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         base_url=definition.base_url if definition else None,
         reasoning=reasoning,
         supports_sampling_params=supports_sampling_params,
+        temperature=sampling_temperature,
+        top_p=sampling_top_p,
         reasoning_efforts=effort_levels,
         reasoning_effort=reasoning_effort,
         # The seed and the restore point are the same value at build time; they
@@ -695,6 +974,10 @@ def _info_from_listing(
         # `source` is the canonical provider id ("openrouter"/"radient"), which
         # is the key `build_model_spec` reads under.
         _remember_listing_entry_effort(source, model_name, model)
+        # Same raw entry, second fact: whether the aggregator's own allowlist
+        # names `temperature`. Warmed here so the narrowing never has to reach
+        # for the network on a paint path.
+        _remember_listing_sampling_support(source, model_name, model)
         return mapped
     raise ValueError(f"Model not found from {source} models API: {model_name}")
 
@@ -1495,6 +1778,9 @@ def invalidate_model_info_cache() -> None:
     # leaving that cached would keep the band on the table's answer for a full
     # bucket after the user pasted the key that would have corrected it.
     _effort_memo.clear()
+    # The sampling-support memo is warmed by the same listing read and degrades
+    # for the same fixable reasons, so it is invalidated together with it.
+    _sampling_support_memo.clear()
 
 
 def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
@@ -1630,6 +1916,11 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
 #: paragraph above applies to keeping the ladder off ``ModelInfo``.
 _effort_memo: dict[tuple[str, str, int], tuple[str, ...] | None] = {}
 
+#: Same shape and lifetime as :data:`_effort_memo`, for the aggregator
+#: ``supported_parameters`` allowlist. ``True``/``False`` is the listing's own
+#: answer; a MISSING key means it said nothing and the curated table decides.
+_sampling_support_memo: dict[tuple[str, str, int], bool] = {}
+
 
 def _listing_effort(provider: str, model_id: str) -> tuple[str, ...] | None:
     """What the provider's listing said this model's effort ladder is.
@@ -1699,6 +1990,66 @@ def _remember_listing_effort(provider: str, model_id: str, row: "DiscoveredModel
     _store_listing_effort(provider, model_id, row.reasoning_efforts)
 
 
+def _listing_forbids_sampling(provider: str, model_id: str) -> bool:
+    """True when the provider's own listing says this model takes no sampling.
+
+    OpenRouter publishes a ``supported_parameters`` ALLOWLIST per model, and 78
+    of 425 models omit ``temperature`` from it. That is a genuine per-model fact
+    the hand-written table cannot keep up with, so a model the table has never
+    heard of still gets the right answer on an aggregator route.
+
+    It may only NARROW, never widen, and that asymmetry is the whole design.
+    The listing answers "will the aggregator FORWARD this parameter", not "will
+    the model HONOUR it": ``google/gemini-3.8-flash`` lists ``temperature`` as
+    supported because OpenRouter forwards it and Google then ignores it. So a
+    listing that stays silent can never overturn a curated OMIT row, and only a
+    stated absence adds an omission the table missed. Same division of labour as
+    :func:`_listing_effort`, where the provider's own answer wins but silence
+    defers to the table.
+
+    Memo-only and non-raising for the same reasons as that function: this sits
+    on a path reachable from a TUI repaint, so a cold memo must degrade to the
+    table rather than reach for the network.
+    """
+    try:
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        supported = _sampling_support_memo.get((provider, model_id, bucket))
+        # `None` is "the listing said nothing", which defers to the table.
+        # Only an explicit allowlist that omits the key is a denial.
+        return supported is False
+    except Exception:  # noqa: BLE001 — never worth a failed start
+        return False
+
+
+def _remember_listing_sampling_support(provider: str, model_id: str, entry: BaseModel) -> None:
+    """Record whether ``entry``'s ``supported_parameters`` allowlist names
+    ``temperature``.
+
+    Absent or unparseable leaves the memo untouched, so the curated table keeps
+    its answer rather than being overruled by a listing that simply does not
+    publish the field (Radient's passthrough semantics are UNVERIFIED, so its
+    listing must not be read as a denial).
+    """
+    try:
+        supported = _extra(entry, "supported_parameters")
+        if not isinstance(supported, (list, tuple)):
+            return
+        names = {str(item).lower() for item in supported}
+        if not names:
+            return
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        _sampling_support_memo[(provider, model_id, bucket)] = "temperature" in names
+        if len(_sampling_support_memo) > _EFFORT_MEMO_MAX:
+            for key in [key for key in _sampling_support_memo if key[2] != bucket]:
+                del _sampling_support_memo[key]
+            for key in list(_sampling_support_memo)[
+                : len(_sampling_support_memo) - _EFFORT_MEMO_MAX
+            ]:
+                del _sampling_support_memo[key]
+    except Exception as exc:  # noqa: BLE001 — never worth a failed start
+        logger.debug("could not read %s sampling support for %s: %s", provider, model_id, exc)
+
+
 def refresh_model_info_background(provider: str, model_id: str) -> None:
     """Resolve one model off-loop so the NEXT paint sees the real price.
 
@@ -1760,8 +2111,8 @@ def configure_model(
     credential_manager: CredentialManager | None = None,
     model_info_client: ModelListingClient | None = None,
     env_config: EnvConfig | None = None,
-    temperature: float = DEFAULT_TEMPERATURE,
-    top_p: float = DEFAULT_TOP_P,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     top_k: Optional[int] = None,
     max_tokens: Optional[int] = None,
     frequency_penalty: Optional[float] = None,
@@ -1825,7 +2176,33 @@ def configure_model(
     # Without this copy an agent's stored temperature (and the server's
     # per-request ``options``) would be recorded on the ModelConfiguration and
     # then silently dropped on the way to the provider.
-    spec = spec.model_copy(update={"temperature": temperature, "top_p": top_p})
+    #
+    # ONLY when the caller genuinely passed one. This used to copy
+    # unconditionally from parameters defaulting to DEFAULT_TEMPERATURE/
+    # DEFAULT_TOP_P, which meant the model's own seed — Google's 1.0/0.95 for
+    # Gemini 2.x — was overwritten with the app-wide 0.2/0.9 on the main
+    # construction path, making a per-model default impossible to express.
+    # ``None`` is the "caller said nothing" sentinel. The override path this
+    # serves is an agent record's stored knobs, which reach here via
+    # ``_AGENT_SAMPLING_FIELDS`` and already omit the argument entirely unless a
+    # value is set, so the sentinel costs them nothing.
+    #
+    # Deliberately NOT claimed for the server's per-request ``ChatRequest
+    # .options``: those routes mutate the SCALAR
+    # ``model_configuration.temperature``, while the wire reads the SPEC, and
+    # the two are independent fields set once at construction — so that path
+    # does not currently reach the provider. It is broken identically before
+    # this change and is out of scope here, but the claim does not belong in a
+    # comment the next reader will trust. ``bootstrap.py``'s
+    # ``sampling_overrides`` seam IS correct and does reach the spec via
+    # ``set_model``.
+    sampling_overrides: dict[str, float] = {}
+    if temperature is not None:
+        sampling_overrides["temperature"] = temperature
+    if top_p is not None:
+        sampling_overrides["top_p"] = top_p
+    if sampling_overrides:
+        spec = spec.model_copy(update=sampling_overrides)
     # Radient base URL is env-overridable (legacy EnvConfig behaviour).
     if canonical == "radient" and env_config is not None:
         base_url = env_config.radient_api_base_url
@@ -1838,8 +2215,11 @@ def configure_model(
         instance=None,
         info=model_info,
         api_key=api_key,
-        temperature=temperature,
-        top_p=top_p,
+        # The legacy scalar attributes mirror what the spec will actually send,
+        # so a reader of ModelConfiguration.temperature sees the value in force
+        # rather than a default the spec has already overridden.
+        temperature=spec.temperature,
+        top_p=spec.top_p,
         top_k=top_k,
         max_tokens=max_tokens,
         frequency_penalty=frequency_penalty,
