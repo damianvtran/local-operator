@@ -8842,7 +8842,45 @@ class OperatorApp(App[None]):
                 return
             self._run_shell_command(text)
             return
-        if text.startswith("/"):
+        if slash_command_for(text) is not None:
+            # RESOLVES, not merely slash-SHAPED. A leading `/` is a command only
+            # when the word after it is one; anything else is an ordinary
+            # character and the line is a prompt.
+            #
+            # It used to be the shape alone, which made the composer contradict
+            # itself. `Editor._compute_slash_runs` paints an unrecognised
+            # leading word with `text-area--slash-unknown` — its docstring says
+            # that muted treatment means "text that WILL be sent" — and then
+            # Enter answered `unknown command: /tmp/test — try /help` and threw
+            # the draft away. The reported case is the one a path makes
+            # unavoidable:
+            #
+            #     /tmp/test
+            #
+            #     The above is a test file path
+            #
+            # There is no way to type that message. The word is unknown, so no
+            # handler wants it; the old branch still claimed it, and the only
+            # workaround was to retype the message with the path moved off the
+            # front. Every absolute path, `/etc`, `//` in prose and a Windows
+            # share fell in the same hole.
+            #
+            # Resolving through the ONE resolver rather than re-deriving "is
+            # this a command" here is what keeps the two answers identical: the
+            # word the dispatch would look up is the word this branch tests, so
+            # a line cannot be claimed by a branch that then has no handler for
+            # it. A registry name is `[a-z]+` and a path's first token is not,
+            # so the two vocabularies cannot collide.
+            #
+            # The cost is that a genuine TYPO (`/usge`) is now sent to the model
+            # rather than warned about. That is the deliberate trade: the
+            # composer already paints it muted BEFORE Enter, the model answers
+            # "you probably meant /usage", and one wasted turn on a misspelling
+            # is recoverable where an unsendable message is not. The
+            # unknown-command notice still guards `_run_slash_command`'s other
+            # callers, which name a command explicitly (mobile `slash()`, the
+            # inline splice) and so have no prose to fall back to.
+            #
             # Nothing but dispatch. A slash command writes its own rows: the
             # ledger row for the one command permitted one (``SLASH_COMMANDS``,
             # ``echo``) is written by its HANDLER, at the point its effect

@@ -1397,14 +1397,23 @@ async def test_an_echoing_first_action_still_retires_the_splash() -> None:
 
 @pytest.mark.asyncio
 async def test_an_unknown_command_names_what_was_typed() -> None:
-    """With the echo gone the warning is the ONLY place the mistyped word
-    appears; "unknown command" without the command is a dead end. Cased as
-    typed, too — reporting `/USGE` as `/usge` sends the user hunting for a
-    second typo they did not make."""
+    """The unknown-command warning still guards the callers that NAME a command.
+
+    The submit path no longer reaches it — an unresolved leading word is prose
+    now (see the path tests below) — but ``_run_slash_command`` has other
+    callers that pass a command by name rather than a line the user typed: the
+    mobile bridge's ``slash()`` and the inline mid-draft splice. Those have no
+    prose to fall back to, so a word with no handler must still say so rather
+    than silently doing nothing.
+
+    Cased as typed: reporting `/USGE` as `/usge` sends the user hunting for a
+    second typo they did not make.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        await _submit(pilot, app, "/USGE")
+        app._run_slash_command("/USGE")
+        await pilot.pause()
         painted = _painted(app)
         rows = _user_rows(app)
         # A typo changed nothing, so the conversation has not started and the
@@ -1414,6 +1423,145 @@ async def test_an_unknown_command_names_what_was_typed() -> None:
     assert "unknown command" in painted, painted
     assert rows == [], rows
     assert welcome is True
+
+
+@pytest.mark.asyncio
+async def test_a_leading_file_path_is_sent_as_a_prompt() -> None:
+    """The reported bug, verbatim: a message that OPENS with a file path.
+
+        /tmp/test
+
+        The above is a test file path
+
+    ``/tmp`` is not a command, so nothing could run it — but the submit path
+    claimed every slash-SHAPED line, so Enter answered ``unknown command:
+    /tmp/test — try /help`` and threw the draft away. There was no way to type
+    the message at all: the only workaround was to reword it so the path did not
+    come first.
+
+    The whole line reaches the model, newlines and all. Asserted on
+    ``session.prompts`` rather than on the absence of the warning, because "no
+    warning" is also what a silently dropped message looks like.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/tmp/test\n\nThe above is a test file path")
+        painted = _painted(app)
+    assert session.prompts == ["/tmp/test\n\nThe above is a test file path"], session.prompts
+    assert "unknown command" not in painted, painted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "/tmp",
+        "/etc/hosts",
+        "/Users/ben/workspace/notes.md",
+        "/usr/local/bin/lop --help",
+        # A UNC share and a doubled slash: the second `/` is not a boundary the
+        # tokenizer would read as a command either, and neither is a word.
+        "//server/share/file.txt",
+        # A path whose first segment IS a command name. `slash_command_for`
+        # splits on WHITESPACE, so the token is `/new/year` — not `/new` — and
+        # the line stays prose. This is the case a naive "first path segment"
+        # rule would get wrong, which is why the resolver is the one authority.
+        "/new/year/plan.md",
+        "/help-me-out/with/this",
+    ],
+)
+async def test_every_path_shape_reaches_the_model(typed: str) -> None:
+    """A leading `/` is a command only when the word after it resolves.
+
+    Parametrised over the shapes a user actually pastes, because the failure was
+    never specific to `/tmp`: every absolute path, every doubled slash and every
+    unknown word fell into the same branch. The last two cases pin the rule to
+    WHITESPACE tokenisation — `/new` and `/help` are real commands, but
+    `/new/year/plan.md` and `/help-me-out/with/this` are single tokens that
+    match no registry name, so a rule that split on `/` instead would run a
+    command the user did not type.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, typed)
+        painted = _painted(app)
+    assert session.prompts == [typed], session.prompts
+    assert "unknown command" not in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_a_real_command_still_wins_over_the_prose_fallback() -> None:
+    """The other half of the same rule: widening prose must not swallow commands.
+
+    A resolving word still dispatches and still sends NOTHING to the model — the
+    regression this change could plausibly cause is `/usage` arriving as a chat
+    message.
+
+    Two apps rather than two submits into one: `/usage` opens a PAGE that owns
+    the composer, so a second submit behind it never reaches the dispatch. That
+    is the panel's own behaviour and predates this change (verified against a
+    `/goal`-only run), but sharing an app would let it mask the assertion.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=FakeProviderController())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/usage")
+        panel_open = app.query_one(UsagePanel).display
+        rows = _user_rows(app)
+    assert panel_open is True
+    assert session.prompts == [], session.prompts
+    assert rows == [], rows
+
+    # An ARGUMENT-carrying command still dispatches too: `/goal` is the one
+    # echoing command, so its row proves the handler ran rather than the line
+    # having been sent as prose.
+    argued = FakeSession()
+    app = OperatorApp(lambda: _factory(argued))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal ship it")
+        rows = _user_rows(app)
+    assert argued.prompts == [], argued.prompts
+    assert rows == ["/goal ship it"], rows
+
+    # An ALIAS resolves through the same entry, so the branch that now asks the
+    # resolver must accept it exactly as it accepts the primary name.
+    aliased = FakeSession()
+    app = OperatorApp(lambda: _factory(aliased))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/config")  # alias of `/settings`
+        painted = _painted(app)
+    assert aliased.prompts == [], aliased.prompts
+    assert "unknown command" not in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_word_is_prose_not_a_swallowed_message() -> None:
+    """A genuine typo is now SENT rather than warned about — the stated trade.
+
+    Pinned deliberately: the composer paints an unrecognised leading word muted
+    before Enter (`text-area--slash-unknown`, "text that WILL be sent"), so the
+    user has already been told. One wasted turn on `/usge` is recoverable; a
+    message that cannot be typed at all is not.
+
+    The picker is dismissed with Esc first, exactly as ``_submit`` documents:
+    Enter on an open picker COMPLETES the highlighted row, so `/usge` would
+    otherwise fuzzy-match its way to `/usage` and never reach this path.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/usge")
+        painted = _painted(app)
+    assert session.prompts == ["/usge"], session.prompts
+    assert "unknown command" not in painted, painted
 
 
 def _dock_geometry(app: OperatorApp, editor: Editor) -> dict[str, int]:
