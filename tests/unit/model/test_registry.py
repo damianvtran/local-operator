@@ -180,6 +180,7 @@ def test_token_plan_models_ship_their_real_windows() -> None:
         # Output caps as the endpoint's own `max_tokens` validator reports them
         # ("Range of max_tokens should be [1, N]"); see the note beside the map.
         "qwen3.8-max": (1_000_000, 131_072),
+        "qwen3.8-flash": (1_000_000, 131_072),
         "qwen3.7-max": (1_000_000, 131_072),
         "qwen3.7-plus": (1_000_000, 131_072),
         "qwen3.6-flash": (1_000_000, 65_536),
@@ -189,6 +190,10 @@ def test_token_plan_models_ship_their_real_windows() -> None:
         "deepseek-v4-flash-0731": (1_000_000, 393_216),
     }
     assert qwencloud_token_plan_models["qwen3.8-max"].supports_images is True
+    # Twice qwen3.6-flash's cap, which is the reason to prefer this row over
+    # that one for the cheap tier; pinned because a wrong cap truncates output
+    # rather than failing loudly.
+    assert qwencloud_token_plan_models["qwen3.8-flash"].max_tokens == 131_072
 
     # Both the exact-id chain and the enumerable map must answer, because
     # `build_model_spec` reaches the former and discovery merges over the
@@ -230,9 +235,13 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     the 128k default just because nobody noticed it — but it means the fix is
     usually to re-derive the snapshot, not to edit the map.
     """
-    # Snapshot of GET /compatible-mode/v1/models, 2026-08-19.
+    # Snapshot of GET /compatible-mode/v1/models, re-derived 2026-09-04 against
+    # the plan's published allowlist. `qwen3.8-flash` is the delta from the
+    # 2026-08-19 snapshot: it serves chat (verified live) and is on the
+    # allowlist, but had no row, so it resolved to the 128k unknown default.
     gateway_chat_models = {
         "qwen3.8-max",
+        "qwen3.8-flash",
         "qwen3.7-max",
         "qwen3.7-plus",
         "qwen3.6-flash",
@@ -259,6 +268,7 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
     assert gateway_chat_models | gateway_non_chat_models == {
         "qwen3.8-max",
+        "qwen3.8-flash",
         "qwen3.7-max",
         "qwen3.7-plus",
         "qwen3.6-flash",
@@ -270,6 +280,58 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
         "qwen-audio-3.0-tts-plus",
         "qwen-audio-3.0-realtime-plus",
     }
+
+
+def test_token_plan_models_declare_prompt_caching() -> None:
+    """The flag is what gates `cache_control`, so False means "never cache".
+
+    `OpenAICompatClient._message_cache_markers` is called only when
+    `request.model.supports_prompt_cache` is set, and this provider speaks the
+    OpenAI-compatible wire. These rows shipped `False`, so lop emitted no
+    markers and the gateway fell back to its implicit cache — the 20% tier
+    rather than the 10% one an explicit marker buys.
+
+    That the gateway caches at all was measured, not read off a doc page: an
+    identical 6.5k-token system prefix sent twice with
+    `cache_control: {"type": "ephemeral"}` reports
+    `cache_creation_input_tokens=6547` on the first call and
+    `cached_tokens=6547` on the second, for every text row here.
+
+    Asserted over the whole map rather than one row, because the failure is
+    invisible at runtime: a row added with the flag unset does not error, it
+    just quietly re-bills its prefix on every turn. On agent traffic — a
+    transcript resent each turn, measured at a 97% cache-read share — that is
+    roughly a 6x difference in billed input.
+    """
+    for model_id, info in qwencloud_token_plan_models.items():
+        assert info.supports_prompt_cache is True, model_id
+
+    # The end of the pipe, not just the map: `build_model_spec` is what the
+    # client actually reads the flag from.
+    assert build_model_spec("alibaba-token-plan", "qwen3.8-max").supports_prompt_cache is True
+    assert build_model_spec("alibaba-token-plan", "qwen3.8-flash").supports_prompt_cache is True
+
+
+def test_token_plan_vision_rows_match_what_the_endpoint_accepts() -> None:
+    """Vision is per-row here, and both directions were checked live.
+
+    The plan's allowlist marks `glm-5.2` and the deepseek rows as text-only
+    while the qwen rows carry "visual understanding". Verified rather than
+    transcribed, because the failure is silent in an unusual way: every row
+    ACCEPTS an `image_url` content block without erroring, but the text-only
+    ones never receive it — asked the colour of a solid blue PNG,
+    `qwen3.8-flash` answers "Blue" while `glm-5.2` and `deepseek-v4-pro` reason
+    aloud that no image was provided.
+
+    So an `image_url` block that does not raise is not evidence of vision, and
+    marking these rows True on the strength of the request succeeding would
+    route a designer or QA subagent to a model that cannot see its screenshot.
+    """
+    assert qwencloud_token_plan_models["qwen3.8-flash"].supports_images is True
+    assert qwencloud_token_plan_models["qwen3.6-flash"].supports_images is True
+    assert qwencloud_token_plan_models["qwen3.7-plus"].supports_images is True
+    assert qwencloud_token_plan_models["glm-5.2"].supports_images is False
+    assert qwencloud_token_plan_models["deepseek-v4-pro"].supports_images is False
 
 
 def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:
