@@ -109,9 +109,10 @@ format: ## Format code with black and isort
 	uvx isort==5.13.2 .
 
 # Run linting with flake8
-# THROWAWAY. Delete this target with the module it runs, once the markdown
-# colour ramp question is settled (see that module's docstring).
-prototype-ramp: ## PROTOTYPE: build + open the markdown colour ramp variants
+# THROWAWAY. Delete this target with the module it runs, once the "lop
+# underuses each theme's palette" question is settled (see that module's
+# docstring for the measurements).
+prototype-ramp: ## PROTOTYPE: build + open the whole-TUI colour variants
 	env -u NO_COLOR .venv/bin/python -m local_operator.tui.prototype_markdown_ramp
 
 lint: ## Run linting with flake8
