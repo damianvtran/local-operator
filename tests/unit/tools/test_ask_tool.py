@@ -91,6 +91,75 @@ def test_ask_is_absent_without_an_ask_hook_even_when_a_ui_is_claimed() -> None:
     assert "ask" not in _tools(_context(None))
 
 
+# --- restraint --------------------------------------------------------------
+#
+# The description is the ONLY thing a model reads about this tool on a turn
+# where the system prompt has been compacted away, so the brake has to live in
+# it and not only in `system.md`. These pin the contract, not the wording.
+
+
+def test_ask_advertises_itself_as_a_last_resort_not_a_checkpoint() -> None:
+    """A tool described only by what it is FOR gets used whenever it fits.
+
+    Measured over 600 local sessions: 156 calls, and 35 in one session on work
+    that had already been authorized end to end. The dominant shape was not a
+    genuine fork but a research result reported as a question ("here is what I
+    found, how do you want it handled?"), which hands back the judgement the
+    delegation existed to buy. So the description must state the alternative —
+    decide it yourself — before it states the capability.
+    """
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        return None
+
+    text = " ".join(_tools(_context(hook))["ask"].description.split())
+    # The framing that outranks "use it whenever you need a decision".
+    assert "LAST RESORT" in text
+    # And the concrete alternative, so restraint is actionable rather than a
+    # mood: research it, or spend a subagent on it, then report the choice.
+    assert "decide yourself" in text
+    assert "subagent" in text
+
+
+def test_ask_names_the_three_cases_that_do_warrant_a_question() -> None:
+    """Restraint must not become silence on an irreversible fork.
+
+    "Ask less" with no stated trigger overshoots into a model that deletes the
+    production index rather than spend a picker. The three legitimate triggers
+    are therefore enumerated in the same breath as the brake: irreversible and
+    unauthorized, genuinely ambiguous, or something only the user has.
+    """
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        return None
+
+    text = " ".join(_tools(_context(hook))["ask"].description.split())
+    assert "destructive or irreversible" in text
+    assert "only the user has" in text
+    # Ambiguity is pinned to the REQUEST, not to the work: probed against the
+    # live model, a draft that said only "materially different work" was quoted
+    # back as justification for asking which of two valid designs to build.
+    assert "the REQUEST ITSELF has two plausible readings" in text
+    assert "Two technical approaches is not ambiguity" in text
+
+
+def test_ask_states_that_requested_work_is_already_authorized() -> None:
+    """The single most common wasted call was re-confirming the live request.
+
+    An agent mid-task reads its own uncertainty as a reason to check in, and
+    without this clause nothing in the tool surface contradicts that. Pinned
+    because it is the clause that removes a whole class of calls rather than
+    trimming one.
+    """
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        return None
+
+    text = " ".join(_tools(_context(hook))["ask"].description.split())
+    assert "already asked for is authorized" in text
+    assert "do not stop to confirm it" in text
+
+
 # --- schema validation ------------------------------------------------------
 
 
