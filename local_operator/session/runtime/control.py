@@ -63,6 +63,15 @@ from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRec
 if TYPE_CHECKING:
     from pathlib import Path
 
+#: What ``/resume`` does to the session you are LEAVING when the setting is
+#: absent. True keeps its runtime working in the background — the whole point
+#: of a session that outlives the terminal, and the behaviour a user switching
+#: between two conversations expects. False is for anyone who would rather a
+#: session they walked away from stop spending tokens; they can still leave it
+#: running deliberately with ``/stop`` as the explicit end.
+DEFAULT_BACKGROUND_ON_RESUME = True
+
+
 #: Which stop method produced an outcome, in escalation order. The runtime's
 #: own control socket (``socket``) is the graceful rung; the two signals are
 #: the escalation; the remaining two name the non-signalled resolutions.

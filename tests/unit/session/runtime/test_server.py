@@ -146,6 +146,37 @@ class FakeHandle:
         self.calls.append(("cancel_subagents_count", (), {}))
         return 2
 
+    async def job_trajectory(self, job_id, offset, limit):  # noqa: ANN001, ANN202
+        """Serve a child's retained events the way the owned handle does.
+
+        Attach snapshots omit trajectories (they exceed the socket's line
+        limit), so a follower fetches them per job. Reading them back out of
+        the canonical store here keeps this double on the same contract as
+        production without a second source of job rows.
+        """
+        self.calls.append(("job_trajectory", (job_id, offset, limit), {}))
+        from local_operator.session.frontend_state import _wire_value
+
+        job = next((row for row in self._frontend.state.jobs if row.id == job_id), None)
+        # Production reads plain dicts off the live ``AsyncJob``; this double
+        # reads the canonical store, whose retained rows are immutable Mapping
+        # wrappers that JSON-encode as item pairs unless thawed first — the
+        # same boundary conversion the store's own serializer performs.
+        rows = [
+            _wire_value(row)
+            for row in (list(getattr(job, "trajectory", None) or []) if job is not None else [])
+        ]
+        first = rows[0] if rows else None
+        base_seq = first.get("_traj_seq") if isinstance(first, dict) else None
+        return {
+            "job_id": job_id,
+            "rows": rows[offset : offset + limit],
+            "offset": offset,
+            "total": len(rows),
+            "base_seq": base_seq if isinstance(base_seq, int) else None,
+            "known": job is not None,
+        }
+
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
 
@@ -1066,3 +1097,345 @@ def test_fold_property_rejects_a_foreign_sink() -> None:
     assert runtime.projection_sinks_built == 0
     with pytest.raises(TypeError):
         _ = runtime.fold
+
+
+class TestLiveStateReachesTheRecord:
+    """`busy` and `detached` must track reality, not sit at their defaults.
+
+    Round 1 (U2) measured a SINGLE tuple `(False, False, None)` across a whole
+    turn and across a client attaching and leaving: `set_busy` had no caller
+    anywhere in the tree, and `detached` was computed only inside a pending
+    transition. The picker's liveness markers were therefore decorative — a
+    runtime grinding through a long turn with no terminal open, the exact thing
+    this release makes possible, looked identical to an idle one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_new_runtime_reports_itself_detached(self) -> None:
+        """The default direction matters: no terminal has ever attached yet."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        assert server._record.detached is True
+
+    @pytest.mark.asyncio
+    async def test_busy_transitions_republish_the_record(self) -> None:
+        """A transition must reach the RECORD, and only a transition may.
+
+        Asserted on republish calls rather than on `_record.busy` because an
+        unstarted server has no publisher — the record is rewritten through
+        `RecordPublisher.heartbeat`, deliberately the one write path.
+        """
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._busy)  # type: ignore[method-assign]
+
+        server.set_busy(True)
+        server.set_busy(True)  # unchanged: must not republish
+        server.set_busy(False)
+
+        assert publishes == [True, False]
+
+    @pytest.mark.asyncio
+    async def test_detached_is_deduplicated_on_the_boolean(self) -> None:
+        """A second terminal changes nothing a reader can see.
+
+        Asserted because the alternative — republishing per connection — puts a
+        staged write on every churn of a session with two viewers.
+        """
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[object] = []
+        server._republish = lambda: publishes.append(1)  # type: ignore[method-assign]
+        server._detached = False
+        server._republish_detached()  # still 0 clients -> True: one publish
+        server._republish_detached()  # unchanged: no publish
+        assert len(publishes) == 1
+
+
+@pytest.mark.asyncio
+async def test_watching_surfaces_is_derived_from_real_connections() -> None:
+    """A relay's presence is not a person. Derived from REAL dials.
+
+    ``"daemon"`` is the default kind for an auth frame with no ``client``
+    field, which is exactly what the mobile daemon's ADOPTION dial sends
+    (`mobile/daemon.py::_dial`) — for every session on the machine, held open
+    permanently. Counting that as "the phone is watching" meant that on any
+    machine running ``lop mobile`` a parked approval sent NO notification, the
+    gate held ~283 MB for 24 h, and the model was told a human was watching
+    (round 3, B1).
+
+    This test dials the server the way production does instead of injecting a
+    kind set as a premise. That distinction is the whole point: four committed
+    tests asserted ``frozenset({"daemon"}) -> the phone is watching`` and all
+    four passed while the product was broken, because they asserted the
+    premise rather than deriving it.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    daemon_writer = attach_writer = None
+    try:
+        record = await _wait_record()
+
+        assert runtime.watching_surfaces() == frozenset()
+
+        # The adoption dial: no `client` field, exactly as the daemon sends.
+        _daemon_reader, daemon_writer = await _dial(record)
+        assert (
+            runtime.watching_surfaces() == frozenset()
+        ), "a daemon adoption dial is a transport connection, not a person watching"
+
+        # A PHONE ACTUALLY OPENING THE SESSION — the real `watch` op the
+        # daemon pushes on the SSE 0->N transition, sent over the same wire
+        # rather than by poking an attribute. Round 3 asserted against a
+        # `note_viewer_active()` helper instead, which is why a fix with NO
+        # production caller passed this test while the phone was never
+        # counted as watching (round 4, R1/Q1).
+        daemon_writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(_daemon_reader, "ack", "w1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # And closing it again: the same op in reverse, not a TTL expiry.
+        daemon_writer.write(json.dumps({"op": "unwatch", "req": "w2"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(_daemon_reader, "ack", "w2")
+        assert (
+            runtime.watching_surfaces() == frozenset()
+        ), "closing the session on the phone must stop counting as watching"
+
+        # A real terminal.
+        _attach_reader, attach_writer = await _dial(record, client="attach")
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+    finally:
+        for writer in (daemon_writer, attach_writer):
+            if writer is not None:
+                writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_that_dies_without_unwatch_stops_counting_as_watching() -> None:
+    """The case three rounds of tests never asked: a daemon connection that
+    goes away UNCLEANLY.
+
+    `phone_watchers` is the daemon connection's state held in a server-global
+    counter, and the only decrement is an `unwatch` op the daemon sends from
+    an SSE generator's `finally` — in the process that just died. So the
+    committed tests, which always send a matching `unwatch`, could not see
+    that the count outlives its connection: a daemon restart while a phone is
+    watching left a permanent +1, and the session reported a viewer nobody
+    could see forever after. Every parked approval on it then sent no desktop
+    toast and the model was told a human was watching (round 5, R5).
+
+    That is round 3's B1 failure mode reached by a third route, which is why
+    this asserts the property (`watching_surfaces()` after an unclean drop)
+    rather than the counter: the counter is the mechanism, and the mechanism
+    has now been wrong three different ways.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    daemon_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+
+        # A phone opens the session: the real op, over the wire.
+        daemon_writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(daemon_reader, "ack", "w1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # The daemon process DIES — no `unwatch`, because a dead process runs
+        # no `finally`. This is the whole point of the test.
+        daemon_writer.close()
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if not runtime._clients:
+                break
+        assert not runtime._clients, "the dropped connection was never reaped"
+
+        assert runtime.watching_surfaces() == frozenset(), (
+            "a phone cannot still be watching through a connection that no longer "
+            "exists — the count belongs to the connection"
+        )
+    finally:
+        if daemon_writer is not None:
+            daemon_writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_daemons_late_drop_leaves_the_replacements_watchers() -> None:
+    """`_drop_client` runs TWICE on one connection, and the second must be a
+    no-op for server-global state.
+
+    The contract is the codebase's own: `_send_to` drops a client whose send
+    failed, and that connection's reader loop later observes the close and
+    drops it again from its `finally` — "a no-op second removal". The round-5
+    fix for the `phone_watchers` leak zeroed the counter UNCONDITIONALLY,
+    which broke that contract for the one piece of server-global state a
+    daemon owns.
+
+    The ordering IS the defect: an evicted daemon parked inside `_on_request`
+    unwinds only when its await returns, by which time the replacement has
+    dialled, replayed `watch` and owns the counter. So the late drop reached
+    across and wiped a LIVE watcher (round 6, R7).
+
+    Worth stating why this is the more dangerous direction. The leak it
+    replaced over-counted, which fails SAFE — a phantom viewer suppresses a
+    toast. This failed OPEN: a phone genuinely being looked at reported nobody
+    watching, so every parked approval toasted a card already on the user's
+    screen and the model was told no one could answer. That is round 4's
+    R1/Q1 failure mode by a fourth route.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer_a = writer_b = None
+    try:
+        record = await _wait_record()
+
+        # Daemon A, with a phone watching through it.
+        reader_a, writer_a = await _dial(record)
+        writer_a.write(json.dumps({"op": "watch", "req": "a1"}).encode() + b"\n")
+        await writer_a.drain()
+        await _until(reader_a, "ack", "a1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+        conn_a = next(c for c in runtime._clients.values() if c.kind == "daemon")
+
+        # Daemon A restarts: B's dial evicts A (the first, legitimate drop).
+        reader_b, writer_b = await _dial(record)
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if len(runtime._clients) == 1:
+                break
+        assert len(runtime._clients) == 1, "the evicted daemon was never removed"
+        assert runtime.phone_watchers == 0, "eviction must release the old daemon's count"
+
+        # B re-announces the session it is watching, as `_reconcile` does.
+        writer_b.write(json.dumps({"op": "watch", "req": "b1"}).encode() + b"\n")
+        await writer_b.drain()
+        await _until(reader_b, "ack", "b1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # A's parked reader loop finally unwinds and drops a connection that
+        # is ALREADY out of the registry. This is the second removal.
+        runtime._drop_client(conn_a)
+
+        assert runtime.watching_surfaces() == frozenset({"viewer"}), (
+            "a late drop of an already-evicted daemon wiped the REPLACEMENT's "
+            "live watcher count — a phone that is being looked at now reports "
+            "nobody watching"
+        )
+        assert runtime.phone_watchers == 1
+    finally:
+        for writer in (writer_a, writer_b):
+            if writer is not None:
+                writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_watch_frame_buffered_behind_a_parked_op_cannot_move_the_count() -> None:
+    """A `watch`/`unwatch` that arrives after its connection is gone is inert.
+
+    Closing a connection does not stop the frames it already sent. The reader
+    loop is strictly serial — `readline()` then `await _on_request(...)` — so
+    while an op is parked, anything the daemon wrote sits in the socket
+    buffer; `_drop_client` closes the WRITER, but the `StreamReader` keeps
+    yielding those lines. `_on_request` therefore runs on a connection that is
+    no longer in the registry.
+
+    Production produces exactly this ordering: `notify_watch_transition`
+    pushes `unwatch` from the SSE generator's `finally` IN THE DAEMON THAT IS
+    DYING, while the relaunched daemon dials and replays `watch`. The late
+    frame then wiped the replacement's live count (round 7, R8) — the fifth
+    instance of this predicate failing OPEN, where a phone genuinely being
+    looked at reports nobody watching, so a parked approval toasts a card
+    already on screen and the model is told no one can answer.
+
+    The R7 guard closed the `_drop_client` path only; this is the request
+    path, which is a different context onto the same server-global counter.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", "w1")
+        assert runtime.phone_watchers == 1
+        conn = next(c for c in runtime._clients.values() if c.kind == "daemon")
+
+        # The connection goes away (eviction by a replacement daemon, or any
+        # other drop). Its buffered frames have NOT gone away with it.
+        runtime._drop_client(conn)
+        assert runtime.phone_watchers == 0
+
+        # A replacement daemon dials and replays its watch, so the count is
+        # live again and owned by a different connection.
+        reader2, writer2 = await _dial(record)
+        writer2.write(json.dumps({"op": "watch", "req": "w2"}).encode() + b"\n")
+        await writer2.drain()
+        await _until(reader2, "ack", "w2")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # Now the dead connection's buffered frame is finally processed. This
+        # is the delivery the reader loop performs; it must not be able to
+        # reach the live count.
+        await runtime._on_request({"op": "unwatch", "req": "late"}, conn)
+
+        assert runtime.watching_surfaces() == frozenset({"viewer"}), (
+            "a frame buffered behind a parked op moved the counter after its "
+            "connection was dropped, wiping the REPLACEMENT daemon's live "
+            "watcher count"
+        )
+        assert runtime.phone_watchers == 1
+        writer2.close()
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_attach_clients_watch_cannot_leak_into_the_phone_count() -> None:
+    """Only the daemon's count is ever released, so only it may be taken.
+
+    `_drop_client` clears the counter for `kind == "daemon"` alone, so a
+    `watch` accepted from an `attach` client incremented something no drop
+    path could ever clear — a phantom viewer for the lifetime of the runtime
+    (round 7, R9). Unreachable today because only `mobile/daemon.py` sends the
+    op, but the asymmetry is one refactor away from being live.
+
+    An attached terminal is already represented: `watching_surfaces` derives
+    `attach` from the registry, which is the shape this counter should have.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(json.dumps({"op": "watch", "req": "a1"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", "a1")
+
+        assert runtime.phone_watchers == 0, (
+            "an attach client incremented the phone watcher count, which only "
+            "a daemon drop can clear"
+        )
+        # The terminal is still reported, by the registry-derived path.
+        assert "attach" in runtime.watching_surfaces()
+
+        # `watch_supported` latches regardless: it is a version signal about
+        # the peer speaking the op, not a count.
+        assert runtime.watch_supported is True
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()

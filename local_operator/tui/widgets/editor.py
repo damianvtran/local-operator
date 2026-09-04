@@ -810,6 +810,25 @@ class EditorSubmitted(Message):
         self.shell = shell
 
 
+class EditorDraftStarted(Message):
+    """Posted the first time a buffer becomes non-empty after being empty.
+
+    The signal a VIEWER uses to warm a runtime speculatively: a user who has
+    begun typing is about to need a session, and starting it now hides the
+    ~1.2 s of construction that would otherwise be paid after they press Enter,
+    with the composer already cleared.
+
+    Posted from :meth:`Editor.edit`, the documented funnel every buffer
+    mutation passes through (keystrokes, pastes, history recall), rather than
+    from a key handler — a key handler on the App intercepts dispatch and
+    breaks every widget that binds keys of its own.
+
+    Carries nothing, and is deliberately EDGE-triggered (empty → non-empty)
+    rather than sent on every edit: the app's own guard is idempotent, but a
+    message per keystroke would be a message per keystroke.
+    """
+
+
 class EditorCopyStale(Message):
     """Posted when the buffer is edited after a copy receipt was raised.
 
@@ -5108,10 +5127,17 @@ class Editor(TextArea):
         # keystroke seam, and it covers paste and history recall too, because
         # they funnel through here as well.
         self.retire_barren_click()
+        # Measured BEFORE the edit for the same reason the citation spans are:
+        # afterwards there is no way to tell a first keystroke from the tenth.
+        was_empty = not self.text.strip()
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
             self.post_message(EditorCopyStale())
+        if was_empty and self.text.strip():
+            # Edge-triggered: the draft just began. A viewer takes this as its
+            # cue to start a runtime while the user is still typing.
+            self.post_message(EditorDraftStarted())
         self._sync_picker()
         if touched:
             self._release_uncited(touched)

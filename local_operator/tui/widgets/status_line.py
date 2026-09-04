@@ -39,6 +39,10 @@ from rich.text import Text
 from textual.widgets import Static
 
 from local_operator.model.naming import model_label as model_label_forms
+from local_operator.session.frontend_state import (
+    format_context_tokens as _format_context_tokens,
+)
+from local_operator.session.frontend_state import format_window as _format_window
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
@@ -489,29 +493,12 @@ def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[
     return _DROP_LADDER_QUIET_ESTIMATE if context_estimated else _DROP_LADDER_QUIET
 
 
-def format_context_tokens(tokens: int) -> str:
-    """Compact context estimate: ``12.4k`` / ``1.2m`` style, plain under 1k."""
-    if tokens >= 1_000_000:
-        return f"{tokens / 1_000_000:.1f}m"
-    if tokens >= 1_000:
-        return f"{tokens / 1_000:.1f}k"
-    return str(tokens)
-
-
-def format_window(window: int) -> str:
-    """Abbreviate a context window for the denominator: ``1M``, ``200k``.
-
-    Capital ``M`` and lower-case ``k`` are the conventional units for model
-    windows, and a whole window renders without a decimal (``1M``, not
-    ``1.0M``) — the denominator is a label, not a measurement.
-    """
-    if window >= 1_000_000:
-        scaled = window / 1_000_000
-        return f"{scaled:.0f}M" if scaled == int(scaled) else f"{scaled:.1f}M"
-    if window >= 1_000:
-        scaled = window / 1_000
-        return f"{scaled:.0f}k" if scaled == int(scaled) else f"{scaled:.1f}k"
-    return str(window)
+# Re-exported from `session.frontend_state`, which is import-light: a
+# detached runtime renders the same `/context` rows and must not pull Textual
+# to format a number (round 4, R2/U13). Kept importable from here because
+# every existing caller in this package reads them from this module.
+format_context_tokens = _format_context_tokens
+format_window = _format_window
 
 
 def format_context_usage(tokens: int, window: int) -> str:
@@ -1012,6 +999,9 @@ class StatusLine:
         self._active_seconds: float = 0.0
         self._turn_started_at: float | None = None
         self._spinner_index: int = 0
+        #: True while a runtime is being started for a cold viewer; see
+        #: :meth:`set_starting`.
+        self._starting: bool = False
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
         #: against it to decide whether the timer must be replaced.
@@ -1054,6 +1044,25 @@ class StatusLine:
         if self._attention:
             return "attention"
         return "working" if self._streaming else "idle"
+
+    def set_starting(self, starting: bool) -> None:
+        """Show "starting…" while a runtime is being brought up for this viewer.
+
+        The one visible consequence of the viewer model at rest. A viewer holds
+        no runtime until it needs one, so between the first keystroke and the
+        runtime being ready there is a real interval — short, but long enough
+        that a band saying nothing reads as a dropped keystroke.
+
+        Deliberately the SAME glyph the working indicator uses
+        (:data:`_SPINNER_FRAMES`) rather than a second animation vocabulary:
+        both mean "the session is busy with something you are waiting for", and
+        the caption is what distinguishes them.
+        """
+        if self._starting == starting:
+            return
+        self._starting = starting
+        self._sync_spinner_timer()
+        self.refresh()
 
     def set_attention(self, attention: bool) -> None:
         """Whether the turn is parked on something the USER owes.
@@ -1725,7 +1734,22 @@ class StatusLine:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(f"{icon} ", style=icon_style or dim)
             left.append(text, style=style)
-        if self._streaming:
+        # `getattr`, not `self._starting`: `_render` is called UNBOUND against
+        # lightweight stub bands in the fork tests (`StatusLine._render(band,
+        # 120)`), which carry only the fields their case is about. Reading a
+        # new attribute directly turned three of those into AttributeErrors —
+        # a widget's renderer must tolerate the reduced hosts its own suite
+        # builds, the same way the fork/subagent fields here already do.
+        if getattr(self, "_starting", False) and not self._streaming:
+            # Before the runtime exists there is nothing to report but the
+            # wait itself, and the caption carries the whole meaning — so it is
+            # always spelled out, unlike the working indicator whose word is
+            # suppressed when the shimmer is already saying it.
+            if parts:
+                left.append(f" {_SEP_LEFT} ", style=seam)
+            left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
+            left.append(" starting…", style=dim)
+        elif self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the
             # band keeps a quiet activity glyph so a still frame still reads
             # "live". With shimmer off that line is static too, so the band
@@ -1990,10 +2014,14 @@ class StatusLine:
         return _SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
 
     def _sync_spinner_timer(self) -> None:
-        if self._streaming and self._spinner_timer is None:
+        # One timer for both animated states: a runtime starting and a turn
+        # streaming are never usefully distinguished by cadence, and a second
+        # timer would be a second thing to leak.
+        animating = self._streaming or self._starting
+        if animating and self._spinner_timer is None:
             self._spinner_rate = self._spinner_interval()
             self._spinner_timer = self._dock.set_interval(self._spinner_rate, self._advance_spinner)
-        elif not self._streaming and self._spinner_timer is not None:
+        elif not animating and self._spinner_timer is not None:
             self._stop_spinner()
 
     def sync_animation_rate(self) -> None:

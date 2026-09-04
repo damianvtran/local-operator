@@ -3401,7 +3401,14 @@ class MockClient:
                 error=_refusal_error("stop_reason=mock_refusal", "I can't help with that request."),
             )
             return
-        wants_tool = any("[tool]" in message.text for message in request.messages)
+        # The LAST user message only. Scanning the whole history made every
+        # turn after the first re-emit the tool call — the trigger text stays
+        # in the conversation forever, so an aborted "runaway" resumed as a
+        # fresh runaway and a follow-up after Esc looped identically (round 2,
+        # U6/N2). A real provider decides per request; the mock's closest
+        # analogue is the newest instruction.
+        last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+        wants_tool = last_user is not None and "[tool]" in last_user.text
         if wants_tool:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")
             yield StreamToolCallDelta(index=0, argument_delta=json.dumps({"text": "hi"}))

@@ -807,3 +807,243 @@ def test_next_wake_due_at_reads_the_live_scheduler() -> None:
         assert handle.next_wake_due_at() is None
     finally:
         loop.close()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_gate_spawns_no_desktop_notifier_under_the_suite_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suite must never put a toast on the developer's real desktop.
+
+    A runtime with no attached client announces a parked gate through
+    ``detached_notify``, which on darwin spawns a real ``osascript display
+    notification``. Six tests in this file drive real gates with zero attached
+    clients, so before the suite-wide gate they delivered 100 genuine
+    notifications to Notification Centre — titled "lop needs you", bodies
+    taken verbatim from these fixtures.
+
+    Nothing about a green suite reveals that: the spawn is fire-and-forget and
+    every failure is swallowed by ``detached_notify``'s contract. This test is
+    the tripwire — it asserts on the SPAWN, which is the only observable the
+    leak has, so a future change that reintroduces an ungated OS-facing path
+    fails here instead of on the operator's screen.
+
+    The gate itself lives in ``tests/conftest.py::isolate_environment``
+    (autouse), which is what makes the whole suite silent; this asserts that
+    gate is actually in force on the production announce path.
+    """
+    spawned: list[list[str]] = []
+
+    def _record(argv: list[str], *args: Any, **kwargs: Any) -> bool:
+        spawned.append(argv)
+        return True
+
+    monkeypatch.setattr(owned_mod, "spawn_detached", _record, raising=False)
+    import local_operator.tui.notify as notify_mod
+
+    monkeypatch.setattr(notify_mod, "spawn_detached", _record, raising=False)
+    # Also patch the helper that runs AFTER a platform notifier is found. On a
+    # runner with neither `osascript` nor `notify-send` (CI's Linux images) a
+    # spawn-level assertion passes for the wrong reason — the binary was
+    # missing, not the gate. This one cannot: it fires whenever the gate lets
+    # execution reach the spawn at all.
+    monkeypatch.setattr(
+        notify_mod, "_spawn_detached_ok", lambda argv: bool(spawned.append(argv)) or True
+    )
+    # And prove the gate the fixture sets is the reason, rather than an
+    # unrelated early return: with it removed, this same path DOES spawn.
+    assert notify_mod.notifications_enabled() is False
+
+    handle, session = make_handle()
+    # No attached clients: this is exactly the condition that routes the
+    # announcement out of band to the OS.
+    assert handle._attached_clients() == 0
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+    await asyncio.sleep(0)
+
+    assert spawned == [], f"the suite spawned an OS notifier: {spawned}"
+
+
+@pytest.mark.parametrize(
+    ("watching", "expect_toast"),
+    [
+        (frozenset({"attach"}), False),
+        (frozenset({"viewer"}), False),
+        (frozenset({"attach", "viewer"}), False),
+        (frozenset(), True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_pending_announcement_routes_to_whoever_is_watching(
+    monkeypatch: pytest.MonkeyPatch,
+    watching: frozenset[str],
+    expect_toast: bool,
+) -> None:
+    """A notification goes to the surface that is watching; the OS is the
+    fallback for nobody, not the default.
+
+    The old test was ``attached_clients() > 0``, which counts terminals only —
+    so a user whose PHONE was watching got a desktop toast for a card already
+    on their phone, on the one surface they were not looking at. Both watching
+    surfaces already deliver this card (the terminal paints it in-band, the
+    mobile relay carries it in the projection push ``_notify`` has already
+    made), which is why routing is a predicate and not a second transport.
+
+    NOTE the kinds here: ``viewer`` is a phone with the session actually
+    OPEN, never the relay's mere presence. This test injects the set as a
+    premise, which is deliberately not enough on its own — see
+    ``test_watching_surfaces_is_derived_from_real_connections`` in
+    ``test_server.py``, which derives it from a real dial and is what catches
+    the class of defect this parametrisation cannot (round 3, B1).
+    """
+    import local_operator.tui.notify as notify_mod
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    spawned: list[list[str]] = []
+    # Patch at `detached_notify`, not at the spawn helper: the helper is only
+    # reached once a platform notifier has been FOUND, and CI's Linux runners
+    # have no `notify-send` (nor `osascript`), so a spawn-level probe measures
+    # the runner's installed binaries instead of this module's routing
+    # decision — which is the only thing under test here.
+    monkeypatch.setattr(
+        notify_mod,
+        "detached_notify",
+        lambda title, body, **kwargs: bool(spawned.append([title, body])) or True,
+    )
+
+    handle, _session = make_handle()
+
+    class _Registrant:
+        record = type("R", (), {"session_id": "route0000001"})()
+
+        def watching_surfaces(self) -> frozenset[str]:
+            return watching
+
+        def set_record_pending(self, kind: str | None) -> None:
+            return None
+
+    handle._registrant = _Registrant()
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+
+    assert bool(spawned) is expect_toast
+
+
+@pytest.mark.asyncio
+async def test_an_old_registrant_without_surface_kinds_keeps_the_previous_behaviour() -> None:
+    """A runtime published by an older release cannot answer by kind.
+
+    It still knows the attach COUNT, and treating "a terminal is attached" as
+    "something is watching" reproduces the previous behaviour exactly rather
+    than inventing a toast that release never sent.
+    """
+    handle, _session = make_handle()
+
+    class _OldRegistrant:
+        def attach_clients(self) -> int:
+            return 1
+
+    handle._registrant = _OldRegistrant()
+    assert handle._watching_surfaces() == frozenset({"attach"})
+
+    class _OldIdle:
+        def attach_clients(self) -> int:
+            return 0
+
+    handle._registrant = _OldIdle()
+    assert handle._watching_surfaces() == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("tool", "description", "expected"),
+    [
+        # `describe_approval` already leads with the action word, and the
+        # title IS the tool name, so prefixing rendered every approval toast
+        # as "write: write: /path" — on the release's headline surface, every
+        # time (round 4, Q3).
+        ("write", "write: /tmp/notes.txt", "write: /tmp/notes.txt"),
+        ("bash", "bash: rm -rf build/", "bash: rm -rf build/"),
+        # A tool whose description does NOT name itself still gets the prefix.
+        ("browser", "https://example.com", "browser: https://example.com"),
+        # No description: the tool name alone says less than the shared
+        # vocabulary, so BODIES answers instead of a bare "write".
+        ("write", "", "Waiting for approval"),
+    ],
+)
+def test_the_toast_body_never_repeats_the_tool_name(
+    tool: str, description: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a user reads on the banner when nothing is attached."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "local_operator.tui.notify.detached_notify",
+        lambda title, body, **kwargs: sent.append((title, body)) or True,
+    )
+    monkeypatch.setattr("local_operator.tui.notify.notifications_enabled", lambda *a, **k: True)
+
+    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle._session = SimpleNamespace(conversation_name="a session")  # type: ignore[attr-defined]
+    handle._registrant = None  # type: ignore[attr-defined]
+    handle._parked_announcement = None  # type: ignore[attr-defined]
+    handle._loop = asyncio.new_event_loop()  # type: ignore[attr-defined]
+    handle._session_id_for_resume = lambda: "abc123def456"  # type: ignore[attr-defined]
+
+    try:
+        handle._announce_pending("approval", tool, description)
+    finally:
+        handle._loop.close()  # type: ignore[attr-defined]
+
+    assert sent, "no notification was produced"
+    assert sent[0][1] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_that_refuses_corrects_its_own_receipt(tmp_path) -> None:
+    """`/compact` answers optimistically, so a refusal MUST be reported.
+
+    A pass that runs narrates itself through the canonical compaction events;
+    a refusal emits nothing at all, which is what made it invisible on the
+    routed path — the runtime replied "compacting context…" and then discarded
+    the outcome, so the user was told a pass had started and nothing ever
+    contradicted it (round 5, U17).
+
+    Driven against a real empty session, whose genuine answer is
+    `nothing_to_compact`, rather than a stubbed outcome: the copy the user
+    reads comes from the session and a fake would not prove it arrives.
+    """
+    import json
+    from pathlib import Path
+
+    from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+    from local_operator.providers.clients import MockClient
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from tests.e2e.harness import build_session
+
+    session = build_session(tmp_path, MockClient().stream)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        result = await handle._slash_result("compact", "", SlashResult)
+        assert result.text == "compacting context…"
+
+        # The reporting task is fire-and-forget by design (a long pass cannot
+        # be awaited inside a request/response op), so settle it explicitly
+        # rather than sleeping — a sleep here measures a race, not the answer.
+        for task in list(handle._background_tasks):
+            await asyncio.shield(task)
+
+        rows = [
+            json.loads(line)["payload"]
+            for line in Path(session.transcript.path).read_text().splitlines()
+            if line.strip()
+            and json.loads(line).get("payload", {}).get("custom_type") == COMPACTION_REFUSED_TYPE
+        ]
+        assert len(rows) == 1, "the refusal never reached the transcript"
+        detail = (rows[0].get("details") or {}).get("detail") or ""
+        assert "nothing to compact" in detail, detail
+    finally:
+        await session.dispose()

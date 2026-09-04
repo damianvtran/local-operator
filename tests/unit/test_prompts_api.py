@@ -551,3 +551,38 @@ def test_team_brief_rides_the_volatile_tail() -> None:
     )
     assert blocks[0] == again[0]
     assert blocks[1] == again[1]
+
+
+def test_a_detached_session_tells_the_model_nobody_can_answer() -> None:
+    """The model must know it has no interactive surface BEFORE it decides to
+    ask a question.
+
+    A detached session's ``ask`` costs a parked gate — which holds the runtime
+    resident for up to a day — and gets no answer. Saying so once, in the
+    volatile tail, is what lets the model proceed or finish instead.
+    """
+    detached = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+    attached = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+
+    assert "<interactivity>" in detached[-1]
+    assert "cannot be answered" in detached[-1]
+    assert "<interactivity>" not in attached[-1]
+
+
+def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
+    """O(1) IN THE NUMBER OF ATTACH/DETACH EVENTS, measured not asserted.
+
+    The defect this avoids is a row (or a message) per transition: a user who
+    reattaches fifty times would pay fifty times, which is exactly the token
+    accumulation the operator called out. Because the statement is recomputed
+    per turn rather than appended, the block is byte-identical no matter how
+    many transitions preceded it.
+    """
+    first = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+    # Fifty transitions' worth of rebuilds, alternating, as a live session does.
+    for index in range(100):
+        build_system_blocks([], "", "env", "2026-01-01", interactive=bool(index % 2))
+    last = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+
+    assert last == first
+    assert len(last[-1]) == len(first[-1])

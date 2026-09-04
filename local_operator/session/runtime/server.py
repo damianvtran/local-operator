@@ -115,7 +115,15 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents"}
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
+
+
+#: Rows one ``job_trajectory`` reply may carry. The whole retained window is
+#: 500 events with no size bound per event, which is what overflows the frame
+#: limit in the first place, so the viewer pages rather than asking for all of
+#: it: 120 rows of ordinary tool traffic sit far inside ``_MAX_LINE_BYTES``
+#: while keeping the round trips for a full window in single digits.
+_TRAJECTORY_PAGE_MAX = 120
 
 
 @dataclass
@@ -159,6 +167,12 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    # Job ids whose trajectory deltas this connection wants (``watch_job``).
+    # Empty by default and per-connection by necessity: the snapshot ships no
+    # trajectories at all (they overflow ``_MAX_LINE_BYTES``), so a viewer
+    # opts in only for the child page a reader actually opened. A second
+    # viewer watching a different child must not widen this one's stream.
+    watched_jobs: set[str] = field(default_factory=set)
 
 
 class SessionHandle(Protocol):
@@ -263,7 +277,35 @@ class RuntimeServer:
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
     ) -> None:
+        #: Live state mirrored into the discovery record. Held here rather
+        #: than read off the record so the publish is one assignment and the
+        #: fields have a defined value before the record exists.
+        self._pending: str | None = None
+        self._busy = False
+        #: True until a terminal attaches. A freshly spawned runtime genuinely
+        #: has no viewer, so this starts True rather than False — the old
+        #: default had every new runtime claiming a terminal it had never had.
+        self._detached = True
         self._handle = handle
+        # Back-reference so the handle can publish record state it alone knows
+        # about — today the parked-gate ``pending`` bit, which originates deep
+        # inside the approval gate and has to reach the discovery record for
+        # `lop sessions` and the picker to show it. Set defensively: reduced
+        # handles in tests are plain objects and must not fail on an attribute
+        # assignment they never asked for.
+        try:
+            handle._registrant = self  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — an unwritable handle simply cannot publish
+            logger.debug("handle does not accept a registrant back-reference", exc_info=True)
+        # With the back-reference in place the handle can answer "is anyone
+        # watching?", which is what the model needs in its prompt so a
+        # detached session does not ask a question nobody can answer.
+        installer = getattr(handle, "_install_interactivity_probe", None)
+        if callable(installer):
+            try:
+                installer()
+            except Exception:  # noqa: BLE001 — a probe is never worth a runtime
+                logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
         # The projection fold is an OPTIONAL, injected collaborator. A caller
@@ -292,6 +334,11 @@ class RuntimeServer:
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
             capabilities=([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else []),
+            # A runtime is born with no terminal watching it. Stamped at
+            # construction rather than left to the first transition, because
+            # the window before a viewer attaches is exactly when a detached
+            # runtime is most interesting to look at.
+            detached=True,
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -326,6 +373,39 @@ class RuntimeServer:
         # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
         # at 0: a daemon restart redials without unwatching, and a counter that
         # went negative would read as "watchers" to an == 0 check forever.
+        #
+        # READ THIS BEFORE YOU TOUCH THE COUNTER. It is SERVER-GLOBAL state
+        # mutated from THREE per-connection contexts, and that mismatch — not
+        # any one line — is what has produced four separate defects in this
+        # predicate across four review rounds:
+        #
+        #   1. removal          `_drop_client` never released a dead daemon's
+        #                       count, so a phantom viewer suppressed toasts
+        #                       forever (R5).
+        #   2. second removal   `_drop_client` is documented to run TWICE on
+        #                       one connection; an unconditional release on the
+        #                       late call wiped the REPLACEMENT's live count
+        #                       (R7).
+        #   3. request          a `watch`/`unwatch` buffered behind a parked op
+        #                       still arrives after its connection is evicted,
+        #                       because closing the writer does not stop the
+        #                       `StreamReader` (R8) — and an `attach` client's
+        #                       `watch` incremented a count only a `daemon`
+        #                       drop could clear (R9).
+        #
+        # Every instance failed the same way: the count outlives, or is stolen
+        # from, the connection it describes. Each is now defended separately,
+        # which is why three guards say "is this connection still registered?"
+        # in three places.
+        #
+        # THE DURABLE FIX IS STRUCTURAL, and deliberately not taken here: hold
+        # the count on `_ClientConn` and fold over the live registry, exactly
+        # as `watching_surfaces` already does for `attach` clients. A dropped
+        # connection then removes its own contribution BY CONSTRUCTION — no
+        # zeroing, no registry guards, and every one of these spellings becomes
+        # unrepresentable rather than separately defended. It was scoped out of
+        # this release as too large for a review round; do it before adding a
+        # fourth mutation site, not after the fifth defect.
         self.phone_watchers: int = 0
         # Latched True on the first watch/unwatch EVER received. Until then
         # watcher count is UNKNOWN (an old daemon never sends the ops), and
@@ -705,6 +785,12 @@ class RuntimeServer:
             wants_frontend=wants_frontend,
         )
         self._clients[id(writer)] = conn
+        # A terminal arriving flips ``detached`` (round 1, U2: it was computed
+        # only inside a pending transition, so every session claimed a viewer
+        # it might never have had). Cheap and de-duplicated — see
+        # ``_republish_detached``.
+        if kind == "attach":
+            self._republish_detached()
         if kind == "daemon":
             # The daemon is the one client that renders projections (attach
             # clients read the welcome for identity only), so its arrival is
@@ -723,14 +809,20 @@ class RuntimeServer:
                 )
                 self._relay_frontend_to(conn, payload)
 
-            from local_operator.session.frontend_state import FrontendSubscription
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                sync_wire_payload,
+            )
 
             outcome = subscribe_frontend(on_update)
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             subscription = cast(FrontendSubscription, outcome)
             sync = subscription.sync
-            sync_payload = sync.model_dump(mode="json")
+            # Trajectories are stripped here and re-fetched per job through
+            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
+            # cannot carry them.
+            sync_payload = sync_wire_payload(sync)
             conn.frontend_unsubscribe = subscription.unsubscribe
             # Registration and snapshot capture happened synchronously on the
             # authoritative loop. Mark ready only after queuing that snapshot;
@@ -766,7 +858,47 @@ class RuntimeServer:
         The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
         and attach-cap eviction all funnel here so the registry can never
         retain an entry whose socket is closed (the reaper counts them)."""
-        self._clients.pop(id(conn.writer), None)
+        # DID THIS CALL ACTUALLY REMOVE THE CONNECTION? `_drop_client` is
+        # designed to run TWICE on one connection — `_send_to` drops a client
+        # whose send failed, and that connection's reader loop later observes
+        # the close and drops it again from its `finally`, which the docstring
+        # there calls "a no-op second removal". Anything below that mutates
+        # SERVER-GLOBAL state has to honour that contract, or the late second
+        # call reaches across to whatever connection replaced this one.
+        was_registered = self._clients.pop(id(conn.writer), None) is not None
+        # The other half of the ``detached`` transition: the last terminal
+        # leaving is precisely when the picker must start saying "nobody is
+        # watching this". Published from the ONE removal path so no exit route
+        # (reader-loop end, shutdown, eviction) can miss it.
+        if conn.kind == "attach":
+            self._republish_detached()
+        # `phone_watchers` is the daemon CONNECTION's state kept in a
+        # server-global counter, and only an `unwatch` op decrements it — an op
+        # the daemon sends from an SSE generator's `finally`, in the process
+        # that just died. So a daemon restart while a phone is watching left
+        # the +1 behind forever: the new daemon's `_reconcile` replays `watch`
+        # (a second +1), the phone's eventual close sends ONE `unwatch`, and
+        # the residue reports a viewer nobody can see. Every parked approval on
+        # that session then sends no toast and the model is told a human is
+        # watching — round 3's B1 failure mode, restored by a third route
+        # (round 5, R5).
+        #
+        # Zeroed rather than decremented: the count belongs to the connection
+        # that reported it, a new daemon re-announces every session it watches,
+        # and at most one daemon connection exists at a time.
+        #
+        # GUARDED ON `was_registered`, because at most one daemon connection
+        # exists but its DROPS are not unique. An evicted daemon parked inside
+        # `_on_request` unwinds only when its await returns — by then the
+        # replacement has dialled, replayed `watch`, and owns the counter, so
+        # an unconditional zero here wiped a LIVE watcher (round 6, R7). That
+        # failed OPEN, unlike the leak it replaced: a phone being looked at
+        # reported nobody watching, so every parked approval toasted a card
+        # already on the user's screen and the model was told no one could
+        # answer. Derived from the registry rather than asserted, the same way
+        # the `attach` half above computes `detached`.
+        if conn.kind == "daemon" and was_registered:
+            self.phone_watchers = 0
         task = conn.event_writer_task
         conn.event_writer_task = None
         if task is not None:
@@ -788,6 +920,84 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001
             pass
 
+    def set_record_pending(self, pending: str | None) -> None:
+        """Record that this session is waiting for a PERSON (or no longer is).
+
+        Named for the RECORD it writes, distinct from ``set_pending`` below,
+        which carries a ``PendingRequest`` into the projection so a front end
+        can paint the card. Two different consumers: that one is "show the
+        user this question", this one is "tell the machine a person is owed".
+
+        ``"approval"`` / ``"ask"`` / ``None``. Republished immediately rather
+        than waiting for the 15 s heartbeat, because the whole value of the
+        field is that a user hunting for "what is that 283 MB process doing"
+        finds the answer at once.
+        """
+        if self._pending == pending:
+            return
+        self._pending = pending
+        self._republish()
+
+    def _republish_detached(self) -> None:
+        """Refresh the record when the attached-terminal count crosses 0↔1.
+
+        De-duplicated on the resulting BOOLEAN rather than on the count: a
+        second terminal attaching to a session that already had one changes
+        nothing a reader can see, and republishing for it would put a staged
+        write on every connection churn.
+        """
+        detached = self.attach_clients() == 0
+        if detached == self._detached:
+            return
+        self._detached = detached
+        self._republish()
+        if detached and self._pending:
+            # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
+            # closed the terminal. The routing decision was made once, at
+            # announce time, and correctly sent no toast then — so without
+            # this the question waits up to 24 h and the user is never told
+            # (round 3, B2). "I approved something, shut the laptop, came back
+            # to a session that had been waiting all day" is the ordinary
+            # shape of it. Re-announcing on the transition is what turns the
+            # one-shot decision into a live one.
+            announce = getattr(self._handle, "reannounce_pending", None)
+            if callable(announce):
+                try:
+                    announce()
+                except Exception:  # noqa: BLE001 — a toast never breaks teardown
+                    logger.debug("could not re-announce the parked gate", exc_info=True)
+
+    def set_busy(self, busy: bool) -> None:
+        """Record whether a turn is running, for the picker's liveness marker."""
+        if self._busy == busy:
+            return
+        self._busy = busy
+        self._republish()
+
+    def _republish(self) -> None:
+        """Refresh the discovery record with the current live state.
+
+        Through ``RecordPublisher.heartbeat``, which is already the one way
+        this process rewrites its record — a second publish path here would be
+        a second thing that can disagree about the record's contents.
+
+        Best-effort: publishing is one small staged write and rename, and a
+        failure costs a marker rather than a session. Called on every
+        transition rather than left to the 15 s heartbeat because the value of
+        these fields is that they are current when somebody looks.
+        """
+        publisher = getattr(self, "_publisher", None)
+        if publisher is None:
+            return
+        try:
+            publisher.heartbeat(
+                pending=self._pending,
+                busy=self._busy,
+                detached=self.attach_clients() == 0,
+            )
+        except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
+            logger.debug("could not republish the session record", exc_info=True)
+
     def attach_clients(self) -> int:
         """How many attach (follower terminal) connections are live.
 
@@ -795,6 +1005,52 @@ class RuntimeServer:
         an interactive viewer holds the runtime warm; ``daemon`` clients never
         do. Also the attach-cap count."""
         return sum(1 for c in self._clients.values() if c.kind == "attach")
+
+    def watching_surfaces(self) -> frozenset[str]:
+        """Which KINDS of surface have a HUMAN watching this session right now.
+
+        Notification routing needs the kind, not the count: a question goes to
+        whatever is actually watching, and only falls out to the OS when
+        nothing is.
+
+        **A ``daemon`` connection is NOT somebody watching.** ``"daemon"`` is
+        the default kind for an auth frame with no ``client`` field, which is
+        exactly what the mobile daemon's ADOPTION dial sends — and that dial
+        covers every session on the machine and is held open permanently
+        (`mobile/daemon.py::_dial`). Counting it meant that on any machine
+        running ``lop mobile`` no parked approval ever sent a notification,
+        the gate held ~283 MB for 24 h, and the model was told a human was
+        watching (round 3, B1). ``process.py::_viewer_attached`` reads this
+        same table and counts only ``"attach"`` for exactly this reason.
+
+        **A PHONE THAT IS BEING LOOKED AT REGISTERS THROUGH ``watch``.**
+        ``phone_watchers`` is incremented by the ``watch`` control op, which
+        the daemon pushes when a session's SSE subscriber count crosses 0↔N
+        (`mobile/daemon.py::notify_watch_transition`) — i.e. exactly when a
+        person opens or closes the session on their phone. That is the signal
+        production already produces, and reading anything else is how round 3
+        traded B1's false positive for a false negative: the fix introduced a
+        parallel `note_viewer_active` mechanism that NOTHING called, so a user
+        reading the session on their phone got a desktop toast for a card
+        already on their screen, and the model was told nobody could answer
+        (round 4, R1/Q1).
+
+        ``watch_supported`` guards the mixed-version case for us: it latches
+        on the first ``watch``/``unwatch`` ever seen, so a daemon too old to
+        send the op leaves it False and this reports no phone rather than
+        inventing one. That matches the reaper's reading of the same pair.
+
+        Deliberately the live connection table rather than a cached flag:
+        surfaces come and go constantly, and a stale answer here means a
+        notification delivered to a surface that has gone away.
+        """
+        watching = {c.kind for c in self._clients.values() if c.kind == "attach"}
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon`` so a reader cannot
+            # confuse "a relay is connected" (true of every session on a
+            # machine running `lop mobile`) with "a person is looking".
+            watching.add("viewer")
+        return frozenset(watching)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")
@@ -809,12 +1065,45 @@ class RuntimeServer:
                 raise ValueError(
                     "attached front ends cannot rebind the session; detach and /resume instead"
                 )
-            if op in ("watch", "unwatch"):
+            if op in ("watch_job", "unwatch_job"):
+                # Trajectory subscription for ONE child page, per connection.
+                # Handled here rather than in ``_dispatch`` because it mutates
+                # this connection's own state and never touches the session:
+                # the dispatcher deliberately has no ``conn``.
+                job_id = str(frame.get("job_id") or "")
+                if not job_id:
+                    raise ValueError("job_id must be a non-empty string")
+                if op == "watch_job":
+                    conn.watched_jobs.add(job_id)
+                else:
+                    conn.watched_jobs.discard(job_id)
+                detail = f"watching {len(conn.watched_jobs)} job(s)"
+            elif op in ("watch", "unwatch"):
                 # The reaper's phone-watcher signal (§2.8). watch_supported
                 # latches on the FIRST op seen so a mixed-version child never
-                # mistakes silence for zero watchers.
+                # mistakes silence for zero watchers. Deliberately OUTSIDE the
+                # registry guard below: it is a version signal, not a count,
+                # and a frame proves the daemon speaks the op whenever it
+                # arrived.
                 self.watch_supported = True
-                if op == "watch":
+                # ONLY A REGISTERED CONNECTION MAY MOVE THE COUNT. The reader
+                # loop is strictly serial — `readline()` then `await
+                # _on_request(...)` — so anything the daemon sent before it
+                # died is still in the socket buffer while an op is parked.
+                # `_drop_client` closes the WRITER, but the `StreamReader`
+                # keeps yielding those buffered lines, so this runs on a
+                # connection already evicted from the registry. A dying
+                # daemon's `unwatch` (pushed from the SSE generator's
+                # `finally`) then wiped the REPLACEMENT daemon's live count
+                # (round 7, R8).
+                #
+                # Gated on `conn.kind` too: only the daemon's count is ever
+                # cleared (`_drop_client` zeroes for `kind == "daemon"`), so an
+                # attach client's `watch` would increment something nothing can
+                # clear — a permanent phantom viewer (round 7, R9).
+                if conn.kind != "daemon" or id(conn.writer) not in self._clients:
+                    pass
+                elif op == "watch":
                     self.phone_watchers += 1
                 else:
                     self.phone_watchers = max(0, self.phone_watchers - 1)
@@ -830,7 +1119,25 @@ class RuntimeServer:
                 await self._push()
                 return
             else:
-                detail = await self._dispatch(op, frame)
+                duplicate = self._already_admitted(op, frame)
+                if duplicate:
+                    # A retry of an errand this transcript already owns (a
+                    # sender that crashed after the row was durable, a wake
+                    # re-fired by a restarted supervisor). Acked, not executed:
+                    # the caller's outcome is "delivered", which is true, and
+                    # nothing is appended twice. See
+                    # ``OwnedSessionHandle.has_admitted_command``.
+                    detail = "already admitted"
+                else:
+                    detail = await self._dispatch(op, frame)
+                await self._send_to(
+                    conn,
+                    {"op": "ack", "req": req, "detail": detail, "duplicate": duplicate},
+                )
+                if not duplicate:
+                    await self._handle.refresh()
+                    await self._push()
+                return
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
             # should see. ``stop`` is exempt: its whole job is to END the
@@ -838,12 +1145,37 @@ class RuntimeServer:
             # mid-dispose (the TUI's handle raises "session is still
             # starting" the moment its session reference drops) — the ack is
             # the reply and the ladder's exit-wait is the confirmation.
-            if op not in ("watch", "unwatch", "stop"):
+            if op not in ("watch", "unwatch", "watch_job", "unwatch_job", "stop"):
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
+
+    def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
+        """Is this a retry of a turn the transcript already carries?
+
+        Only ``prompt`` carries a durable, append-only identity, so only it can
+        be answered from the transcript. ``steer`` is deliberately excluded:
+        its idempotency is the handle's own reservation map, and a steer is not
+        an append-only user row to match against.
+
+        Optional capability, probed — a reduced handle without it simply never
+        reports a duplicate, which is the pre-idempotency behaviour.
+        """
+        if op != "prompt":
+            return False
+        command_id = str(frame.get("command_id") or "")
+        if not command_id:
+            return False
+        checker = getattr(self._handle, "has_admitted_command", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(command_id))
+        except Exception:  # noqa: BLE001 — never fail a turn over a dedupe probe
+            logger.debug("admitted-command probe failed", exc_info=True)
+            return False
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
         from local_operator.mobile.types import validate_control_frame
@@ -1013,6 +1345,25 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result if isinstance(result, int) else 0
+        if op == "job_trajectory":
+            # The other half of the frame-size fix: the attach snapshot omits
+            # trajectories, so a viewer opening a child page pulls that one
+            # job's window here, in pages. Optional capability — an older
+            # runtime answers unknown-op and the viewer degrades to "trajectory
+            # unavailable" rather than rendering the child as empty.
+            fetch = getattr(h, "job_trajectory", None)
+            if not callable(fetch):
+                raise ValueError("this owner cannot serve job trajectories")
+            job_id = str(frame.get("job_id") or "")
+            if not job_id:
+                raise ValueError("job_id must be a non-empty string")
+            offset = max(0, int(frame.get("offset") or 0))
+            requested = int(frame.get("limit") or _TRAJECTORY_PAGE_MAX)
+            limit = max(1, min(requested, _TRAJECTORY_PAGE_MAX))
+            result = fetch(job_id, offset, limit)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         raise ValueError(f"unknown op: {op!r}")
 
     # -- v5 frontend state relay ----------------------------------------------
@@ -1029,6 +1380,12 @@ class RuntimeServer:
     def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
         if id(conn.writer) not in self._clients:
             return
+        from local_operator.session.frontend_state import filter_update_trajectories
+
+        # Per-connection, and applied on THIS loop rather than at the producer:
+        # one canonical update fans out to every client, each of which has its
+        # own open child page (or none).
+        data = filter_update_trajectories(data, conn.watched_jobs.__contains__)
         if not conn.frontend_ready:
             if len(conn.frontend_pending) >= _EVENT_QUEUE_MAX:
                 # A join that cannot install its boundary before this many

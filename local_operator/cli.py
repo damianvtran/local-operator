@@ -33,7 +33,6 @@ Example Usage:
 from __future__ import annotations
 
 import argparse
-import copy
 import functools
 import math
 import os
@@ -493,6 +492,23 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # running / talk to it / end it" — and deliberately NOT the
     # `lop mobile start|stop|restart` shape, which manages the daemon
     # service rather than a session.
+    # The activation target of a desktop notification. Deliberately a real
+    # subcommand rather than `python -m …`: the toast is clicked minutes or
+    # hours later, by which time the interpreter that sent it may be gone (a
+    # runtime exits when its work is done, and a worktree's `.venv` is
+    # disposable) — so the command has to name the user's OWN launcher, which
+    # is what `lop` on PATH resolves to. Hidden from `--help`: nobody types
+    # this, and it is not a supported way to open a session.
+    resume_click_parser = subparsers.add_parser(
+        "resume-click",
+        # NO `help=` AT ALL. For a SUBPARSER, `help=argparse.SUPPRESS` is not
+        # the hide idiom it is for an argument — argparse renders the sentinel
+        # verbatim, so `lop --help` listed `resume-click  ==SUPPRESS==`
+        # (round 3, B5). Omitting the kwarg is what keeps it off the list.
+        parents=[parent_parser],
+    )
+    resume_click_parser.add_argument("session", help="session id to reopen")
+
     stop_parser = subparsers.add_parser(
         "stop",
         help="Stop a running lop session (graceful, then signals)",
@@ -537,6 +553,95 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "starved process the socket cannot reach (use after the plain "
             "stop refused with a fresh heartbeat)"
         ),
+    )
+
+    # Scheduled wakes, and the process that fires them for sessions nobody is
+    # running. Top-level beside `sessions`/`send`/`stop` for the same reason
+    # they are: it answers "what is scheduled and will it actually fire",
+    # which is a question about this machine rather than about one session.
+    wake_parser = subparsers.add_parser(
+        "wake",
+        help="Inspect scheduled wakes and the supervisor that fires them",
+        parents=[parent_parser],
+    )
+    wake_sub = wake_parser.add_subparsers(dest="wake_command")
+    wake_status = wake_sub.add_parser(
+        "status",
+        help="whether a supervisor is installed, and what it would fire next",
+        parents=[parent_parser],
+    )
+    wake_status.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_status.add_argument(
+        "--install",
+        action="store_true",
+        help="install the supervisor now rather than waiting for the next schedule",
+    )
+    wake_status.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the supervisor; scheduled wakes then fire only when a session is open",
+    )
+    wake_list = wake_sub.add_parser(
+        "list",
+        help="every scheduled wake on this machine, soonest first",
+        parents=[parent_parser],
+    )
+    wake_list.add_argument("--json", action="store_true", help="machine-readable output")
+    # `create` completes the surface: `status` says whether wakes fire,
+    # `list` says what is scheduled, and this is how a wake gets scheduled
+    # from outside a session — which is also what makes install-on-demand
+    # testable without driving a TUI.
+    wake_create = wake_sub.add_parser(
+        "create",
+        help="schedule a wake for a session (installs the supervisor on demand)",
+        parents=[parent_parser],
+    )
+    wake_create.add_argument("session", help="session id to wake")
+    wake_create.add_argument(
+        "when",
+        help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
+    )
+    wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    wake_create.add_argument(
+        "--every",
+        default="",
+        metavar="DURATION",
+        # The operator's stated use for background automations ("regular disk
+        # cleaning, automation tasks") is recurring by nature, and the model
+        # has been able to schedule one since `WakeSchedule.every_ms`; only
+        # the CLI could not. Parsed by the same `parse_wake_duration` the
+        # tool path uses, so `40s` / `8h30m` mean the same thing from either
+        # entry point — including its deliberate rejection of a bare number
+        # and of a zero interval, both of which are runaway loops.
+        help='repeat every DURATION after the first fire ("5m", "1h", "8h30m")',
+    )
+    wake_create.add_argument(
+        "--until",
+        default="",
+        metavar="WHEN",
+        # Bounds a recurrence in TIME. `WakeSchedule.until_at` and
+        # `advance_wake_schedule`'s `retired: until` have always honoured it;
+        # only the CLI could not express it, so a scheduled automation could
+        # only ever be unbounded (round 4, R4).
+        help='stop repeating after this time ("in 7d", "at 09:30")',
+    )
+    wake_create.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop repeating after N fires",
+    )
+    wake_create.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_serve = wake_sub.add_parser(
+        "serve",
+        help="run the supervisor in the foreground (what the LaunchAgent runs)",
+        parents=[parent_parser],
+    )
+    wake_serve.add_argument(
+        "--once",
+        action="store_true",
+        help="fire whatever is due right now, then exit",
     )
 
     # Exec command for single execution mode
@@ -1383,8 +1488,11 @@ def send_command(args: argparse.Namespace) -> int:
     the piped payload was discarded silently."""
     import asyncio
 
-    from local_operator.mobile.peer_client import send_peer_message
-    from local_operator.mobile.peer_send import candidate_lines, validate_peer_body
+    from local_operator.mobile.peer_send import (
+        candidate_lines,
+        deliver_peer_message,
+        validate_peer_body,
+    )
 
     # stdin can only change the binding when at most ONE positional was typed:
     # with both slots filled the outcome is already decided (a conflict when a
@@ -1461,7 +1569,16 @@ def send_command(args: argparse.Namespace) -> int:
         if example:
             print(f"  e.g. `{example}`", file=sys.stderr)
         return 1
-    if error or record is None:
+    cold_session_id = ""
+    if record is None:
+        # No LIVE record, but an exact `--session` may still name a stored
+        # session that simply is not running. A quiet note to one of those is
+        # the mailbox mode's whole purpose, so it is spooled rather than
+        # refused; anything wanting attention starts a runtime for it.
+        from local_operator.mobile.peer_send import resolve_cold_session
+
+        cold_session_id = resolve_cold_session(args.session or "") or ""
+    if not cold_session_id and (error or record is None):
         _peer_red(error or "no target resolved")
         return 1
 
@@ -1480,7 +1597,7 @@ def send_command(args: argparse.Namespace) -> int:
     # once and using it for both is what keeps them from drifting apart again.
     sender = _peer_sender_identity()
     sender_pid = sender.get("pid")
-    if record.pid == sender_pid:
+    if record is not None and record.pid == sender_pid:
         _peer_red("that target is this session; use the composer to message yourself")
         return 1
 
@@ -1498,8 +1615,9 @@ def send_command(args: argparse.Namespace) -> int:
     mode = "steer" if args.steer else "mailbox"
     try:
         detail = asyncio.run(
-            send_peer_message(
+            deliver_peer_message(
                 record,
+                session_id=(record.session_id if record is not None else cold_session_id),
                 text=text,
                 mode=mode,
                 wake=bool(args.wake),
@@ -1512,8 +1630,11 @@ def send_command(args: argparse.Namespace) -> int:
         # non-zero "could not deliver" line, never an uncaught traceback (U1).
         _peer_red(f"could not deliver: {exc}")
         return 1
-    name = record.conversation_name or record.session_id
-    print(f"→ {name} (pid {record.pid}): {detail}")
+    if record is not None:
+        name = record.conversation_name or record.session_id
+        print(f"→ {name} (pid {record.pid}): {detail}")
+    else:
+        print(f"→ {cold_session_id} (not running): {detail}")
     return 0
 
 
@@ -1550,6 +1671,12 @@ def sessions_command(args: argparse.Namespace) -> int:
                 "footprint_bytes": use.footprint_bytes if use else None,
                 "uptime_s": max(0.0, now - rec.started_at),
                 "heartbeat_age_s": max(0.0, now - rec.heartbeat_at),
+                # Live state from the record. Defaulted through getattr so a
+                # record written by an OLDER runtime (which has no such fields)
+                # lists cleanly rather than raising mid-table.
+                "pending": getattr(rec, "pending", None),
+                "busy": bool(getattr(rec, "busy", False)),
+                "detached": bool(getattr(rec, "detached", False)),
             }
         )
 
@@ -1561,22 +1688,411 @@ def sessions_command(args: argparse.Namespace) -> int:
         print("no active lop sessions")
         return 0
 
+    # NEEDS is the column this release adds, and it earns its width: a parked
+    # question holds a runtime resident for up to a day, so "which of these is
+    # waiting on me" has to be answerable from the same place the memory is
+    # visible. Blank for every session that is simply working.
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'CONVERSATION':<24} "
+        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
         f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
     )
     print(header)
     for row in rows:
         name = (row["conversation_name"] or row["session_id"] or "")[:24]
         model = (row["model_label"] or "")[:24]
+        needs = (row.get("pending") or "")[:8]
         print(
-            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {name:<24} "
+            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {needs:<8} {name:<24} "
             f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
             f"{_format_duration(row['uptime_s']):>8} "
             f"{_format_duration(row['heartbeat_age_s']):>7}"
         )
     return 0
+
+
+def _wake_create(args: argparse.Namespace) -> int:
+    """``lop wake create <session> "<when>" "<message>"``.
+
+    Persists through the TRANSCRIPT first, exactly like the in-session wake
+    tool (``Session._persist_wake_schedules``), because the transcript entry
+    is the source of truth: a session rebuilds its derived index entry from it
+    on every open, so an index-only write is adopted as nothing and deleted
+    by the next open (round 2, U4/Q9 — the wake was scheduled, the runtime
+    started, and the self-prompt was gone). The index write and the
+    install-on-demand hook ride after it, best-effort, as they do there.
+
+    A session that does not exist is refused rather than created: the wake
+    index keys on a session id, and an id with no transcript would produce a
+    reminder the supervisor faithfully fires into nothing.
+    """
+    import time as _time
+
+    from local_operator.harness.wake import (
+        MIN_WAKE_INTERVAL_MS,
+        WakeSchedule,
+        parse_wake_at,
+        parse_wake_duration,
+    )
+    from local_operator.paths import config_dir
+    from local_operator.wakes.store import read_entry, write_entry
+
+    root = config_dir()
+    session_id = str(args.session)
+    session_dir = root / "sessions" / session_id
+    if not session_dir.is_dir():
+        print(f"no session {session_id!r}", file=sys.stderr)
+        return 1
+
+    now_ms = int(_time.time() * 1000)
+    raw = str(args.when).strip()
+    # "in 2m" is the phrasing the help text advertises and the one a person
+    # reaches for; the parsers below take the bare duration, so the leading
+    # preposition is stripped here rather than taught to both of them.
+    body = raw[3:].strip() if raw.lower().startswith("in ") else raw
+    if raw.lower().startswith("at "):
+        due_at = parse_wake_at(raw[3:].strip(), now_ms)
+    else:
+        duration = parse_wake_duration(body)
+        due_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+    if due_at is None:
+        print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
+        return 1
+
+    entry = read_entry(root, session_id) or {}
+
+    # Existing schedules come from the TRANSCRIPT, not the index: the index
+    # is derived and may lag (or be absent), and the append below REPLACES
+    # the session's schedule list, so reading a stale source would silently
+    # cancel live reminders — the same hazard the in-session persist guards.
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(session_dir)
+    latest = transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+    existing: list[dict[str, Any]] = []
+    if latest is not None:
+        details = dict(latest.payload.get("details", {}))
+        existing = [dict(s) for s in details.get("schedules", []) if isinstance(s, dict)]
+    # Per-session handles (``w1``…), matching the in-session numbering so the
+    # id a user sees here is the id `/wake` would have given it.
+    every_ms: int | None = None
+    every_raw = str(getattr(args, "every", "") or "").strip()
+    if every_raw:
+        every_ms = parse_wake_duration(every_raw)
+        if every_ms is None:
+            # The same refusal the tool path gives, for the same reason: a
+            # bare number is ambiguous between seconds and milliseconds, and
+            # guessing wrong is a runaway loop.
+            print(
+                f"could not read a repeat interval from {every_raw!r} "
+                "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
+                file=sys.stderr,
+            )
+            return 1
+        if every_ms < MIN_WAKE_INTERVAL_MS:
+            # Caught HERE rather than at the model validator so the user gets
+            # a sentence instead of a pydantic traceback. The floor is
+            # deliberate: a wake starts a full turn, so a sub-minute repeat
+            # starves the session it is meant to serve.
+            print(
+                f"repeat interval {every_raw!r} is too short — "
+                f"the minimum is {MIN_WAKE_INTERVAL_MS // 1000}s, "
+                "because each wake starts a full turn",
+                file=sys.stderr,
+            )
+            return 1
+
+    until_at: int | None = None
+    until_raw = str(getattr(args, "until", "") or "").strip()
+    if until_raw:
+        # Both prepositions are stripped here rather than taught to the two
+        # parsers, exactly as the `when` argument above does it — the help
+        # promises "in 7d" and "at 09:30", so both have to reach a bare
+        # duration/clock parser.
+        lowered = until_raw.lower()
+        if lowered.startswith("in "):
+            body = until_raw[3:].strip()
+        elif lowered.startswith("at "):
+            body = until_raw[3:].strip()
+        else:
+            body = until_raw
+        duration = parse_wake_duration(body)
+        until_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+        if until_at is None:
+            print(
+                f"could not read an end time from {until_raw!r} (try 'in 7d' or 'at 09:30')",
+                file=sys.stderr,
+            )
+            return 1
+
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        print("--limit must be at least 1", file=sys.stderr)
+        return 1
+
+    # Both bounds only mean something for a repeat: a one-shot already fires
+    # exactly once, so silently accepting them would promise a behaviour the
+    # schedule does not have.
+    if every_ms is None and (until_at is not None or limit is not None):
+        print("--until and --limit bound a repeat — add --every", file=sys.stderr)
+        return 1
+
+    schedule = WakeSchedule(
+        id=f"w{len(existing) + 1}",
+        message=str(args.message),
+        next_due_at=due_at,
+        created_at=now_ms,
+        every_ms=every_ms,
+        until_at=until_at,
+        limit=limit,
+    )
+    combined = [*existing, schedule.model_dump()]
+
+    # TRANSCRIPT FIRST, then the derived index — the same order as
+    # ``Session._persist_wake_schedules``. The append is the only step allowed
+    # to fail the command: an index written without it is a wake the next
+    # open deletes, which is exactly the round-2 defect.
+    import asyncio as _asyncio
+
+    async def _append() -> None:
+        await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": combined})
+
+    _asyncio.run(_append())
+
+    written = write_entry(
+        root,
+        session_id,
+        cwd=str(entry.get("cwd") or session_dir),
+        schedules=combined,
+    )
+
+    installed_reason = ""
+    try:
+        from local_operator.wakes.install import ensure_supervisor_installed
+
+        installed_reason = ensure_supervisor_installed(root).reason
+    except Exception:  # noqa: BLE001
+        # A wake that is scheduled but unsupervised still fires whenever the
+        # session is open, so a failed install must not fail the command —
+        # `lop wake status` is where that gap is reported, in one place.
+        import logging as _logging
+
+        _logging.getLogger(__name__).debug("wake supervisor install failed", exc_info=True)
+
+    if getattr(args, "json", False):
+        print(
+            _json_dumps(
+                {
+                    "session_id": session_id,
+                    "wake_id": schedule.id,
+                    "next_due_at": due_at,
+                    "entry": str(written) if written else "",
+                    "supervisor": installed_reason,
+                }
+            )
+        )
+        return 0
+    print(f"{schedule.id}  {_format_due((due_at - now_ms) / 1000.0)}  {schedule.message}")
+    if installed_reason:
+        print(f"supervisor: {installed_reason}")
+    return 0
+
+
+def _wake_rows() -> "list[dict[str, Any]]":
+    """Every scheduled wake on this machine, soonest first.
+
+    Reads the derived index rather than each transcript: the index exists
+    exactly so this question can be answered without opening every session,
+    and it is rewritten on every persist and every open, so a stale row
+    self-heals rather than needing a repair path here.
+    """
+    import time as _time
+
+    from local_operator.paths import config_dir
+    from local_operator.wakes.store import read_index
+
+    now_ms = int(_time.time() * 1000)
+    rows: list[dict[str, Any]] = []
+    for session_id, entry in read_index(config_dir()).items():
+        if not isinstance(entry, dict):
+            continue
+        dormant = bool(entry.get("stopped_at"))
+        for raw in entry.get("schedules") or ():
+            if not isinstance(raw, dict):
+                continue
+            due = raw.get("next_due_at")
+            if isinstance(due, bool) or not isinstance(due, int):
+                continue
+            rows.append(
+                {
+                    "session_id": session_id,
+                    "cwd": entry.get("cwd") or "",
+                    "wake_id": raw.get("id") or "",
+                    "message": raw.get("message") or "",
+                    "next_due_at": due,
+                    "due_in_s": (due - now_ms) / 1000.0,
+                    "dormant": dormant,
+                    # RECURRENCE, so a listing can distinguish an automation
+                    # from a one-shot. The store has always carried these; the
+                    # lister dropped them, which meant a user who scheduled
+                    # "regular disk cleaning" had no CLI way to confirm it
+                    # repeats — in either the human or the --json form
+                    # (round 4, R3/Q2/U14).
+                    "every_ms": raw.get("every_ms"),
+                    "until_at": raw.get("until_at"),
+                    # Computed here beside `due_in_s`, against the SAME clock
+                    # read: the renderer has no `now` of its own, and two
+                    # clock reads in one listing can disagree across a second
+                    # boundary.
+                    "until_in_s": (
+                        (int(raw["until_at"]) - now_ms) / 1000.0
+                        if isinstance(raw.get("until_at"), int)
+                        and not isinstance(raw.get("until_at"), bool)
+                        else None
+                    ),
+                    "limit": raw.get("limit"),
+                    "fired_count": raw.get("fired_count") or 0,
+                }
+            )
+    rows.sort(key=lambda row: row["next_due_at"])
+    return rows
+
+
+def wake_command(args: argparse.Namespace) -> int:
+    """``lop wake status|list|serve`` — scheduled wakes and their supervisor.
+
+    The question this answers is "will my reminder actually fire", which
+    before the supervisor had an uncomfortable answer: only if a session
+    happened to be open. ``status`` is therefore the important subcommand —
+    it reports whether the thing that fires wakes for closed sessions exists.
+    """
+    from local_operator.paths import config_dir
+
+    command = getattr(args, "wake_command", None) or "status"
+
+    if command == "serve":
+        # The foreground form of what the LaunchAgent runs. Useful on its own
+        # for anyone who would rather run it under their own supervisor.
+        import asyncio as _asyncio
+
+        from local_operator.wakes.supervisor import serve
+
+        return _asyncio.run(serve(config_dir(), once=bool(args.once)))
+
+    if command == "create":
+        return _wake_create(args)
+
+    if command == "list":
+        rows = _wake_rows()
+        if args.json:
+            print(_json_dumps(rows))
+            return 0
+        if not rows:
+            print("no scheduled wakes")
+            return 0
+        from local_operator.harness.wake import format_duration
+
+        for row in rows:
+            when = _format_due(row["due_in_s"])
+            mark = " (dormant — session stopped)" if row["dormant"] else ""
+            name = row["session_id"]
+            # `every …` reuses the same renderer the tool listing and the wake
+            # panel use, so one wake reads identically wherever it is shown.
+            repeat = ""
+            if row.get("every_ms"):
+                repeat = f" · every {format_duration(int(row['every_ms']))}"
+                if row.get("limit"):
+                    repeat += f", {int(row['fired_count'])}/{int(row['limit'])} fired"
+                elif row.get("fired_count"):
+                    repeat += f", {int(row['fired_count'])} fired"
+                # The TIME bound, shown for the same reason the count bound is:
+                # a `--limit` wake advertised its bound while an `--until` one
+                # was indistinguishable from an unbounded repeat, so the bound
+                # a user is most likely to forget was the one not rendered
+                # (round 5, R6/U16). Relative, matching the `when` column —
+                # "until in 7d" answers "is this still running next week"
+                # without the reader converting a timestamp.
+                left = row.get("until_in_s")
+                if left is not None:
+                    repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
+            print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
+        return 0
+
+    # status
+    from local_operator.wakes.install import (
+        ensure_supervisor_installed,
+        is_supported,
+        plist_path,
+        uninstall,
+    )
+
+    if getattr(args, "uninstall", False):
+        outcome = uninstall()
+        print(f"supervisor: {outcome.reason}")
+        return 0
+
+    rows = _wake_rows()
+    installed = is_supported() and plist_path().exists()
+    if getattr(args, "install", False):
+        outcome = ensure_supervisor_installed(config_dir())
+        installed = outcome.installed
+        print(f"supervisor: {outcome.reason}")
+
+    upcoming = [row for row in rows if not row["dormant"]]
+    payload = {
+        "supported": is_supported(),
+        "installed": installed,
+        "plist": str(plist_path()) if is_supported() else "",
+        "scheduled": len(rows),
+        "armed": len(upcoming),
+        "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+    }
+    if args.json:
+        print(_json_dumps(payload))
+        return 0
+
+    print(f"supervisor:  {'installed' if installed else 'not installed'}")
+    if installed is False and is_supported() and rows:
+        # The ACTIONABLE branch. Round 1 (D4): this command reported "not
+        # installed" beside three armed wakes and an overdue one, which is
+        # precisely the failure the subcommand exists to surface — and then
+        # stopped, leaving the user to find `--help` to act on the one fact it
+        # had just told them. The unsupported branch below already got two
+        # explanatory lines; the fixable one got none.
+        print("             (nothing will fire these while their sessions are")
+        print("              closed — run 'lop wake status --install')")
+    if not is_supported():
+        # Honest rather than reassuring: on a platform with no installer the
+        # wakes of a CLOSED session do not fire, and saying so is the whole
+        # point of this line.
+        print("             (no installer for this platform — wakes fire only while a")
+        print("              session is open)")
+    print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
+    if upcoming:
+        print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+    return 0
+
+
+def _json_dumps(value: Any) -> str:
+    import json as _json
+
+    return _json.dumps(value, indent=2)
+
+
+def _format_due(seconds: float) -> str:
+    """``in 4m`` / ``2h overdue`` — the relative form a reminder is read in."""
+    overdue = seconds < 0
+    seconds = abs(seconds)
+    if seconds < 90:
+        text = f"{int(seconds)}s"
+    elif seconds < 5400:
+        text = f"{int(seconds // 60)}m"
+    elif seconds < 172800:
+        text = f"{int(seconds // 3600)}h"
+    else:
+        text = f"{int(seconds // 86400)}d"
+    return f"{text} overdue" if overdue else f"in {text}"
 
 
 def stop_command(args: argparse.Namespace) -> int:
@@ -3191,6 +3707,27 @@ def main() -> int:
             return sessions_command(args)
         elif args.subcommand == "stop":
             return stop_command(args)
+        elif args.subcommand == "resume-click":
+            # Function-local like every other runtime import here: this module
+            # is on the CLI startup path and must not pull the spawn/terminal
+            # graph into every `lop` invocation.
+            from local_operator.tui.resume_click import open_session
+
+            if open_session(args.session):
+                return 0
+            # A CLICK THAT DOES NOTHING NEEDS A REASON. Success stays silent —
+            # nobody watches a notification's activation target — but the
+            # failure path is reachable by hand and the fallback spawn
+            # "usually does nothing visible", so without this a user has no
+            # way to find out why the click appeared to do nothing (D17).
+            print(
+                f"could not open a terminal for session {args.session} — "
+                f"run: lop --resume {args.session}",
+                file=sys.stderr,
+            )
+            return 1
+        elif args.subcommand == "wake":
+            return wake_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":
@@ -3432,15 +3969,87 @@ def main() -> int:
             tui_config = config_manager.get_config_value("tui", None)
             theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
 
-            async def session_factory():
-                return await create_session(
-                    args,
-                    config_manager,
-                    credential_manager,
-                    agent_registry,
-                    has_ui=True,
-                    defer_mcp_wiring=True,
+            async def viewer_factory(resume_id: "str | None"):
+                """Build the TUI's session facade: a VIEWER, never an owner.
+
+                `lop` no longer hosts the agent. It opens a viewer bound to
+                nothing; the work runs in a separate runtime process that the
+                first message starts and that exits when it has nothing left to
+                do. That is what lets a turn survive the terminal closing.
+
+                Two entry states, and the choice between them is just "is
+                something already running for this id":
+
+                - a live record → ATTACH, so a second terminal joins a session
+                  that is already working rather than fighting it for the lease;
+                - otherwise → COLD, which costs no process and no directory.
+
+                ``--resume`` of a session whose runtime is gone is the cold
+                case, and so is a fresh launch: a new id is minted here, in the
+                viewer, and the runtime materialises the directory for it on
+                first engage.
+                """
+                import uuid as _uuid
+
+                from local_operator.mobile.attach_client import find_owner_record
+                from local_operator.session.remote import RemoteSession
+
+                config_directory = config_manager.config_dir
+                # Same expression session_factory uses for a new session's
+                # directory name, so ids minted by either path are one shape.
+                session_id = resume_id or _uuid.uuid4().hex[:12]
+
+                async def take_over():
+                    # A viewer must never win the transcript lease — the
+                    # runtime owns it, and a TUI holding one would look like a
+                    # runtime to the wake supervisor's live-record rule. Kept
+                    # wired (RemoteSession requires a factory) and deliberately
+                    # unreachable: `_can_go_cold` routes owner loss to the cold
+                    # state instead of to a takeover.
+                    #
+                    # THE OWNER PATH IS GONE FROM `lop`. This factory only ever
+                    # returns a RemoteSession — attached when a live record
+                    # exists, cold otherwise — so the TUI process never builds
+                    # a `Session`, never takes the lease, and never writes the
+                    # transcript. That is what makes "at most one runtime per
+                    # session, ever" true by construction rather than by
+                    # arbitration between two kinds of writer.
+                    #
+                    # `session_factory.create_session` still exists and is
+                    # still correct for the callers that legitimately own their
+                    # session in-process: `lop exec`, the headless REPL, the
+                    # server, and the mobile daemon's own attach path. Those
+                    # are not the TUI and are deliberately left alone.
+                    raise RuntimeError("a viewer never takes over a session")
+
+                record = None
+                if resume_id:
+                    record, _owner = await asyncio.to_thread(
+                        find_owner_record, config_directory, session_id
+                    )
+                if record is not None:
+                    try:
+                        return await RemoteSession.connect(
+                            record,
+                            session_id,
+                            config_dir=config_directory,
+                            takeover_factory=take_over,
+                        )
+                    except (ConnectionError, OSError, TimeoutError):
+                        # The runtime died between the scan and the dial, or is
+                        # too old to attach to. Cold is the honest fallback:
+                        # the conversation still opens and the next message
+                        # starts a fresh runtime.
+                        pass
+                return await RemoteSession.cold(
+                    session_id,
+                    config_dir=config_directory,
+                    cwd=os.getcwd(),
+                    takeover_factory=take_over,
                 )
+
+            async def session_factory():
+                return await viewer_factory(getattr(args, "resume", None))
 
             # The provider controller gives the TUI the full provider/model/
             # credential/usage surface behind /model /provider /login /usage.
@@ -3481,20 +4090,11 @@ def main() -> int:
                 # startup; mutating the original here would confuse the exit
                 # hint's "resume with:" line).
                 async def resume_factory(resume_id: str | None):
-                    resume_args = copy.copy(args)
-                    # ``None`` is meaningful, not absent: ``create_session``
-                    # branches on ``resume is not None``, so passing it through
-                    # verbatim is what makes ``/new`` a genuine cold-launch
-                    # session rather than a special case beside one.
-                    resume_args.resume = resume_id
-                    return await create_session(
-                        resume_args,
-                        config_manager,
-                        credential_manager,
-                        agent_registry,
-                        has_ui=True,
-                        defer_mcp_wiring=True,
-                    )
+                    # ``None`` is meaningful, not absent: it means /new, which
+                    # mints a fresh id rather than reopening one — the same
+                    # distinction ``create_session``'s ``resume is not None``
+                    # branch used to carry, now expressed in the viewer.
+                    return await viewer_factory(resume_id)
 
                 tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # The silence starts HERE, not inside ``run_tui``. The

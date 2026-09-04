@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable
@@ -95,6 +96,14 @@ logger = logging.getLogger(__name__)
 #: race the gap says the same thing — never the transport's ``not attached``.
 _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
 
+#: How long a VIEWER chases a vanished runtime before unbinding and going cold.
+#: A runtime exits by design when it has nothing left to do, so owner loss is
+#: usually not a crash at all — but a restart after a `kill -9` publishes a new
+#: record within a second or two, so the window has to be wide enough to catch
+#: that before concluding nothing is coming. Only the viewer path uses it; the
+#: legacy attach path still recovers by taking over (see ``_can_go_cold``).
+COLD_FALLBACK_S = 8.0
+
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
     cls.model_fields["type"].default: cls
     for cls in (
@@ -163,6 +172,21 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
+        #: Where a runtime for this session should be started. Only a cold
+        #: viewer needs it (an attached one inherits the runtime's own cwd);
+        #: ``cold()`` sets the real value.
+        self._cwd = ""
+        #: Serialises ``_ensure_bound`` so concurrent first-writes engage one
+        #: runtime between them rather than one each.
+        self._bind_lock = asyncio.Lock()
+        #: Whether owner loss may end in an unbound viewer rather than a
+        #: takeover. True for a viewer (the runtime owns the lease and this
+        #: process must never take it); left False for the legacy attach path,
+        #: whose contract is still "recover the conversation into this
+        #: process" and whose tests assert exactly that.
+        self._can_go_cold = False
+        #: Told when the runtime vanished for good; see ``_go_cold``.
+        self._went_cold_callback: Callable[[], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -264,6 +288,164 @@ class RemoteSession:
         await self._load_history(frontend.live_cursor)
         self._finish_sync()
         return self
+
+    @classmethod
+    async def cold(
+        cls,
+        session_id: str,
+        *,
+        config_dir: Path,
+        cwd: str,
+        takeover_factory: Callable[[], Any],
+    ) -> "RemoteSession":
+        """A viewer bound to NOTHING: durable history and a spool, no runtime.
+
+        The state ``lop`` boots into. There is no process to attach to yet and
+        deliberately none is started — opening a terminal is not work, and a
+        session that is only being LOOKED at should cost nothing. The first
+        mutating call (a prompt, a steer, an answered gate) runs
+        :meth:`_ensure_bound`, which engages a runtime and attaches to it.
+
+        Canonical state is synthesised rather than read from an owner, because
+        there is no owner: the model comes from config, the roster is empty,
+        and the wakes come from the on-disk index. It is a real
+        ``FrontendSessionState`` so every widget renders a cold session through
+        exactly the same path it renders an attached one — the alternative, a
+        second "cold" rendering mode, is how two vocabularies for one screen
+        get built.
+        """
+        self = cls(
+            config_dir=config_dir,
+            session_id=session_id,
+            takeover_factory=takeover_factory,
+        )
+        self._cwd = cwd
+        self._can_go_cold = True
+        self._install_frontend(await self._synthesise_cold_state(cwd))
+        # A session that has never run has no transcript to read; one being
+        # reopened has its whole history here, off the loop as always.
+        if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
+            await self._load_history(None)
+        self._finish_sync()
+        # Nothing is queued behind an owner that will never arrive: a cold
+        # viewer is READY, and it is _ensure_bound that supplies the runtime
+        # when one is actually needed.
+        self._owner_ready.set()
+        return self
+
+    async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
+        """Canonical state for a session with no runtime to ask.
+
+        Off the loop: it reads the config file and the wake index.
+        """
+
+        def _build() -> FrontendSessionState:
+            from local_operator.session.frontend_state import (
+                FrontendModelSpec,
+                WakeState,
+            )
+
+            model: FrontendModelSpec | None = None
+            try:
+                from local_operator.config import ConfigManager
+
+                config = ConfigManager(config_dir=self._config_dir)
+                provider = str(config.get_config_value("hosting", "") or "")
+                model_id = str(config.get_config_value("model_name", "") or "")
+                model = FrontendModelSpec(provider=provider, model_id=model_id)
+            except Exception:  # noqa: BLE001 — an unreadable config is not fatal
+                logger.debug("cold state could not read the configured model", exc_info=True)
+            if model is None:
+                # NEVER None. ``RemoteSession.model`` raises without a spec, and
+                # a cold viewer is exactly the state where config may be empty
+                # (a first run, before `/login`) — so the band would crash on
+                # the very screen that exists to help the user fix it. An empty
+                # spec renders as "no model" and is replaced by the runtime's
+                # own on first engage.
+                model = FrontendModelSpec(provider="", model_id="")
+
+            wakes: list[WakeState] = []
+            try:
+                from local_operator.wakes.store import read_entry
+
+                entry = read_entry(self._config_dir, self._session_id)
+                for schedule in (entry or {}).get("schedules", []) or []:
+                    if isinstance(schedule, dict):
+                        try:
+                            wakes.append(WakeState.model_validate(schedule))
+                        except Exception:  # noqa: BLE001 — skip an unreadable row
+                            continue
+            except Exception:  # noqa: BLE001 — no index is the common case
+                logger.debug("cold state could not read the wake index", exc_info=True)
+
+            return FrontendSessionState(
+                session_id=self._session_id,
+                epoch=f"cold-{self._session_id}",
+                cwd=cwd,
+                selected_model=model,
+                effective_model=model,
+                wakes=wakes,
+            )
+
+        return await asyncio.to_thread(_build)
+
+    @property
+    def is_cold(self) -> bool:
+        """No runtime is attached (nor being attached) for this viewer."""
+        return self._client is None or not self._client.connected
+
+    async def _ensure_bound(self) -> None:
+        """Attach to a runtime, starting one if none exists. Idempotent.
+
+        The seam between "looking at a session" and "working in one", and the
+        only place a viewer creates a process. Serialised by a lock because
+        several mutating calls can arrive in the same tick (a prompt racing the
+        speculative warm engage the first keystroke started) and each must
+        wait for the SAME engagement rather than starting a second.
+
+        Scoped to VIEWER facades (``_can_go_cold``). The legacy attach path
+        keeps its own contract for a lost owner — recover the conversation into
+        this process, or report the deliberate stop — and engaging a runtime
+        there would both contradict that and start a process for a session the
+        caller is about to take over itself.
+        """
+        if not self._can_go_cold or not self.is_cold:
+            return
+        async with self._bind_lock:
+            if not self.is_cold:
+                return
+            from local_operator.mobile.attach_client import find_owner_record
+            from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+            await engage_runtime(
+                self._session_id,
+                self._cwd,
+                WarmErrand(),
+                config_dir=self._config_dir,
+            )
+            record, _owner = await asyncio.to_thread(
+                find_owner_record, self._config_dir, self._session_id
+            )
+            if record is None:
+                raise ConnectionError("could not start a runtime for this session")
+            await self._bind_to(record)
+
+    async def _bind_to(self, record: SessionRecord) -> None:
+        """Attach this viewer to a live record and adopt its canonical state.
+
+        The tail of :meth:`connect`, reused so a cold viewer becoming attached
+        takes the identical path a fresh attach does — including the history
+        boundary, which is what stops the rows already on screen from painting
+        a second time.
+        """
+        await self._dial(record)
+        frontend = await self._await_frontend()
+        self._install_frontend(frontend.snapshot, publish=True)
+        await self._load_history(frontend.live_cursor)
+        self._finish_sync()
+        self._deliberate_stop = False
+        self._stopped_announced = False
+        self._owner_ready.set()
 
     async def _dial(self, record: SessionRecord) -> None:
         # Freeze relay delivery until the canonical sync is installed ahead of
@@ -844,6 +1026,38 @@ class RemoteSession:
             return "this session was stopped"
         return "session owner is reconnecting"
 
+    def _go_cold(self) -> None:
+        """Unbind from a runtime that is gone, keeping the conversation.
+
+        The viewer stays exactly as it is on screen; only its binding drops.
+        ``_owner_ready`` is SET rather than left clear because a cold viewer is
+        ready — the next prompt engages a runtime through ``_ensure_bound``
+        instead of waiting for one that is never coming back.
+        """
+        client, self._client = self._client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 — teardown of a dead socket
+                logger.debug("closing the lost owner connection failed", exc_info=True)
+        self._streaming = False
+        self._owner_ready.set()
+        callback = self._went_cold_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
+            logger.debug("went-cold callback failed", exc_info=True)
+
+    def set_went_cold_callback(self, callback: Callable[[], Any] | None) -> None:
+        """Told when the runtime went away and no successor arrived.
+
+        The viewer paints "runtime exited" on its band; the conversation is
+        still readable and the next message starts a fresh runtime.
+        """
+        self._went_cold_callback = callback
+
     def _notify_stopped(self) -> None:
         """Tell the app once that this viewer's session ended deliberately.
 
@@ -874,8 +1088,24 @@ class RemoteSession:
             self._owner_ready.set()  # prompts route to the stopped notice
             return
         delay = 0.1
+        # Under the viewer model, owner loss has a THIRD outcome beside
+        # "reattached" and "took over": the runtime exited and no successor is
+        # coming, which is the ordinary end of a run-to-completion runtime and
+        # not a failure at all. After this long without a record the viewer
+        # stops chasing one and goes cold — the transcript stays on screen and
+        # the next message engages a fresh runtime. Without a bound the loop
+        # would redial forever against a session nobody is running.
+        cold_deadline = time.monotonic() + COLD_FALLBACK_S
         try:
             while not self._disposed:
+                if self._can_go_cold and time.monotonic() >= cold_deadline:
+                    logger.info(
+                        "no runtime for %s after %.0fs; the viewer is going cold",
+                        self._session_id,
+                        COLD_FALLBACK_S,
+                    )
+                    self._go_cold()
+                    return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
@@ -951,6 +1181,80 @@ class RemoteSession:
                 delay = min(delay * 1.7, 0.5)
         finally:
             self._recovering = False
+
+    async def load_job_trajectory(self, job_id: str) -> bool:
+        """Fetch one child's retained event window from the owner, in pages.
+
+        Called when a reader OPENS a subagent page. The attach snapshot carries
+        no trajectories (a busy session's would exceed the socket's 1 MiB line
+        limit and made the session unattachable), so the rows are pulled here
+        and cached on the jobs facade.
+
+        ``watch_job`` is issued FIRST and deliberately: subscribing before the
+        read means events emitted during the fetch are relayed rather than
+        lost, and the worst case is a row delivered twice, which the page
+        already dedupes by ``TRAJECTORY_SEQ_KEY``. Returns False when the owner
+        cannot serve trajectories (an older runtime, or the socket dropped) so
+        the page can say so instead of rendering the child as empty.
+        """
+        client = self._client
+        if client is None:
+            return False
+        try:
+            await client.watch_job(job_id)
+        except (ConnectionError, RuntimeError):
+            # An owner too old for the op cannot serve the fetch either; treat
+            # the whole capability as absent.
+            return False
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        base_seq: int | None = None
+        try:
+            while True:
+                payload = await client.job_trajectory(job_id, offset=offset)
+                if not isinstance(payload, Mapping):
+                    return False
+                page = [row for row in (payload.get("rows") or []) if isinstance(row, dict)]
+                page_base = payload.get("base_seq")
+                page_base = page_base if isinstance(page_base, int) else None
+                if offset and page_base != base_seq:
+                    # The owner evicted from the front while we paged, so the
+                    # offsets already read name different events now. Start over
+                    # rather than splicing two halves of different windows.
+                    rows, offset, base_seq = [], 0, None
+                    continue
+                base_seq = page_base
+                rows.extend(page)
+                total = payload.get("total")
+                offset += len(page)
+                if not page or not isinstance(total, int) or offset >= total:
+                    break
+        except (ConnectionError, RuntimeError):
+            return False
+        store = self._frontend_store
+        if store is None:
+            return False
+        # Into the canonical state, where the live append stream will extend it
+        # from here; see ``FrontendStateStore.seed_job_trajectory``.
+        if not store.seed_job_trajectory(job_id, rows):
+            return False
+        self._apply_frontend_facades(store.state)
+        return True
+
+    async def unload_job_trajectory(self, job_id: str) -> None:
+        """Stop watching one child's appends (its page closed).
+
+        The cached rows are kept: reopening the same page is common and the
+        next fetch refreshes them anyway. Only the owner-side subscription is
+        released, which is what bounds the delta stream.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.unwatch_job(job_id)
+        except (ConnectionError, RuntimeError):
+            pass
 
     def set_takeover_callback(self, callback: Callable[[Any], Any]) -> None:
         self._takeover_callback = callback
@@ -1189,6 +1493,10 @@ class RemoteSession:
         the prompt path catching up with its own sibling. Minted here when the
         caller supplies nothing, which is the historical behaviour.
         """
+        # The cold-to-attached seam: a viewer that has been LOOKING at a
+        # session starts working in it here, which is the first moment a
+        # runtime is actually owed. A no-op once attached.
+        await self._ensure_bound()
         await self._owner_ready.wait()
         target = self._takeover_target
         if target is not None:
@@ -1229,6 +1537,7 @@ class RemoteSession:
         asyncio.create_task(self._send_steer_when_ready(message))
 
     async def _send_steer_when_ready(self, message: Message) -> None:
+        await self._ensure_bound()
         """Retain a queued steer across silent reattach/takeover."""
         await self._owner_ready.wait()
         target = self._takeover_target

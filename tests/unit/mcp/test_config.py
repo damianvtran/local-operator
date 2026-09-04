@@ -681,3 +681,54 @@ def test_server_tool_filters_parse_aliases_for_every_transport() -> None:
         dumped = cfg.model_dump(by_alias=True)
         assert dumped["enabledTools"] == ["search_*", "get_one"]
         assert dumped["disabledTools"] == ["search_private"]
+
+
+def test_the_user_scope_write_honours_an_isolated_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sandboxed config dir must redirect the WRITE, not just the reads.
+
+    `_scope_path` resolved the user scope with a bare `Path.home()`, so an
+    isolated `LOCAL_OPERATOR_CONFIG_DIR` — the mechanism every test and every
+    agent probe uses to stay off the real machine — did not cover `/mcp add`
+    or `/mcp remove`. During round 5 that removed a real server from a real
+    developer's live `~/.local-operator/mcp.json`.
+
+    This is the same class as the LaunchAgent write and the desktop
+    notifications: a location the code reaches by rebuilding a path itself
+    instead of asking the one resolver that knows about the override.
+    """
+    from local_operator.mcp.config import _scope_path
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "sandbox"))
+    target = _scope_path(None, "user")
+    assert target == tmp_path / "sandbox" / "mcp.json"
+    assert Path.home() not in target.parents, "a sandboxed write must not land under the real home"
+
+
+def test_the_user_scope_still_defaults_to_the_config_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no override the target is unchanged — the fix must not move a
+    real user's servers to a new file."""
+    from local_operator.mcp.config import _scope_path
+
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    assert _scope_path(None, "user") == Path.home() / ".local-operator" / "mcp.json"
+
+
+def test_a_sandboxed_write_is_read_back_by_the_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writer and reader must resolve the same file, or a sandboxed write is
+    invisible to the read that follows it and a test silently proves nothing."""
+    import json
+
+    from local_operator.mcp.config import _local_operator_file_paths, _scope_path
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "sandbox"))
+    target = _scope_path(None, "user")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"mcpServers": {"probe": {"command": "true"}}}))
+
+    assert target in _local_operator_file_paths(str(tmp_path))

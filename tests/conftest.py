@@ -155,6 +155,20 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))  # Windows equivalent
     for name in _AMBIENT_VARS:
         monkeypatch.delenv(name, raising=False)
+    # The suite must never reach the operator's DESKTOP either. A runtime with
+    # no attached client announces a parked gate through `detached_notify`,
+    # which on darwin spawns a real `osascript display notification` — so six
+    # tests driving real gates put 100 genuine toasts in Notification Centre,
+    # titled "lop needs you" with fixture strings as bodies. Nothing in a
+    # green suite reveals that: the spawn is fire-and-forget and its failure
+    # is swallowed by design.
+    #
+    # This is the same defect class as the launchd escapes (a test reaching
+    # the real machine through a side effect the assertions never look at),
+    # and it gets the same answer: gate it centrally, once, for every test.
+    # A test that specifically exercises the notification path unsets or
+    # monkeypatches around this, which is the visible, deliberate opt-in.
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
     yield home
 
 

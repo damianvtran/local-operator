@@ -127,7 +127,12 @@ async def test_registrant_publishes_and_daemon_adopts() -> None:
                 command_id=command_id,
                 text="parent instruction",
             )
-            assert reply == {"op": "ack", "req": reply["req"], "detail": "steer ok"}
+            # Field-wise rather than whole-frame: ack frames gain additive
+            # fields over time (``duplicate`` for command idempotency), and an
+            # equality assertion here would fail every such addition while
+            # claiming to test the steer receipt.
+            assert reply["op"] == "ack"
+            assert reply["detail"] == "steer ok"
             assert handle.calls[-1] == (
                 "steer",
                 ("parent instruction",),

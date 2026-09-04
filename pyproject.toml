@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.45.7"
+version = "0.46.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -185,6 +185,13 @@ local_operator = [
     # wheel, and ``task(agent="reviewer")`` silently degrades to an unguided
     # child on every non-source install.
     "agent_seeds/*.md",
+    # The macOS notification sender's source and icon. Both must ship: the
+    # bundle is compiled on the user's machine on first use (see
+    # ``tui/notifier_app``), and without the `.m` there is nothing to build
+    # while without the `.icns` the toast wears the generic placeholder
+    # instead of the project's mark.
+    "tui/notifier_app/notifier.m",
+    "tui/notifier_app/icon.icns",
     # The phone control plane's built SPA. The daemon serves it from
     # local_operator/mobile/web/dist/; without this a pip/uv install has
     # no UI and every authed GET answers 503 "bundle not built".

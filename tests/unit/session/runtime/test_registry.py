@@ -88,3 +88,45 @@ def test_record_round_trips_and_ignores_unknown_keys(tmp_path: Path) -> None:
     restored = SessionRecord.from_json(data)
     assert restored.control_key == record.control_key
     assert not hasattr(restored, "future_field")
+
+
+def test_a_killed_runtime_is_not_reported_live_while_it_is_a_zombie() -> None:
+    """`kill -9` must not leave `lop sessions` claiming the session is live.
+
+    `os.kill(pid, 0)` succeeds against a process that has exited but not been
+    reaped, so a crashed runtime reported `live` with `0B` RSS until the
+    heartbeat aged it out 45 s later — and `lop sessions`, the one place a
+    user checks to understand the failure, actively misled them (round 3,
+    U10). The window is real: a runtime's parent is often a shell that has
+    since exited, so nothing reaps the entry promptly.
+
+    The probe is opt-in because it costs a `ps` fork on macOS (measured
+    3.9 ms vs ~1 µs for signal-0) and `scan()` runs on every `lop`
+    invocation; `scan` spends it only on records whose heartbeat has already
+    gone quiet.
+    """
+    import subprocess
+    import time
+
+    from local_operator.session.runtime.registry import pid_alive
+
+    proc = subprocess.Popen(["sleep", "30"])  # noqa: S603,S607 — fixed argv
+    try:
+        assert pid_alive(proc.pid, check_zombie=True) is True
+        proc.kill()
+        # Wait for the kernel to move it to Z without reaping it (no wait()).
+        for _ in range(100):
+            if not pid_alive(proc.pid, check_zombie=True):
+                break
+            time.sleep(0.02)
+        assert (
+            pid_alive(proc.pid, check_zombie=True) is False
+        ), "an exited-but-unreaped runtime must not report as live"
+        # The cheap path is unchanged: it still sees the zombie as alive, which
+        # is what keeps `scan` fork-free for healthy sessions.
+        assert pid_alive(proc.pid) is True
+    finally:
+        proc.wait()
+
+    # Once reaped, both paths agree it is gone.
+    assert pid_alive(proc.pid) is False

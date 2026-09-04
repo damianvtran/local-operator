@@ -75,6 +75,8 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -96,10 +98,16 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.logger import current_log_file
 
+# The `/mcp` verb helpers live with the verbs they serve, so the terminal and
+# the detached runtime format one path and refuse one foreign config the same
+# way rather than keeping two copies of the rules (round 5, U15).
+from local_operator.mcp.verbs import _home_relative
+
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import next_effort
 from local_operator.session import naming
+from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import images as images_mod
@@ -164,6 +172,7 @@ from local_operator.tui.widgets.editor import (
     Editor,
     EditorCopied,
     EditorCopyStale,
+    EditorDraftStarted,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -962,6 +971,82 @@ def _typed_line_of(text: str) -> str | None:
         return typed_line_of(text)
     except Exception:  # noqa: BLE001 — replay must never fail on this
         return None
+
+
+#: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
+#: the session itself produced. Matched on the transport's own phrases rather
+#: than on the exception type: `ConnectionError` also carries the graceful
+#: "reconnecting"/"stopped" refusals, which have their own copy and must not
+#: be rewritten as a crash (round 3, U10).
+_RUNTIME_GONE_MARKERS = (
+    "socket unreachable",
+    "closed the connection",
+    "connect call failed",
+)
+
+
+def _is_runtime_gone(error: BaseException) -> bool:
+    """Whether this failure means the runtime process died under us.
+
+    A crash (OOM, `kill -9`, a bug) drops the socket, and what reached the
+    user was the raw transport line — an errno and a loopback port — with
+    their message discarded. The deliberate paths (`/stop`, a reconnecting
+    owner) are excluded here because they already have honest copy of their
+    own; only an unexpected loss takes the recovery path.
+    """
+    if not isinstance(error, (ConnectionError, OSError)):
+        return False
+    text = str(error).lower()
+    if "stopped" in text or "reconnecting" in text:
+        return False
+    return any(marker in text for marker in _RUNTIME_GONE_MARKERS)
+
+
+def _gate_timeout_notice(details: dict[str, Any]) -> str:
+    """Say what expired, what it wanted, and that nobody chose it.
+
+    The distinction this line has to carry is denial-by-expiry versus
+    denial-by-decision: the user did not say no, they were not there. Naming
+    the tool matters for the same reason the picker's parked row wants it —
+    "a tool was denied" and "`bash rm -rf build/` was denied" are different
+    amounts of help when you are reconstructing what happened overnight.
+    """
+    tool = str(details.get("tool") or "a tool").strip()
+    description = str(details.get("description") or "").strip()
+    waited = details.get("waited_s")
+    # REPORT THE WAIT THAT HAPPENED. This used to floor at one hour
+    # (`max(1, waited // 3600)`), so a 30-second expiry — a live, reachable
+    # path when there is no registrant, or notifications are off and nothing
+    # is watching — rendered as "waited 1h" (round 3, D12). This row exists
+    # to preserve the difference between denied-by-decision and
+    # denied-by-absence, and a fabricated duration undermines the one number
+    # that has to be trustworthy. An absent or unreadable value says so
+    # rather than rounding up to an hour.
+    try:
+        seconds = float(waited) if waited is not None else 0.0
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds <= 0:
+        waited_text = "a while"
+    elif seconds < 60:
+        waited_text = f"{int(seconds)}s"
+    elif seconds < 3600:
+        waited_text = f"{int(seconds // 60)}m"
+    elif seconds < 86400:
+        waited_text = f"{int(seconds // 3600)}h"
+    else:
+        waited_text = f"{int(seconds // 86400)}d"
+    # An `ask` is a QUESTION, and an unanswered question was not "denied":
+    # describing it in the approval gate's vocabulary told the user something
+    # that did not happen (D12's copy note).
+    kind = str(details.get("kind") or "approval").strip().lower()
+    subject = f"{tool} · {description}" if description else tool
+    if kind == "ask":
+        return (
+            f"waited {waited_text} for an answer with nobody attached, "
+            f"then moved on — {subject}"
+        )
+    return f"waited {waited_text} for approval with nobody attached, then denied it — {subject}"
 
 
 #: The prompt each loop iteration submits. Deliberately references the
@@ -2656,6 +2741,19 @@ class OperatorApp(App[None]):
         # the mode has to put back on the way out: the composer's read-only
         # state and whatever held focus when it opened.
         self._subagent_view: SubagentView | None = None
+        # Jobs whose retained trajectory this viewer has already fetched from
+        # the owner, and the fetch state each page should render. Follower-only
+        # (see ``_load_subagent_trajectory``); an owner session never populates
+        # them and every page reads the empty-string default.
+        self._trajectory_loads: set[str] = set()
+        self._trajectory_state: dict[str, str] = {}
+        #: Whether the speculative engage has already fired for the CURRENT
+        #: binding. Reset by a session swap (`/new`, `/resume`), because the
+        #: new binding is cold again and owes its own warm-up.
+        self._warm_engage_started = False
+        #: True while a runtime is being started for a cold viewer; the band
+        #: says "starting…" for exactly this interval.
+        self._starting_runtime = False
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -4004,6 +4102,36 @@ class OperatorApp(App[None]):
                             )
                         )
                         appended = True
+                    continue
+                # A gate that timed out unattended is the most expensive event
+                # in the detached feature — up to a day of held residency ends
+                # here — and it rendered NOWHERE (round 1, D2/U2): the user
+                # returned to a conversation that promised an action and
+                # appeared to simply stop. The payload already carried the
+                # tool, the description and the wait; only a renderer was
+                # missing.
+                #
+                # `warning` ink because it is a state the user must know about,
+                # not a receipt they can skip: a tool was denied, and denied by
+                # expiry rather than by their decision — which is the same
+                # distinction the transcript row itself exists to preserve.
+                if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    self._append_block(NoticeBlock(_gate_timeout_notice(details), kind="warning"))
+                    appended = True
+                    continue
+                # A compaction that did NOT run. Rendered here for the same
+                # reason as the row above: a custom row with no renderer is a
+                # row nobody sees, and this one exists to CORRECT the
+                # optimistic "compacting context…" receipt the routed command
+                # already showed (round 5, U17). `warning` ink because the
+                # context the user asked to reclaim is still there.
+                if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    text = str(details.get("detail") or "compaction did not run").strip()
+                    kind = "error" if text.startswith("compaction failed") else "warning"
+                    self._append_block(NoticeBlock(text, kind=kind))
+                    appended = True
                     continue
                 role = getattr(message, "role", None)
                 if role == "tool":
@@ -5374,6 +5502,15 @@ class OperatorApp(App[None]):
                 self._system_notice(RESUME_EMPTY_NOTICE, "warning")
                 return
 
+            # Live state is overlaid HERE rather than inside
+            # ``recent_session_rows``, and that placement is load-bearing:
+            # ``resume.py`` is stdlib-only and sits on the CLI startup path, so
+            # `lop --resume` must not pay for a registry walk. The picker is
+            # the one caller that wants it, and it pays for it once at open:
+            # ONE ``registry.scan()`` and ONE ``wakes.store.read_index()`` for
+            # the whole list, never a probe per row.
+            rows = self._overlay_live_state(rows)
+
             # AFTER the empty check, so a store with nothing to offer does no
             # scanning, and BEFORE the screen is pushed, so the first keystroke
             # filters against a complete index rather than a half-built one.
@@ -5392,7 +5529,21 @@ class OperatorApp(App[None]):
                 if session_id:
                     self._resume_session(session_id, notice)
 
-            self.push_screen(SessionPickerScreen(rows, time.time(), digests), _resume_choice)
+            self.push_screen(
+                SessionPickerScreen(
+                    rows,
+                    time.time(),
+                    digests,
+                    # The picker re-reads liveness on its own animation tick
+                    # (D1+D3): a spinner that moves while reporting state from
+                    # when the picker opened is a stronger claim than a frozen
+                    # one and less true. The same overlay used to build the
+                    # rows does the refresh, so there is one definition of what
+                    # each marker means.
+                    refresh_live_state=self._overlay_live_state,
+                ),
+                _resume_choice,
+            )
             return
 
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume
@@ -5440,9 +5591,195 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
+        left_running = self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
-        notice(f"resuming session {resume_id}…")
+        # Name what happened to the session being LEFT (round 1, D5). This is
+        # the release's headline behaviour change and it INVERTS a prior
+        # guarantee: leaving a conversation used to end it, and now the
+        # runtime keeps working, keeps model calls in flight and keeps its
+        # memory resident. The old receipt was word-for-word identical, so the
+        # same sentence silently came to mean the opposite thing — a user
+        # switching between four conversations had four runtimes alive and was
+        # never told once.
+        if left_running:
+            notice(f"resuming session {resume_id}… (previous session left running)")
+        else:
+            notice(f"resuming session {resume_id}…")
         self._run_session_transition(self._reload_session())
+
+    def _detach_or_stop_outgoing(self) -> bool:
+        """Decide what happens to the session being LEFT by a /resume.
+
+        Returns True when the outgoing session was left RUNNING, so the
+        caller's receipt can say so — see D5 at the call site.
+
+        Under the viewer model this is a real choice for the first time.
+        Disposing a viewer only closes its socket — the runtime keeps working
+        — so switching conversations no longer ends the one you switch away
+        from. That is the point of a session that outlives the terminal, and
+        it is the default (``runtime.background_on_resume``).
+
+        Set it False and /resume STOPS the outgoing session instead, for
+        anyone who would rather a conversation they walked away from stop
+        spending tokens. Only a session with a live turn is worth stopping; an
+        idle runtime reaps itself within the drain either way.
+
+        Best-effort throughout: a failure here must never block the resume the
+        user actually asked for.
+        """
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            # Nothing was left running: there was no runtime to leave.
+            return False
+        try:
+            from local_operator.session.runtime.control import (
+                DEFAULT_BACKGROUND_ON_RESUME,
+            )
+
+            # Read at COMMAND time through the same accessor `/fork` uses,
+            # which is what the section's LIVE scope promises: an edit takes
+            # effect on the very next /resume in this same session.
+            section = self._config_values().get("runtime")
+            configured = DEFAULT_BACKGROUND_ON_RESUME
+            if isinstance(section, dict) and "background_on_resume" in section:
+                configured = bool(section["background_on_resume"])
+        except Exception:  # noqa: BLE001 — an unreadable setting keeps the default
+            configured = True
+        if configured:
+            return True
+        probed = getattr(session, "request_stop", None)
+        if not callable(probed):
+            # An owner too old to be asked keeps running whatever the setting
+            # says, so the receipt must not claim it was stopped.
+            return True
+        request_stop = cast(Callable[[], Awaitable[Any]], probed)
+
+        async def stop_outgoing() -> None:
+            try:
+                await request_stop()
+            except Exception:  # noqa: BLE001 — never block the incoming resume
+                logger.debug("stopping the outgoing session failed", exc_info=True)
+
+        self.run_worker(stop_outgoing(), group="resume-stop", exclusive=False)
+        # A stop was REQUESTED. The receipt must not promise it is still
+        # running: the user opted out of backgrounding precisely so it would
+        # not be.
+        return False
+
+    def _session_runs_elsewhere(self) -> bool:
+        """Whether this session's runtime is on another machine.
+
+        Under the viewer model a local session is ALSO reached over a socket,
+        so ``is_remote`` no longer distinguishes "someone else's session" from
+        "my own session, one process away". The question that still matters for
+        a config write is narrower: would writing this machine's config govern
+        the runtime? A runtime whose record this machine published is local,
+        whatever transport reaches it.
+        """
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            return False
+        # A local runtime publishes a discovery record here; a genuinely
+        # foreign one does not. Absence of proof is treated as elsewhere,
+        # because wrongly persisting is the costlier of the two mistakes.
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime import registry
+
+            session_id = getattr(session, "session_id", "") or ""
+            if not session_id:
+                return True
+            # ``registry.scan`` rather than ``find_owner_record``: the latter
+            # deliberately excludes the CALLING process, which is the right
+            # answer for "who else owns this" and the wrong one here — the
+            # question is whether a record exists on this machine at all.
+            return not any(
+                getattr(record, "session_id", "") == session_id
+                for record, _state in registry.scan(config_dir())
+            )
+        except Exception:  # noqa: BLE001 — unprovable means "do not persist"
+            logger.debug("could not decide whether the runtime is local", exc_info=True)
+            return True
+
+    def _session_is_busy(self) -> bool:
+        """Whether the session is mid-turn, however that turn was started.
+
+        Deliberately asks the SESSION rather than this viewer's own state: the
+        turn may have been submitted by another terminal, or by the phone, and
+        the answer is still "yes, work is happening".
+        """
+        session = self._session
+        if session is None:
+            return False
+        for probe in ("is_busy", "busy"):
+            value = getattr(session, probe, None)
+            try:
+                resolved = value() if callable(value) else value
+            except Exception:  # noqa: BLE001 — a probe must never break a command
+                continue
+            if isinstance(resolved, bool):
+                return resolved
+        return False
+
+    def _overlay_live_state(self, rows: "list[Any]") -> "list[Any]":
+        """Fill in each row's runtime state, and float the ones needing a person.
+
+        Two reads for the whole list: the discovery records say which sessions
+        are running, working, attached or wedged, and the wake index says which
+        have reminders armed. Best-effort — a picker that cannot read either
+        one still lists every session exactly as it did before, because the
+        fields are defaulted and the markers simply do not appear.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+        from local_operator.tui.widgets.session_picker import sort_needs_you_first
+
+        try:
+            scanned = registry.scan(config_dir())
+        except Exception:  # noqa: BLE001 — markers are an enhancement, never a gate
+            logger.debug("picker could not scan session records", exc_info=True)
+            scanned = []
+        try:
+            from local_operator.wakes.store import read_index
+
+            wake_index = read_index(config_dir())
+        except Exception:  # noqa: BLE001
+            logger.debug("picker could not read the wake index", exc_info=True)
+            wake_index = {}
+
+        live: dict[str, tuple[Any, str]] = {}
+        for record, state in scanned:
+            session_id = getattr(record, "session_id", "")
+            if session_id:
+                live[session_id] = (record, state)
+
+        updated: list[Any] = []
+        for row in rows:
+            record_state = live.get(row.id)
+            live_state = ""
+            pending: str | None = None
+            if record_state is not None:
+                record, state = record_state
+                if state == "wedged":
+                    live_state = "wedged"
+                elif getattr(record, "busy", False):
+                    live_state = "busy"
+                elif not getattr(record, "detached", False):
+                    live_state = "attached"
+                else:
+                    live_state = "idle"
+                pending = getattr(record, "pending", None) or None
+            entry = wake_index.get(row.id) or {}
+            schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+            updated.append(
+                row._replace(
+                    live_state=live_state,
+                    pending=pending,
+                    wakes=len(schedules),
+                    wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
+                )
+            )
+        return sort_needs_you_first(updated)
 
     def _run_session_transition(self, operation: Awaitable[None]) -> None:
         """Run one session replacement behind the standard composer boundary.
@@ -7907,6 +8244,65 @@ class OperatorApp(App[None]):
         dock.styles.padding = (0, 0, lift, 0)
 
     # -- input --------------------------------------------------------------
+    def _warm_runtime_for_draft(self) -> None:
+        """Engage a runtime for a cold viewer, at most once per binding."""
+        if self._warm_engage_started:
+            return
+        session = self._session
+        ensure = getattr(session, "_ensure_bound", None)
+        if not callable(ensure) or not getattr(session, "is_cold", False):
+            return
+        self._warm_engage_started = True
+        self._set_starting(True)
+
+        async def run() -> None:
+            try:
+                await cast(Callable[[], Awaitable[None]], ensure)()
+            except Exception:  # noqa: BLE001 — the real prompt reports the failure
+                # A speculative warm-up that fails must stay silent: the user
+                # has not asked for anything yet, and the message they send
+                # next engages again and surfaces any error properly.
+                logger.debug("speculative runtime engage failed", exc_info=True)
+                self._warm_engage_started = False
+            finally:
+                self._set_starting(False)
+
+        self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _set_starting(self, starting: bool) -> None:
+        """Show or clear the band's "starting…" state.
+
+        The one visible consequence of the viewer model at rest: between the
+        first keystroke and the runtime being ready there is a real interval,
+        and a band that said nothing would read as a dropped keystroke.
+        """
+        if self._starting_runtime == starting:
+            return
+        self._starting_runtime = starting
+        if self._status is not None:
+            setter = getattr(self._status, "set_starting", None)
+            if callable(setter):
+                setter(starting)
+        self._refresh_band()
+
+    def on_editor_draft_started(self, message: EditorDraftStarted) -> None:
+        """A draft just began: warm a runtime for a cold viewer.
+
+        Speculative, and it exists to hide a real cost. A viewer holds no
+        runtime until it needs one, so without this the first message pays
+        ~1.2 s of session construction AFTER the user hits Enter, with the
+        composer already cleared — the app looks hung at the exact moment it
+        should feel fastest. Starting the runtime while the user is still
+        typing turns that into no wait at all.
+
+        The waste is bounded by design: a draft that is abandoned leaves a
+        runtime whose viewer detaches, and the residency predicate reaps it
+        within the drain (~3 s). The runtime also DEFERS materialising the
+        session directory, so an abandoned draft leaves nothing on disk.
+        """
+        del message
+        self._warm_runtime_for_draft()
+
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
         if self._session_transition_pending:
@@ -11207,6 +11603,30 @@ class OperatorApp(App[None]):
                 if self._stopped_session_id and "stopped" in str(error):
                     text_line, kind = self._no_session_notice(unsent=True)
                     self._append_block(NoticeBlock(text_line, kind))
+                elif _is_runtime_gone(error):
+                    # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
+                    # the user got was `✗ owner socket unreachable: [Errno 61]
+                    # Connect call failed ('127.0.0.1', 51753)` and their
+                    # message was gone — not queued, not retried, no way back
+                    # (round 3, U10). "owner", an errno and a loopback port
+                    # are the transport's vocabulary, and the lost text is the
+                    # part that actually costs the user something.
+                    #
+                    # The text goes back in the composer so it can be sent
+                    # again with one keystroke, and the viewer drops its
+                    # binding so the NEXT send engages a fresh runtime rather
+                    # than dialling a socket that is never coming back.
+                    self._restore_unsent(text, images)
+                    go_cold = getattr(session, "_go_cold", None)
+                    if callable(go_cold):
+                        go_cold()
+                    self._append_block(
+                        NoticeBlock(
+                            "this session's runtime stopped — your message is back in the "
+                            "composer; send it again to start a new one",
+                            "warning",
+                        )
+                    )
                 else:
                     self._append_block(NoticeBlock(str(error), "error"))
                 # A prompt that failed never announced itself, so its echo
@@ -11253,6 +11673,23 @@ class OperatorApp(App[None]):
             # Already named. The message may still have moved the subject —
             # that is the re-title path, which has its own throttle.
             self._maybe_retitle_conversation(text)
+            return
+        if bool(getattr(session, "is_remote", False)):
+            # NAMING BELONGS TO THE RUNTIME NOW.
+            # ``OwnedSessionHandle.prompt`` calls its own
+            # ``_maybe_name_conversation``, so the title is generated beside
+            # the transcript that stores it, by the process that owns the
+            # provider. A viewer must not race that: its ``complete_once``
+            # raises by construction ("provider errands run on the session
+            # owner"), so leaving this path enabled started a worker on every
+            # first message that could only ever fail, and the band would have
+            # shown the provisional excerpt until the runtime's real title
+            # arrived anyway.
+            #
+            # The PROVISIONAL name still shows: that is local, needs no
+            # provider call, and is what stops the tab reading ``lo › <cwd>``
+            # for the length of the opening turn.
+            self._show_provisional_name(text)
             return
         if self._name_requested:
             return
@@ -12131,6 +12568,9 @@ class OperatorApp(App[None]):
         subagents without going back up a level to do it.
         """
         if self._subagent_view is not None:
+            # Retargeting is opening another child's page; it owes the same
+            # fetch a first open does.
+            self._load_subagent_trajectory(job_id)
             self._refresh_subagent_view(job_id)
             return
         # Captured before anything is blurred: this is where Esc puts the
@@ -12154,10 +12594,52 @@ class OperatorApp(App[None]):
         self._sync_boot_layout()
         self._sync_subagent_compact_layout(self.size.height)
         self._set_composer_read_only(True)
+        # A follower has no trajectory until it asks for one: attach snapshots
+        # omit retained events because they overflow the control socket's line
+        # limit. Started before the first paint so the fetch overlaps the
+        # mount, and the page shows its loading row meanwhile.
+        self._load_subagent_trajectory(job_id)
         # Enter paints the new mode first; folding and mounting a retained
         # 500-event trajectory on the same key handler made the key appear lost
         # for about a second. The next refresh fills the already-visible page.
         self.call_after_refresh(self._refresh_subagent_view, job_id)
+
+    def _load_subagent_trajectory(self, job_id: str) -> None:
+        """Pull one child's retained events from the owner, if it has any.
+
+        Only a FOLLOWER needs this: an in-process session's job rows already
+        carry their trajectories, and its facade has no loader at all, so the
+        ``getattr`` below is what keeps the owner path untouched.
+
+        Fetched once per job per attachment and remembered in
+        ``_trajectory_loads``, because opening a page is a common gesture and
+        the live append stream keeps the cached window current after the first
+        read — a re-fetch on every open would re-read up to 500 events to learn
+        nothing.
+        """
+        session = self._session
+        loader = getattr(session, "load_job_trajectory", None)
+        if not callable(loader) or job_id in self._trajectory_loads:
+            return
+        load = cast(Callable[[str], Awaitable[bool]], loader)
+        self._trajectory_loads.add(job_id)
+        self._trajectory_state[job_id] = "loading"
+
+        async def run() -> None:
+            ok = False
+            try:
+                ok = bool(await load(job_id))
+            finally:
+                self._trajectory_state[job_id] = "" if ok else "unavailable"
+                if not ok:
+                    # Let a later open retry: the usual cause is a socket that
+                    # dropped, which the next attach repairs.
+                    self._trajectory_loads.discard(job_id)
+                view = self._subagent_view
+                if view is not None and view.job_id == job_id:
+                    self._refresh_subagent_view(job_id)
+
+        self.run_worker(run(), group="subagent-trajectory", exclusive=False)
 
     def _close_subagent_view(self) -> bool:
         """Leave the view and put the conversation back. True if it was open.
@@ -12170,6 +12652,17 @@ class OperatorApp(App[None]):
         view = self._subagent_view
         if view is None:
             return False
+        # Release the owner-side append subscription this page took out. Best
+        # effort and fire-and-forget: a viewer that fails to unwatch only keeps
+        # paying for one job's deltas until it detaches.
+        unload = getattr(self._session, "unload_job_trajectory", None)
+        if callable(unload):
+            self._trajectory_loads.discard(view.job_id)
+            self.run_worker(
+                cast(Callable[[str], Awaitable[None]], unload)(view.job_id),
+                group="subagent-trajectory",
+                exclusive=False,
+            )
         self._subagent_view = None
         view.remove()
         if self._subagent_panel is not None:
@@ -12657,6 +13150,9 @@ class OperatorApp(App[None]):
             transcript_directory=(
                 str(transcript_directory) if transcript_directory is not None else None
             ),
+            # Empty on an owner (rows ride the snapshot); on a follower this is
+            # what lets the page say "loading" instead of "nothing happened".
+            trajectory_state=self._trajectory_state.get(job_id, ""),
         )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)
@@ -13221,6 +13717,28 @@ class OperatorApp(App[None]):
     def _editor(self) -> Editor:
         """The input editor. Queried rather than held: Textual owns the widget."""
         return self.query_one(Editor)
+
+    def _restore_unsent(self, text: str, images: list[Any] | None = None) -> None:
+        """Put a message that never left back into the composer.
+
+        For a send that failed OUTRIGHT — the runtime died mid-flight — where
+        the alternative is the user retyping it from memory (round 3, U10).
+
+        A half-typed draft is never displaced, for the same reason the steer
+        recall refuses to: throwing away what the user is currently typing
+        costs them something real, and the failed text is already on screen in
+        the notice above. Attachments are not restored — they are re-picked
+        rather than re-typed, and silently re-arming them would send files the
+        user cannot see in the composer.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer to restore into
+            return
+        if editor.text.strip():
+            return
+        editor.forget_prompt(text)
+        editor.load_text(text)
 
     def _render_authoritative_slash(self, command: str, arg: str, outcome: Any) -> None:
         """Render a follower's routed slash outcome in THIS terminal.
@@ -13808,7 +14326,20 @@ class OperatorApp(App[None]):
             self._issued_own_stop = False
             if isinstance(error, asyncio.CancelledError):
                 raise
-            self._system_notice(f"could not stop the owner: {error}", "warning")
+            # A viewer bound to NOTHING has nothing to stop, and that is a
+            # normal state under this release rather than a failure — `lop`
+            # now opens a viewer that engages a runtime on the first message,
+            # so `/stop` before that message is simply early. Round 1 (U3)
+            # found this reported as `! could not stop the owner: not
+            # attached`: "owner" is the concept this release removes from the
+            # user's model, and "not attached" is the transport's reason, not
+            # the user's situation. On `/stop all` it also printed beside the
+            # correct "no sessions to stop", giving one action both an error
+            # and a benign result.
+            if isinstance(error, ConnectionError) and "not attached" in str(error):
+                self._system_notice("nothing is running in this session yet")
+                return
+            self._system_notice(f"could not stop this session: {error}", "warning")
             return
         # The owner's ack says the stop is UNDERWAY ("stopping …"); what
         # settles it is the announcement that follows, which paints the
@@ -13820,7 +14351,10 @@ class OperatorApp(App[None]):
         session_id = getattr(session, "session_id", "") or ""
         if session_id:
             self._stopped_session_id = session_id
-        self._system_notice(detail or "stop requested from the owner")
+        # "owner" left the vocabulary with the owner path (round 2, N1): a
+        # stop that arrives as an announcement came from another terminal or
+        # from the runtime's own ladder, and that is what the user needs.
+        self._system_notice(detail or "stop requested from another terminal")
 
     async def _stop_target_worker(self, target: str) -> None:
         """``/stop <target>``: resolve with the `send` vocabulary, stop it.
@@ -14168,12 +14702,17 @@ class OperatorApp(App[None]):
         if lowered == "saved":
             self._cmd_model_saved(notice)
             return
-        if persist_default and bool(getattr(session, "is_remote", False)):
-            # The follower's own config write would persist a default the
-            # SESSION never switched to (the switch lives on the owner), and
-            # routing it would persist on the wrong machine. Declined
-            # explicitly — the owner's typed producer answers the same way,
-            # so both terminals state one rule (MAJOR-1, review round 2).
+        if persist_default and self._session_runs_elsewhere():
+            # Persisting writes THIS machine's config, so it only makes sense
+            # where the launches it governs happen.
+            #
+            # The test was `is_remote` until the viewer model landed, and that
+            # became wrong the moment EVERY session became remote: a user on
+            # their own machine, whose runtime is a child process on that same
+            # machine, was told to "run it on the terminal whose launches it
+            # should govern" — which is the terminal they were already sitting
+            # at. The refusal now asks the question it always meant: is the
+            # runtime somewhere this config write would not reach?
             self._system_notice(
                 "/model default persists to the local machine's config — run it "
                 "on the terminal whose launches it should govern; /model <p>/<id> "
@@ -15651,6 +16190,22 @@ class OperatorApp(App[None]):
             if self._loop_running:
                 self._loop_cancelled = True
                 notice("loop will stop after the current turn")
+            elif self._session_is_busy():
+                # A loop DRIVES the session from the terminal that started it:
+                # each iteration is an ordinary turn submitted over the socket,
+                # which is what keeps it bounded, interruptible and visible in
+                # the transcript. So a second viewer of the same session has no
+                # loop to cancel even though it can see the turns arriving, and
+                # "no loop is running" would be a flat contradiction of what is
+                # on its screen.
+                #
+                # Say where the control actually is, and name the tool that
+                # works from here: `/stop` ends the runtime from any viewer.
+                notice(
+                    "no loop is running in THIS terminal — a loop is cancelled "
+                    "where it was started, or use /stop to end the session",
+                    "warning",
+                )
             else:
                 notice("no loop is running")
             return
@@ -18489,15 +19044,21 @@ class OperatorApp(App[None]):
         notify_note = Text()
         notify_note.append("notifications".ljust(name_width), style=muted)
         notify_note.append(
-            "desktop toast when a turn finishes or needs you; shell: "
-            "`lop config edit display.notifications false`",
+            # Both halves of this used to be wrong for the detached path
+            # (round 3, D13). "when a turn finishes" overstated it — the
+            # runtime's only notifying caller is the gate — and "only while
+            # the terminal is unfocused" describes the in-band focus gate,
+            # which a detached runtime has no terminal to consult: it sends
+            # precisely when NO terminal is watching.
+            "desktop toast when a turn finishes here, or when a detached "
+            "session needs you; shell: `lop config edit display.notifications false`",
             style=dim,
         )
         notify_note_more = Text()
         notify_note_more.append("".ljust(name_width), style=muted)
         notify_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; "
-            "sent only while the terminal is unfocused",
+            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for "
+            "the terminal to be unfocused, detached ones click to reopen",
             style=dim,
         )
         if not lines or lines[-1].plain:
@@ -18771,7 +19332,10 @@ class OperatorApp(App[None]):
         # unsupported warning — never "ran /…".
         return SlashResult(
             kind="notice",
-            text=f"/{command} is not available from an attached terminal — run it on the owner",
+            text=(
+                f"/{command} is not available from an attached terminal — "
+                "run it in the session's own terminal"
+            ),
             style="warning",
         )
 
@@ -19254,7 +19818,9 @@ class OperatorApp(App[None]):
     #: the safe shape is inverted precedence (resolve as a name first, fall
     #: back to the listing), which is error recovery rather than a reserved
     #: word.
-    MCP_SUBCOMMANDS = ("list", "add", "remove", "login", "logout", "reauth")
+    #: The canonical verb list lives in `session.frontend_state` so the
+    #: detached runtime validates against the SAME set (round 5, U15).
+    MCP_SUBCOMMANDS = _MCP_SUBCOMMANDS
 
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
         """``/mcp`` lists servers; its subcommands manage servers and grants.
@@ -19361,120 +19927,15 @@ class OperatorApp(App[None]):
     def _mcp_add_result(self, tokens: list[str]) -> tuple[str, NoticeKind]:
         """Do one ``/mcp add`` and return its receipt as ``(text, kind)``.
 
-        Grammar, the smallest unambiguous thing that covers both transports::
-
-            /mcp add <name> <url>              -> http server
-            /mcp add <name> <command> [args…]  -> stdio server
-
-        The discriminator is whether the third token parses as an http(s) URL.
-        There is no scope token: the write always lands in the GLOBAL
-        ``~/.local-operator/mcp.json``, matching ``lop mcp add``'s default, and
-        the receipt NAMES the file so an invisible default becomes a visible
-        fact the user can go and check.
-
-        OAuth is deliberately NOT inferred from a URL. Real configs carry
-        non-OAuth http servers (an internal gateway, a header-authenticated
-        endpoint), so inferring ``auth: oauth`` from the scheme would silently
-        change how a server authenticates and produce a browser prompt for a
-        server that never needed one. Added without auth; ``/mcp login <name>``
-        is the documented next step for a server that does use OAuth.
-
-        Env vars are out of scope on purpose — a ``KEY=VALUE`` token in this
-        grammar cannot be told apart from a command argument, and the CLI's
-        explicit ``--env`` flag already covers it.
+        The grammar, the scope rules and every refusal live in
+        ``mcp.verbs`` so the DETACHED runtime answers this command
+        identically — before round 5 it silently fell through to a server
+        listing (U15). Only the reconnect differs between the two surfaces,
+        which is why it is the injected half.
         """
-        from local_operator.mcp.config import (
-            MCPConfigWriteError,
-            add_server,
-            load_all_mcp_configs,
-            owned_scope_for_source,
-        )
+        from local_operator.mcp.verbs import mcp_add_result
 
-        if len(tokens) < 2:
-            return (
-                "usage: /mcp add <name> <url>  |  /mcp add <name> <command> [args…]",
-                "warning",
-            )
-        name, target, *rest = tokens
-        is_url = target.startswith(("http://", "https://"))
-        cwd = os.getcwd()
-        # ``remove`` refuses to touch a server it does not own; ``add`` is the
-        # mirror operation and has to answer the same question, or the two
-        # verbs disagree about one invariant. What the answer IS depends on
-        # priority, so the two cases are reported differently rather than
-        # collapsed into one refusal:
-        #
-        #   * The existing definition OUTRANKS the global file we write (a
-        #     project ``.local-operator/mcp.json`` or ``.mcp.json``). The write
-        #     lands and changes nothing the user can observe — they keep
-        #     getting the old server. Refused, because a success receipt for a
-        #     write with no effect is a receipt that lies, and that is worse
-        #     than the shadowing case below.
-        #   * The existing definition ranks BELOW it (an imported foreign
-        #     config). Our entry would win and silently repoint a server the
-        #     user still maintains in Claude Code or Cursor — exactly what
-        #     ``_mcp_remove_result`` refuses to cause from the other side.
-        #     Refused too, naming the file and the tool, so the user can
-        #     change it where it lives or pick another name.
-        try:
-            existing = load_all_mcp_configs(cwd)[1].get(name)
-        except Exception:  # noqa: BLE001 — an unreadable config is reported by the write
-            existing = None
-        if existing is not None:
-            # Priority FIRST: `<cwd>/.mcp.json` is both unowned and
-            # higher-priority, and "your write would not take effect" is the
-            # more useful thing to say about it than "you would shadow it" —
-            # which would also be false.
-            if _outranks_global_mcp_scope(existing, cwd):
-                return (
-                    f"{name!r} is already defined in {_home_relative(str(existing))}, "
-                    f"which takes priority over the global config /mcp add writes.\n"
-                    f"Adding it here would have no effect. Edit that file, or remove "
-                    f"the entry there first.",
-                    "warning",
-                )
-            if owned_scope_for_source(existing, cwd) is None:
-                return (
-                    f"{name!r} is already defined in {_home_relative(str(existing))} "
-                    f"({_foreign_config_origin(existing)}).\nAdding it here would "
-                    f"shadow that entry rather than update it. Change it there, or "
-                    f"pick another name.",
-                    "warning",
-                )
-        try:
-            if is_url:
-                if rest:
-                    # An http server takes exactly one target; trailing tokens
-                    # are a stdio-shaped mistake and dropping them silently
-                    # would configure something the user did not describe.
-                    return (
-                        f"/mcp add {name} <url> takes no extra arguments — "
-                        f"got {' '.join(rest)!r}",
-                        "warning",
-                    )
-                path = add_server(name, url=target, cwd=os.getcwd())
-            else:
-                path = add_server(name, command=target, args=list(rest) or None, cwd=os.getcwd())
-        except MCPConfigWriteError as exc:
-            return (f"could not add MCP server {name!r}: {_home_abbreviated(str(exc))}", "warning")
-        except Exception as exc:  # noqa: BLE001 — a failed write is a notice, not a crash
-            return (f"could not add MCP server {name!r}: {exc}", "error")
-        self._reconnect_mcp_after_config_change()
-        # An http server added without auth is the common half-done case, so
-        # the receipt still points at the next step — but it must point at one
-        # that WORKS. `/mcp login` was wrong: this command deliberately writes
-        # no `auth` block, and `_resolve_mcp_server` refuses any server whose
-        # `auth.type` is not `oauth`, so the suggestion failed for every server
-        # this command can create. The CLI's `--oauth` flag is the only path
-        # that writes the block, so name that instead. Inferring OAuth from the
-        # URL remains ruled out: real configs carry non-OAuth http servers, and
-        # guessing would silently change how a server authenticates.
-        hint = (
-            f" — needs OAuth? re-add it with: lop mcp add {name} --url {target} --oauth"
-            if is_url
-            else ""
-        )
-        return (f"added MCP server {name!r} to {_home_relative(str(path))}{hint}", "success")
+        return mcp_add_result(tokens, self._reconnect_mcp_after_config_change)
 
     def _cmd_mcp_add(self, tokens: list[str]) -> None:
         """The local ``/mcp add``: write the config, print the receipt."""
@@ -19484,62 +19945,13 @@ class OperatorApp(App[None]):
     def _mcp_remove_result(self, name: str) -> tuple[str, NoticeKind]:
         """Do one ``/mcp remove`` and return its receipt as ``(text, kind)``.
 
-        The refusal is the point of this command. ``load_all_mcp_configs``
-        merges EIGHT sources but local-operator only writes two of them, so a
-        server can be perfectly visible in ``/mcp`` and still be none of our
-        business to delete. Removing an entry defined by ``~/.claude.json``
-        would either fail or, worse, write a local-operator file that shadows a
-        config the user still maintains in Claude Code — a silent divergence
-        between two tools that both claim to own the server.
-
-        ``<cwd>/.mcp.json`` is refused for a subtler reason: it is READ by
-        ``load_all_mcp_configs`` but never written by ``_scope_path``, so it is
-        foreign to the writer even though it is a local-operator-ish path.
-
-        A Codex TOML source (``~/.codex/config.toml``, see issue #367) is the
-        permanent case: ``tomllib`` is read-only (``load``/``loads`` only, and
-        ``tomli_w`` is not a dependency), so an imported Codex server can never
-        be removed in place. Refusal there is the ONLY correct behaviour rather
-        than a policy choice, and stays correct until a TOML writer is added.
+        Shares ``mcp.verbs`` with the runtime for the reason the refusals
+        themselves give: which files we may write is one rule, and a second
+        copy of it beside this one would be a second source of truth.
         """
-        from local_operator.mcp.config import (
-            MCPConfigWriteError,
-            load_all_mcp_configs,
-            owned_scope_for_source,
-            remove_server,
-        )
+        from local_operator.mcp.verbs import mcp_remove_result
 
-        cwd = os.getcwd()
-        try:
-            configs, sources = load_all_mcp_configs(cwd)
-        except Exception as exc:  # noqa: BLE001 — an unreadable config is a notice
-            return (f"could not read the MCP configuration: {exc}", "error")
-        if name not in configs:
-            # Same shape as ``_resolve_mcp_server``'s unknown-name refusal,
-            # minus its OAuth check: removal is not an OAuth operation, so a
-            # stdio server must reach the real answer rather than "does not use
-            # OAuth login".
-            return (f"MCP server {name!r} is not configured — see /mcp", "warning")
-        source = sources.get(name)
-        scope = owned_scope_for_source(source, cwd)
-        if scope is None:
-            return (
-                f"{name!r} is defined in {_home_relative(str(source))} "
-                f"({_foreign_config_origin(source)}), not by local-operator.\n"
-                "Remove it there.",
-                "warning",
-            )
-        try:
-            path = remove_server(name, scope=scope, cwd=cwd)
-        except MCPConfigWriteError as exc:
-            return (
-                f"could not remove MCP server {name!r}: {_home_abbreviated(str(exc))}",
-                "warning",
-            )
-        except Exception as exc:  # noqa: BLE001 — a failed write is a notice, not a crash
-            return (f"could not remove MCP server {name!r}: {exc}", "error")
-        self._reconnect_mcp_after_config_change()
-        return (f"removed MCP server {name!r} from {_home_relative(str(path))}", "success")
+        return mcp_remove_result(name, self._reconnect_mcp_after_config_change)
 
     def _cmd_mcp_remove(self, name: str) -> None:
         """The local ``/mcp remove``: refuse, or remove and print the receipt."""
@@ -22031,106 +22443,3 @@ def _slash_style(kind: NoticeKind) -> str:
     if kind in ("warning", "error"):
         return kind
     return "info"
-
-
-#: Which TOOL owns each foreign MCP config file, keyed by the trailing path
-#: fragment ``load_all_mcp_configs`` reads it from. A refusal that names only
-#: the file leaves the user hunting for what writes it; naming the tool makes
-#: "remove it there" an instruction rather than a dead end. The Codex entry is
-#: read-only for a reason that will not change soon: ``tomllib`` parses TOML
-#: (``load``/``loads``) and cannot emit it, and ``tomli_w`` is not a
-#: dependency, so refusing is the only correct answer for a Codex-imported
-#: server rather than a policy we could relax (issue #367).
-_FOREIGN_MCP_CONFIGS: tuple[tuple[tuple[str, ...], str], ...] = (
-    ((".claude.json",), "imported from Claude Code"),
-    ((".claude", ".mcp.json"), "imported from Claude Code"),
-    ((".cursor", "mcp.json"), "imported from Cursor"),
-    ((".vscode", "mcp.json"), "imported from VS Code"),
-    ((".codex", "config.toml"), "imported from Codex CLI"),
-    # Read by the loader, never written by ``_scope_path`` — foreign to the
-    # writer despite living in the project the user is sitting in.
-    ((".mcp.json",), "a project .mcp.json local-operator does not write"),
-)
-
-
-def _outranks_global_mcp_scope(source: str | os.PathLike[str], cwd: str) -> bool:
-    """Whether ``source`` beats the GLOBAL mcp.json in the merge order.
-
-    ``/mcp add`` always writes the global file, and ``load_all_mcp_configs``
-    resolves a name first-source-wins in a fixed priority order. Anything ahead
-    of the global file therefore keeps defining the server after our write, so
-    the add is a no-op the user cannot see. This answers "would the write be
-    observable", which is a different question from "do we own the file" — a
-    project ``.local-operator/mcp.json`` is ours to write AND outranks us.
-
-    Resolved paths on both sides, for the reason ``owned_scope_for_source``
-    resolves: a symlinked home or a ``/private/var`` prefix must not decide it.
-    """
-    from pathlib import Path
-
-    root = Path(cwd).expanduser()
-    ahead_of_global = (
-        root / ".local-operator" / "mcp.json",
-        root / ".mcp.json",
-    )
-    try:
-        resolved = Path(source).expanduser().resolve()
-        return any(candidate.expanduser().resolve() == resolved for candidate in ahead_of_global)
-    except OSError:
-        return False
-
-
-def _foreign_config_origin(source: str | None) -> str:
-    """Name the tool that owns ``source``, for the ``/mcp remove`` refusal."""
-    # Function-local import: this module keeps `pathlib` off its import path
-    # (every other use here is local too), and this runs once per refusal.
-    from pathlib import Path
-
-    if source:
-        parts = Path(source).parts
-        for fragment, origin in _FOREIGN_MCP_CONFIGS:
-            if len(parts) >= len(fragment) and tuple(parts[-len(fragment) :]) == fragment:
-                return origin
-    return "not written by local-operator"
-
-
-def _home_abbreviated(text: str) -> str:
-    """Abbreviate the home prefix wherever it appears INSIDE a message.
-
-    :func:`_home_relative` abbreviates a string that IS a path; this one is for
-    prose that merely contains one — the config writers embed the file they
-    refused to write in their error text ("server 'x' already exists in
-    /Users/…/mcp.json"), and a receipt that abbreviates its success path while
-    spelling the whole thing out on failure reads as two different commands.
-    """
-    home = os.path.expanduser("~")
-    if home in ("", "/"):
-        return text
-    return text.replace(home + os.sep, "~" + os.sep)
-
-
-def _home_relative(path: str) -> str:
-    """``~/.local-operator/config.yml`` rather than the full ``/Users/…`` form.
-
-    The prefix is the same on every machine and costs a third of the line the
-    confirmation has to spend saying WHERE it wrote. A path outside the home
-    tree — the ``LOCAL_OPERATOR_CONFIG_DIR`` override, a test's tmp dir — is
-    left absolute, because there is no shorter honest rendering of it.
-    """
-    home = os.path.expanduser("~")
-    if home in ("", "/"):
-        return path
-    if path.startswith(home + os.sep):
-        return "~" + path[len(home) :]
-    # A path that came from `Path.resolve()` can disagree with `$HOME` purely
-    # by symlink — macOS hands out `/private/var/…` for a `/var/…` home — so a
-    # prefix test on the raw strings leaves an under-home path rendered in
-    # full. Retry against the resolved home before giving up; still absolute
-    # for anything genuinely outside the home tree.
-    try:
-        resolved_home = os.path.realpath(home)
-    except OSError:
-        return path
-    if resolved_home not in ("", "/") and path.startswith(resolved_home + os.sep):
-        return "~" + path[len(resolved_home) :]
-    return path

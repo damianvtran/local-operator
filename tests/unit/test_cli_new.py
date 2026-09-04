@@ -81,6 +81,28 @@ def quiet_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- Legacy parser contract -------------------------------------------------
 
 
+def _fake_tui_module() -> types.ModuleType:
+    """A stub for ``local_operator.tui`` that is still a PACKAGE.
+
+    ``types.ModuleType("local_operator.tui")`` alone has no ``__path__``, so
+    the moment anything imports a SUBMODULE through it Python raises
+    ``ModuleNotFoundError: ... is not a package``. That is not hypothetical
+    here: the CLI's viewer factory imports ``session.remote``, which reaches
+    ``session.frontend_state``, which imports ``local_operator.tui.costs`` —
+    so a bare stub turned the whole TUI launch path into an error return that
+    these tests then read as "the session was never built".
+
+    Giving the stub the real package's ``__path__`` keeps submodule imports
+    resolving against the real tree while ``run_tui`` stays faked, which is
+    the only part these tests mean to replace.
+    """
+    import local_operator.tui as real_tui
+
+    fake = types.ModuleType("local_operator.tui")
+    fake.__path__ = real_tui.__path__  # type: ignore[attr-defined]
+    return fake
+
+
 def test_root_defaults(parser: argparse.ArgumentParser) -> None:
     args = parser.parse_args([])
     assert args.subcommand is None
@@ -809,9 +831,21 @@ def test_main_interactive_tty_uses_tui(
         seen["factory_called"] = True
         return sentinel_session
 
+    # The TUI no longer builds a Session: `lop` boots a VIEWER, so the factory
+    # it awaits returns a RemoteSession and `create_session` is never reached
+    # from this path. Both are patched — `create_session` so a regression that
+    # revived the owner path fails loudly here, and the viewer builder so the
+    # test still observes the factory the CLI actually wires.
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    async def fake_cold(session_id, *args, **kwargs):
+        seen["factory_called"] = True
+        seen["viewer_session_id"] = session_id
+        return sentinel_session
+
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,
@@ -982,7 +1016,7 @@ def test_main_preflight_missing_hosting_tty_enters_setup(
 
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,
@@ -1038,7 +1072,7 @@ def test_main_preflight_unknown_hosting_tty_enters_setup(
 
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,
@@ -1117,7 +1151,15 @@ def test_main_interactive_missing_api_key_warns_and_starts(
         seen["built"] = True
         return MagicMock()
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    # `lop` boots a viewer, so the preflight's "the session was allowed
+    # through" is now observed on the viewer builder rather than on
+    # `create_session`. What the test is really asserting — that the preflight
+    # did not block the launch — is unchanged.
+    async def fake_cold(session_id, *args, **kwargs):
+        seen["built"] = True
+        return MagicMock()
+
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,
@@ -1132,6 +1174,7 @@ def test_main_interactive_missing_api_key_warns_and_starts(
     setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
@@ -1206,7 +1249,15 @@ def test_main_preflight_env_key_passes(
         seen["built"] = True
         return MagicMock()
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    # `lop` boots a viewer, so the preflight's "the session was allowed
+    # through" is now observed on the viewer builder rather than on
+    # `create_session`. What the test is really asserting — that the preflight
+    # did not block the launch — is unchanged.
+    async def fake_cold(session_id, *args, **kwargs):
+        seen["built"] = True
+        return MagicMock()
+
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,
@@ -1222,6 +1273,7 @@ def test_main_preflight_env_key_passes(
     setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
@@ -1243,7 +1295,7 @@ def test_tui_flag_forces_tui_on_non_tty(
     async def fake_create_session(*args, **kwargs):
         return MagicMock()
 
-    fake_tui = types.ModuleType("local_operator.tui")
+    fake_tui = _fake_tui_module()
 
     async def fake_run_tui(
         session_factory,

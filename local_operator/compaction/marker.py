@@ -39,6 +39,18 @@ __all__ = [
 #: ``CustomMessage.custom_type`` of the entry a compaction pass leaves behind.
 COMPACTION_MARKER_TYPE = "compaction_summary"
 
+#: ``custom_type`` of the row a compaction that did NOT run leaves behind.
+#:
+#: A pass that runs narrates itself through the ``compaction_start``/
+#: ``compaction_end`` events, so nothing needs recording for the happy path.
+#: A REFUSAL emits no events at all, which is what made it invisible on the
+#: routed path: the runtime answered "compacting context…" optimistically and
+#: then discarded the outcome, so a user was told a pass had started and
+#: nothing ever contradicted it (round 5, U17). Recorded rather than sent as a
+#: transient notice because a detached session may have no terminal attached
+#: when the refusal lands.
+COMPACTION_REFUSED_TYPE = "compaction_refused"
+
 
 def build_compaction_marker(
     summary: str, preserve_data: dict[str, Any] | None = None

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from typing import Any
 
 from local_operator.paths import config_dir
@@ -186,6 +187,81 @@ def resolve_peer_target(
     if len(matches) > 1:
         return None, matches, ""
     return matches[0], [], ""
+
+
+def resolve_cold_session(session: str) -> "str | None":
+    """A stored session id addressable even though nothing is running for it.
+
+    ``resolve_peer_target`` matches DISCOVERY RECORDS, which only live sessions
+    publish, so before this a note to a session whose terminal was closed had
+    no target at all — the very case the quiet mailbox mode is for. An exact
+    session id is the only accepted form here on purpose: a substring match
+    against on-disk directories has no conversation name to match on and could
+    silently pick the wrong transcript, and picking the wrong recipient is the
+    one failure this whole path must not have.
+
+    Returns the id when its session directory exists, else None.
+    """
+    if not session or session in (".", "..") or os.path.basename(session) != session:
+        return None
+    directory = config_dir() / "sessions" / session
+    try:
+        return session if directory.is_dir() else None
+    except OSError:
+        return None
+
+
+async def deliver_peer_message(
+    record: "Any | None",
+    *,
+    session_id: str,
+    text: str,
+    mode: str,
+    wake: bool,
+    sender: "dict[str, Any]",
+    cwd: str = "",
+) -> str:
+    """Hand one message to a peer session, running or not. Returns the receipt.
+
+    Three cases, and the split between them is the whole point:
+
+    - **A live record** — dial it, exactly as before.
+    - **No runtime, quiet note** (``wake=False`` and mailbox mode) — SPOOL it.
+      Starting a runtime here would contradict what the sender asked for:
+      ``wake=False`` means "read this on your next turn", not "start one now",
+      and a 283 MB process for a note nobody is waiting on is the wrong trade.
+      The runtime drains the spool the next time the session opens.
+    - **No runtime, but the sender wants attention** (``wake=True``, or a
+      steer) — engage a runtime and deliver over its socket. The sender is
+      explicitly asking the peer to act, which cannot happen without a process.
+    """
+    from local_operator.mobile.peer_client import send_peer_message
+
+    if record is not None:
+        return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
+
+    if not wake and mode == "mailbox":
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        directory = config_dir() / "sessions" / session_id
+        written = await asyncio.to_thread(
+            append_inbox,
+            directory,
+            InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+        )
+        if not written:
+            raise RuntimeError("could not spool the message for that session")
+        return "spooled (will be read when the session next opens)"
+
+    from local_operator.session.runtime.launch import PeerMessageErrand, engage_runtime
+
+    outcome = await engage_runtime(
+        session_id,
+        cwd or os.path.expanduser("~"),
+        PeerMessageErrand(text=text, mode=mode, wake=wake, sender=dict(sender)),
+        config_dir=config_dir(),
+    )
+    return outcome.detail
 
 
 def candidate_lines(

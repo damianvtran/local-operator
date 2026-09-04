@@ -16,6 +16,7 @@ tool-inventory / env prefix that keeps the provider cache warm.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 #: Hard cap on a stored goal. A goal is a short objective, not a spec dump;
 #: capping it keeps the volatile tail small and bounds the per-turn cost.
@@ -45,6 +46,29 @@ class GoalState:
     #: (A2), which still counts as attached. The two move together: every stamp
     #: sets both, and ``clear_agent_profile`` blanks both.
     agent_name: str = ""
+    #: Live probe answering "is an interactive surface watching this session
+    #: right now?" — set by the runtime, which is the only component that
+    #: knows (it owns the control socket's connection table). ``None`` means
+    #: "no probe installed", which every non-runtime host leaves alone and
+    #: which reads as interactive: a plain CLI or a test has a person in
+    #: front of it by construction.
+    #:
+    #: A PROBE rather than a stored flag on purpose. Attach state changes
+    #: whenever a viewer opens or closes, and a cached copy would need an
+    #: event per change — the token accumulation this exists to avoid. The
+    #: prompt closure calls this at turn start and the answer costs one line
+    #: whatever happened in between.
+    interactive_probe: "Callable[[], bool] | None" = None
+
+    def is_interactive(self) -> bool:
+        """Whether a surface can answer a question right now (default True)."""
+        probe = self.interactive_probe
+        if probe is None:
+            return True
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — an unreadable probe must not kill a turn
+            return True
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""

@@ -49,8 +49,14 @@ def test_setup_tavily_oauth_repairs_global_non_oauth_entry(monkeypatch, tmp_path
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.chdir(workdir)
-    mcp_path = tmp_path / ".local-operator" / "mcp.json"
-    mcp_path.parent.mkdir()
+    # The user-scope mcp.json lives in `config_dir()`, which this test points
+    # at `<tmp>/config` — NOT at `$HOME/.local-operator`. The fixture used to
+    # write the HOME path and pass only because `_scope_path` rebuilt a home
+    # path by hand instead of asking `config_dir()`; that is the bug that let
+    # an isolated config dir still write a developer's real mcp.json
+    # (round 5, U15 containment).
+    mcp_path = tmp_path / "config" / "mcp.json"
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
     mcp_path.write_text(
         json.dumps(
             {

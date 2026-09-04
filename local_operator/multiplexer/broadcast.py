@@ -104,6 +104,15 @@ def resume_executable() -> str:
     PATH or cwd than the launch did (a crash restore runs from whatever shell
     the multiplexer spawns), and a relative ``argv[0]`` would then resolve to
     nothing.
+
+    **NOT SAFE FROM A DETACHED RUNTIME CHILD.** That process is
+    ``python -m local_operator.session.runtime.process``, so ``argv[0]`` is
+    the bare INTERPRETER and this returns a path that opens a Python REPL
+    rather than reopening the session. Both notification callers rediscovered
+    that independently and now resolve ``shutil.which("lop")`` first (see
+    ``tui/notify.resume_click_command`` and ``tui/resume_click.open_session``);
+    a new caller that can run outside a real ``lop`` process must do the same
+    (round 3, B6).
     """
     launcher = sys.argv[0] if sys.argv else ""
     if launcher:
