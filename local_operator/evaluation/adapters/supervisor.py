@@ -54,7 +54,7 @@ from local_operator.evaluation.adapters.discovery import (
     validate_resolved_launch,
     worker_argv,
 )
-from local_operator.evaluation.adapters.rpc import RpcClient
+from local_operator.evaluation.adapters.rpc import RpcClient, RpcRemoteError
 from local_operator.evaluation.evidence.media import (
     MediaValidationError,
     validate_media,
@@ -89,6 +89,39 @@ _DENIED_MARKERS = ("OPENAI", "OPENROUTER", "ANTHROPIC", "MODEL", "PROVIDER")
 
 class SupervisionError(RuntimeError):
     pass
+
+
+def _mutation_committed(error: BaseException) -> bool:
+    """Did the ADAPTER declare that its mutation applied and only the read failed?
+
+    This is the single predicate that decides whether a failed mutating call
+    keeps its session alive, so it is deliberately narrow. It is true only for
+    an answered ``adapter_error`` whose worker-built detail carries
+    ``phase == "observation"`` -- meaning the adapter raised
+    ``ObservationPhaseError`` from ``execute`` after the guest actions
+    committed.
+
+    Everything else stays ambiguous and keeps poisoning, and the exclusions
+    matter more than the inclusion:
+
+    * A TIMEOUT or a CANCELLED call answers nothing. The worker may still be
+      mid-mutation, and ``RpcClient`` has already poisoned the channel.
+    * A PROCESS DEATH, a protocol error, or any ``SupervisionError`` raised by
+      the parent's own verification arrives as a different exception type and
+      never reaches this branch.
+    * A ``phase`` of ``"unknown"`` -- the default, and what every adapter that
+      has not adopted the contract emits -- is ambiguous by definition.
+
+    A session kept alive here is NOT trusted further than before: the resume
+    call re-enters ``_mutating_call``, so a second failure poisons normally.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "observation"
+    )
 
 
 class _Tail:
@@ -600,8 +633,9 @@ class VerifiedAdapterSession:
             result = await self._supervisor._call_raw(method, params, result_type, timeout=timeout)
             validate(result)
             return result
-        except BaseException:
-            await self._poison_after_ambiguous_mutation()
+        except BaseException as error:
+            if not _mutation_committed(error):
+                await self._poison_after_ambiguous_mutation()
             raise
 
     async def inspect_requirements(
@@ -728,6 +762,57 @@ class VerifiedAdapterSession:
         )
         assert isinstance(result, ExecuteResult)
         self.verifier.accept_execution(params, result)
+        return result
+
+    async def resume_observation(self, params: ExecuteParams, *, timeout: float) -> ExecuteResult:
+        """Re-read the state a COMMITTED batch produced. Never re-applies it.
+
+        Callable only after that same batch failed with ``phase ==
+        "observation"``, i.e. after the adapter declared the mutation committed
+        and only the read-back lost. The caller (``episode._execute_batch``)
+        owns that gate; this method owns the verification, which is not
+        weakened by one clause:
+
+        * ``resume_observation=True`` is set here rather than accepted from the
+          caller, so the obligation "do not apply this batch again" is stated
+          by the boundary that guarantees it.
+        * A fresh ``operation_id`` per attempt. The original key would replay
+          the worker's cached ERROR verbatim -- correct behaviour for the
+          operation cache, and exactly wrong for a read whose outcome is not
+          yet decided.
+        * The result is checked by the ordinary ``validate_execution`` +
+          ``_validate_output`` path: exact next sequence, content-derived
+          identity, receipt bound to this batch and this input observation, and
+          every frame artifact re-opened by digest under the parent's own root
+          with ``O_NOFOLLOW``. A resumed observation clears the same bar as a
+          normal one.
+
+        Still a ``_mutating_call``: a failure here poisons and requires rescue
+        exactly as before. Recovery adds attempts, never a weaker failure mode.
+        """
+
+        current = self.verifier.current_observation
+        if current is None:
+            raise SupervisionError("resume has no current observation")
+        # The batch must still bind to the observation the model acted on. A
+        # resume that arrived after the verifier moved on would be reading for
+        # a step that is already closed.
+        params.action_batch.validate_for(current)
+        self._ensure_usable()
+        resumed = params.model_copy(update={"resume_observation": True})
+        result = await self._mutating_call(
+            "execute",
+            resumed,
+            ExecuteResult,
+            timeout=timeout,
+            validate=lambda value: (
+                self.verifier.validate_execution_result(resumed, value)
+                if isinstance(value, ExecuteResult)
+                else (_ for _ in ()).throw(SupervisionError("execute returned the wrong result"))
+            ),
+        )
+        assert isinstance(result, ExecuteResult)
+        self.verifier.accept_execution(resumed, result)
         return result
 
     def begin_ask(self, params: AskUserExchangeParams) -> None:

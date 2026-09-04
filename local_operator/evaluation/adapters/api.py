@@ -63,10 +63,25 @@ from local_operator.evaluation.receipts import (
 # error path, which is the worst possible place to discover a mismatch. The
 # exact-version pin in ``AdapterSelector`` turns that into a refusal at
 # selection time, before a worker is spawned or a resource allocated.
-ADAPTER_SCHEMA_VERSION = "1.3"
+#
+# 1.4 adds the OBSERVATION-PHASE RECOVERY contract: ``phase`` on
+# ``RpcErrorDetail`` (rpc.py) and ``resume_observation`` on ``ExecuteParams``.
+# Together they let an adapter say "my mutation committed; only the read-back
+# failed", which is the one case where a repeat call is safe -- see
+# ``ObservationPhaseError`` below for why the harness cannot infer this on its
+# own. Five paid episodes died at steps 9-32 because a burstable benchmark VM
+# starved its screenshot server for ~25s and the adapter, correctly, refused to
+# build a frameless observation.
+#
+# The bump is required for exactly the reason 1.3's was, in both directions: a
+# 1.3 worker's error line carries no ``phase`` key and fails a 1.4 parent's
+# canonicality check, and a 1.4 worker's ``"phase":"unknown"`` fails a 1.3
+# parent's ``extra="forbid"``. ``resume_observation`` is the same story on the
+# request side.
+ADAPTER_SCHEMA_VERSION = "1.4"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.3"]
+SchemaVersion: TypeAlias = Literal["1.4"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -513,9 +528,62 @@ class ObservationResult(ProtocolModel):
     observation: Observation
 
 
+class ObservationPhaseError(Exception):
+    """The mutation COMMITTED; only reading the resulting state failed.
+
+    An adapter raises this from ``execute`` to state a fact only it can know:
+    the guest actions were applied and the environment moved, and the failure
+    happened afterwards, while reading the new state back. That distinction is
+    the whole safety argument for recovery -- ``execute`` is otherwise treated
+    as an AMBIGUOUS mutation, where a repeat call could apply the actions a
+    second time, and that treatment must not be weakened.
+
+    WHY A DECLARED CONTRACT AND NOT INFERENCE. The parent's only other evidence
+    is ``RpcErrorDetail``: an exception type name, a message, and file/line
+    frames. Keying recovery off any of those would hard-code one benchmark's
+    private internals into a benchmark-neutral harness -- adapter exception
+    names are adapter-owned, unversioned, and free to change in a patch
+    release. The adapter is the code that ordered the two phases, so it is the
+    only honest source of the fact, and it says so in a type the boundary
+    defines. ``AdapterRescueUnsupported`` (worker.py) is the same pattern.
+
+    Raising this WITHOUT having committed the mutation is a contract violation
+    that can double-apply an action. It is safe to raise only from after the
+    point of no return -- typically ``raise ObservationPhaseError(...) from
+    error`` around the read-back that follows the guest call.
+
+    An adapter that never raises it is completely unaffected: the phase
+    defaults to ``unknown`` and every failure poisons exactly as before.
+    """
+
+
 class ExecuteParams(OperationParams):
+    """One action batch to apply, or one committed batch's read-back to resume.
+
+    ``resume_observation`` is set ONLY by the parent, and only after this exact
+    batch already failed with ``phase == "observation"`` -- that is, after the
+    adapter declared the mutation committed. It carries one obligation, which is
+    the contract an adapter accepts by ever raising ``ObservationPhaseError``:
+
+        The adapter MUST NOT apply ``action_batch`` again. It must only re-read
+        the environment and return the observation the failed call could not
+        build, as the exact next sequence after the parent's current one.
+
+    The batch still rides along because the receipt binds to it
+    (``validate_execution`` checks ``action_batch_id``, the input observation,
+    and that the sequence is fresh), so the parent's verification of a resumed
+    call is identical to that of a normal one -- nothing is relaxed to let
+    recovery through.
+
+    Each attempt carries a FRESH ``operation_id`` derived from the original.
+    Reusing the original key would replay the worker's cached error verbatim,
+    which is precisely what the operation cache is for and precisely wrong
+    here: a resumed read is a new call whose outcome is not yet decided.
+    """
+
     action_batch: ActionBatch
     action_batch_id: Digest
+    resume_observation: bool = False
 
     @model_validator(mode="after")
     def _bind_batch(self) -> "ExecuteParams":
