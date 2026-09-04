@@ -1,4 +1,4 @@
-runtime listening on 127.0.0.1:56845
+runtime listening on 127.0.0.1:55229
 
 [1] LOCAL client, `/mcp reauth notion`
     reply : authorizing MCP server 'notion' on this machine; the result appears here when it completes.
@@ -27,5 +27,10 @@ runtime listening on 127.0.0.1:56845
     PASS  : the receipt returned immediately
     a second op on the SAME connection answered in 0.00s
     PASS  : the connection stayed responsive
+
+[6] `/mcp reauth notion` superseded by `/mcp login other`
+    forgot : ['notion']
+    notice : ["MCP login for 'notion' cancelled before the browser completed it; the stored credential is unchanged.", "MCP reauth for 'notion' was cancelled after its old credential was removed, so the server is now unauthenticated — run /mcp login notion to finish."]
+    PASS  : the loss is named, with the recovery step
 
 RESULT: ALL CHECKS PASSED

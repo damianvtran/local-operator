@@ -296,6 +296,45 @@ async def main() -> int:
         else:
             print("    PASS  : the connection stayed responsive\n")
         writer.close()
+
+        # --- 6. a superseded reauth must say the credential is gone (F6) ------
+        # reauth is destructive before it is constructive. Cancelled between
+        # the delete and the reconnect, the server has NO credential, and a
+        # bare "cancelled" reads as "nothing changed".
+        class Parked(Manager):
+            def __init__(self) -> None:
+                super().__init__()
+                self.gate = asyncio.Event()
+
+            async def connect_configured_server(self, name: str, *, timeout_ms: Any = None) -> Any:
+                await self.gate.wait()
+                return await super().connect_configured_server(name, timeout_ms=timeout_ms)
+
+        session.mcp_manager = Parked()
+        session.notices.clear()
+        forgotten.clear()
+        reader, writer = await dial(record, locality=None)
+        await send_slash(reader, writer, 10, "reauth notion")
+        await asyncio.sleep(0.1)
+        # A second grant supersedes the first, cancelling it mid-flight.
+        await send_slash(reader, writer, 11, "login other")
+        await asyncio.sleep(0.2)
+        print("[6] `/mcp reauth notion` superseded by `/mcp login other`")
+        print(f"    forgot : {forgotten}")
+        print(f"    notice : {[n[0] for n in session.notices]}")
+        # Scenario 5 left a `/mcp login notion` parked on its probe; this
+        # supersede cancels that one too, so filter to the REAUTH notice — the
+        # one whose delete already happened.
+        cancel_notes = [n[0] for n in session.notices if n[0].startswith("MCP reauth")]
+        if not cancel_notes:
+            print("    FAIL  : the superseded grant reported nothing")
+            failures += 1
+        elif "unauthenticated" not in cancel_notes[0]:
+            print("    FAIL  : the user is not told the credential is gone")
+            failures += 1
+        else:
+            print("    PASS  : the loss is named, with the recovery step\n")
+        writer.close()
     finally:
         runtime.close()
 

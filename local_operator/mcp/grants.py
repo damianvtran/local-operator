@@ -134,7 +134,9 @@ def logout_server(name: str) -> str | None:
         return str(exc)
 
 
-async def run_grant(manager: Any, sub: str, name: str) -> tuple[str, NoticeKind]:
+async def run_grant(
+    manager: Any, sub: str, name: str, forgotten: list[str] | None = None
+) -> tuple[str, NoticeKind]:
     """Run one grant verb to completion; return the receipt and its style.
 
     This is the whole command, awaited: callers that can afford to block (the
@@ -143,6 +145,15 @@ async def run_grant(manager: Any, sub: str, name: str) -> tuple[str, NoticeKind]
     disconnecting between the two so the manager's auto-reconnect cannot read
     the old credential during the teardown window and quietly re-authenticate
     the session the user just reset.
+
+    ``forgotten`` is an out-parameter the caller reads AFTER a cancellation:
+    ``reauth`` is destructive before it is constructive, so a grant cancelled
+    between the delete and the reconnect leaves the server with no credential
+    at all. The caller cannot infer that from the exception — a cancel before
+    the delete and a cancel after it raise the identical ``CancelledError`` —
+    and telling the user "cancelled" when their grant is actually gone sends
+    them to a server that will not connect (review F6). Appending the name here
+    is what lets the notice say which of the two happened.
     """
     from local_operator.mcp.auth import McpLoginCancelledError
 
@@ -164,6 +175,8 @@ async def run_grant(manager: Any, sub: str, name: str) -> tuple[str, NoticeKind]
         error = logout_server(name)
         if error is not None:
             return f"MCP reauth failed for {name!r}: {error}", "warning"
+        if forgotten is not None:
+            forgotten.append(name)
         try:
             await manager.disconnect_server(name)
         except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant
@@ -223,6 +236,10 @@ async def start_grant(
     if sub == "logout":
         return await run_grant(manager, sub, name)
 
+    # Tracks whether the destructive half of a `reauth` has already happened,
+    # so the cancellation notice can say which state the user is left in.
+    forgotten: list[str] = []
+
     async def _settle() -> None:
         try:
             # The half ``resolve_server`` cannot answer: it is synchronous, and
@@ -245,12 +262,27 @@ async def start_grant(
             if not await login_allowed(manager, cfg):
                 notify(f"MCP server {name!r} does not use OAuth login.", "warning")
                 return
-            text, kind = await run_grant(manager, sub, name)
+            text, kind = await run_grant(manager, sub, name, forgotten)
         except asyncio.CancelledError:
-            notify(
-                f"MCP {sub} for {name!r} cancelled before the browser completed it.",
-                "warning",
-            )
+            # WHICH cancellation this was decides what the user must do next,
+            # and the exception cannot tell them apart. A `reauth` cancelled
+            # after the delete (by a superseding grant, or by session teardown)
+            # has already destroyed the credential, so "cancelled" alone reads
+            # as "nothing changed" and sends the user back to a server that can
+            # no longer connect (review F6). Name the state and the recovery.
+            if forgotten:
+                notify(
+                    f"MCP {sub} for {name!r} was cancelled after its old credential "
+                    "was removed, so the server is now unauthenticated — "
+                    f"run /mcp login {name} to finish.",
+                    "warning",
+                )
+            else:
+                notify(
+                    f"MCP {sub} for {name!r} cancelled before the browser completed it; "
+                    "the stored credential is unchanged.",
+                    "warning",
+                )
             raise
         except Exception as exc:  # noqa: BLE001 — never kill the host loop
             logger.debug("MCP %s failed for %s", sub, name, exc_info=True)

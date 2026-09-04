@@ -342,10 +342,16 @@ class OwnedSessionHandle(SessionHandle):
             self._fold.note_prompt_rejected("session closed before the prompt was admitted")
         self._notify()
         # A grant parked on a browser round trip would otherwise outlive the
-        # session it authenticates, writing its notice into a disposed one.
-        # Cancelled rather than awaited: nobody is going to complete a login
-        # for a session that is going away, and ``_settle`` turns the
-        # cancellation into a receipt on its way out.
+        # session it authenticates: it holds the loopback redirect port and a
+        # reference to a disposed session, waiting up to ten minutes for a
+        # human who is no longer there.
+        #
+        # Cancelled rather than awaited, because nobody is going to complete a
+        # login for a session that is going away. This does NOT suppress the
+        # notice — cancelling is what CAUSES ``_settle`` to emit one, and it
+        # does land (review F7 corrected an earlier comment here that claimed
+        # the opposite). That is deliberate: a `reauth` cancelled after its
+        # delete has destroyed a credential, and the user has to be told.
         for grant in list(self._mcp_grant_tasks):
             if not grant.done():
                 grant.cancel()

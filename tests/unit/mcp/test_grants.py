@@ -402,3 +402,78 @@ async def test_the_receipt_does_not_promise_a_browser_it_may_not_open() -> None:
         spawn=lambda coro: asyncio.ensure_future(coro),
     )
     assert "browser tab is opening" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_reauth_cancelled_after_its_delete_says_the_grant_is_gone(
+    _no_real_credential_writes: list[str],
+) -> None:
+    """F6: `reauth` is destructive before it is constructive.
+
+    Cancelled between the delete and the reconnect — by a superseding grant or
+    by session teardown — the server is left with no credential at all. A bare
+    "cancelled" reads as "nothing changed" and sends the user back to a server
+    that can no longer connect, so the notice must name the state and the
+    recovery.
+    """
+    manager = _Manager()
+    manager.connect_gate = asyncio.Event()  # never fires: cancel mid-grant
+    notices: list[tuple[str, str]] = []
+
+    await start_grant(
+        _Session(manager),
+        "reauth",
+        "notion",
+        browser_is_reachable=True,
+        notify=lambda body, style: notices.append((body, style)),
+        spawn=lambda coro: asyncio.ensure_future(coro),
+    )
+    task = next(t for t in asyncio.all_tasks() if "_settle" in str(t.get_coro()))
+    for _ in range(6):  # let it reach the connect
+        await asyncio.sleep(0)
+    assert _no_real_credential_writes == ["notion"], "the delete should have happened"
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert notices, "a cancelled grant must still report"
+    body, style = notices[-1]
+    assert "unauthenticated" in body, body
+    assert "/mcp login notion" in body, body
+    assert style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_grant_cancelled_before_its_delete_says_nothing_changed() -> None:
+    """The other half of F6: don't alarm a user whose credential is intact."""
+    manager = _Manager()
+    probing = asyncio.Event()
+
+    class _SlowProbe(_Manager):
+        async def server_supports_oauth_login(self, cfg: Any) -> bool:
+            probing.set()
+            await asyncio.sleep(3600)
+            return True
+
+    manager = _SlowProbe()
+    notices: list[tuple[str, str]] = []
+
+    await start_grant(
+        _Session(manager),
+        "reauth",
+        "notion",
+        browser_is_reachable=True,
+        notify=lambda body, style: notices.append((body, style)),
+        spawn=lambda coro: asyncio.ensure_future(coro),
+    )
+    task = next(t for t in asyncio.all_tasks() if "_settle" in str(t.get_coro()))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert probing.is_set()
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    body, _style = notices[-1]
+    assert "unchanged" in body, body
+    assert "unauthenticated" not in body, body
