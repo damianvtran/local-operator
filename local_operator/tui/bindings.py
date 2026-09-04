@@ -258,9 +258,43 @@ _MARKDOWN_BINDINGS: tuple[Binding, ...] = (
         ),
     ),
     Binding("markdown.h3", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
-    Binding("markdown.h4", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
+    # h4 drops the bold rather than taking a fourth hue. h3 and h4 were the
+    # same token AND the same weight — byte-identical ink in all 54 themes,
+    # by construction rather than by palette accident, so the two levels were
+    # indistinguishable everywhere. Weight is the channel that fixes it for
+    # free: it spends no token, so the accent enumeration in
+    # local_operator.tcss is untouched, and it inverts in no palette. A hue
+    # here does not survive the ramp: binding h4 (or h3) to `signal` measured
+    # h3-louder-than-h2 in 26 of 54 themes and h3-louder-than-h1 in 12,
+    # because the semantic tokens carry no ordering among themselves — the
+    # neutral ramp does. Weight alone is the WEAKEST of the three channels
+    # and is not asked to work alone; the heading marker below is definitive.
+    Binding("markdown.h4", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("markdown.h5", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
     Binding("markdown.h6", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding(
+        "markdown.heading_marker",
+        "dim",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "The heading's OWN level, stated rather than inferred. rich strips "
+            "the `#` markers when it parses a heading and renders only the "
+            "text, which forced all six levels onto the colour channel alone "
+            "— the root cause of h3/h4 colliding, and of every proposal to "
+            "fix it wanting a hue it should not have to spend. Restoring the "
+            "marker returns the level to the channel markdown itself uses, "
+            "where the count of `#` is unambiguous at every level, in all 54 "
+            "themes, and cannot be inverted by a saturated palette.\n\n"
+            "`dim` because the marker is structural metadata about the "
+            "content rather than the content — the same argument as "
+            "`markdown.item.bullet`, one rung quieter since the heading text "
+            "beside it already carries hue and weight. It is the sheet's own "
+            "separator ink and clears the 3:1 non-text floor in all 54 "
+            "(min 3.61:1), the same floor `markdown.hr` is held to."
+        ),
+    ),
     Binding("markdown.link", "signal", "bg", Role.REFERENCE, Surface.TRANSCRIPT),
     Binding("markdown.link_url", "signal", "bg", Role.REFERENCE, Surface.TRANSCRIPT),
 )
