@@ -1340,6 +1340,8 @@ class OwnedSessionHandle(SessionHandle):
         command: str,
         args: str,
         images: list[dict[str, str]] | None = None,
+        *,
+        locality: str = "local",
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -1360,13 +1362,21 @@ class OwnedSessionHandle(SessionHandle):
         The returned shape is a ``SlashResult`` dump the INVOKING terminal
         renders locally, so the receipt reads the same whether the session is
         local or detached.
+
+        ``locality`` is the invoking CLIENT's declared position (see
+        ``ClientLocality``), defaulting to ``local`` because every client that
+        exists today reaches this runtime over loopback. Only ``/mcp``'s grant
+        verbs read it, to decide whether opening a browser here would put the
+        tab in front of the person who typed the command.
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(command, args, SlashResult)
+        result = await self._slash_result(command, args, SlashResult, locality)
         return result.model_dump(mode="json")
 
-    async def _slash_result(self, command: str, args: str, SlashResult: Any) -> Any:
+    async def _slash_result(
+        self, command: str, args: str, SlashResult: Any, locality: str = "local"
+    ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
         Only the commands a viewer ROUTES reach here; process- and
@@ -1383,7 +1393,7 @@ class OwnedSessionHandle(SessionHandle):
         if command == "agent":
             return self._agent_slash(args, SlashResult)
         if command == "mcp":
-            return self._mcp_slash(session, args, SlashResult)
+            return await self._mcp_slash(session, args, SlashResult, locality)
         if command == "model":
             return await self._model_slash(session, args, SlashResult)
         if command == "goal":
@@ -1575,17 +1585,36 @@ class OwnedSessionHandle(SessionHandle):
             data={"type": "agent_mutate" if arg else "agent_list", "args": arg},
         )
 
-    def _mcp_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+    async def _mcp_slash(
+        self,
+        session: Any,
+        arg: str,
+        SlashResult: Any,
+        locality: str = "local",
+    ) -> Any:
         """The routed ``/mcp``: status from the session's own manager.
 
         The bare listing is kept LOCAL by the viewer's dispatch (it reads the
         identical rows from its mcp facade), so what reaches here is either
-        the empty case or a grant subcommand. A grant awaits a browser round
-        trip on the machine the user is sitting at, not on the session's
-        host, so it is declined in the same machine-locality vocabulary
-        `/approvals default` uses rather than being silently dropped.
+        the empty case or a subcommand.
+
+        A grant (``login``/``logout``/``reauth``) RUNS HERE when the invoking
+        client is on this machine, which today it always is: the control
+        socket binds ``127.0.0.1`` only. This used to be refused outright with
+        "run it from a terminal on that machine", which was self-contradictory
+        on a detached session — the terminal routes the verb to the owner, the
+        owner told the user to type it in a terminal, and there was no third
+        place to type it. The result was that ``/mcp reauth`` could not be run
+        at all once a session had detached, which is precisely when an expired
+        credential needs it.
+
+        Locality is now the CLIENT's declared property rather than a guess
+        made here (see ``ClientLocality``), so a future relay carrying a
+        phone's command still gets the refusal, aimed at the case it describes.
         """
-        from local_operator.session.frontend_state import _MCP_GRANT_SUBCOMMANDS
+        from local_operator.mcp.grants import (
+            GRANT_SUBCOMMANDS as _MCP_GRANT_SUBCOMMANDS,
+        )
         from local_operator.session.frontend_state import (
             MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS,
         )
@@ -1617,16 +1646,27 @@ class OwnedSessionHandle(SessionHandle):
                 style="warning",
             )
         if sub in _MCP_GRANT_SUBCOMMANDS:
-            # A grant awaits a browser round trip on the machine the USER is
-            # sitting at, and stores credentials there. Declined in the same
-            # machine-locality vocabulary `/approvals default` uses rather
-            # than opening a browser nobody is looking at.
-            return SlashResult(
-                kind="notice",
-                text=f"/mcp {sub} opens a browser and stores credentials on the machine "
-                "running the terminal — run it from a terminal on that machine",
-                style="warning",
+            # Same fixed-arity refusals the attached path applies, so one typed
+            # string is answered identically wherever it is typed.
+            if len(parts) < 2:
+                return SlashResult(kind="notice", text=f"usage: /mcp {sub} <name>", style="warning")
+            if len(parts) > 2:
+                return SlashResult(
+                    kind="notice",
+                    text=f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}",
+                    style="warning",
+                )
+            from local_operator.mcp.grants import start_grant
+
+            text, kind = await start_grant(
+                session,
+                sub,
+                parts[1],
+                browser_is_reachable=locality != "remote",
+                notify=self._grant_notice,
+                spawn=self._spawn_grant,
             )
+            return SlashResult(kind="notice", text=text, style=kind)
         # `add`/`remove` write the GLOBAL mcp.json and reconnect THIS session's
         # manager, so they are genuinely our work — the follower's facade is
         # read-only and its filesystem is not the one this session reads its
@@ -1660,6 +1700,48 @@ class OwnedSessionHandle(SessionHandle):
         if not servers:
             return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
         return SlashResult(kind="block", data={"type": "mcp"})
+
+    def _grant_notice(self, text: str, kind: str) -> None:
+        """Report a settled MCP grant to every front end watching this session.
+
+        The grant's receipt cannot be its ``result`` frame: the exchange waits
+        on a human and the invoking client times out after ``ACK_TIMEOUT_S``.
+        A ``NoticeEvent`` is the channel that already reaches every attached
+        terminal (and the phone projection), so the outcome lands wherever the
+        user is looking rather than only in the terminal that happened to type
+        the verb — which for a detached session may well be gone by then.
+        """
+        from local_operator.harness.types import NoticeEvent
+
+        emit = getattr(self._session, "_emit", None)
+        if not callable(emit):
+            logger.info("MCP grant: %s", text)
+            return
+        # ``NoticeEvent`` carries the narrower info/warning/error trio; a
+        # grant's "success" maps onto ``info`` rather than inventing a kind
+        # the event schema does not define.
+        event_kind = kind if kind in ("info", "warning", "error") else "info"
+        typed_emit = cast("Callable[[Any], Awaitable[Any]]", emit)
+
+        async def _emit_notice() -> None:
+            try:
+                await typed_emit(NoticeEvent(text=text, kind=event_kind))
+            except Exception:  # noqa: BLE001 — a failed notice must not kill the loop
+                logger.debug("MCP grant notice failed", exc_info=True)
+
+        self._spawn_grant(_emit_notice())
+
+    def _spawn_grant(self, coro: Awaitable[None]) -> None:
+        """Run a detached grant step on this runtime's own loop.
+
+        Held in a set for the reason ``_reconnect_mcp`` holds its reload task:
+        ``create_task`` keeps only a weak reference, so a bare task can be
+        collected mid-flight and the browser exchange would simply stop with
+        no receipt. The done-callback discards it so the set cannot grow.
+        """
+        task = self._loop.create_task(cast("Coroutine[Any, Any, None]", coro))
+        self._mcp_reload_tasks.add(task)
+        task.add_done_callback(self._mcp_reload_tasks.discard)
 
     def _reconnect_mcp(self) -> None:
         """Re-read the config and reconnect after ``/mcp add|remove`` wrote it.

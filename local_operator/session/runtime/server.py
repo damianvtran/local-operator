@@ -45,6 +45,7 @@ import os
 import secrets
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
 
@@ -59,6 +60,7 @@ from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
+    ClientLocality,
     SessionRecord,
 )
 
@@ -118,6 +120,37 @@ _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
 
 
+def _accepts_locality(fn: Any) -> bool:
+    """Whether ``fn`` takes the ``locality`` keyword.
+
+    Cached because it is asked on every routed slash command and
+    ``inspect.signature`` is not cheap. Keyed by the underlying function so
+    bound methods of the same class share one answer. A handle whose signature
+    cannot be read (a C callable, an exotic mock) is treated as not accepting
+    it: the caller then uses the narrow call, which every implementation has
+    always supported.
+    """
+    target = getattr(fn, "__func__", fn)
+    cached = _LOCALITY_SUPPORT.get(target)
+    if cached is not None:
+        return cached
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        answer = False
+    else:
+        answer = "locality" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    _LOCALITY_SUPPORT[target] = answer
+    return answer
+
+
+#: Memo for ``_accepts_locality``. Keyed weakly so a handle class that goes
+#: away (a per-test double) does not pin its function objects in memory.
+_LOCALITY_SUPPORT: "weakref.WeakKeyDictionary[Any, bool]" = weakref.WeakKeyDictionary()
+
+
 #: Rows one ``job_trajectory`` reply may carry. The whole retained window is
 #: 500 events with no size bound per event, which is what overflows the frame
 #: limit in the first place, so the viewer pages rather than asking for all of
@@ -140,6 +173,10 @@ class _ClientConn:
 
     writer: asyncio.StreamWriter
     kind: ClientKind
+    #: Whether the human on the other end is at this machine. Declared in the
+    #: auth frame; see ``ClientLocality``. Only ops that act on the USER's
+    #: surroundings (an OAuth browser tab) read it.
+    locality: ClientLocality = "local"
     last_seen: float = field(default_factory=time.monotonic)
     # Frames on one TCP stream must stay ordered, while unrelated streams must
     # never queue behind its backpressure.
@@ -750,6 +787,12 @@ class RuntimeServer:
         # upgrade would demote the phone bridge to a follower.
         raw_kind = frame.get("client", "daemon")
         kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
+        # Absent means LOCAL, matching every client that exists today: the
+        # listener is loopback-only, so anything that dialed is on this
+        # machine. A relay forwarding a remote device's commands is the one
+        # caller that must say ``"remote"``, and an old client that never
+        # heard of the field keeps the behaviour it always had.
+        locality: ClientLocality = "remote" if frame.get("locality") == "remote" else "local"
         # v4: only attach clients may subscribe to the raw event relay. The
         # daemon's projection path must stay byte-identical, so a daemon auth
         # carrying the flag (there is none today) is deliberately ignored.
@@ -781,6 +824,7 @@ class RuntimeServer:
         conn = _ClientConn(
             writer=writer,
             kind=kind,
+            locality=locality,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
         )
@@ -1113,7 +1157,7 @@ class RuntimeServer:
                 # ``data`` the invoker renders locally (a slash command's typed
                 # outcome, a cancel's authoritative count) rather than a
                 # one-line receipt that would paint in the owner's transcript.
-                data = await self._dispatch_payload(op, frame)
+                data = await self._dispatch_payload(op, frame, conn.locality)
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
                 await self._push()
@@ -1322,18 +1366,31 @@ class RuntimeServer:
             return str(result) if isinstance(result, str) and result else "stopping"
         raise ValueError(f"unknown op: {op!r}")
 
-    async def _dispatch_payload(self, op: str, frame: dict[str, Any]) -> Any:
+    async def _dispatch_payload(
+        self, op: str, frame: dict[str, Any], locality: ClientLocality = "local"
+    ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data."""
         h = self._handle
         if op == "slash_result":
             run = getattr(h, "run_slash_authoritative", None)
             if not callable(run):
                 raise ValueError("this owner cannot run typed slash results")
-            result = run(
+            args: list[Any] = [
                 str(frame.get("command", "")),
                 str(frame.get("args", "")),
                 list(frame.get("images") or []),
-            )
+            ]
+            # ``locality`` is passed only to handles that accept it. A handle
+            # is an injected collaborator — the TUI's, the runtime's, and test
+            # doubles all implement this — so widening the call unconditionally
+            # would break every implementation that has not been updated. The
+            # probe keeps the parameter OPTIONAL in the protocol rather than
+            # forcing a lockstep change, which is the same capability-probe
+            # stance the ops above take with ``getattr``.
+            if _accepts_locality(run):
+                result = run(*args, locality=locality)
+            else:
+                result = run(*args)
             if inspect.isawaitable(result):
                 result = await result
             return result

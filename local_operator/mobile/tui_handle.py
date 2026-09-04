@@ -487,6 +487,8 @@ class TuiSessionHandle(SessionHandle):
         command: str,
         args: str,
         images: list[dict[str, str]] | None,
+        *,
+        locality: str = "local",
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
@@ -495,18 +497,29 @@ class TuiSessionHandle(SessionHandle):
         and returns a ``ran /…`` receipt — this asks the app for a
         :class:`SlashResult` payload the INVOKING terminal renders locally, so
         ``/goal``/``/rename``/``/mcp``/``/context`` answer where they were
-        typed. The producer is a coroutine (the MCP grant awaits a browser
-        round trip), so it is scheduled on the app loop and its completion
-        awaited here — unbounded, because an OAuth grant legitimately outlives
-        the UI-hop timeout ``_on_app`` enforces, and a cancelled request
-        unwinds the grant cleanly through the task.
+        typed. The producer is a coroutine, so it is scheduled on the app loop
+        and its completion awaited here.
+
+        That await used to be genuinely unbounded, to let an MCP grant's
+        browser round trip finish. It never worked: the invoking client gives
+        up after ``ACK_TIMEOUT_S`` (15 s), so a grant that waited on a human
+        left the follower with a timeout while the exchange ran on invisibly.
+        The grant verbs now return a receipt immediately and report their
+        settled outcome as a ``NoticeEvent`` (see ``local_operator.mcp.grants``),
+        so nothing reaching here blocks on a person.
+
+        ``locality`` is the invoking client's declared position; it is passed
+        through to the app so the grant verbs can tell a terminal on this
+        machine from a relayed remote device.
         """
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
         def schedule() -> None:
             task = owner_loop.create_task(
-                self._app.run_slash_authoritative(command, args, list(images or []))
+                self._app.run_slash_authoritative(
+                    command, args, list(images or []), locality=locality
+                )
             )
 
             def finish(completed: asyncio.Task[Any]) -> None:

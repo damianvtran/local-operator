@@ -45,6 +45,15 @@ class FakeSession:
         self.prompt_calls: list[str] = []
         self.steer_calls: list[str] = []
         self.prompt_release = asyncio.Event()
+        #: The MCP manager the `/mcp` handlers read. ``None`` matches a real
+        #: session before its servers connect; the grant tests substitute a
+        #: double. Declared here rather than attached per-test so the shape is
+        #: part of the double's contract.
+        self.mcp_manager: Any = None
+        #: The session's event-emission seam. The runtime reports a settled
+        #: MCP grant through it, since the grant outlives the request that
+        #: started it. Tests replace it to capture what viewers would see.
+        self._emit: Any = None
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
@@ -1047,3 +1056,160 @@ async def test_a_compaction_that_refuses_corrects_its_own_receipt(tmp_path) -> N
         assert "nothing to compact" in detail, detail
     finally:
         await session.dispose()
+
+
+# --- /mcp grant verbs on a DETACHED runtime ----------------------------------
+#
+# The regression these cover: a detached runtime refused every grant verb with
+# "run it from a terminal on that machine" while the user was sitting at that
+# machine. The control socket binds 127.0.0.1 only, so a client that reached
+# the runtime is on its host by construction; the refusal fired on the one case
+# it was meant to protect and left `/mcp reauth` with no working path at all
+# once a session detached — exactly when an expired credential needs it.
+
+
+class _GrantCfg:
+    """An http server with no declared auth block: the shape that can OAuth."""
+
+    auth = None
+    url = "https://mcp.example.com/mcp"
+
+
+@pytest.fixture
+def fake_mcp_logout(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Never let a unit test delete a row from the developer's real auth.db.
+
+    ``reauth`` forgets the stored grant before reconnecting, and the helper it
+    uses writes the shared credential store. Patched at the definition site so
+    the runtime's late import picks it up.
+    """
+    removed: list[str] = []
+
+    def _fake(name: str, cwd: str) -> str | None:
+        removed.append(name)
+        return None
+
+    monkeypatch.setattr("local_operator.mcp.auth.mcp_logout_server", _fake)
+    return removed
+
+
+class _GrantManager:
+    def __init__(self, *, supports: bool = True) -> None:
+        self._supports = supports
+        self.connected: list[str] = []
+        self.disconnected: list[str] = []
+
+    def get_server_config(self, name: str):  # noqa: ANN202
+        return _GrantCfg()
+
+    async def server_supports_oauth_login(self, cfg) -> bool:  # noqa: ANN001
+        return self._supports
+
+    async def disconnect_server(self, name: str) -> None:
+        self.disconnected.append(name)
+
+    async def connect_configured_server(
+        self, name: str, *, timeout_ms=None
+    ):  # noqa: ANN001, ANN202
+        self.connected.append(name)
+        return type("_Conn", (), {"tools": [1, 2]})()
+
+
+@pytest.mark.asyncio
+async def test_routed_mcp_reauth_runs_instead_of_refusing_the_local_user(
+    fake_mcp_logout: list[str],
+) -> None:
+    """The bug report: /mcp reauth on a detached session must actually reauth."""
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _GrantManager()
+
+    result = await handle._slash_result("mcp", "reauth notion", SlashResult)
+
+    assert "run it from a terminal on that machine" not in result.text
+    assert "authorizing MCP server 'notion'" in result.text
+    assert result.style == "info"
+
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.shield(task)
+    # The stored grant is forgotten BEFORE the reconnect, or the manager's
+    # auto-reconnect re-authenticates the session the user just reset.
+    assert fake_mcp_logout == ["notion"]
+    assert session.mcp_manager.disconnected == ["notion"]
+    assert session.mcp_manager.connected == ["notion"]
+
+
+@pytest.mark.asyncio
+async def test_a_relayed_remote_client_still_gets_the_locality_refusal(
+    fake_mcp_logout: list[str],
+) -> None:
+    """The refusal is kept for the topology it actually describes.
+
+    A phone's command reaching the runtime through a relay must NOT open a
+    browser on the host: the tab would be in front of nobody and the credential
+    would land in a store the phone's owner cannot use.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _GrantManager()
+
+    result = await handle._slash_result("mcp", "reauth notion", SlashResult, "remote")
+
+    assert "run it from a terminal on that machine" in result.text
+    assert result.style == "warning"
+    assert session.mcp_manager.connected == []
+    assert session.mcp_manager.disconnected == []
+    assert fake_mcp_logout == [], "a refused grant must not touch the credential"
+
+
+@pytest.mark.asyncio
+async def test_a_grant_verb_without_a_server_name_is_refused_by_arity(
+    fake_mcp_logout: list[str],
+) -> None:
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _GrantManager()
+
+    result = await handle._slash_result("mcp", "reauth", SlashResult)
+    assert result.text == "usage: /mcp reauth <name>"
+    assert result.style == "warning"
+
+    result = await handle._slash_result("mcp", "reauth a b", SlashResult)
+    assert "takes one server name" in result.text
+    assert session.mcp_manager.connected == []
+
+
+@pytest.mark.asyncio
+async def test_the_settled_grant_reaches_viewers_as_a_notice(
+    fake_mcp_logout: list[str],
+) -> None:
+    """The receipt cannot be the result frame, so it must be an event.
+
+    The invoking client abandons the request after ACK_TIMEOUT_S; a NoticeEvent
+    is the channel that already fans out to every attached front end.
+    """
+    from local_operator.harness.types import NoticeEvent
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _GrantManager()
+    emitted: list[object] = []
+
+    async def _emit(event: object) -> None:
+        emitted.append(event)
+
+    session._emit = _emit
+
+    await handle._slash_result("mcp", "login notion", SlashResult)
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.shield(task)
+    # The notice is emitted by a task the first one spawns; settle that too.
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.shield(task)
+
+    notices = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert notices, "the settled grant never reached the event stream"
+    assert "authenticated MCP server 'notion'" in notices[0].text

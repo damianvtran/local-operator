@@ -60,6 +60,25 @@ PROTOCOL_VERSION = 5
 #: daemon dialing a NEW runtime on the same class it always had.
 ClientKind = Literal["daemon", "attach"]
 
+#: Whether the human driving a control connection sits at THIS machine.
+#:
+#: Some operations are only meaningful where the user is: an OAuth grant opens
+#: a browser tab and writes a credential into this machine's ``auth.db``, so
+#: running one for a phone would pop a tab nobody is looking at and store a
+#: grant the phone's owner cannot use.
+#:
+#: This cannot be inferred from inside the runtime, which is exactly the bug
+#: that produced it: ``/mcp reauth`` refused every routed invocation on the
+#: theory that a routed command comes from elsewhere, when the control socket
+#: binds ``127.0.0.1`` only and every client is therefore local. So locality is
+#: DECLARED by the client in its auth frame and defaults to ``local``: today
+#: every dialer reaches the runtime over loopback and is local by construction.
+#: A relay that forwards a remote device's commands is the case that must
+#: declare ``remote``, and until one exists this stays a one-value union in
+#: practice while giving that relay a seam that does not require re-deciding
+#: the question at each call site.
+ClientLocality = Literal["local", "remote"]
+
 #: How many concurrent attach (viewer terminal) connections one runtime
 #: accepts before evicting the least-recently-seen one. Connection close is
 #: detected anyway (the reader loop drops the registry entry); the cap is
