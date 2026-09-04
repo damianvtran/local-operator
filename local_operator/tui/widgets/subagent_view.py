@@ -54,6 +54,7 @@ import reprlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from rich.cells import cell_len
@@ -76,6 +77,7 @@ from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
+    TRANSCRIPT_FILENAME,
     TranscriptEntry,
     TranscriptPage,
     read_transcript_page,
@@ -1680,7 +1682,18 @@ class SubagentView(Vertical):
         self._history_loading = False
         self._history_exhausted = False
         self._history_error = False
+        #: What the FOOTER says, and nothing more: the last completed look
+        #: found no ``transcript.jsonl``. Deliberately not a load gate —
+        #: ``_history_absent_final`` is. The two were one flag until the
+        #: footer was caught claiming "history unavailable" under a fully
+        #: rendered trajectory: the initial read lost the launch race, latched
+        #: the flag, and the flag then refused every later load for the life
+        #: of the page while the live trajectory kept painting rows.
         self._history_unavailable = True
+        #: The absence is PERMANENT — stop looking. True before this page has
+        #: been pointed at a job at all (``_history_directory`` still holds
+        #: its unresolved sentinel, which is not a path anything may read).
+        self._history_absent_final = True
         self._initial_tail_pending = False
         #: EDGE-TRIGGERED page-back latch, not a level test. ``_scroll_changed``
         #: fires for every offset the body passes through — including the
@@ -1891,6 +1904,10 @@ class SubagentView(Vertical):
             body.append(tail)
         self._pending, self._pending_head = body, head
         self._sync_body(body, head)
+        # AFTER the fold, so the edge below is computed against the trajectory
+        # this refresh just absorbed, and before the paint, so a re-look that
+        # starts here is already reflected in the note this refresh writes.
+        self._reconsider_missing_history()
         self._paint_history_state()
         self._paint_chrome()
         if self._running:
@@ -1910,6 +1927,12 @@ class SubagentView(Vertical):
         self._history_exhausted = False
         self._history_error = False
         self._history_unavailable = not bool(directory)
+        # The permanence half of the note. NO DIRECTORY is the one absence
+        # this page can call final on sight: a child that never started a
+        # durable session has nothing to read now and nothing to read later,
+        # and no refresh will change that. A directory that exists is a
+        # question the page re-asks (``_reconsider_missing_history``).
+        self._history_absent_final = not bool(directory)
         # Re-armed on retarget (see ``_history_at_top``): a new job is a new
         # reader at the tail whose first scroll to the top owes a page.
         self._history_at_top = True
@@ -1919,13 +1942,89 @@ class SubagentView(Vertical):
         if directory:
             self.call_after_refresh(self._maybe_load_history, initial=True)
 
+    def _transcript_file_exists(self) -> bool:
+        """Whether the child's transcript is on disk RIGHT NOW.
+
+        One ``stat`` against a known path, which is the whole reason the
+        re-look can afford to ask on an ordinary refresh: the alternative
+        signal — issuing the page read and letting it raise — costs a thread
+        hop and a sequential scan to learn the same one bit.
+
+        Never raises. A directory that disappeared, a permission change, or
+        anything else the filesystem can report reads as "not there", which
+        is the answer the note already knows how to say. This surface is
+        observability and must not be able to take the app down.
+        """
+        directory = self._history_directory
+        if not directory:
+            return False
+        try:
+            return (Path(directory) / TRANSCRIPT_FILENAME).exists()
+        except OSError:
+            return False
+
+    def _reconsider_missing_history(self) -> None:
+        """Re-look for a transcript that was not there when we last checked.
+
+        ``SubagentComms.attach`` binds ``session_dir`` the instant the child
+        session is constructed, but ``Transcript`` no longer creates the file
+        eagerly (see the note in ``session/transcript.py``) — it appears on
+        the first append. A page opened inside that window reads a directory
+        with no ``transcript.jsonl``, and the absence it observes is a fact
+        about that instant only. Treating it as permanent is what put
+        "history unavailable" in the footer under a fully rendered
+        trajectory: the note contradicted the rows directly above it.
+
+        The trigger is the question itself — the file is there now — rather
+        than a proxy for it. A proxy was tried first and is worse in both
+        directions: keying the re-look on the child's visible progress misses
+        the transcript appearing under a child that relayed no event in that
+        window, and fires reads at a child that is producing rows into a
+        session it never made durable.
+
+        ``show()`` runs on every relayed event AND on the 1 Hz job poll, so
+        what is affordable here is bounded by that cadence: a ``stat`` is, a
+        page read is not, and this asks for the read only once the cheap
+        answer says there is something to read. It also stops on its own —
+        a successful read clears the note, and a child that never starts a
+        durable session has no directory at all (``_history_absent_final``),
+        so the probe never runs for it.
+
+        No timer and no polling of its own: this rides refreshes the page was
+        already doing, which is what keeps a re-look from becoming a retry
+        storm. The explicit ``Home`` retry remains the reader's own gesture.
+        """
+        if self._history_absent_final or not self._history_unavailable:
+            return
+        if not self._transcript_file_exists():
+            # Still genuinely absent, and the note already says so. A swept
+            # child whose transcript was deleted lands here every refresh and
+            # correctly does nothing.
+            return
+        self._maybe_load_history(recheck=True)
+
     def _history_state_text(self) -> str:
+        """The note, from what the last COMPLETED look concluded.
+
+        Unavailable outranks loading, which is the opposite of the obvious
+        order and is what keeps the note from flapping. A background re-look
+        (``_reconsider_missing_history``) raises ``_history_loading`` while
+        the page still knows nothing, and announcing "loading earlier…" for
+        each speculative peek would blink the footer between two texts once
+        per refresh while nothing about the page had actually changed. A peek
+        is not news until it lands; until then the last conclusion stands.
+
+        The three notes are mutually exclusive by construction — each
+        completion path writes the conclusion it reached and clears the
+        others — so this ladder reports a state rather than picking a winner
+        among several simultaneously-true ones.
+        """
+        if self._history_unavailable:
+            return f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"
         if self._history_loading:
             return f"{HISTORY_LOADING_NOTE} · {READ_ONLY_NOTE}"
         if self._history_error:
             return f"{HISTORY_ERROR_NOTE} · {READ_ONLY_NOTE}"
-        if self._history_unavailable:
-            return f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"
         if self._history_exhausted and self._history_entries:
             return f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
         return READ_ONLY_NOTE
@@ -2024,13 +2123,27 @@ class SubagentView(Vertical):
         self._body.scroll_end(animate=False)
 
     def _maybe_load_history(
-        self, *, initial: bool = False, anchor: float | None = None, retry: bool = False
+        self,
+        *,
+        initial: bool = False,
+        anchor: float | None = None,
+        retry: bool = False,
+        recheck: bool = False,
     ) -> None:
         if (
             not self.is_mounted
             or self._history_loading
             or self._history_exhausted
-            or self._history_unavailable
+            # The only PERMANENT refusal: no directory to read. Everything
+            # else is a fact about one instant that a later look may revise.
+            or self._history_absent_final
+            # A standing "no transcript there" blocks the ambient callers —
+            # the scroll-edge arrival fires on every settle frame, and a disk
+            # read per frame against a directory that was empty a moment ago
+            # is the hot loop this guard has always existed to prevent. It
+            # does NOT block the two deliberate ones: an explicit Home
+            # (``retry``) and the change-driven re-look (``recheck``).
+            or (self._history_unavailable and not (retry or recheck))
             or (self._history_error and not retry)
             or not self._history_directory
         ):
@@ -2072,6 +2185,7 @@ class SubagentView(Vertical):
             return
         self._history_loading = False
         self._history_unavailable = True
+        self._history_error = False
         self._paint_history_state()
         self._reconcile_current_body()
         # The initial open still owes a first glance, even when there is
@@ -2084,6 +2198,12 @@ class SubagentView(Vertical):
             return
         self._history_loading = False
         self._history_error = True
+        # A failed READ supersedes a previous "nothing there": the page no
+        # longer knows the file is absent, and the error note is both true
+        # and the only one of the two that names a way forward (Home). Left
+        # standing, the older conclusion would outrank this one in
+        # ``_history_state_text`` and hide the retry the reader needs.
+        self._history_unavailable = False
         self._paint_history_state()
         self._reconcile_current_body()
         self._settle_initial_landing()
@@ -2129,6 +2249,13 @@ class SubagentView(Vertical):
         # span the mount, not just the disk read.
         self._history_loading = False
         self._history_error = False
+        # The read SUCCEEDED, so whatever this page concluded about the file
+        # being missing is now out of date — including when the page carries
+        # no rows, which still proves the transcript exists and is merely
+        # empty. This is the clear the note never had: the flag was written
+        # only by the failure path and by a retarget, so a directory that
+        # gained its transcript kept the stale note for the life of the page.
+        self._history_unavailable = False
         rows = list(page.entries)
         if page.reconciled:
             # Replacement is a new canonical window, not an additive page.
@@ -2375,7 +2502,15 @@ class SubagentView(Vertical):
             if self._trajectory_state == "loading":
                 return _notice("__working__", TRAJECTORY_LOADING_NOTE, "info")
             return _notice("__empty__", TRAJECTORY_UNAVAILABLE_NOTE, "note")
-        if self._history_loading and not activity:
+        # Gated on the INITIAL read specifically, not on any read in flight.
+        # The point is to not claim "nothing was retained" over a page whose
+        # durable rows are still on their way from disk — a statement only the
+        # opening read can make prematurely. A background re-look
+        # (``_reconsider_missing_history``) also raises ``_history_loading``,
+        # and reading that flag directly let a speculative peek blank this row
+        # for the duration of a read that usually finds nothing: the
+        # terminating row of an idle child would blink once per state change.
+        if self._history_loading and self._initial_tail_pending and not activity:
             return None
         if not self._running and not self._queued:
             return None if activity else _notice("__empty__", self._empty_state(), "info")

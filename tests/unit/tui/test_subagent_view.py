@@ -2101,7 +2101,11 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
 
         child_dir.mkdir()
-        view._history_unavailable = False
+        # No manual clear of ``_history_unavailable`` here any more. It used to
+        # be needed because that flag was a load gate nothing in the product
+        # ever cleared, so the Home retry below could not have run — the crutch
+        # was itself the evidence for the latch this file now pins. ``Home`` is
+        # an explicit reader gesture and is admitted regardless of the note.
         attempts = 0
 
         def flaky(*args, **kwargs):
@@ -4098,3 +4102,172 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
             f"growth dragged the viewport {offset - owner_top} rows into a block "
             f"(offset={offset}, owner_top={owner_top}, max={view._body.max_scroll_y})"
         )
+
+
+@pytest.mark.asyncio
+async def test_the_unavailable_note_clears_when_the_transcript_appears(tmp_path) -> None:
+    """The launch race, end to end: the note must not outlive the absence.
+
+    ``SubagentComms.attach`` binds ``session_dir`` when the child session is
+    constructed, but ``Transcript`` creates ``transcript.jsonl`` on the first
+    append, so a page opened in that window reads a valid directory with no
+    file in it. The reported symptom was the footer saying "history
+    unavailable" under a fully rendered trajectory for the rest of the page's
+    life, because the flag that failure set was also the gate on ever loading
+    again.
+
+    Driven through the app's own refresh (``_refresh_subagent_view``, the 1 Hz
+    poll's entry point) rather than by poking the flag, since the claim is
+    that the PRODUCT re-examines the directory.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    # attach() made the directory; the child's first append has not landed.
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        # Correct at this instant: there genuinely is no transcript yet.
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_child_with_no_directory_never_probes_and_keeps_the_note(tmp_path) -> None:
+    """The permanent half: no directory is an absence no refresh revises.
+
+    A child that never started a durable session has nothing to read now and
+    nothing to read later, so the note is the truth and the page must not
+    spend a disk read per refresh discovering that again — the hot loop the
+    module's other retry latches exist to prevent.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type("Comms", (), {"session_dir_of": lambda self, _job_id: None})()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert view._history_absent_final
+
+        probes = 0
+        real_probe = view._transcript_file_exists
+
+        def counted() -> bool:
+            nonlocal probes
+            probes += 1
+            return real_probe()
+
+        view._transcript_file_exists = counted  # type: ignore[method-assign]
+        for _ in range(5):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+
+        assert probes == 0, "a child with no directory must not be probed at all"
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_transcript_costs_one_stat_per_refresh_and_no_read(
+    tmp_path, monkeypatch
+) -> None:
+    """The transient half must not become a retry storm.
+
+    A directory that exists and stays empty is re-examined on every refresh —
+    that is what makes the note self-correcting — but the re-examination is a
+    ``stat``, and the expensive page read is only requested once the cheap
+    answer says there is something to read. A swept child whose transcript was
+    genuinely deleted sits here indefinitely, so this is the case that decides
+    whether "self-correcting" costs anything.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        reads = 0
+        real_read = subagent_view.read_transcript_page
+
+        def counted_read(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", counted_read)
+        for _ in range(6):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+        await _wait_history(pilot, view)
+        assert reads == 0, "an empty directory must not be re-read from disk each refresh"
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        # The moment the file appears, the SAME refresh path picks it up, and
+        # exactly one read pays for it.
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("late row", id="late-1"))
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert reads == 1
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "late row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_swept_child_with_a_deleted_transcript_reads_honestly(tmp_path) -> None:
+    """``gone`` semantics must survive the re-look.
+
+    Retention sweeps a settled child five minutes after it finishes, and its
+    session directory can be removed with it. The page then has no durable
+    rows to offer and says so — while ``LEDGER_GONE_NOTE`` continues to
+    terminate the body, because the rows above it were true when captured.
+    """
+    job = _job_with(TRAJECTORY, status="gone")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "swept"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        # The directory outlived the file, which is the sweep this covers.
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        for _ in range(3):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert LEDGER_GONE_NOTE in " ".join(view.rendered_rows())
