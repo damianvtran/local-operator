@@ -27,7 +27,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.2.3",
@@ -49,7 +49,7 @@ def metadata() -> AdapterMetadata:
         entry_point="tiny_adapter:create",
         package_digest=DIGEST,
         release_digest="b" * 64,
-        schema_version="1.2",
+        schema_version="1.3",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
     )
 
@@ -133,7 +133,7 @@ def test_scoped_infra_has_no_provider_or_model_purpose() -> None:
 def test_rescue_descriptor_is_content_bound_and_has_refs_not_secrets(tmp_path: Path) -> None:
     selected = selector(tmp_path)
     descriptor = RescueDescriptor(
-        schema_version="1.2",
+        schema_version="1.3",
         selector=selected,
         handshake=handshake(tmp_path),
         episode_id="episode",

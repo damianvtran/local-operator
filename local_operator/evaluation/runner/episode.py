@@ -1093,15 +1093,19 @@ class EpisodeRunner:
         # exactly this reason; a fatal error deserves it at least as much,
         # because there is no retry that will produce a second chance to look.
         #
-        # ``_diagnostic`` is the same renderer used for the outcome's own
-        # diagnostic field: it strips pydantic's ``input_value=`` echo (the one
-        # place a resolved secret could surface) and truncates to 500 chars, and
+        # ``_failure_detail`` leads with that same ``_diagnostic`` line and
+        # then appends the adapter's structured cause when the failure crossed
+        # the RPC boundary carrying one -- without it, ep-e46c789ca818 recorded
+        # the whole of "adapter_error: adapter operation failed" after 19 billed
+        # steps. ``_diagnostic`` itself strips pydantic's ``input_value=`` echo
+        # (the one place a resolved secret could surface) and truncates to 500
+        # chars, and
         # ``publish_artifact`` independently scans every byte against the
         # episode's RedactionSet, so a leaked credential fails the write rather
         # than reaching the bundle.
         detail: Any = None
         try:
-            detail = self._publish(_diagnostic(error).encode("utf-8"), media_type="text/plain")
+            detail = self._publish(_failure_detail(error).encode("utf-8"), media_type="text/plain")
         except (_EvidenceFailure, OSError):
             # Best-effort by design. This runs on the path that is already
             # handling a failure, and an unpublishable detail must never be the
@@ -1691,6 +1695,45 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
         evidence_code="worker-unavailable",
         duration_ms=0,
     )
+
+
+def _failure_detail(error: BaseException) -> str:
+    """The fatal-error artifact: the diagnostic, plus the adapter's own cause.
+
+    ``_diagnostic`` is also the ``outcome.diagnostic`` field and is bounded at
+    500 characters for that reason. An adapter's structured cause -- type,
+    message, method, operation ID, cause chain and worker-side frames -- is
+    legitimately longer than that, and truncating it here would reintroduce
+    exactly the loss this artifact exists to prevent, one layer further out.
+    So the artifact carries both: the same first line a reader sees in the
+    outcome, then the full structured detail when the failure crossed the
+    adapter boundary carrying one.
+
+    Every field rendered below was bounded and canary-checked on the WORKER
+    side before it crossed (worker._error_detail), and ``publish_artifact``
+    independently scans these bytes against the episode's own RedactionSet, so
+    a leak fails the write rather than reaching the bundle.
+    """
+
+    summary = _diagnostic(error)
+    detail = getattr(error, "detail", None)
+    if detail is None or not hasattr(detail, "render"):
+        return summary
+    lines = [
+        summary,
+        "",
+        "--- adapter detail ---",
+        f"exception_type: {detail.exception_type}",
+        f"message: {detail.message}",
+        f"method: {detail.method}",
+    ]
+    if detail.operation_id is not None:
+        lines.append(f"operation_id: {detail.operation_id}")
+    for index, cause in enumerate(detail.causes, start=1):
+        lines.append(f"cause[{index}]: {cause.exception_type}: {cause.message}")
+    for frame in detail.frames:
+        lines.append(f"  at {frame.file}:{frame.line} in {frame.function}")
+    return "\n".join(lines)
 
 
 def _rejection_detail(rejected: Any) -> str:

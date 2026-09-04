@@ -672,6 +672,29 @@ class VerifiedAdapterSession:
         return initial
 
     async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
+        """Read the current snapshot. Poisons on failure, deliberately.
+
+        ``observe`` is READ-ONLY, so a failure here is not an ambiguous
+        mutation and the poison below is stricter than the mutating-call rule
+        requires. That was examined against two lost paid episodes
+        (ep-e46c789ca818, ep-ffda3fc88f81) and left as is, for two reasons that
+        should be re-checked rather than re-derived if this path ever changes:
+
+        * Neither episode failed here. Both died in ``execute`` -- their
+          journals carry equal action_batch and environment_step counts with
+          the error immediately after the decision -- which is mutating, and
+          retrying a possibly-applied mutation is unsafe.
+        * This method currently has NO caller in the episode runner. Every
+          observation reaches the runner as the RESULT of ``reset_start`` or
+          ``execute``, so relaxing this would rescue nothing today while
+          widening the window in which a snapshot the verifier already
+          rejected could be re-accepted.
+
+        The mutating boundary itself is never negotiable: ``prepare``,
+        ``reset_start``, ``execute``, ``ask_user_exchange``, ``score`` and
+        ``cleanup`` go through ``_mutating_call`` and must stay non-retryable.
+        """
+
         self._ensure_usable()
         if params.episode_id != self.verifier.episode_id:
             raise SupervisionError("observe belongs to another episode")

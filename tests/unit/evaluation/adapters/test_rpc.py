@@ -127,3 +127,58 @@ async def test_timeout_sends_cancel_then_terminates() -> None:
     assert terminated.is_set()
     for fd in (requests_read, requests_write, responses_read, responses_write):
         os.close(fd)
+
+
+def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:
+    """Detail text must never break the transport that carries it.
+
+    The framing is LF-delimited and rejects CR, so an adapter message holding
+    either would turn an answered adapter error into a channel-killing protocol
+    error -- failing loudest on precisely the path that exists to explain a
+    failure. Bounds are asserted alongside because an unbounded field would let
+    a worker's exception text decide the parent's allocation.
+    """
+
+    from local_operator.evaluation.adapters.rpc import (
+        MAX_DETAIL_MESSAGE,
+        RpcError,
+        RpcErrorDetail,
+        canonical_line,
+    )
+    from local_operator.evaluation.adapters.worker import _control_safe
+
+    hostile = "line one\r\nline two\ttabbed\x00null " + "z" * 4000
+    cleaned = _control_safe(hostile, MAX_DETAIL_MESSAGE)
+    # The VALUE carries no control characters. Asserted on the string rather
+    # than on the encoded line because JSON escapes CR/LF into a safe ``\r\n``
+    # two-byte form -- so a framing-only assertion passes even when the value
+    # is dirty, and a reader of the artifact would get the raw newlines back.
+    assert not any(character in cleaned for character in "\r\n\t\x00")
+    assert all(character.isprintable() or character == " " for character in cleaned)
+    assert len(cleaned) <= MAX_DETAIL_MESSAGE
+    detail = RpcErrorDetail(
+        exception_type="RuntimeError",
+        message=cleaned,
+        method="execute",
+        operation_id="exec-1",
+    )
+    line = canonical_line(
+        RpcError(code="adapter_error", message="adapter operation failed", detail=detail)
+    )
+    assert line.endswith(b"\n") and line.count(b"\n") == 1 and b"\r" not in line
+
+
+def test_unbuildable_canary_set_withholds_rather_than_assuming_no_secrets() -> None:
+    """A secret that cannot be canaried must fail CLOSED, never open.
+
+    Leaving the redaction set None after secrets were delivered would read
+    identically to "this worker holds none" and skip the check on the one
+    occasion something is definitely there to protect.
+    """
+
+    from local_operator.evaluation.adapters.rpc import MAX_DETAIL_MESSAGE, WITHHELD
+    from local_operator.evaluation.adapters.worker import _DENY_ALL, _redacted
+
+    assert _redacted("anything at all", MAX_DETAIL_MESSAGE, _DENY_ALL) == WITHHELD
+    # No secrets delivered at all: the text is kept, because none can leak.
+    assert _redacted("plain text", MAX_DETAIL_MESSAGE, None) == "plain text"

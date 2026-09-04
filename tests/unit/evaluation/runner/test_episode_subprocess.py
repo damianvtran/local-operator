@@ -349,7 +349,7 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.2",
+            schema_version="1.3",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=True
             ),
@@ -420,7 +420,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     (workspace / "tasks" / "pkg").mkdir(exist_ok=True)
     (workspace / "tasks" / "pkg" / "mod.py").write_text("MARK = 'nested'\n")
     return AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",

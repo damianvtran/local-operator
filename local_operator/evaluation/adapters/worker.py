@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import traceback
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, cast
@@ -35,10 +36,19 @@ from local_operator.evaluation.adapters.discovery import (
     workspace_digest,
 )
 from local_operator.evaluation.adapters.rpc import (
+    MAX_DETAIL_CAUSES,
+    MAX_DETAIL_FRAMES,
+    MAX_DETAIL_MESSAGE,
+    MAX_DETAIL_NAME,
+    MAX_DETAIL_TYPE,
+    WITHHELD,
     AsyncIncrementalReader,
     CancelRequest,
     IncrementalWriter,
     RpcError,
+    RpcErrorCause,
+    RpcErrorDetail,
+    RpcErrorFrame,
     RpcProtocolError,
     RpcRequest,
     RpcResponse,
@@ -47,6 +57,7 @@ from local_operator.evaluation.adapters.rpc import (
 )
 from local_operator.evaluation.evidence.models import canonical_digest
 from local_operator.evaluation.protocol import ProtocolModel
+from local_operator.evaluation.receipts import RedactionSet
 
 REQUEST_FD_ENV = "LO_ADAPTER_REQUEST_FD"
 RESPONSE_FD_ENV = "LO_ADAPTER_RESPONSE_FD"
@@ -74,6 +85,136 @@ class _OperationRecord:
     params_digest: str
     result: dict[str, Any] | None
     error: RpcError | None
+
+
+class _DenyAllRedactions(RedactionSet):
+    """A canary set that refuses every non-empty string.
+
+    Used when secret material was delivered but a canary set could not be built
+    from it. The alternative -- leaving the set None -- reads identically to
+    "this worker holds no secrets" and would skip the check entirely on the one
+    occasion something is definitely there to protect.
+    """
+
+    def assert_clear(self, value: Any) -> None:
+        raise ValueError("secret canary set is unavailable")
+
+
+#: Constructed with empty canaries; ``assert_clear`` is what does the work.
+_DENY_ALL = _DenyAllRedactions((), (), (), ())
+
+
+def _control_safe(value: str, limit: int) -> str:
+    """Collapse control characters and bound the result.
+
+    The RPC line framing is LF-delimited and refuses CR, so an exception
+    message containing either would make an otherwise-valid response
+    unparseable -- the worker would have written a frame the parent rejects as
+    a protocol error, killing the channel on the exact path that exists to
+    explain a failure. Adapter text is arbitrary (a subprocess's captured
+    stderr routinely carries newlines), so this is a wire requirement, not
+    cosmetics.
+    """
+
+    collapsed = "".join(character if character.isprintable() else " " for character in value)
+    return collapsed.strip()[:limit]
+
+
+def _redacted(value: str, limit: int, redactions: RedactionSet | None) -> str:
+    """Bound and canary-check one string before it may cross the boundary.
+
+    Fails CLOSED: a string that matches a canary is replaced wholesale rather
+    than masked, because a partial mask still narrows the secret for anyone
+    holding the bundle. ``redactions`` is None only when the worker holds no
+    secrets at all (nothing was ever delivered to leak), which keeps the
+    no-secret episode from paying for a scan that cannot match.
+
+    This is the SECOND line of defence, not the only one. The parent's evidence
+    writer scans every artifact it publishes against the episode's own
+    RedactionSet, so a value this worker never saw still cannot reach the
+    bundle. Checking here as well means a leak is refused before it is written
+    to a pipe, rather than after.
+    """
+
+    bounded = _control_safe(value, limit)
+    if not bounded or redactions is None:
+        return bounded
+    try:
+        redactions.assert_clear(bounded)
+    except ValueError:
+        return WITHHELD
+    return bounded
+
+
+def _error_detail(
+    error: BaseException,
+    method: AdapterMethod,
+    operation_id: str | None,
+    redactions: RedactionSet | None,
+) -> RpcErrorDetail | None:
+    """Describe an adapter-side failure in bounded, redacted, structured form.
+
+    Built ENTIRELY on the worker side, which is what makes the traceback
+    question answerable at all: the parent never receives raw traceback text,
+    only a tuple of (basename, line, function) triples this function derived and
+    canary-checked. See ``RpcErrorFrame`` for why that projection carries no
+    runtime value and no filesystem layout.
+
+    Returning None rather than raising is deliberate. This runs on the failure
+    path; a detail that cannot be built must degrade to the generic reply the
+    parent already understood, never turn an answered adapter error into an
+    unanswered channel death.
+    """
+
+    try:
+        causes: list[RpcErrorCause] = []
+        seen: set[int] = {id(error)}
+        # ``__cause__`` first: an explicit ``raise ... from ...`` is the
+        # adapter stating the real fault, while ``__context__`` is whatever
+        # happened to be in flight and is only consulted when nothing was
+        # stated.
+        current: BaseException | None = error.__cause__ or error.__context__
+        while current is not None and len(causes) < MAX_DETAIL_CAUSES:
+            if id(current) in seen:
+                break  # A cycle is possible through __context__; stop, never spin.
+            seen.add(id(current))
+            causes.append(
+                RpcErrorCause(
+                    exception_type=_redacted(type(current).__name__, MAX_DETAIL_TYPE, redactions)
+                    or "Exception",
+                    message=_redacted(str(current), MAX_DETAIL_MESSAGE, redactions),
+                )
+            )
+            current = current.__cause__ or current.__context__
+        frames: list[RpcErrorFrame] = []
+        # The DEEPEST frames are the informative ones -- the harness dispatch
+        # frames at the top are identical for every failure.
+        for summary in traceback.extract_tb(error.__traceback__)[-MAX_DETAIL_FRAMES:]:
+            frames.append(
+                RpcErrorFrame(
+                    # basename only: an absolute path names the worker's
+                    # filesystem layout and the account it runs under.
+                    file=_redacted(os.path.basename(summary.filename), MAX_DETAIL_NAME, redactions)
+                    or "<unknown>",
+                    line=summary.lineno or 0,
+                    function=_redacted(summary.name, MAX_DETAIL_NAME, redactions) or "<unknown>",
+                )
+            )
+        return RpcErrorDetail(
+            exception_type=_redacted(type(error).__name__, MAX_DETAIL_TYPE, redactions)
+            or "Exception",
+            message=_redacted(str(error), MAX_DETAIL_MESSAGE, redactions),
+            method=method,
+            operation_id=(
+                _redacted(operation_id, MAX_DETAIL_NAME, redactions) or None
+                if operation_id is not None
+                else None
+            ),
+            causes=tuple(causes),
+            frames=tuple(frames),
+        )
+    except Exception:
+        return None
 
 
 def _workspace_digest(selector: AdapterSelector) -> str:
@@ -105,6 +246,11 @@ class Worker:
         self._operations: dict[str, _OperationRecord] = {}
         self._max_operation_records = max_operation_records
         self._pending_line: asyncio.Task[bytes] | None = None
+        # Canaries over every secret THIS worker was handed, so error detail can
+        # be checked before it is written to the pipe. Populated from the two
+        # calls that deliver secret material (reset_start, begin_rescue) and
+        # never from the environment, which is stripped by construction.
+        self._redactions: RedactionSet | None = None
 
     def _line_task(self) -> asyncio.Task[bytes]:
         if self._pending_line is None:
@@ -229,6 +375,11 @@ class Worker:
                 )
                 self._replay_operation(request, digest, previous_action)
                 return
+        # BEFORE dispatch, not inside it: ``reset_start`` and ``begin_rescue``
+        # are themselves failure sites, and a credential delivered by the very
+        # call that then raised is exactly the one whose value must not ride
+        # back out in the exception text.
+        self._track_secrets(params)
         try:
             result = await self._dispatch(request.method, params)
             result_type = RESULT_MODELS[request.method]
@@ -265,15 +416,27 @@ class Worker:
             if rescue_action_id is not None:
                 self._record_rescue_action(rescue_action_id, params, request.method, response)
             return
-        except (AdapterDiscoveryError, Exception):
+        except (AdapterDiscoveryError, Exception) as error:
             # Adapter exceptions may contain reprs, paths, environment values, or
-            # tracebacks.  The wire exposes only a closed code and fixed text.
+            # tracebacks. The wire still exposes only a closed code and fixed
+            # text -- the variable part is confined to ``detail``, where every
+            # field is bounded and every string has been canary-checked against
+            # the secrets this worker was handed.
+            #
+            # Before this, the entire recorded diagnostic for a fatal failure
+            # was "adapter_error: adapter operation failed": two consecutive
+            # paid episodes (ep-e46c789ca818, ep-ffda3fc88f81) died here after
+            # 19 and 16 billed steps, and diagnosing either cost another paid
+            # run. Blanket redaction was the right instinct and the wrong
+            # granularity -- it discarded the exception TYPE and the failing
+            # METHOD, neither of which can carry adapter data.
             response = self._write_error(
                 request,
                 "adapter_error",
                 "adapter operation failed",
                 digest=digest,
                 operation_id=operation_id,
+                detail=_error_detail(error, request.method, operation_id, self._redactions),
             )
             if rescue_action_id is not None:
                 self._record_rescue_action(rescue_action_id, params, request.method, response)
@@ -335,6 +498,35 @@ class Worker:
             "adapter-rescue-action-call-v1",
             params.model_dump(mode="json", exclude={"operation_id"}),
         )
+
+    def _track_secrets(self, params: ProtocolModel) -> None:
+        """Widen the canary set with any secret material this call delivered.
+
+        Only ``ResetStartParams`` and ``BeginRescueParams`` carry resolved
+        secrets (api.py's schema 1.2 note), and both are read structurally here
+        rather than by method name so a future model that gains the field cannot
+        silently escape the scan. Values are held only as canaries -- the set
+        stores derived comparison forms and never exposes them -- and a failure
+        to build one degrades to the previous behaviour of withholding all
+        variable text, never to shipping unchecked text.
+        """
+
+        secrets = getattr(params, "secrets", None)
+        if not secrets:
+            return
+        try:
+            values = tuple(secret.value for secret in secrets)
+            self._redactions = (
+                RedactionSet.from_resolved_values(values)
+                if self._redactions is None
+                else self._redactions.with_values(values)
+            )
+        except (AttributeError, ValueError):
+            # Unbuildable canaries mean nothing can be proven clean. Fail closed
+            # with a set that matches nothing usable rather than leaving None,
+            # which would read as "no secrets exist" and skip the check.
+            self._redactions = _DENY_ALL
+        return
 
     async def _dispatch(self, method: AdapterMethod, params: ProtocolModel) -> ProtocolModel:
         if method == "hello":
@@ -408,8 +600,11 @@ class Worker:
         *,
         digest: str,
         operation_id: str | None = None,
+        detail: RpcErrorDetail | None = None,
     ) -> RpcResponse:
-        error = RpcError.model_validate({"code": code, "message": message}, strict=True)
+        error = RpcError.model_validate(
+            {"code": code, "message": message, "detail": detail}, strict=True
+        )
         response = RpcResponse(jsonrpc="2.0", id=request.id, method=request.method, error=error)
         self._send_response(request, digest, response, operation_id=operation_id)
         return response
