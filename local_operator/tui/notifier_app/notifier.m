@@ -93,6 +93,16 @@ int main(int argc, const char *argv[]) {
         [notification setValue:[NSString stringWithUTF8String:argv[1]] forKey:@"title"];
         [notification setValue:[NSString stringWithUTF8String:argv[2]]
                         forKey:@"informativeText"];
+        /* The state category ("Input required") rides the SUBTITLE, which is
+         * a field of its own and cannot be clipped away by a long session
+         * name — the title used to carry " needs you" appended AFTER the
+         * 80-char cap, so the two words explaining the banner were exactly
+         * the two the OS truncated (round 3, D11). cmux and the in-band
+         * notifier already put it here; this is what makes the three
+         * backends agree. */
+        if (argc > 4 && argv[4][0] != '\0') {
+            [notification setValue:[NSString stringWithUTF8String:argv[4]] forKey:@"subtitle"];
+        }
 
         id center = [centerClass performSelector:@selector(defaultUserNotificationCenter)];
         if (center == nil) {

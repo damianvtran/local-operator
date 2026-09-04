@@ -28,6 +28,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,9 +52,16 @@ BUNDLE_NAME = "Local Operator"
 #: `icon.icns` was added, until `lsregister -f` ran again. A rebuild re-runs
 #: registration (see `build_bundle`), so raising this stamp is what pushes the
 #: new icon out to users who already have the old bundle.
-BUILD_STAMP = "1"
+BUILD_STAMP = "2"
 
 _MARKER = ".build-stamp"
+
+#: How long a `.building` marker is believed before it is reclaimed as stale.
+#: The build is one `clang` invocation (sub-second here, seconds on a cold or
+#: loaded machine); this is generous enough that a genuinely running build is
+#: never stolen, and short enough that a crashed one costs at most this long
+#: rather than forever.
+_BUILD_LOCK_STALE_S = 300.0
 
 
 def bundle_root(config_dir: Path) -> Path:
@@ -226,7 +234,28 @@ def _build_in_background(config_dir: Path) -> None:
         # O_EXCL is the whole guard: the loser of the race does nothing.
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        return
+        # A MARKER IS NOT A TOMBSTONE. The builder is a daemon thread in a
+        # runtime that exits as soon as its work is done — plus SIGKILL, OOM
+        # and power loss — so the process can die between creating this and
+        # removing it. Treating that as "a build is in progress" disabled the
+        # identity bundle permanently and invisibly: every later
+        # `ensure_bundle` returned None forever while notifications kept
+        # working via the fallback, so nothing ever surfaced the failure
+        # (round 3, B4).
+        #
+        # Age is the liveness test rather than a pid: the marker's writer may
+        # be long gone, and a pid on a machine that has since rebooted can
+        # name an unrelated live process. A build is a single clang
+        # invocation; anything older than the stale window had no survivor.
+        try:
+            if time.time() - lock.stat().st_mtime < _BUILD_LOCK_STALE_S:
+                return
+            lock.unlink()
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            # Lost the race to another reclaimer, or the marker vanished
+            # under us. Either way somebody else is building; do nothing.
+            return
     except OSError:
         return
     os.close(fd)
@@ -246,13 +275,27 @@ def _build_in_background(config_dir: Path) -> None:
     thread.start()
 
 
-def notify_command(app: Path, title: str, body: str, click_command: str = "") -> list[str]:
+def notify_command(
+    app: Path,
+    title: str,
+    body: str,
+    click_command: str = "",
+    subtitle: str = "",
+) -> list[str]:
     """argv posting one notification through the bundle.
+
+    ``subtitle`` carries the state category ("Input required") in a field of
+    its own, where a long session name cannot clip it — see `notifier.m`.
+    Positional after ``click_command`` because the run loop keys off the
+    click argument's presence; an empty string in slot 3 keeps the subtitle
+    reachable for a toast with no click action.
 
     Pure, so the wire shape is testable without building or posting anything —
     the same discipline `osascript_command` follows.
     """
     argv = [str(app / "Contents" / "MacOS" / "notifier"), title or BUNDLE_NAME, body]
-    if click_command:
+    if click_command or subtitle:
         argv.append(click_command)
+    if subtitle:
+        argv.append(subtitle)
     return argv

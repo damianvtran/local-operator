@@ -107,3 +107,49 @@ def test_a_real_build_produces_a_registered_bundle(tmp_path: Path) -> None:
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     assert info["CFBundleIdentifier"] == "me.damiantran.localoperator"
     assert notifier_app.is_built(app) is True
+
+
+def test_a_crashed_build_does_not_disable_the_bundle_forever(tmp_path: Path) -> None:
+    """A `.building` marker is a lock, not a tombstone.
+
+    The builder is a daemon thread in a runtime that exits as soon as its
+    work is done — plus SIGKILL, OOM and power loss — so the process can die
+    between creating the marker and removing it. Treating that as "a build is
+    in progress" disabled the identity bundle PERMANENTLY and invisibly:
+    every later `ensure_bundle` returned None while notifications kept
+    working through the fallback, so nothing ever surfaced the failure
+    (round 3, B4).
+
+    Asserted on the decision rather than by building: an old marker must be
+    reclaimed, a fresh one must be respected (or two runtimes racing on first
+    use would both start a compiler).
+    """
+    import os
+    import time
+
+    lock = tmp_path / "notifier" / ".building"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("")
+
+    # A marker written seconds ago: a real build could still be running.
+    assert notifier_app._BUILD_LOCK_STALE_S > 0
+    fresh = time.time()
+    os.utime(lock, (fresh, fresh))
+    notifier_app._build_in_background(tmp_path)
+    assert lock.exists(), "a fresh marker must be respected"
+
+    # A marker from an hour ago has no survivor behind it.
+    old = time.time() - notifier_app._BUILD_LOCK_STALE_S - 60
+    os.utime(lock, (old, old))
+    notifier_app._build_in_background(tmp_path)
+    # The reclaimer takes the lock (and its builder thread clears it when
+    # done); either way the stale file must not still be the ORIGINAL one.
+    for _ in range(50):
+        if not lock.exists() or lock.stat().st_mtime > old + 1:
+            break
+        time.sleep(0.1)
+    assert (
+        not lock.exists()
+    ) or lock.stat().st_mtime > old + 1, (
+        "a stale marker must be reclaimed, not treated as a permanent tombstone"
+    )

@@ -38,6 +38,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
+
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import (
@@ -278,7 +279,7 @@ class OwnedSessionHandle(SessionHandle):
                     answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
                 except TimeoutError:
                     await self._record_gate_timeout(
-                        "ask", getattr(question, "text", "") or "question"
+                        "ask", getattr(question, "text", "") or "question", kind="ask"
                     )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
@@ -1058,7 +1059,9 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001
             return 0
 
-    async def _record_gate_timeout(self, tool: str, description: str) -> None:
+    async def _record_gate_timeout(
+        self, tool: str, description: str, kind: str = "approval"
+    ) -> None:
         """Append the row that says NOBODY WAS THERE.
 
         A denial and an expiry look identical to the model otherwise, and they
@@ -1086,6 +1089,10 @@ class OwnedSessionHandle(SessionHandle):
                     details={
                         "tool": tool,
                         "description": description,
+                        # The gate KIND: an unanswered `ask` was not "denied",
+                        # and describing it in the approval gate's vocabulary
+                        # told the user something that did not happen (D12).
+                        "kind": kind,
                         "waited_s": self._gate_timeout_s() or 0.0,
                     },
                 )
@@ -1144,13 +1151,34 @@ class OwnedSessionHandle(SessionHandle):
         if surfaces:
             return
         try:
-            from local_operator.tui.notify import detached_notify
+            from local_operator.tui.notify import (
+                BODIES,
+                CONTEXTS,
+                detached_notify,
+                sanitize_text,
+            )
 
-            name = getattr(self._session, "conversation_name", "") or "lop"
+            # TITLE IS THE SESSION NAME ONLY. " needs you" used to be appended
+            # AFTER the 80-char cap, so a long model-written name produced a
+            # 105-char title and the OS clipped exactly the two words that
+            # explained the banner (round 3, D11). The state category rides
+            # the subtitle, which is a field of its own and cannot be clipped
+            # away by the name — the same place cmux and the in-band notifier
+            # already put it.
+            #
+            # `sanitize_text` for the same reason every other path does it:
+            # the name is model-written and reaches argv (D16).
+            name = sanitize_text(getattr(self._session, "conversation_name", "") or "lop")
+            # The body names the ACTION when there is one, and otherwise falls
+            # back to the shared vocabulary — an `ask` with no text used to
+            # render as the bare word "question" with no hint it was a
+            # question rather than an approval.
+            subject = f"{title}: {detail}".strip().rstrip(":").strip()
             detached_notify(
-                f"{name} needs you",
-                f"{title}: {detail}".strip().rstrip(":"),
+                name,
+                subject or BODIES.get(kind, ""),
                 session_id=self._session_id_for_resume(),
+                subtitle=CONTEXTS.get(kind, ""),
             )
         except Exception:  # noqa: BLE001 — a toast must never affect the gate
             logger.debug("detached notification failed", exc_info=True)

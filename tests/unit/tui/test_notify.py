@@ -546,6 +546,7 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
     NOTHING, so an unprobed flag is the difference between a clickable toast
     and a silently missing one."""
     import subprocess
+    import time
 
     import local_operator.tui.notify as notify_mod
 
@@ -553,15 +554,45 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
         stdout = "Usage: notify-send [OPTION...]\n  --urgency\n"
         stderr = ""
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
-    assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is False
-
     class _Modern:
         stdout = "Usage: notify-send [OPTION...]\n  --action=KEY=LABEL\n"
         stderr = ""
 
+    def _probe_result(binary: str):
+        # The probe is cached per binary path, so each case needs its own.
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: binary)
+        return None
+
+    # THE FIRST CALL NEVER WAITS. It used to run `subprocess.run(timeout=2)`
+    # synchronously on the runtime's event loop, blocking it a measured 2.03s
+    # from inside the gate path (round 3, B3). It now answers False — the
+    # always-safe plain toast — and probes on a background thread, so the
+    # contract is "never blocks", not "answers correctly the first time".
+    notify_mod._ACTION_SUPPORT.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    assert notify_mod._notify_send_supports_actions("/usr/bin/old-notify-send") is False
+
+    # Once the probe lands, the cached answer is used and no further process
+    # is spawned for that binary.
+    notify_mod._ACTION_SUPPORT.clear()
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Modern())
+    notify_mod._notify_send_supports_actions("/usr/bin/notify-send")
+    for _ in range(100):
+        if "/usr/bin/notify-send" in notify_mod._ACTION_SUPPORT:
+            break
+        time.sleep(0.02)
+    assert notify_mod._ACTION_SUPPORT["/usr/bin/notify-send"] is True
     assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is True
+
+    # An old binary caches False and stays False.
+    notify_mod._ACTION_SUPPORT.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    notify_mod._notify_send_supports_actions("/usr/bin/old2")
+    for _ in range(100):
+        if "/usr/bin/old2" in notify_mod._ACTION_SUPPORT:
+            break
+        time.sleep(0.02)
+    assert notify_mod._ACTION_SUPPORT["/usr/bin/old2"] is False
 
 
 def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> None:

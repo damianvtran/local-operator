@@ -86,6 +86,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from typing import Callable, Literal, Mapping
 
@@ -467,7 +468,7 @@ def osascript_command(title: str, body: str) -> list[str]:
     return ["osascript", "-e", script]
 
 
-def detached_notify(title: str, body: str, *, session_id: str = "") -> bool:
+def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
     """Tell the user out of band about a session they are not looking at.
 
     The in-band paths above write escape sequences to a TERMINAL, which is
@@ -497,12 +498,15 @@ def detached_notify(title: str, body: str, *, session_id: str = "") -> bool:
             # background, so this notification goes out the old way rather
             # than waiting on a compiler in a gate path, and the next one
             # carries the identity.
-            bundled = _identity_notifier(title, body, session_id)
+            bundled = _identity_notifier(title, body, session_id, subtitle)
             if bundled is not None:
                 return _spawn_detached_ok(bundled)
             if not shutil.which("osascript"):
                 return False
-            return _spawn_detached_ok(osascript_command(title, body))
+            # No subtitle field on the AppleScript route, so the state
+            # category rides the body rather than being lost entirely.
+            plain_body = f"{subtitle} · {body}" if subtitle and body else (body or subtitle)
+            return _spawn_detached_ok(osascript_command(title, plain_body))
         notifier = shutil.which("notify-send")
         if not notifier:
             return False
@@ -523,7 +527,9 @@ def _spawn_detached_ok(argv: list[str]) -> bool:
     return bool(spawn_detached(argv))
 
 
-def _identity_notifier(title: str, body: str, session_id: str) -> list[str] | None:
+def _identity_notifier(
+    title: str, body: str, session_id: str, subtitle: str = ""
+) -> list[str] | None:
     """argv posting through our own bundle, or None to use the plain route.
 
     Never raises and never blocks: a missing config dir, an unbuilt bundle or
@@ -540,32 +546,60 @@ def _identity_notifier(title: str, body: str, session_id: str) -> list[str] | No
         click = ""
         if session_id:
             click = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
-        return notifier_app.notify_command(app, title, body, click)
+        return notifier_app.notify_command(app, title, body, click, subtitle)
     except Exception:  # noqa: BLE001 — identity is a nicety; delivery is not
         logger.debug("identity notifier unavailable", exc_info=True)
         return None
 
 
+#: Cached answers to the ``--action`` probe, keyed by notifier path.
+#: NEVER re-probed once known: the binary does not grow options while the
+#: process runs, and the probe is a fork+exec that was being paid on EVERY
+#: notification (round 3, B3).
+_ACTION_SUPPORT: dict[str, bool] = {}
+
+
 def _notify_send_supports_actions(notifier: str) -> bool:
-    """Whether this ``notify-send`` understands ``--action``.
+    """Whether this ``notify-send`` understands ``--action``, WITHOUT blocking.
 
     The flag is a recent (libnotify 0.8) addition, and an older binary treats
     it as an unknown option and delivers NOTHING — so a version probe is the
     difference between a clickable toast and a silently missing one. Probed
     from ``--help`` rather than a version parse because distributions patch
     the version string more freely than the option table.
+
+    **This is called from the runtime's gate path, on the event loop.** The
+    synchronous `subprocess.run(..., timeout=2)` it used to do blocked that
+    loop for a measured 2.03 s with a slow notifier — stalling every other
+    session surface, heartbeat and socket read in the process, and directly
+    contradicting `detached_notify`'s "must never block the event loop"
+    contract (#401 class).
+
+    So the first call NEVER waits: it answers False (the plain, always-safe
+    toast) and probes on a background thread, and every later notification
+    reads the cache. The cost of that is one un-clickable first toast on a
+    Linux machine, which is the same shape as the identity bundle's
+    build-behind-the-first-notification trade.
     """
-    try:
-        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            [notifier, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
-        return False
-    return "--action" in (result.stdout + result.stderr)
+    cached = _ACTION_SUPPORT.get(notifier)
+    if cached is not None:
+        return cached
+
+    def _probe() -> None:
+        try:
+            result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+                [notifier, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            _ACTION_SUPPORT[notifier] = "--action" in (result.stdout + result.stderr)
+        except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
+            _ACTION_SUPPORT[notifier] = False
+
+    threading.Thread(target=_probe, name="notify-action-probe", daemon=True).start()
+    return False
 
 
 def resume_click_command(session_id: str) -> list[str]:

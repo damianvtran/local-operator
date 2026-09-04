@@ -1174,7 +1174,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         and re-scanning the registry ten times a second to discover that would
         be the picker's own idle cost.
         """
-        was_busy = any(getattr(row, "live_state", "") == "busy" for row in self._all)
+        before = self._marker_signature()
         refresh = self._refresh_live_state
         if refresh is not None:
             try:
@@ -1185,17 +1185,46 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 self._filtered_for = "\x00 never a real query"
             except Exception:  # noqa: BLE001 — a stale marker is not worth the picker
                 logger.debug("picker could not refresh live state", exc_info=True)
-        # Repaint while anything is spinning, AND on the tick that empties the
-        # busy set. Skipping the transition left the LAST spinner frozen on
-        # screen — and, worse, hid a needs-you marker that arrived in the same
-        # window — until the user pressed a key (round 2, D9). A session that
-        # starts working later picks the animation up from a clean phase, so
-        # leaving the frame where it is on a settled store is fine.
+        # REPAINT ON ANY VISIBLE CHANGE, not only while something spins.
+        #
+        # The refresh REORDERS (`_overlay_live_state` sorts needs-you first)
+        # and `_selected` is an index into that order, so skipping the repaint
+        # left the screen painted in the old order while Enter resolved
+        # against the new one — the cursor sat on `alpha` and Enter resumed
+        # `beta` (round 3, D10). That fires on this release's headline event:
+        # a detached session parking on a gate sorts itself to the top, and
+        # nothing is spinning while it happens. The same early return also
+        # froze every non-busy marker transition (idle→wedged, idle→attached,
+        # record gone, wake armed).
+        #
+        # The frame counter still advances only while something is busy, which
+        # keeps the property the previous comment wanted: a session that starts
+        # working later picks the animation up from a clean phase.
+        after = self._marker_signature()
         is_busy = any(getattr(row, "live_state", "") == "busy" for row in self._all)
-        if not (was_busy or is_busy):
+        if is_busy:
+            self._frame += 1
+        elif before == after:
             return
-        self._frame += 1
         self._repaint()
+
+    def _marker_signature(self) -> tuple[tuple[str, str, str, bool], ...]:
+        """Everything about the rows a repaint would show differently.
+
+        Identity AND order: a reorder with no content change still has to
+        repaint, because the cursor is an index into the order (D10). Kept to
+        the marker-relevant fields so an unrelated churn (a heartbeat
+        timestamp) does not force a repaint ten times a second.
+        """
+        return tuple(
+            (
+                str(getattr(row, "session_id", "")),
+                str(getattr(row, "live_state", "")),
+                str(getattr(row, "pending", "") or ""),
+                bool(getattr(row, "wakes", 0)),
+            )
+            for row in self._all
+        )
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-measure: every column and the page size come from the screen."""

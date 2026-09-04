@@ -1645,3 +1645,101 @@ def test_every_state_marker_is_exactly_one_cell() -> None:
         *SPINNER_FRAMES,
     )
     assert {cell_len(marker) for marker in markers} == {1}
+
+
+def test_the_painted_cursor_and_enter_agree_after_a_reorder() -> None:
+    """The row under the cursor must be the row Enter resumes.
+
+    `_tick` reassigns `self._all` from a refresh that REORDERS (needs-you
+    sorts first) and `_selected` is an index into that order. Skipping the
+    repaint therefore left the SCREEN in the old order while Enter resolved
+    against the new one: the cursor sat on `alpha` and Enter resumed `beta`
+    (round 3, D10). That fires on this release's headline event — a detached
+    session parking on a gate, with nothing spinning.
+
+    Asserted against what `_repaint` actually pushed to the body, NOT against
+    `render_lines_for_test`: that helper recomputes the card from current
+    state, so it can never show a stale frame and cannot catch this class.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    rows = [
+        SessionRow(id="aaaaaaaaaaa1", mtime=now, name="alpha the top row", live_state="idle"),
+        SessionRow(id="bbbbbbbbbbb2", mtime=now, name="beta", live_state="idle"),
+    ]
+    parked = {"yes": False}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        out = list(current)
+        if parked["yes"]:
+            out = [r._replace(pending="approval") if r.id == "bbbbbbbbbbb2" else r for r in out]
+            out.sort(key=lambda r: (getattr(r, "pending", None) is None,))
+        return out
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    screen._selected = 0
+
+    painted: dict[str, list[str]] = {}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            lines = text.split("\n")  # type: ignore[attr-defined]
+            painted["lines"] = [line.plain for line in lines]
+
+    screen._body = _Body()  # type: ignore[assignment]
+    screen._repaint()
+    assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+
+    # beta parks while the picker is open. Nothing is busy — the state the
+    # previous guard returned early on.
+    parked["yes"] = True
+    screen._tick()
+
+    cursor_line = next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+    would_resume = screen._all[screen._selected].id
+    assert "beta" in cursor_line, "the screen kept the pre-reorder frame"
+    assert would_resume == "bbbbbbbbbbb2"
+
+
+def test_a_marker_change_with_nothing_busy_still_repaints() -> None:
+    """Every non-busy marker transition froze too (D10's second half).
+
+    idle→wedged, idle→attached, record-gone and wake-armed all changed the
+    row's meaning while the screen kept the old glyph, because the repaint
+    was tied to the spinner rather than to the data.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    rows = [SessionRow(id="aaaaaaaaaaa1", mtime=now, name="only", live_state="idle")]
+    state = {"live": "idle"}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        return [r._replace(live_state=state["live"]) for r in current]
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    repaints = {"n": 0}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            repaints["n"] += 1
+
+    screen._body = _Body()  # type: ignore[assignment]
+
+    screen._tick()
+    assert repaints["n"] == 0, "an unchanged settled store must stay cheap"
+
+    state["live"] = "wedged"
+    screen._tick()
+    assert repaints["n"] == 1, "a marker transition must reach the screen"
