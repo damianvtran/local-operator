@@ -60,6 +60,7 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
+from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     BudgetCommitmentPayload,
@@ -1112,7 +1113,10 @@ class EpisodeRunner:
         # secret is withheld whole before it ever reaches this side.
         detail: Any = None
         try:
-            detail = self._publish(_failure_detail(error).encode("utf-8"), media_type="text/plain")
+            detail = self._publish(
+                _failure_detail(error, self._redactions).encode("utf-8"),
+                media_type="text/plain",
+            )
         except (_EvidenceFailure, OSError):
             # Best-effort by design. This runs on the path that is already
             # handling a failure, and an unpublishable detail must never be the
@@ -1704,7 +1708,7 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
     )
 
 
-def _failure_detail(error: BaseException) -> str:
+def _failure_detail(error: BaseException, redactions: RedactionSet | None = None) -> str:
     """The fatal-error artifact: the diagnostic, plus the adapter's own cause.
 
     ``_diagnostic`` is also the ``outcome.diagnostic`` field and is bounded at
@@ -1716,13 +1720,17 @@ def _failure_detail(error: BaseException) -> str:
     outcome, then the full structured detail when the failure crossed the
     adapter boundary carrying one.
 
-    Every field rendered below was bounded and canary-checked on the WORKER
-    side before it crossed (worker._error_detail), and ``publish_artifact``
-    independently scans these bytes against the episode's own RedactionSet, so
-    a leak fails the write rather than reaching the bundle.
+    The adapter-supplied fields below were bounded and canary-checked on the
+    WORKER side before they crossed (``worker._error_detail``). The SUMMARY
+    line is not: it renders a local exception -- including a provider error the
+    worker never saw -- so ``redactions`` is forwarded to ``_diagnostic``,
+    which scans before truncating. ``publish_artifact`` scans these bytes too,
+    but cannot be relied on for a value the harness itself already cut: its
+    substring check no longer matches a severed canary, which is precisely how
+    a truncate-then-scan ordering seals a partial credential.
     """
 
-    summary = _diagnostic(error)
+    summary = _diagnostic(error, redactions)
     detail = getattr(error, "detail", None)
     if detail is None or not hasattr(detail, "render"):
         return summary
@@ -1760,8 +1768,22 @@ def _rejection_detail(rejected: Any) -> str:
     return f"{rejected.diagnostic}\n\n--- rejected reply ---\n{reply}"
 
 
-def _diagnostic(error: BaseException) -> str:
+def _diagnostic(error: BaseException, redactions: RedactionSet | None = None) -> str:
     """Render an error for ``EpisodeOutcome.diagnostic`` without its inputs.
+
+    ORDER IS THE SECURITY PROPERTY, exactly as in ``worker._redacted``: when
+    ``redactions`` is supplied the rendered string is scanned BEFORE the 500
+    character bound is applied. ``RedactionSet.assert_clear`` is a SUBSTRING
+    check, so truncating first severs the canary and the surviving prefix is
+    returned verbatim -- and ``publish_artifact``'s own scan then returns clean
+    on those bytes for the same reason, sealing them into the bundle. Measured
+    on a provider-style error echoing a request URL: 63 characters of an API
+    key survived, scan blind.
+
+    ``redactions`` is optional because most callers render into
+    ``EpisodeOutcome.diagnostic``, an in-process return value that is never
+    sealed. It is REQUIRED on the paths whose bytes become evidence, which is
+    why ``_failure_detail`` takes and forwards it.
 
     A pydantic ``ValidationError``'s ``str()`` embeds ``input_value=<head>…<tail>``
     for every failing field. The one model on this boundary that carries
@@ -1780,8 +1802,20 @@ def _diagnostic(error: BaseException) -> str:
             f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
             for item in error.errors(include_input=False, include_url=False)
         )
-        return f"ValidationError: {error.title} ({details})"[:500]
-    return f"{type(error).__name__}: {error}"[:500]
+        rendered = f"ValidationError: {error.title} ({details})"
+    else:
+        rendered = f"{type(error).__name__}: {error}"
+    if redactions is not None:
+        try:
+            # The FULL rendering, before the bound is applied.
+            redactions.assert_clear(rendered)
+        except ValueError:
+            # Fails CLOSED and whole, never masked: a partial still narrows the
+            # secret. The exception TYPE is kept because it cannot carry
+            # adapter or provider data and is what makes the failure bucketable
+            # at all -- losing it would undo this PR's own purpose.
+            return f"{type(error).__name__}: {WITHHELD}"
+    return rendered[:500]
 
 
 def _diagnostic_code(error: BaseException) -> str:
