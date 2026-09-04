@@ -1643,6 +1643,16 @@ class Session:
         #: offending block is IN the history, so an un-degraded retry sends it
         #: again, and the session is otherwise unusable for good.
         self._images_rejected = False
+        #: Whether the strip above was caused by SIZE rather than by a refused
+        #: block. The two causes share one flag because they have the same
+        #: effect on the render, but they do NOT have the same lifetime: a
+        #: poisoned block stays poisoned on any provider, while "the request
+        #: was too large for THIS provider" is evidence about one connection,
+        #: exactly like ``_wire_budget_override`` beside it. Kept as a separate
+        #: bit rather than a tri-state so every existing read of
+        #: ``_images_rejected`` keeps its meaning unchanged (agent review
+        #: round 2, R8).
+        self._images_rejected_for_size = False
         #: Latch for the text-only-model omission announcement (see
         #: :meth:`_render_history`). The omission itself is not sticky — it
         #: reads the CURRENT spec every render — but its announcement is:
@@ -2541,6 +2551,10 @@ class Session:
             return True
 
         self._images_rejected = True
+        # Marks this strip as provider-scoped, so a later switch can lift it
+        # (see the field, and ``set_model``). Set together with the flag it
+        # qualifies so the two can never disagree.
+        self._images_rejected_for_size = True
         logger.warning(
             "provider refused a %d-byte request with %d frame(s) left and no budget "
             "headroom; dropping images from this session's context (%s)",
@@ -2551,7 +2565,16 @@ class Session:
         await self._emit(
             NoticeEvent(
                 text=(
-                    "The conversation is too large for this provider even after "
+                    # Branching on the actual history rather than emitting one
+                    # sentence that is false half the time: this rung is
+                    # reached on the FIRST refusal for a text-only history,
+                    # where "dropping screenshots" and "images have been
+                    # removed" both describe something that never happened
+                    # (agent review round 2, R9).
+                    "This conversation is too large for the provider to accept. "
+                    "Run /compact to summarise it, or start a new conversation."
+                    if frames_left == 0
+                    else "The conversation is too large for this provider even after "
                     "dropping screenshots, so images have been removed from the "
                     "context to keep the session working. If it still fails, run "
                     "/compact or start a new conversation."
@@ -3007,6 +3030,19 @@ class Session:
         # same-pair early return above, so an `/effort` keystroke does not
         # discard a limit that is still in force (round 1 review, R4a).
         self._wire_budget_override = None
+        if self._images_rejected_for_size:
+            # Same argument, same evidence, so the same lifetime: a strip we
+            # applied because the request was too big for the DEPARTED provider
+            # would otherwise leave the session permanently blind on a laxer
+            # one, shedding screenshots it would have accepted. Only the
+            # size-caused strip lifts — a block the provider REFUSED is
+            # poisoned on any provider and stays sticky, which is the whole
+            # premise of ``_degrade_if_image_rejected`` (round 2 review, R8).
+            self._images_rejected = False
+            self._images_rejected_for_size = False
+            # The next render is image-bearing again, so the shed notice is
+            # owed afresh if the new provider also turns out to be too small.
+            self._frames_shed_announced = False
         # An explicit switch withdraws the fallback pin's premise: the pin
         # rescued the PREVIOUS selection, and the stream fn's preflight will
         # clear its own route state the moment it sees the new selector. The

@@ -16,6 +16,8 @@ sizes, not a 34 MB blob in the repo.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from local_operator.compaction.pruning import shed_frames_to_wire_budget
@@ -303,3 +305,160 @@ def test_wire_recovery_band_is_inert_when_the_byte_trigger_is_off() -> None:
     scheduled; with bytes disabled it must not become a second veto."""
     settings = CompactionSettings(wire_bytes_trigger=0)
     assert cleared_wire_headroom(10**12, settings) is True
+
+
+# ---------------------------------------------------------------------------
+# Argument sizing must never under-count the real wire (review R7 / QA Q5)
+# ---------------------------------------------------------------------------
+#
+# ``estimate_wire_bytes`` decides whether a request is shed before sending, so
+# an UNDER-count is the one error it must never make: it means believing an
+# oversize payload fits and sending it, which is the 413 this whole change
+# exists to prevent.
+#
+# The first remediation sized strings with ``len(s)`` — characters, not bytes,
+# and blind to escapes — which flipped the bias from +1.2% (over) to -1.9%
+# (under) across 487,652 real tool calls, reaching -75% on CJK/emoji and -3%
+# to -12% on ordinary ASCII ``write`` calls.
+#
+# The reference below is the encoding the provider clients ACTUALLY use:
+# ``httpx._content.encode_json`` serializes a ``json=`` body with
+# ``ensure_ascii=False``, ``separators=(",", ":")`` and encodes UTF-8, and all
+# four call sites in ``providers/clients.py`` pass ``json=``. Sizing against
+# ``json.dumps`` defaults (``ensure_ascii=True``) would measure a different
+# encoding than the one that leaves the machine.
+
+
+def _wire_json_bytes(value: object) -> int:
+    """Exactly what httpx puts on the wire for ``value`` inside a JSON body."""
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+#: Payload shapes chosen so each one breaks a DIFFERENT wrong assumption:
+#: character-counting, escape-blindness, and flat numeric charges.
+_ARGUMENT_SHAPES: dict[str, object] = {
+    "ascii": {"command": "ls -la /tmp && echo done"},
+    # The real-world case that hit ASCII-only users: source text is dense in
+    # newlines, tabs and quotes, each of which costs two bytes, not one.
+    "write_call": {"path": "/a/b.py", "content": 'def f(x):\n\treturn "%s"\n' * 200},
+    "escape_dense": {"s": 'a"b\\c\nd\te\rf\bg\fh' * 300},
+    "cjk": {"text": "\u6587\u5b57\u5316" * 500},
+    "emoji": {"text": "\U0001f600\U0001f601\U0001f602" * 300},
+    "accented": {"text": "\u00e9\u00e8\u00ea\u00eb" * 500},
+    # C0 controls with no short form become the six-byte \uXXXX.
+    "control_chars": {"s": "".join(chr(code) for code in range(0x20)) * 40},
+    "floats": {"values": [3.14159265358979, 1e300, -0.5, 1.0, 2.718281828]},
+    "big_ints": {"values": [2**64, -(2**63), 0, 1, 999999999999999999]},
+    "literals": {"a": True, "b": False, "c": None},
+    "nested": {"a": {"b": [{"c": "\u00e9x"}, [1, 2.5, None], "d\ne"]}},
+    "empty_containers": {"a": {}, "b": [], "c": ""},
+    "mixed_realistic": {
+        "path": "/src/\u6a21\u5757.py",
+        "content": 'x = "\u00e9"\nif x:\n\tprint("\U0001f600")\n' * 100,
+        "line": 42,
+        "ratio": 0.75,
+        "flags": [True, None],
+    },
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ARGUMENT_SHAPES))
+def test_argument_sizing_never_under_counts_the_real_wire(shape: str) -> None:
+    """THE regression for R7/Q5: erring high is fine, erring low is not.
+
+    Fails on 26bf8715 for every non-ASCII, escape-heavy and numeric shape.
+    """
+    from local_operator.compaction.tokens import _argument_bytes
+
+    arguments = _ARGUMENT_SHAPES[shape]
+    estimated = _argument_bytes(arguments)
+    actual = _wire_json_bytes(arguments)
+
+    assert estimated >= actual, (
+        f"{shape}: estimate {estimated} UNDER the real wire {actual} "
+        f"({(estimated - actual) / actual * 100:+.2f}%) — the guard would send "
+        "an oversize request believing it fits"
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(_ARGUMENT_SHAPES))
+def test_argument_sizing_stays_close_to_the_real_wire(shape: str) -> None:
+    """Never-under must not be bought with a wild over-estimate, which would
+    shed screenshots no provider asked us to drop.
+
+    The bias is a trailing separator charged per container, so the bound is
+    generous only for tiny payloads where one byte is a large fraction.
+    """
+    from local_operator.compaction.tokens import _argument_bytes
+
+    arguments = _ARGUMENT_SHAPES[shape]
+    estimated = _argument_bytes(arguments)
+    actual = _wire_json_bytes(arguments)
+
+    assert estimated <= actual + 16 + actual * 0.02, (
+        f"{shape}: estimate {estimated} is {(estimated - actual) / actual * 100:+.2f}% "
+        f"over the real wire {actual}"
+    )
+
+
+def test_argument_sizing_is_exact_for_the_shapes_that_dominate_real_traffic() -> None:
+    """A stronger claim where it can be made: for a flat object of strings the
+    estimate matches the encoder byte for byte apart from the one trailing
+    separator, so the residual bias is understood rather than merely bounded.
+    """
+    from local_operator.compaction.tokens import _argument_bytes
+
+    for arguments in (
+        {"content": "plain ascii"},
+        {"content": "\u6587\u5b57"},
+        {"content": 'quotes " and \\ and \n'},
+    ):
+        estimated = _argument_bytes(arguments)
+        actual = _wire_json_bytes(arguments)
+        assert estimated - actual == 1, f"{arguments!r}: bias {estimated - actual}, expected 1"
+
+
+def test_a_cjk_history_is_not_waved_under_the_budget() -> None:
+    """QA's minimal reproduction, pinned.
+
+    A 300-call CJK history that the seam believed was 12,007,690 bytes went on
+    the wire at 36,007,390 — under the 24 MB budget by the guard's reckoning
+    and over Anthropic's 32 MB cap in reality.
+    """
+    from local_operator.compaction.tokens import _argument_bytes
+
+    messages: list[Message] = []
+    for index in range(300):
+        message = Message.assistant("")
+        message.tool_calls = [
+            ToolCall(id=str(index), name="w", arguments={"text": "\u6587" * 40_000})
+        ]
+        messages.append(message)
+
+    seam = estimate_wire_bytes(messages)
+    actual = sum(
+        len(call.name) + _wire_json_bytes(call.arguments)
+        for message in messages
+        for call in message.tool_calls or ()
+    )
+
+    assert seam >= actual, "the seam under-counted a CJK history"
+    assert not (seam <= DEFAULT_WIRE_BYTES_BUDGET < actual), (
+        "the guard believes an over-cap payload fits"
+    )
+
+
+def test_raw_arguments_are_still_preferred_when_present() -> None:
+    """The provider's own rendering IS the wire, so it is used verbatim rather
+    than re-derived — the structural sizer is only the resumed-session
+    fallback, where ``raw_arguments`` has been dropped on the way to disk.
+    """
+    message = Message.assistant("")
+    message.tool_calls = [
+        ToolCall(id="1", name="bash", raw_arguments='{"command":"ls"}', arguments={"command": "ls"})
+    ]
+    # The raw string verbatim, NOT the structural estimate of the parsed dict —
+    # which for this payload would be one byte larger.
+    assert estimate_wire_bytes([message]) == len("bash") + len('{"command":"ls"}')

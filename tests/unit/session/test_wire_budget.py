@@ -525,7 +525,10 @@ async def test_the_terminal_rung_does_not_repeat_its_notice(tmp_path):
     for turn in range(3):
         await session.prompt(f"t{turn}")
 
-    degrade_notices = [n for n in notices if "even after" in n]
+    # Matched on the terminal advice rather than a phrase, so the assertion is
+    # about the notice firing once and not about its exact wording (which
+    # branches on whether the history had frames at all — round 2, R9).
+    degrade_notices = [n for n in notices if "/compact" in n]
     assert len(degrade_notices) == 1, f"the degrade announced itself {len(degrade_notices)}x"
     await session.dispose()
 
@@ -593,4 +596,101 @@ async def test_raising_the_live_setting_clears_the_measured_budget(tmp_path):
 
     assert session._wire_budget_override is None
     assert session._wire_bytes_budget() == 30_000_000, "the explicit edit was swallowed"
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The size-driven strip is provider-scoped (agent review round 2, R8/R9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_provider_switch_lifts_a_size_driven_image_strip(tmp_path):
+    """R8: the strip was evidence about the DEPARTED provider's cap.
+
+    R4 already established the principle for the budget. The sticky flag is
+    set from the same evidence, so it needs the same lifetime — otherwise the
+    session stays permanently blind on a provider that would have accepted
+    every frame, which is the exact harm R4's comment argues against.
+    """
+    stream = RefusesOversizeRequests(cap=1_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(6))
+
+    # The ladder ratchets before it strips, so drive it to the terminal rung
+    # rather than assuming one refusal reaches it.
+    for turn in range(12):
+        await session.prompt(f"t{turn}")
+        if session._images_rejected:
+            break
+    assert session._images_rejected, "the size strip never fired"
+    assert session._images_rejected_for_size
+
+    session.set_model(ModelSpec(provider="other", model_id="lax", context_window=1_000_000))
+
+    assert not session._images_rejected, "the departed provider's strip survived"
+    assert not session._images_rejected_for_size
+    assert session._wire_budget_override is None
+    # The next render carries images again, which is the point of lifting it.
+    rendered = session._render_history(list(session._context.messages))
+    assert any(
+        isinstance(block, ImageContent) for message in rendered for block in message.content
+    ), "images did not come back for the new provider"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_switch_does_not_lift_a_refusal_driven_strip(tmp_path):
+    """The other half of R8, and the more important one: a block the provider
+    REFUSED is poisoned on any provider. Only the size-caused strip is
+    provider-scoped; lifting the refusal-caused one would re-send the block
+    that bricked the session in the first place."""
+
+    class RefusesImages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.calls += 1
+            first = self.calls == 1
+
+            async def gen():
+                if first:
+                    raise ProviderError(400, "Could not process image")
+                yield StreamTextDelta(delta="ok")
+                yield StreamEndEvent(stop_reason="endTurn")
+
+            return gen()
+
+    session = make_session(tmp_path, RefusesImages())
+    await session.seed_history(_frames(2))
+
+    await session.prompt("go")
+    assert session._images_rejected
+    assert not session._images_rejected_for_size, "a block refusal was marked as size-caused"
+
+    session.set_model(ModelSpec(provider="other", model_id="lax", context_window=1_000_000))
+
+    assert session._images_rejected, "a poisoned-block strip was lifted by a model switch"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_notice_does_not_claim_screenshots_on_a_text_history(tmp_path):
+    """R9: this rung is reached on the FIRST refusal for a text-only history,
+    where "dropping screenshots" describes something that never happened."""
+    stream = RefusesOversizeRequests(cap=1_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history([Message.user("T" * 5_000_000)])
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    await session.prompt("go")
+
+    assert session._images_rejected
+    terminal = [n for n in notices if "/compact" in n]
+    assert terminal, "no terminal notice was emitted"
+    assert "screenshot" not in terminal[0].lower(), terminal[0]
+    assert "images have been removed" not in terminal[0].lower(), terminal[0]
     await session.dispose()
