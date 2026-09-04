@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install prototype-ramp
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -109,6 +109,11 @@ format: ## Format code with black and isort
 	uvx isort==5.13.2 .
 
 # Run linting with flake8
+# THROWAWAY. Delete this target with the module it runs, once the markdown
+# colour ramp question is settled (see that module's docstring).
+prototype-ramp: ## PROTOTYPE: build + open the markdown colour ramp variants
+	env -u NO_COLOR .venv/bin/python -m local_operator.tui.prototype_markdown_ramp
+
 lint: ## Run linting with flake8
 	.venv/bin/python -m flake8 .
 
