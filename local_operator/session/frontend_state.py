@@ -85,6 +85,80 @@ FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 USAGE_COMPONENT_CAP = 200
 
 
+def _folded_components(components: Sequence[Any]) -> list[Any]:
+    """Collapse receipts that share a serving identity, losslessly for money.
+
+    The per-JOB twin of :data:`USAGE_COMPONENT_CAP`, and it may not use the
+    same mechanism. A tail cap is safe for the session-level list because the
+    figures it feeds are running totals maintained elsewhere — but a job's
+    ``usage.cost_components`` IS the input to :func:`job_cost`, so dropping a
+    receipt there would silently undercount a child's spend. Money must not be
+    truncated to fit a socket.
+
+    Folding is lossless where a cap is not. ``turn_cost`` prices each component
+    independently — a reported ``usd_cost`` is used as-is, otherwise the tokens
+    are priced at that component's own identity's rate — and then sums. So
+    receipts that share BOTH the serving identity and the reported/estimated
+    disposition can be added together before pricing and yield the same total:
+    summed prices for the reported group, summed tokens at one rate for the
+    estimated group. The result is bounded by the number of distinct models a
+    child actually used (one or two in practice) instead of by how many calls
+    it made, which is what makes it scale with a 20-job roster.
+
+    Ordering is preserved by first appearance so the newest identity does not
+    jump the list, and a component that carries no identity is passed through
+    untouched rather than folded into a bucket it may not belong in.
+    """
+    folded: dict[tuple[str, str, bool], Any] = {}
+    order: list[tuple[str, str, bool]] = []
+    passthrough: list[Any] = []
+    for component in components:
+        provider = str(getattr(component, "provider", "") or "")
+        model_id = str(getattr(component, "model_id", "") or "")
+        if not provider and not model_id:
+            # No identity to fold on: pricing would resolve it against the
+            # caller's default label, which differs per call site.
+            passthrough.append(component)
+            continue
+        key = (provider, model_id, getattr(component, "usd_cost", None) is not None)
+        existing = folded.get(key)
+        if existing is None:
+            folded[key] = component.model_copy(deep=True)
+            order.append(key)
+            continue
+        folded[key] = existing.model_copy(
+            update={
+                "input_tokens": existing.input_tokens + component.input_tokens,
+                "output_tokens": existing.output_tokens + component.output_tokens,
+                "cache_read_tokens": existing.cache_read_tokens + component.cache_read_tokens,
+                "cache_write_tokens": existing.cache_write_tokens + component.cache_write_tokens,
+                "cache_write_5m_tokens": (
+                    existing.cache_write_5m_tokens + component.cache_write_5m_tokens
+                ),
+                "cache_write_1h_tokens": (
+                    existing.cache_write_1h_tokens + component.cache_write_1h_tokens
+                ),
+                "reasoning_tokens": existing.reasoning_tokens + component.reasoning_tokens,
+                "usd_cost": (
+                    None
+                    if existing.usd_cost is None
+                    else existing.usd_cost + (component.usd_cost or 0.0)
+                ),
+                # Occupancy is a level, not a sum: the newest reading wins, the
+                # same rule ``_aggregate_usage`` applies.
+                "context_tokens": (
+                    component.context_tokens
+                    if component.context_tokens is not None
+                    else existing.context_tokens
+                ),
+                # Nested components are already folded into the buckets above;
+                # keeping them would double-count on the next fold.
+                "cost_components": [],
+            }
+        )
+    return [folded[key] for key in order] + passthrough
+
+
 def _capped_components(components: Sequence[Any]) -> list[Any]:
     """The newest :data:`USAGE_COMPONENT_CAP` receipts, oldest evicted first.
 
@@ -852,9 +926,13 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
       (:data:`USAGE_COMPONENT_CAP`), and capped AGAIN here because an owner
       that restored a pre-cap checkpoint holds the uncapped list in memory for
       the life of that process.
-    * each job's ``usage.cost_components`` — the per-job twin of the same list,
-      measured at 29 KB for ONE job on the reference machine, which is what
-      made 18 stripped-trajectory jobs still serialize to 196 KB.
+    * each job's ``usage.cost_components`` and ``descendant_usage`` — the
+      per-job twins of the same list, measured at 29 KB for ONE job on the
+      reference machine, which is what made 18 stripped-trajectory jobs still
+      serialize to 196 KB. FOLDED by serving identity rather than capped:
+      these price the child's spend (``job_cost``), so dropping rows would
+      undercount money, while folding is lossless. See
+      :func:`_folded_components`.
 
     :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
     field appears.
@@ -875,14 +953,30 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
                     # construction, see JobState), so dropping the rows here
                     # loses nothing the viewer needs to describe the job.
                     job["trajectory"] = []
-                usage = job.get("usage")
-                if isinstance(usage, dict):
-                    job_components = usage.get("cost_components")
-                    if isinstance(job_components, list) and (
-                        len(job_components) > USAGE_COMPONENT_CAP
-                    ):
-                        usage["cost_components"] = _capped_components(job_components)
+                _fold_job_usage_in_place(job)
     return payload
+
+
+def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
+    """Fold one serialized job row's receipt lists, losslessly (see above).
+
+    Operates on the already-serialized dict rather than on the model, because
+    this runs at the wire boundary where the payload is plain JSON. The rows
+    are revalidated as ``Usage`` to fold them and dumped straight back, so a
+    malformed row simply stays as it is rather than failing the whole frame —
+    an attach must not be refused because one job's accounting is odd.
+    """
+    for container, key in ((job.get("usage"), "cost_components"), (job, "descendant_usage")):
+        if not isinstance(container, dict) and key != "descendant_usage":
+            continue
+        rows = container.get(key) if isinstance(container, dict) else None
+        if not isinstance(rows, list) or len(rows) <= 1:
+            continue
+        try:
+            folded = _folded_components([Usage.model_validate(row) for row in rows])
+        except Exception:  # noqa: BLE001 — odd accounting must not refuse an attach
+            continue
+        container[key] = [item.model_dump(mode="json") for item in folded]
 
 
 def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:

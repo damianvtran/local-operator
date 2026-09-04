@@ -402,3 +402,107 @@ async def test_a_viewer_defers_naming_to_the_runtime(tmp_path: Path, monkeypatch
             await pilot.pause()
 
     assert started == [], "the viewer started a naming errand it cannot complete"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The details are on the FIRST frame, not after a runtime starts.
+
+    The regression this guards shipped in the release that made the TUI a
+    viewer: the old in-process TUI restored the subagent roster and the todo
+    list at boot (``Session.__init__`` → ``_load_subagent_roster`` /
+    ``_load_todo_snapshot``), and the viewer path synthesised canonical state
+    from config and the wake index only. So a resumed session opened with an
+    empty subagent panel and no todos and stayed that way indefinitely — the
+    details were not slow to arrive, they were never going to arrive.
+
+    Asserted on the state the widgets read, and asserted BEFORE anything binds
+    a runtime, because "after the first message" is exactly the behaviour that
+    was wrong.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        JobState,
+        TodoItemState,
+        TodoPhaseState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("run the audit"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        conversation_title="Article search rollout",
+        goal="ship the rollout",
+        jobs=[JobState(id="job1", type="task", label="auditor", status="succeeded")],
+        todos=[
+            TodoPhaseState(
+                name="Verification", items=[TodoItemState(text="run the gate", status="pending")]
+            )
+        ],
+        cumulative_parent_cost=12.5,
+        context_tokens=322_546,
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")}
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.is_cold is True, "restoring details must not start a runtime"
+        state = viewer.frontend_state
+        assert [job.id for job in state.jobs] == ["job1"]
+        # A restored row has no in-process trajectory; the panel needs to know
+        # that rather than rendering the child as an empty live job.
+        assert state.jobs[0].restored is True
+        assert [item.text for phase in state.todos for item in phase.items] == ["run the gate"]
+        assert state.conversation_title == "Article search rollout"
+        assert state.goal == "ship the rollout"
+        # Spend and occupancy are the conversation's, not this process's: a
+        # resumed session that already cost money must not open reading zero.
+        assert state.cumulative_parent_cost == 12.5
+        assert state.context_tokens == 322_546
+        # The model still comes from THIS process's config, not the stale copy
+        # in the checkpoint — the config may have changed since.
+        assert state.cwd == str(tmp_path)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_opens_when_the_checkpoint_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bad status row must never stop a conversation from opening."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("still here?"))
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": {"jobs": "not-a-list"}}
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.session_id == SESSION_ID
+        assert list(viewer.frontend_state.jobs) == []
+        assert [getattr(m, "text", "") for m in viewer.history()] == ["still here?"]
+    finally:
+        await viewer.dispose()
