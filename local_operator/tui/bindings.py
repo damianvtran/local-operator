@@ -289,19 +289,28 @@ _MARKDOWN_BINDINGS: tuple[Binding, ...] = (
     # outright, so hue is free to buy SCANNABILITY rather than rank — which
     # is the whole reason a hue-per-level ramp is safe here and was not
     # before.
-    Binding("markdown.h4", "success", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding("markdown.h4", "success", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
     # h5 keeps a hue; h6 is the first level to fall off the colour ramp onto
     # the neutral one. NOT `dim` for either: `dim` measures below 4.5:1 on
     # `bg` in 30 of 54 themes, so the old tail shipped sub-AA heading text in
     # more than half the palettes. `muted` clears 4.84:1 in all 54, which is
     # what holds the ramp's floor at 4.26:1.
     #
-    # WEIGHT descends once and never returns: h1-h3 bold, h4-h6 plain. An
-    # earlier draft ran bold, plain, bold, plain down the tail — h4 unbolded
-    # while h5 was bold again — which reads as noise rather than rank, and
-    # h5/h6 shared an ink on top of it. Weight is a monotonic channel or it
-    # is not a channel at all.
-    Binding("markdown.h5", "accent", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    # WEIGHT is bold for h1-h5 and plain for h6 alone. That is deliberately
+    # almost no signal: it makes a heading read as a heading (bold against
+    # body prose) rather than encoding its RANK, and hands rank entirely to
+    # hue plus the `#` markers when they are enabled. h6 drops the bold as
+    # the one typographic full stop at the bottom of the ramp.
+    #
+    # Weight must still never REVERSE going down the ramp. An earlier draft
+    # ran bold, plain, bold, plain through the tail — h4 unbolded while h5
+    # was bold again — so weight claimed h5 outranked h4 while position said
+    # the opposite. `test_heading_weight_descends_monotonically` pins that.
+    #
+    # With five levels sharing a weight, hue is doing the separating alone:
+    # measured min pairwise dE76 among h1-h5 is 21.6 median across the 54
+    # themes, with one theme (`light`, 5.5) under 10.
+    Binding("markdown.h5", "accent", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
     Binding("markdown.h6", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding(
         "markdown.heading_marker",
