@@ -96,3 +96,25 @@ draft, and is why the patch is now in the script rather than in the operator's
 memory.
 
 `before.txt` captures the refusal reproduced against the released 0.46.0 build.
+
+## The notices, as a rendered frame
+
+These strings are product copy: a user reads them in the transcript. Captured
+with the real `OperatorApp` so `local_operator.tcss` actually applies (the
+lightweight test hosts declare no `CSS_PATH` and would not show the styling).
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  docs/evidence/mcp-grant-locality/notice_shot.py out.svg [before|after]
+```
+
+`notices-before.svg` / `notices-after.svg`. The cancellation line is the delta:
+
+- before: `MCP reauth for 'notion' cancelled before the browser completed it.`
+  Terse, and it tells the user nothing about what to do next.
+- after: `… cancelled before the browser completed it; this attempt changed
+  nothing — run /mcp login notion to authenticate the server.`
+
+Both frames wrap cleanly at 100 columns with the notice glyphs intact (`·`
+info, `!` warning, `✓` success), and the longer strings do not disturb the
+transcript's centred layout.
