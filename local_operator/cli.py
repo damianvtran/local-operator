@@ -501,7 +501,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # this, and it is not a supported way to open a session.
     resume_click_parser = subparsers.add_parser(
         "resume-click",
-        help=argparse.SUPPRESS,
+        # NO `help=` AT ALL. For a SUBPARSER, `help=argparse.SUPPRESS` is not
+        # the hide idiom it is for an argument — argparse renders the sentinel
+        # verbatim, so `lop --help` listed `resume-click  ==SUPPRESS==`
+        # (round 3, B5). Omitting the kwarg is what keeps it off the list.
         parents=[parent_parser],
     )
     resume_click_parser.add_argument("session", help="session id to reopen")
@@ -3573,7 +3576,19 @@ def main() -> int:
             # graph into every `lop` invocation.
             from local_operator.tui.resume_click import open_session
 
-            return 0 if open_session(args.session) else 1
+            if open_session(args.session):
+                return 0
+            # A CLICK THAT DOES NOTHING NEEDS A REASON. Success stays silent —
+            # nobody watches a notification's activation target — but the
+            # failure path is reachable by hand and the fallback spawn
+            # "usually does nothing visible", so without this a user has no
+            # way to find out why the click appeared to do nothing (D17).
+            print(
+                f"could not open a terminal for session {args.session} — "
+                f"run: lop --resume {args.session}",
+                file=sys.stderr,
+            )
+            return 1
         elif args.subcommand == "wake":
             return wake_command(args)
         elif args.subcommand == "login":

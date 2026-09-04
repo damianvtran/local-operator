@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime.types import (
+    HEARTBEAT_INTERVAL_S,
     HEARTBEAT_TIMEOUT_S,
     RUN_DIRNAME,
     SessionRecord,
@@ -70,10 +72,28 @@ def unpublish(pid: int, root: Path | None = None) -> None:
         pass
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     """Signal-0 liveness, the cheapest check that answers "is there a process
     with this pid" without disturbing it. EPERM means alive-but-not-ours,
-    which for our purposes is alive."""
+    which for our purposes is alive.
+
+    A ZOMBIE IS NOT ALIVE. `kill(pid, 0)` succeeds against a process that has
+    exited but not yet been reaped, so a `kill -9`'d runtime kept reporting
+    `live` — with `0B` RSS — until the heartbeat aged it out 45 s later, and
+    `lop sessions`, the one place a user checks to understand the failure,
+    actively misled them (round 3, U10). The window is real rather than
+    theoretical: a runtime's parent is often the shell that launched it and
+    has since exited, so nothing reaps the entry promptly.
+
+    Deliberately NOT psutil: this module is stdlib-only by contract (it is on
+    the CLI startup path), and `/proc` does not exist on macOS.
+
+    **The zombie probe is opt-in via `check_zombie`**, because on macOS it
+    costs a `ps` fork — measured at 3.9 ms, against ~1 µs for signal-0 — and
+    `scan()` runs on every `lop` invocation. Paying that per live session on
+    startup would trade a rare stale row for a routine slowdown. `scan` asks
+    for it only where the answer changes what a user is told.
+    """
     if pid <= 0:
         return False
     try:
@@ -84,7 +104,33 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-    return True
+    return not check_zombie or not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether this pid is an exited-but-unreaped process.
+
+    Fails CLOSED (returns False, i.e. "treat as alive") on any doubt: calling
+    a live session dead would reap a record out from under a working runtime,
+    which is far worse than the stale row this exists to avoid.
+    """
+    try:
+        proc_status = Path(f"/proc/{pid}/stat")
+        if proc_status.exists():  # Linux: no subprocess needed
+            # `comm` can contain spaces and parentheses; state is the field
+            # after the LAST ')'.
+            data = proc_status.read_text()
+            return data.rpartition(")")[2].strip().startswith("Z")
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["/bin/ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — an unprobeable pid is treated as alive
+        return False
+    return result.stdout.strip().upper().startswith("Z")
 
 
 def scan(root: Path | None = None) -> list[tuple[SessionRecord, str]]:
@@ -111,7 +157,14 @@ def scan(root: Path | None = None) -> list[tuple[SessionRecord, str]]:
             except OSError:
                 pass
             continue
-        if not pid_alive(record.pid):
+        # The zombie probe costs a `ps` fork on macOS, so it is spent only on
+        # records whose heartbeat has already gone quiet: a healthy runtime
+        # beats every 15 s, so a gap means either a wedge or a process that
+        # died without being reaped. That is exactly the case that used to
+        # report `live` with 0B RSS for 45 s (round 3, U10), and it keeps the
+        # common path (every session, every `lop` invocation) fork-free.
+        quiet = now - record.heartbeat_at > HEARTBEAT_INTERVAL_S * 1.5
+        if not pid_alive(record.pid, check_zombie=quiet):
             try:
                 path.unlink()
             except OSError:

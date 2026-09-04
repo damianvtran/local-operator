@@ -478,8 +478,11 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
     holds the runtime resident for up to a day.
 
     STRICTLY BEST-EFFORT, and the constraint is stronger than for the in-band
-    paths: this is called from the runtime's gate path and from turn-end, so
-    it must never block the event loop and never delay the process's exit.
+    paths: this is called from the runtime's GATE path — its only caller,
+    `_announce_pending`; a detached turn merely finishing sends nothing (the
+    docstring claimed turn-end too, which grep does not support: round 3,
+    D13) — on the event loop, so it must never block that loop and never
+    delay the process's exit.
     Delivery is a detached spawn that is never waited on (``spawn_detached``
     documents the three properties that makes safe), every failure is
     swallowed, and the return value reports only whether a child was STARTED.
@@ -506,6 +509,15 @@ def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: st
             # No subtitle field on the AppleScript route, so the state
             # category rides the body rather than being lost entirely.
             plain_body = f"{subtitle} · {body}" if subtitle and body else (body or subtitle)
+            if session_id:
+                # THIS TOAST IS NOT CLICKABLE and looks exactly like the one
+                # that is: `osascript` carries no activation, so the first
+                # notification on a cold machine (before the bundle finishes
+                # building) silently does nothing when clicked — at the moment
+                # a user is most likely to try (round 3, D14). Say so, rather
+                # than letting them learn the feature does not work. The next
+                # toast carries the bundle and drops this line.
+                plain_body = f"{plain_body} — reopen with: lop --resume {session_id}"
             return _spawn_detached_ok(osascript_command(title, plain_body))
         notifier = shutil.which("notify-send")
         if not notifier:

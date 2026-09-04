@@ -966,6 +966,35 @@ def _typed_line_of(text: str) -> str | None:
         return None
 
 
+#: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
+#: the session itself produced. Matched on the transport's own phrases rather
+#: than on the exception type: `ConnectionError` also carries the graceful
+#: "reconnecting"/"stopped" refusals, which have their own copy and must not
+#: be rewritten as a crash (round 3, U10).
+_RUNTIME_GONE_MARKERS = (
+    "socket unreachable",
+    "closed the connection",
+    "connect call failed",
+)
+
+
+def _is_runtime_gone(error: BaseException) -> bool:
+    """Whether this failure means the runtime process died under us.
+
+    A crash (OOM, `kill -9`, a bug) drops the socket, and what reached the
+    user was the raw transport line — an errno and a loopback port — with
+    their message discarded. The deliberate paths (`/stop`, a reconnecting
+    owner) are excluded here because they already have honest copy of their
+    own; only an unexpected loss takes the recovery path.
+    """
+    if not isinstance(error, (ConnectionError, OSError)):
+        return False
+    text = str(error).lower()
+    if "stopped" in text or "reconnecting" in text:
+        return False
+    return any(marker in text for marker in _RUNTIME_GONE_MARKERS)
+
+
 def _gate_timeout_notice(details: dict[str, Any]) -> str:
     """Say what expired, what it wanted, and that nobody chose it.
 
@@ -11554,6 +11583,30 @@ class OperatorApp(App[None]):
                 if self._stopped_session_id and "stopped" in str(error):
                     text_line, kind = self._no_session_notice(unsent=True)
                     self._append_block(NoticeBlock(text_line, kind))
+                elif _is_runtime_gone(error):
+                    # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
+                    # the user got was `✗ owner socket unreachable: [Errno 61]
+                    # Connect call failed ('127.0.0.1', 51753)` and their
+                    # message was gone — not queued, not retried, no way back
+                    # (round 3, U10). "owner", an errno and a loopback port
+                    # are the transport's vocabulary, and the lost text is the
+                    # part that actually costs the user something.
+                    #
+                    # The text goes back in the composer so it can be sent
+                    # again with one keystroke, and the viewer drops its
+                    # binding so the NEXT send engages a fresh runtime rather
+                    # than dialling a socket that is never coming back.
+                    self._restore_unsent(text, images)
+                    go_cold = getattr(session, "_go_cold", None)
+                    if callable(go_cold):
+                        go_cold()
+                    self._append_block(
+                        NoticeBlock(
+                            "this session's runtime stopped — your message is back in the "
+                            "composer; send it again to start a new one",
+                            "warning",
+                        )
+                    )
                 else:
                     self._append_block(NoticeBlock(str(error), "error"))
                 # A prompt that failed never announced itself, so its echo
@@ -13644,6 +13697,28 @@ class OperatorApp(App[None]):
     def _editor(self) -> Editor:
         """The input editor. Queried rather than held: Textual owns the widget."""
         return self.query_one(Editor)
+
+    def _restore_unsent(self, text: str, images: list[Any] | None = None) -> None:
+        """Put a message that never left back into the composer.
+
+        For a send that failed OUTRIGHT — the runtime died mid-flight — where
+        the alternative is the user retyping it from memory (round 3, U10).
+
+        A half-typed draft is never displaced, for the same reason the steer
+        recall refuses to: throwing away what the user is currently typing
+        costs them something real, and the failed text is already on screen in
+        the notice above. Attachments are not restored — they are re-picked
+        rather than re-typed, and silently re-arming them would send files the
+        user cannot see in the composer.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer to restore into
+            return
+        if editor.text.strip():
+            return
+        editor.forget_prompt(text)
+        editor.load_text(text)
 
     def _render_authoritative_slash(self, command: str, arg: str, outcome: Any) -> None:
         """Render a follower's routed slash outcome in THIS terminal.
@@ -18949,15 +19024,21 @@ class OperatorApp(App[None]):
         notify_note = Text()
         notify_note.append("notifications".ljust(name_width), style=muted)
         notify_note.append(
-            "desktop toast when a turn finishes or needs you; shell: "
-            "`lop config edit display.notifications false`",
+            # Both halves of this used to be wrong for the detached path
+            # (round 3, D13). "when a turn finishes" overstated it — the
+            # runtime's only notifying caller is the gate — and "only while
+            # the terminal is unfocused" describes the in-band focus gate,
+            # which a detached runtime has no terminal to consult: it sends
+            # precisely when NO terminal is watching.
+            "desktop toast when a turn finishes here, or when a detached "
+            "session needs you; shell: `lop config edit display.notifications false`",
             style=dim,
         )
         notify_note_more = Text()
         notify_note_more.append("".ljust(name_width), style=muted)
         notify_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; "
-            "sent only while the terminal is unfocused",
+            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for "
+            "the terminal to be unfocused, detached ones click to reopen",
             style=dim,
         )
         if not lines or lines[-1].plain:
