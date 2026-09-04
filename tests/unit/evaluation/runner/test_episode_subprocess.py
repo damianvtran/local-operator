@@ -57,6 +57,7 @@ from local_operator.evaluation.adapters.api import (
     CleanupResult,
     ExecuteResult,
     ExecutionReceipt,
+    ObservationPhaseError,
     ObservationResult,
     PrepareResult,
     RequirementsResult,
@@ -143,6 +144,42 @@ def _frame_mode():
             return handle.read().strip()
     except OSError:
         return ""
+
+
+# How many times the OBSERVATION phase of execute should fail before it starts
+# succeeding, armed the same adapter-owned way as the cutpoint. This reproduces
+# the paid-episode failure exactly: the guest actions land, and the read-back
+# that follows raises. The countdown lives in a FILE because it must survive
+# across separate execute calls and be observable from the parent.
+def _observation_failures():
+    import os
+
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tiny_observation_failures"
+    )
+    try:
+        with open(path) as handle:
+            return int(handle.read().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+# Burn one armed failure and report whether this call should fail. Decrementing
+# on disk is what makes the failure TRANSIENT rather than permanent: the
+# exhausted-retries test arms more failures than the runner has attempts, and
+# the recovery test arms fewer.
+def _consume_observation_failure():
+    import os
+
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tiny_observation_failures"
+    )
+    remaining = _observation_failures()
+    if remaining <= 0:
+        return False
+    with open(path, "w") as handle:
+        handle.write(str(remaining - 1))
+    return True
 
 
 # Whether reset_start should import a task module from the WORKSPACE (the
@@ -256,6 +293,13 @@ class TinyAdapter:
         # Learned ONLY from reset_start; the stripped environment offers no
         # other route to it, which is exactly what this fixture proves.
         self.artifact_root = None
+        # How many times a batch was actually APPLIED, published beside the
+        # module so the parent can assert a resumed call did not re-apply one.
+        self.applied = 0
+        self.applied_path = __import__("os").path.join(
+            __import__("os").path.dirname(__import__("os").path.abspath(__file__)),
+            "tiny_applied_count",
+        )
 
     def _maybe_die(self, name):
         if _cutpoint() == name:
@@ -300,10 +344,25 @@ class TinyAdapter:
 
     async def execute(self, params):
         self._maybe_die("execute")
-        self.sequence += 1
+        # The MUTATION. Recorded so a test can prove a resumed call did not
+        # apply the batch a second time -- the safety property the whole
+        # observation-phase contract rests on.
+        if not params.resume_observation:
+            self.applied += 1
+            with open(self.applied_path, "w") as handle:
+                handle.write(str(self.applied))
+
+        # PAST THE POINT OF NO RETURN: from here a failure is a failure to
+        # READ, which is what ObservationPhaseError declares. The sequence is
+        # advanced only after the observation is built, so a failed attempt
+        # leaves the adapter where it was and the resumed attempt yields the
+        # sequence the parent expects.
+        if _consume_observation_failure():
+            raise ObservationPhaseError("environment returned no screenshot frame")
         output = _observation(
-            self.task_id, self.episode_id, self.sequence, self.artifact_root
+            self.task_id, self.episode_id, self.sequence + 1, self.artifact_root
         )
+        self.sequence += 1
         receipt = ExecutionReceipt(
             operation_id=params.operation_id,
             action_batch_id=params.action_batch_id,
@@ -349,7 +408,7 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.3",
+            schema_version="1.4",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=True
             ),
@@ -420,7 +479,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     (workspace / "tasks" / "pkg").mkdir(exist_ok=True)
     (workspace / "tasks" / "pkg" / "mod.py").write_text("MARK = 'nested'\n")
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",
@@ -434,7 +493,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     )
 
 
-def _subprocess_config(tmp_path: Path) -> Any:
+def _subprocess_config(tmp_path: Path, **overrides: Any) -> Any:
     """Config with timeouts sized for a REAL interpreter spawn.
 
     The in-process default of 5s is ample for a fake adapter but marginal here:
@@ -453,6 +512,7 @@ def _subprocess_config(tmp_path: Path) -> Any:
         step_timeout=60.0,
         score_timeout=60.0,
         cleanup_timeout=60.0,
+        **overrides,
     )
 
 
@@ -505,6 +565,155 @@ def _arm_frames(site: Path, mode: str | None) -> None:
         marker.unlink(missing_ok=True)
     else:
         marker.write_text(mode)
+
+
+def _arm_observation_failures(site: Path, count: int) -> None:
+    """Arm N consecutive observation-phase failures in the installed adapter.
+
+    Armed through a file for the same reason the cutpoint is: the worker's
+    environment is built from a closed allowlist, so a test cannot hand it a
+    mode any other way without weakening the policy under test.
+    """
+
+    marker = site / "tiny_observation_failures"
+    if count <= 0:
+        marker.unlink(missing_ok=True)
+    else:
+        marker.write_text(str(count))
+
+
+def _applied_count(site: Path) -> int:
+    """How many times the adapter actually APPLIED a batch."""
+
+    marker = site / "tiny_applied_count"
+    try:
+        return int(marker.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _retry_events(root: Path) -> list[dict[str, Any]]:
+    """Every journalled observation-phase retry in a sealed bundle."""
+
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines() if line]
+    return [
+        event
+        for event in events
+        if event["kind"] == "error"
+        and event["payload"]["diagnostic_code"] == "observation-phase-retry"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transient_observation_failure_does_not_destroy_the_episode(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """The paid-episode failure, reproduced end to end against a real worker.
+
+    Five real episodes died between steps 9 and 32 like this: a burstable VM
+    starved its guest screenshot server, the read-back after a committed step
+    failed, and the whole episode was destroyed along with every valid step
+    before it. Here the first step's observation phase fails twice and then
+    recovers; the episode must reach a normal scored ending.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, "honest")
+    _arm_observation_failures(adapter_site, 2)
+    # No sleeping in a unit test; the bound under test is the ATTEMPT count.
+    config = _subprocess_config(tmp_path, observation_retry_delay=0.0)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=ScriptedModel(["step", "step", "finish"]),
+        launch=AdapterSupervisor.launch,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    # Never poisoned, so no rescue was demanded and no VM was abandoned.
+    assert outcome.rescue_required is False
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None
+    assert report.counters.environment_step_count == 2
+
+    # THE SAFETY PROPERTY: two steps ran, so the batch was applied exactly
+    # twice. A resumed call that re-applied its batch would show more.
+    assert _applied_count(adapter_site) == 2
+
+    # THE HONESTY PROPERTY: both degraded reads are in the evidence, so a
+    # reader sees the environment faltered rather than a suspiciously clean run.
+    retries = _retry_events(root)
+    assert len(retries) == 2
+    assert all(event["payload"]["category"] == "environment" for event in retries)
+    assert all(event["payload"]["retryable"] is True for event in retries)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_observation_retries_still_fail_and_seal_the_bundle(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """Recovery is BOUNDED: past the bound the episode still dies cleanly.
+
+    A harness that retried forever would hold a paid VM open against a dead
+    environment. The bundle must still seal and verify, so an unrecoverable
+    outage stays auditable rather than merely survived.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, "honest")
+    # One more failure than the runner has attempts.
+    _arm_observation_failures(adapter_site, 5)
+    config = _subprocess_config(tmp_path, observation_retry_delay=0.0)
+    rescued: list[Any] = []
+
+    async def recording_rescue(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        rescued.append(descriptor)
+
+        class _Aggregate:
+            complete = True
+            descriptor_id = descriptor.descriptor_id
+
+        return _Aggregate()
+
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=ScriptedModel(["step", "step", "finish"]),
+        launch=AdapterSupervisor.launch,
+        rescue=recording_rescue,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed", outcome.diagnostic
+    # The ORIGINAL cause is recorded, not the recovery that could not fix it.
+    assert outcome.diagnostic is not None
+    assert "no screenshot frame" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+
+    # Exactly the configured bound: 3 retries, then the failure propagates.
+    assert len(_retry_events(root)) == 3
+    # The step never completed, so no step event was written for it.
+    assert report.counters is not None
+    assert report.counters.environment_step_count == 0
 
 
 @pytest.mark.asyncio

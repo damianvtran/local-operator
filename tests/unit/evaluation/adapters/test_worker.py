@@ -279,7 +279,7 @@ def rescue_selector(tmp_path: Path) -> AdapterSelector:
     release_digest = "b" * 64
     (workspace / "adapter-release.json").write_text(f'{{"release_digest":"{release_digest}"}}')
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="rescue",
         distribution="rescue-adapter",
         version="1.0",
@@ -301,7 +301,7 @@ def rescue_metadata() -> AdapterMetadata:
         entry_point="rescue_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.3",
+        schema_version="1.4",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=False),
     )
 
@@ -348,7 +348,7 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             ),
         )
         descriptor = RescueDescriptor(
-            schema_version="1.3",
+            schema_version="1.4",
             selector=selected,
             handshake=handshake,
             episode_id="episode",
@@ -470,7 +470,7 @@ def test_rescue_cleanup_rejects_forged_episode_and_action_without_losing_pin(
         selected_route="computer",
     )
     descriptor = RescueDescriptor(
-        schema_version="1.3",
+        schema_version="1.4",
         selector=selected,
         handshake=pinned_handshake,
         episode_id="episode",
@@ -535,3 +535,53 @@ async def test_worker_rejects_cancel_without_inflight_call() -> None:
                     os.close(fd)
             except OSError:
                 pass
+
+
+def test_error_phase_is_declared_by_the_adapter_and_only_for_execute() -> None:
+    """The worker REPORTS a declared phase; it never infers one.
+
+    The parent makes a safety decision on this field -- whether a failed
+    mutating call may keep its session -- so the two ways to get it wrong are
+    pinned here:
+
+    * A phase is stamped only for an ``ObservationPhaseError``. An ordinary
+      adapter exception, however much its text looks like a screenshot
+      failure, stays ``unknown`` and keeps poisoning.
+    * Only ``execute`` may claim it. The recovery path re-reads state after a
+      committed step; there is no equivalent for ``prepare`` or ``cleanup``,
+      so a claim from one of those is dropped rather than honoured.
+    """
+
+    from local_operator.evaluation.adapters.api import ObservationPhaseError
+    from local_operator.evaluation.adapters.worker import _error_detail
+
+    declared = _error_detail(
+        ObservationPhaseError("environment returned no screenshot frame"),
+        "execute",
+        "exec-0",
+        None,
+    )
+    assert declared is not None and declared.phase == "observation"
+    # It renders, so a bundle reader can see why the harness retried.
+    assert "phase=observation" in declared.render()
+
+    # An undeclared failure whose message names the same symptom.
+    undeclared = _error_detail(
+        RuntimeError("environment returned no screenshot frame"),
+        "execute",
+        "exec-0",
+        None,
+    )
+    assert undeclared is not None and undeclared.phase == "unknown"
+    assert "phase=" not in undeclared.render()
+
+    # The same declared exception raised from a method that cannot be resumed.
+    for method in ("prepare", "reset_start", "score", "cleanup"):
+        wrong_method = _error_detail(
+            ObservationPhaseError("no screenshot"),
+            method,  # pyright: ignore[reportArgumentType]
+            "op-0",
+            None,
+        )
+        assert wrong_method is not None
+        assert wrong_method.phase == "unknown", method

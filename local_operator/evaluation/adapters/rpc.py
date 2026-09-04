@@ -7,7 +7,7 @@ import errno
 import json
 import os
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import Field, field_validator, model_validator
 
@@ -88,6 +88,18 @@ class RpcErrorCause(ProtocolModel):
     message: str = Field(max_length=MAX_DETAIL_MESSAGE)
 
 
+#: Which phase of a mutating call failed, as the ADAPTER declares it.
+#:
+#: ``observation`` means the mutation committed and only the read-back of the
+#: resulting state failed -- the one shape of failure a repeat call cannot
+#: double-apply. ``unknown`` is the default and means exactly what the boundary
+#: assumed before this field existed: the call may or may not have applied, so
+#: it is not safe to repeat. A worker only ever writes ``observation`` when the
+#: adapter raised ``ObservationPhaseError``; nothing is inferred from an
+#: exception type, a message, or a traceback.
+ErrorPhase: TypeAlias = Literal["unknown", "observation"]
+
+
 class RpcErrorDetail(ProtocolModel):
     """Bounded, worker-redacted cause travelling inside the existing envelope.
 
@@ -109,6 +121,12 @@ class RpcErrorDetail(ProtocolModel):
     # operation replay cache returns this error again under a NEW request ID,
     # so the request ID alone does not identify the originating operation.
     operation_id: str | None = Field(default=None, max_length=MAX_DETAIL_NAME)
+    # A CLOSED enum rather than free text, because the parent makes a safety
+    # decision on it: this is the only field in this model that changes what
+    # the harness DOES rather than what it records. Defaulting to "unknown"
+    # keeps every adapter that does not participate on the pre-existing
+    # poison-on-any-mutating-failure path.
+    phase: ErrorPhase = "unknown"
     causes: tuple[RpcErrorCause, ...] = Field(default=(), max_length=MAX_DETAIL_CAUSES)
     frames: tuple[RpcErrorFrame, ...] = Field(default=(), max_length=MAX_DETAIL_FRAMES)
 
@@ -124,6 +142,11 @@ class RpcErrorDetail(ProtocolModel):
         parts.append(f"method={self.method}")
         if self.operation_id is not None:
             parts.append(f"operation_id={self.operation_id}")
+        # Rendered only when it is load-bearing. An "unknown" phase is the
+        # default and adds noise to every pre-existing diagnostic; naming the
+        # observation phase explains why the harness then retried.
+        if self.phase != "unknown":
+            parts.append(f"phase={self.phase}")
         for cause in self.causes:
             parts.append(
                 f"caused by {cause.exception_type}: {cause.message}"
