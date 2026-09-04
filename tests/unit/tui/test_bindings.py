@@ -525,10 +525,22 @@ class TestStyleMatchesPreRefactorLiterals:
             color=theme.semantic_color("string")
         )
 
-    def test_markdown_h1_is_bold_accent(self, theme_name: str) -> None:
+    def test_markdown_h1_is_bold_signal_not_accent(self, theme_name: str) -> None:
+        """h1 moved OFF `accent`.
+
+        `accent` means "a turn is live" and is enumerated as such in
+        local_operator.tcss; h1 was the one binding spending it for structure,
+        which made a document title share ink with the running-tool icon.
+        Measured, an accent-bearing heading ramp collides outright (min dE76
+        0.00, gruvbox-light) while the accent-free ramp holds 5.25 across 54
+        themes — so freeing it cost the ramp nothing.
+        """
         theme.set_theme(theme_name)
         assert bindings.style("markdown.h1") == Style(
-            color=theme.semantic_color("accent"), bold=True
+            color=theme.semantic_color("signal"), bold=True
+        )
+        assert (
+            bindings.style("markdown.h1").color != Style(color=theme.semantic_color("accent")).color
         )
 
     def test_markdown_hr_is_dim_not_edge(self, theme_name: str) -> None:
@@ -538,3 +550,45 @@ class TestStyleMatchesPreRefactorLiterals:
     def test_markdown_code_is_signal(self, theme_name: str) -> None:
         theme.set_theme(theme_name)
         assert bindings.style("markdown.code") == Style(color=theme.semantic_color("signal"))
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_code_fence_sits_on_its_own_slab(theme_name: str) -> None:
+    """The fence ground is `raised`, and actually differs from the prose ground.
+
+    On `bg` a code block was the same paper as the text around it, so a fence
+    had no edges at all. `raised` is one of the elevation tokens the binding
+    table never spent; it is a real step in every registered palette, and the
+    fence is the surface that most needs one.
+    """
+    theme.set_theme(theme_name)
+    ground = bindings.ground_hex("code.background")
+    assert ground == theme.semantic_color("raised")
+    assert ground != theme.semantic_color("bg"), (
+        f"{theme_name}: the fence slab is the same ink as the prose ground, "
+        "so a code block has no edges"
+    )
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_the_syntax_ramp_is_not_one_grey(theme_name: str) -> None:
+    """Keyword, function, class and builtin must not all be the same ink.
+
+    They were all `muted`, so a fence carried no structure at all and the
+    reader parsed it from position alone — the single largest block of grey
+    in the transcript.
+    """
+    theme.set_theme(theme_name)
+    inks = {
+        element: bindings.style(element).color
+        for element in (
+            "code.keyword",
+            "code.name_function",
+            "code.name_class",
+            "code.string",
+        )
+    }
+    assert len(set(inks.values())) >= 3, (
+        f"{theme_name}: the syntax ramp collapsed to {len(set(inks.values()))} "
+        f"distinct inks — {inks}"
+    )

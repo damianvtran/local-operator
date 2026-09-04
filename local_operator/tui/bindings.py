@@ -208,32 +208,35 @@ _MARKDOWN_BINDINGS: tuple[Binding, ...] = (
             "clears 3:1 in all 54 (min 3.61:1)."
         ),
     ),
-    # h1 is the ONE structural hue the budget allows (§1.2 Rule C) — see the
-    # module docstring for why this is classified LIVENESS (the token's
-    # canonical role) rather than a role the enum does not have.
+    # h1 no longer spends `accent`. That token means "a turn is live" and is
+    # enumerated as such in local_operator.tcss; h1 was the ONE binding
+    # spending it for STRUCTURE rather than liveness, which made a document
+    # title share ink with the running-tool icon and the shimmer crest.
+    #
+    # Measured, not preferred: an accent-BEARING ramp
+    # (accent, label, signal, string, muted, dim) collides outright at min
+    # dE76 0.00 on gruvbox-light, while the accent-free ramp below holds a
+    # min dE76 of 5.25 across all 54 themes. Spending accent on prose made
+    # the ramp measurably worse, so freeing it costs the ramp nothing and
+    # returns the liveness token to meaning exactly one thing.
     Binding(
         "markdown.h1",
-        "accent",
+        "signal",
         "bg",
-        Role.LIVENESS,
+        Role.REFERENCE,
         Surface.TRANSCRIPT,
         bold=True,
         note=(
-            "Headings carry a real three-step ramp. With no rules, panels, "
-            "or size changes available in a terminal, WEIGHT and TINT are "
-            "the only depth cues there are — h5/h6 previously matched h3/h4 "
-            "minus the bold, which flattened the tail of long documents "
-            "into a single indistinguishable level.\n\n"
-            "h1 is the exception, and it is the ONE structural hue the "
-            "budget allows: h1, h2 and strong were all literally "
-            "`Style(color=fg, bold=True)` — identical pixels — so a long "
-            "answer had no top-level anchor and every bolded phrase in the "
-            "prose competed with the title. Lightness is the axis with the "
-            "least room left on it (h2-h6 already spend three rungs of it), "
-            "so the anchor is bought with hue instead. Once per document, "
-            "and h2-h6 stay on the neutral ramp: this is the whole "
-            "structural allowance, not the start of a heading palette. "
-            "It makes h1 a fifth accent site — see local_operator.tcss."
+            "The document's title. `signal` is the ramp's reference hue and "
+            "is already the loudest non-outcome ink in most palettes, which "
+            "is what a title wants; h2 keeps `label` below it.\n\n"
+            "Previously `accent`, which made a title the same ink as the "
+            "live-tool indicator and the shimmer crest. See the comment "
+            "above for why that was measurably worse, not merely "
+            "off-message. `signal` also carries `markdown.code` and "
+            "`markdown.link`, but those are inline runs inside a paragraph "
+            "while this is a bolded line opening a document behind a `#` "
+            "marker — the two are never confusable in position."
         ),
     ),
     Binding(
@@ -257,21 +260,42 @@ _MARKDOWN_BINDINGS: tuple[Binding, ...] = (
             "that separates the two without growing the accent budget."
         ),
     ),
-    Binding("markdown.h3", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
-    # h4 drops the bold rather than taking a fourth hue. h3 and h4 were the
-    # same token AND the same weight — byte-identical ink in all 54 themes,
-    # by construction rather than by palette accident, so the two levels were
-    # indistinguishable everywhere. Weight is the channel that fixes it for
-    # free: it spends no token, so the accent enumeration in
-    # local_operator.tcss is untouched, and it inverts in no palette. A hue
-    # here does not survive the ramp: binding h4 (or h3) to `signal` measured
-    # h3-louder-than-h2 in 26 of 54 themes and h3-louder-than-h1 in 12,
-    # because the semantic tokens carry no ordering among themselves — the
-    # neutral ramp does. Weight alone is the WEAKEST of the three channels
-    # and is not asked to work alone; the heading marker below is definitive.
-    Binding("markdown.h4", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
-    Binding("markdown.h5", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
-    Binding("markdown.h6", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding(
+        "markdown.h3",
+        "warning",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        bold=True,
+        note=(
+            "`warning` here is the third STRUCTURAL hue, not the outcome hue — "
+            "the same argument `code.string`/`code.number` already make (see "
+            "the module docstring): the token names an ink, and this use "
+            "answers 'where am I in the document', not 'did this work'. It "
+            "never appears on a row that also reports an outcome.\n\n"
+            "Chosen by measurement, not taste. `string` looks like the "
+            "natural third hue but is an ALIAS in most palettes — min dE76 "
+            "0.0 against `success`, `warning` AND `signal` across 54 themes — "
+            "so a ramp using it collided in 28 of them. `warning` is 44.5 "
+            "from `signal` and 25.1 from `success`, the widest available "
+            "separation, and it lifts the ramp's worst contrast from 3.61:1 "
+            "to 4.26:1."
+        ),
+    ),
+    # h4 carries the fourth hue UNBOLDED, which is how the ramp keeps
+    # descending after hue runs out of ordering: h1-h4 are hue + weight,
+    # h5/h6 fall back to the neutral ramp and separate by weight alone. The
+    # `#` markers restored in `markdown_theme._flat_heading` state the level
+    # outright, so hue is free to buy SCANNABILITY rather than rank — which
+    # is the whole reason a hue-per-level ramp is safe here and was not
+    # before.
+    Binding("markdown.h4", "success", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    # h5/h6 both `muted`, differing by weight. NOT `dim`: `dim` measures
+    # below 4.5:1 on `bg` in 30 of 54 themes, so the old tail shipped
+    # sub-AA heading text in more than half the palettes. `muted` clears
+    # 4.84:1 in all 54, which is what lifts the ramp's floor to 4.26:1.
+    Binding("markdown.h5", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT, bold=True),
+    Binding("markdown.h6", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding(
         "markdown.heading_marker",
         "dim",
@@ -308,14 +332,19 @@ _CODE_BINDINGS: tuple[Binding, ...] = (
     Binding("code.comment", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding(
         "code.keyword",
-        "muted",
+        "label",
         "bg",
         Role.NEUTRAL,
         Surface.TRANSCRIPT,
+        bold=True,
         note=(
-            "NOT accent: syntax highlighting would spend the running-indicator "
-            "budget on every `def` in the transcript. Keywords are already "
-            "distinguished by position, and the ramp keeps Name.Function at muted."
+            "Still NOT `accent` — syntax highlighting must not spend the "
+            "running-indicator budget on every `def` in the transcript. But "
+            "`muted` was the opposite error: keyword, function, class and "
+            "builtin ALL resolved to it, so a fence was one grey and the "
+            "reader parsed structure from position alone. `label` is the "
+            "meta hue, distinct from `signal` (functions) at min dE76 11.0 "
+            "across 54 themes."
         ),
     ),
     # `warning` (amber) here is the code-literal hue, not the outcome hue —
@@ -338,12 +367,12 @@ _CODE_BINDINGS: tuple[Binding, ...] = (
         ),
     ),
     Binding("code.name", "fg", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
-    Binding("code.name_function", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
-    Binding("code.name_class", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
-    Binding("code.name_builtin", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding("code.name_function", "signal", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding("code.name_class", "warning", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding("code.name_builtin", "label", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("code.string", "warning", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("code.number", "warning", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
-    Binding("code.operator", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding("code.operator", "label", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("code.punctuation", "dim", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("code.error", "danger", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
     Binding("code.generic", "fg", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
@@ -351,7 +380,28 @@ _CODE_BINDINGS: tuple[Binding, ...] = (
     # and the `Syntax(..., background_color=...)` argument in
     # `IslandCodeBlock`). A GROUND binding renders ON itself: it establishes
     # the surface rather than sitting on one.
-    Binding("code.background", "bg", "bg", Role.GROUND, Surface.TRANSCRIPT),
+    Binding(
+        "code.background",
+        "raised",
+        "raised",
+        Role.GROUND,
+        Surface.TRANSCRIPT,
+        note=(
+            "The fence gets a real SLAB. On `bg` a code block was the same "
+            "paper as the prose around it, so a fence had no edges and a "
+            "reader had to infer where code started from the syntax colours "
+            "alone. `raised` is the elevation token the transcript never "
+            "spent: measured across 54 themes it is visibly distinct from "
+            "`bg` in 53 (the exception is `paper`, whose ramp is flat by "
+            "design) and still holds `fg` at min 6.09:1, so the slab costs "
+            "no legibility.\n\n"
+            "This is the D2 slab decision REVISITED, not reversed: the "
+            "original objection was to rich's default Monokai block, whose "
+            "ground was unrelated to the theme and was the loudest chrome in "
+            "the transcript. A ground drawn from the theme's own elevation "
+            "ramp is one step of depth, not a competing surface."
+        ),
+    ),
 )
 
 #: `IslandSyntaxTheme`'s pygments token -> element name. Kept here, next to
