@@ -147,7 +147,12 @@ async def run_arm(
     case: Case,
     ask_description: str,
 ) -> dict[str, Any]:
-    from local_operator.harness.types import AgentTool, ChatRequest, Message, TextContent
+    from local_operator.harness.types import (
+        AgentTool,
+        ChatRequest,
+        Message,
+        TextContent,
+    )
 
     def _msg(role: str, text: str) -> Message:
         return Message(role=role, content=[TextContent(text=text)])  # type: ignore[arg-type]
