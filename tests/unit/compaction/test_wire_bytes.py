@@ -504,7 +504,11 @@ def test_sizing_never_raises_on_a_lone_surrogate(payload: str) -> None:
 
     Fails on 2b15c340 with UnicodeEncodeError.
     """
-    from local_operator.compaction.tokens import _argument_bytes, _string_bytes, _utf8_len
+    from local_operator.compaction.tokens import (
+        _argument_bytes,
+        _string_bytes,
+        _utf8_len,
+    )
 
     assert _string_bytes(payload) > 0
     assert _utf8_len(payload) > 0
@@ -556,7 +560,7 @@ def test_a_tool_call_carrying_a_surrogate_is_sized_on_both_branches() -> None:
         {"path": "/src/\u6a21\u5757.py", "content": 'x = "\u00e9"\n' * 50},
     ],
 )
-def test_raw_arguments_are_sized_in_bytes_not_characters(arguments: dict) -> None:
+def test_raw_arguments_are_sized_in_bytes_not_characters(arguments: dict[str, str]) -> None:
     """Fails on 2b15c340 for every non-ASCII payload."""
     raw = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
     message = Message.assistant("")
