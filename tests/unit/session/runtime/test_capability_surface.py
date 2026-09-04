@@ -61,9 +61,42 @@ def _handle_attributes_read_by_the_server() -> set[str]:
     probes and direct `self._handle.name(...)` calls. A regex over one of them
     is how the round-3 audit missed four capabilities.
     """
-    source = (RUNTIME_DIR / "server.py").read_text()
+    return _attributes_read_in((RUNTIME_DIR / "server.py").read_text())
+
+
+def _attributes_read_in(source: str) -> set[str]:
+    """The extractor itself, over arbitrary source.
+
+    Split from its input so the mutation test below can feed it a synthetic
+    module and prove the extractor sees a capability HOWEVER it is spelled.
+    Testing the real extractor is the point: a second copy written for the
+    test would pass while the production one stayed blind.
+    """
     tree = ast.parse(source)
     names: set[str] = set()
+
+    # LOCAL ALIASES OF THE HANDLE, discovered rather than hardcoded. The
+    # server's own dispatchers open with `h = self._handle` and then call
+    # `h.prompt(...)`, `h.slash(...)`, `h.abort()` — a shape that is neither a
+    # `getattr` probe nor a `self._handle.x` access, so the audit could not see
+    # TEN capabilities including the two most central ones. Proved by mutation:
+    # the same missing capability was caught when spelled `self._handle.x` and
+    # missed when spelled `h.x` (round 5, Q5).
+    #
+    # Collected from the assignments themselves so a future `handle = self._handle`
+    # in a new dispatcher is covered without editing this list — the hardcoded
+    # `{"h", "handle"}` set below is only the receiver names for `getattr`,
+    # which is a separate and much older shape.
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Attribute)
+                and value.attr == "_handle"
+            ):
+                aliases.add(target.id)
 
     for node in ast.walk(tree):
         # getattr(h, "name", ...) / getattr(handle, "name", ...)
@@ -81,15 +114,15 @@ def _handle_attributes_read_by_the_server() -> set[str]:
                 receiver = target.id
             elif isinstance(target, ast.Attribute):
                 receiver = target.attr
-            if receiver in {"h", "handle", "_handle"}:
+            if receiver in {"h", "handle", "_handle"} | aliases:
                 names.add(node.args[1].value)
-        # self._handle.name(...)
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Attribute)
-            and node.value.attr == "_handle"
-        ):
-            names.add(node.attr)
+        if isinstance(node, ast.Attribute):
+            # self._handle.name(...)
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "_handle":
+                names.add(node.attr)
+            # h.name(...) — the aliased read, via a name assigned from the handle
+            elif isinstance(node.value, ast.Name) and node.value.id in aliases:
+                names.add(node.attr)
 
     return names
 
@@ -263,3 +296,46 @@ def test_the_runtime_knows_every_mcp_verb_the_terminal_offers() -> None:
             f"/mcp {verb} is not dispatched by the runtime, so it falls through "
             "to a listing that looks like success"
         )
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "self._handle.{name}()",
+        # The alias, which the extractor was blind to. `_dispatch` opens with
+        # `h = self._handle` and calls `h.prompt(...)` / `h.slash(...)`, so
+        # this is the shape the server ACTUALLY uses for its most central
+        # capabilities — and the audit could not see ten of them (round 5, Q5).
+        "h = self._handle\n    h.{name}()",
+        'getattr(self._handle, "{name}", None)',
+        'getattr(h, "{name}", None)',
+    ],
+)
+def test_the_extractor_sees_a_capability_however_it_is_spelled(spelling: str) -> None:
+    """QA's mutation, committed so the blind spot cannot silently return.
+
+    The guard this file provides is only worth what its extractor can see. QA
+    proved the same missing capability was CAUGHT when written
+    `self._handle.x` and MISSED when written `h.x` — so whether the audit
+    protects a capability depended on the author's spelling, not on the code.
+
+    Runs the real extractor against a synthetic module rather than asserting
+    against a name list: a list would be updated by the same person who
+    forgot to teach the extractor a new shape.
+    """
+    import ast as _ast
+
+    marker = "qa5_probe_capability"
+    statements = spelling.format(name=marker).split("\n")
+    module = "class RuntimeServer:\n    def _dispatch(self):\n" + "".join(
+        f"        {line.strip()}\n" for line in statements
+    )
+    # Parse the fixture first: a malformed synthetic module would otherwise
+    # yield an empty name set and read as a blind spot that is not there.
+    _ast.parse(module)
+
+    seen = _attributes_read_in(module)
+    assert marker in seen, (
+        f"the extractor cannot see a capability spelled {spelling!r}; a guard "
+        "that depends on how a call is written does not guard anything"
+    )
