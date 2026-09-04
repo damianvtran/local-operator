@@ -99,6 +99,53 @@ def test_only_a_genuine_pair_of_zeroes_reads_as_free() -> None:
     assert format_price_pair(-1.0, 0.0) == ""
 
 
+def test_a_meta_route_reads_as_usage_based_rather_than_free_or_blank() -> None:
+    """The fourth price state, and the two wrong labels it replaces.
+
+    A router's cost depends on the model it dispatches to, so neither existing
+    answer is true of it: ``free`` is a promise the user would act on, and a
+    blank cell is the same thing this column says about a model nobody priced.
+    Both were reachable for ``radient/auto`` depending only on which shape its
+    listing happened to quote.
+    """
+    assert format_price_pair(-1.0, -1.0, routed=True) == "usage-based"
+    # The flag is checked FIRST, and that is the point rather than an ordering
+    # detail: a stale listing quoting a symmetric zero for a router (Radient's
+    # does today) must not be able to out-vote the endpoint's own nature.
+    assert format_price_pair(0.0, 0.0, routed=True) == "usage-based"
+    # Unset, every pre-existing answer is unchanged.
+    assert format_price_pair(0.0, 0.0) == "free"
+    assert format_price_pair(-1.0, -1.0) == ""
+    assert format_price_pair(3.0, 15.0) == "$3/15"
+
+
+def test_the_routed_label_does_not_overflow_the_price_column() -> None:
+    """`usage-based` is materially longer than `free`, and this column is
+    width-constrained — so the width it costs is a property worth pinning.
+
+    At the picker's narrowest painted width the row must still fit exactly,
+    with the id truncated rather than the numbers run spilling past the edge.
+    """
+    row = ModelRow(
+        provider="radient",
+        model_id="auto",
+        label="Automatic",
+        context_window=1_048_576,
+        input_price=-1.0,
+        output_price=-1.0,
+        aggregated=True,
+        routed=True,
+    )
+    picker = ModelPicker(lambda chosen: None)
+    picker.set_rows([row], current="radient/auto", status="")
+
+    for width in (56, 60, 73, 100):
+        painted = picker._row(0, width).plain
+        assert cell_len(painted) == width, (width, painted)
+        assert "usage-based" in painted, (width, painted)
+        assert "1m" in painted, (width, painted)
+
+
 def test_a_sub_cent_price_keeps_three_significant_figures() -> None:
     """The `$18.75 -> $19` argument does not stop at one cent.
 

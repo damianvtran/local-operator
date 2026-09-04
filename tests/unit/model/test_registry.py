@@ -443,3 +443,49 @@ def test_withdrawn_deepseek_snapshot_still_resolves_for_existing_configs() -> No
     # The undated alias is a DIFFERENT id and keeps its recommendation: the
     # measured failure is specific to the July snapshot.
     assert "deepseek/deepseek-v4-flash" in RecommendedOpenRouterModelIds
+
+
+@pytest.mark.parametrize("provider", ["radient", "openrouter"])
+def test_an_aggregator_router_resolves_to_a_real_window_and_accepts_images(
+    provider: str,
+) -> None:
+    """The router templates describe a ROUTE, and both facts below are things a
+    session acts on rather than cosmetics.
+
+    ``context_window=-1`` was normalised by ``build_model_spec`` to the 128k
+    unknown default, and the session derives its compaction threshold from that
+    number — so a router that accepts 1M compacted at an eighth of its room,
+    and the picker advertised ``128k`` for it. ``supports_images=False`` is a
+    positive statement of incapacity in this registry's three-state scheme, not
+    an "unknown": it made the session strip images and announce that the model
+    does not accept them, which is false for every model these routers select.
+    """
+    info = get_model_info(provider, "auto")
+    assert info.context_window == 1_048_576
+    assert info.supports_images is True
+
+    spec = build_model_spec(provider, "auto")
+    assert spec.context_window == 1_048_576, "the sentinel no longer collapses to 128k"
+    assert spec.supports_images is True, "the session must not strip images on a router"
+
+    # ``max_tokens`` stays unknown ON PURPOSE: the output cap belongs to the
+    # SELECTED model and varies by an order of magnitude across the routes, so
+    # there is no honest router-wide number to state. Pinned so a later edit
+    # that invents one has to argue with this comment first.
+    assert info.max_tokens == -1
+
+
+@pytest.mark.parametrize("provider", ["radient", "openrouter"])
+def test_an_arbitrary_aggregator_model_keeps_the_unknown_sentinels(provider: str) -> None:
+    """The router's numbers must NOT leak onto the aggregator's other ids.
+
+    The provider template answers for "a model this aggregator serves that we
+    know nothing else about", and for that question ``-1`` is the honest
+    answer: an arbitrary unlisted model could have any window, and handing it
+    the router's 1M would suppress compaction on a small model until the
+    provider rejected the turn. Only the ONE known router id gets the real
+    numbers, which is why the two rows are separate.
+    """
+    info = get_model_info(provider, "some-vendor/never-heard-of-it")
+    assert info.context_window == -1
+    assert info.supports_images is False
