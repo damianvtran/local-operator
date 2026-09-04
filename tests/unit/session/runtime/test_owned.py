@@ -1131,8 +1131,8 @@ async def test_routed_mcp_reauth_runs_instead_of_refusing_the_local_user(
     assert "authorizing MCP server 'notion'" in result.text
     assert result.style == "info"
 
-    for task in list(handle._mcp_reload_tasks):
-        await asyncio.shield(task)
+    for task in list(handle._mcp_grant_tasks):
+        await asyncio.gather(task, return_exceptions=True)
     # The stored grant is forgotten BEFORE the reconnect, or the manager's
     # auto-reconnect re-authenticates the session the user just reset.
     assert fake_mcp_logout == ["notion"]
@@ -1204,12 +1204,96 @@ async def test_the_settled_grant_reaches_viewers_as_a_notice(
     session._emit = _emit
 
     await handle._slash_result("mcp", "login notion", SlashResult)
+    # The grant settles first; the notice it emits is a SEPARATE task on the
+    # ordinary holder (a notice must not go through the superseding path, or
+    # it would cancel the grant reporting it).
+    for task in list(handle._mcp_grant_tasks):
+        await asyncio.gather(task, return_exceptions=True)
     for task in list(handle._mcp_reload_tasks):
-        await asyncio.shield(task)
-    # The notice is emitted by a task the first one spawns; settle that too.
-    for task in list(handle._mcp_reload_tasks):
-        await asyncio.shield(task)
+        await asyncio.gather(task, return_exceptions=True)
 
     notices = [e for e in emitted if isinstance(e, NoticeEvent)]
     assert notices, "the settled grant never reached the event stream"
     assert "authenticated MCP server 'notion'" in notices[0].text
+
+
+@pytest.mark.asyncio
+async def test_a_second_grant_supersedes_the_first(fake_mcp_logout: list[str]) -> None:
+    """F3: every grant binds the same loopback redirect port, so only one runs.
+
+    Two concurrent exchanges race for that port and the loser fails with a bind
+    error describing nothing the user did. The TUI has always serialised these
+    through an exclusive worker group; the runtime had no equivalent.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+
+    class _Blocking(_GrantManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def connect_configured_server(self, name, *, timeout_ms=None):  # noqa: ANN001, ANN202
+            await self.release.wait()
+            return await super().connect_configured_server(name, timeout_ms=timeout_ms)
+
+    session.mcp_manager = _Blocking()
+    notices: list[str] = []
+
+    async def _emit(event: object) -> None:
+        notices.append(getattr(event, "text", ""))
+
+    session._emit = _emit
+
+    await handle._slash_result("mcp", "login one", SlashResult)
+    await asyncio.sleep(0)
+    first = list(handle._mcp_grant_tasks)
+    assert len(first) == 1
+
+    await handle._slash_result("mcp", "login two", SlashResult)
+    await asyncio.sleep(0)
+    # The first was cancelled to make room, not left racing the second. The
+    # count is of LIVE grants: the cancelled task's done-callback has not run
+    # yet, so it is briefly still in the set — what matters is that exactly one
+    # is still contending for the redirect port.
+    assert first[0].cancelling() or first[0].cancelled() or first[0].done()
+    live = [t for t in handle._mcp_grant_tasks if not (t.done() or t.cancelling())]
+    assert len(live) == 1
+
+    session.mcp_manager.release.set()
+    for task in list(handle._mcp_grant_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+    # The superseded grant still got an ending rather than vanishing.
+    assert any("cancelled" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_dispose_cancels_a_grant_parked_on_a_browser(
+    fake_mcp_logout: list[str],
+) -> None:
+    """F4: a grant waiting on a human must not outlive the session.
+
+    Ten minutes is long enough for the session to be disposed underneath it,
+    and a notice written into a disposed session is at best noise.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+
+    class _Parked(_GrantManager):
+        async def connect_configured_server(self, name, *, timeout_ms=None):  # noqa: ANN001, ANN202
+            # Never returns: the "browser tab" the user never gets to.
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+    session.mcp_manager = _Parked()
+    await handle._slash_result("mcp", "login notion", SlashResult)
+    await asyncio.sleep(0)
+    tasks = list(handle._mcp_grant_tasks)
+    assert len(tasks) == 1 and not tasks[0].done()
+
+    await handle.dispose()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    assert tasks[0].cancelled() or tasks[0].done()

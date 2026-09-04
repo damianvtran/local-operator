@@ -137,6 +137,12 @@ class OwnedSessionHandle(SessionHandle):
         #: Held only so a fire-and-forget task is not garbage-collected while
         #: it runs — asyncio keeps no strong reference of its own.
         self._mcp_reload_tasks: set[asyncio.Task[None]] = set()
+        #: In-flight MCP grants, kept apart from the reload tasks above
+        #: because their lifetimes differ by three orders of magnitude: a
+        #: reload is sub-second best-effort work, a grant waits on a human for
+        #: up to ten minutes. ``dispose`` cancels these; only one runs at a
+        #: time (see ``_spawn_grant``).
+        self._mcp_grant_tasks: set[asyncio.Task[None]] = set()
         #: The RuntimeServer serving this handle, set by its constructor. The
         #: gate path needs it for two things only a server knows: how many
         #: front ends could present a card right now, and how to publish the
@@ -335,6 +341,14 @@ class OwnedSessionHandle(SessionHandle):
                 )
             self._fold.note_prompt_rejected("session closed before the prompt was admitted")
         self._notify()
+        # A grant parked on a browser round trip would otherwise outlive the
+        # session it authenticates, writing its notice into a disposed one.
+        # Cancelled rather than awaited: nobody is going to complete a login
+        # for a session that is going away, and ``_settle`` turns the
+        # cancellation into a receipt on its way out.
+        for grant in list(self._mcp_grant_tasks):
+            if not grant.done():
+                grant.cancel()
         self._unsubscribe_admitted_commands()
         self._command_reservations.clear()
         await self._session.dispose()
@@ -1729,19 +1743,41 @@ class OwnedSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — a failed notice must not kill the loop
                 logger.debug("MCP grant notice failed", exc_info=True)
 
-        self._spawn_grant(_emit_notice())
-
-    def _spawn_grant(self, coro: Awaitable[None]) -> None:
-        """Run a detached grant step on this runtime's own loop.
-
-        Held in a set for the reason ``_reconnect_mcp`` holds its reload task:
-        ``create_task`` keeps only a weak reference, so a bare task can be
-        collected mid-flight and the browser exchange would simply stop with
-        no receipt. The done-callback discards it so the set cannot grow.
-        """
-        task = self._loop.create_task(cast("Coroutine[Any, Any, None]", coro))
+        # NOT through ``_spawn_grant``: this is called FROM a grant task, and
+        # that helper supersedes the running grant — the notice would cancel
+        # the very task reporting it. A notice is also a sub-second local
+        # emission with no exclusivity to enforce, so it belongs on the
+        # ordinary best-effort holder.
+        task = self._loop.create_task(_emit_notice())
         self._mcp_reload_tasks.add(task)
         task.add_done_callback(self._mcp_reload_tasks.discard)
+
+    def _spawn_grant(self, coro: Awaitable[None]) -> None:
+        """Run a detached grant on this runtime's own loop, one at a time.
+
+        Held in a set because ``create_task`` keeps only a weak reference, so a
+        bare task can be collected mid-flight and the exchange would simply
+        stop with no receipt. Its OWN set rather than ``_mcp_reload_tasks``
+        (review F4): a config reload is sub-second best-effort work, while a
+        grant can sit for ten minutes waiting on a person, and ``dispose``
+        must be able to cancel the second without waiting on it.
+
+        **Superseding is the point of the single slot** (review F3). Every
+        grant binds the same loopback redirect port, so two concurrent
+        exchanges race for it and the loser fails with a bind error that
+        describes nothing the user did. The TUI has always serialised these
+        through an exclusive ``mcp-login`` worker group; the runtime had no
+        equivalent, so a detached session could run two at once. Cancelling the
+        previous one reproduces that behaviour: its ``_settle`` reports the
+        cancellation through ``notify``, so the superseded grant still gets an
+        ending rather than vanishing.
+        """
+        for previous in list(self._mcp_grant_tasks):
+            if not previous.done():
+                previous.cancel()
+        task = self._loop.create_task(cast("Coroutine[Any, Any, None]", coro))
+        self._mcp_grant_tasks.add(task)
+        task.add_done_callback(self._mcp_grant_tasks.discard)
 
     def _reconnect_mcp(self) -> None:
         """Re-read the config and reconnect after ``/mcp add|remove`` wrote it.

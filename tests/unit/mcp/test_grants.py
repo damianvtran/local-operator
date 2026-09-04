@@ -270,24 +270,35 @@ async def test_reauth_forgets_the_old_grant_before_reconnecting(
 
 
 @pytest.mark.asyncio
-async def test_an_ineligible_server_is_refused_before_anything_is_deleted() -> None:
-    """A server that takes no OAuth grant must not lose its credential."""
-    manager = _Manager(supports=False)
-    spawned: list[Any] = []
+async def test_an_ineligible_server_never_loses_its_credential(
+    _no_real_credential_writes: list[str],
+) -> None:
+    """A server that takes no OAuth grant must not be logged out by a reauth.
 
-    text, kind = await start_grant(
+    The eligibility probe moved into the detached task (F2/Q1), so the refusal
+    arrives as a notice rather than as the receipt. What must NOT move is the
+    ordering: the probe still gates the credential deletion, or `/mcp reauth`
+    on an api-key server would destroy a working grant and then decline to
+    replace it.
+    """
+    manager = _Manager(supports=False)
+    notices: list[tuple[str, str]] = []
+
+    await start_grant(
         _Session(manager),
         "reauth",
         "notion",
         browser_is_reachable=True,
-        notify=lambda body, style: None,
-        spawn=spawned.append,
+        notify=lambda body, style: notices.append((body, style)),
+        spawn=lambda coro: asyncio.ensure_future(coro),
     )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
-    assert text == "MCP server 'notion' does not use OAuth login."
-    assert kind == "warning"
-    assert spawned == []
+    assert notices == [("MCP server 'notion' does not use OAuth login.", "warning")]
+    assert _no_real_credential_writes == [], "an ineligible server lost its credential"
     assert manager.disconnected == []
+    assert manager.connected == []
 
 
 def test_resolve_server_refuses_a_session_without_mcp() -> None:
@@ -301,3 +312,93 @@ def test_resolve_server_names_an_unconfigured_server() -> None:
 
     result = resolve_server(_Session(_Empty()), "notion")
     assert result == "MCP server 'notion' is not configured — see /mcp"
+
+
+@pytest.mark.asyncio
+async def test_the_capability_probe_does_not_block_the_receipt() -> None:
+    """F2/Q1: the OAuth capability probe must run INSIDE the detached task.
+
+    The probe is up to three sequential 10 s HTTP discovery GETs with no total
+    cap, on exactly the url-only config it exists for. Awaited before the spawn
+    it measured 30.7 s against an unroutable host — past the invoker's 15 s
+    ACK_TIMEOUT_S, and holding the runtime's serial reader the whole time.
+
+    The original test suite could not see this: its manager answered the probe
+    instantly, so only the half AFTER the spawn was ever gated.
+    """
+    probing = asyncio.Event()
+
+    class _SlowProbeManager(_Manager):
+        async def server_supports_oauth_login(self, cfg: Any) -> bool:
+            probing.set()
+            await asyncio.sleep(3600)  # the unroutable host
+            return True
+
+    manager = _SlowProbeManager()
+    spawned: list[Any] = []
+
+    text, kind = await asyncio.wait_for(
+        start_grant(
+            _Session(manager),
+            "login",
+            "notion",
+            browser_is_reachable=True,
+            notify=lambda body, style: None,
+            spawn=spawned.append,
+        ),
+        timeout=1.0,  # far inside ACK_TIMEOUT_S; fails outright if it regresses
+    )
+
+    assert kind == "info"
+    assert len(spawned) == 1
+    # The probe has not even started: it belongs to the task, not the request.
+    assert not probing.is_set()
+
+    task = asyncio.ensure_future(spawned[0])
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert probing.is_set(), "the probe never ran in the detached task"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_an_ineligible_server_is_reported_through_notify() -> None:
+    """The probe moved, so its refusal is now a notice rather than a receipt.
+
+    It must still be SAID — a server that takes no OAuth grant cannot silently
+    look like a grant in progress.
+    """
+    manager = _Manager(supports=False)
+    notices: list[tuple[str, str]] = []
+
+    text, _kind = await start_grant(
+        _Session(manager),
+        "login",
+        "notion",
+        browser_is_reachable=True,
+        notify=lambda body, style: notices.append((body, style)),
+        spawn=lambda coro: asyncio.ensure_future(coro),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert "authorizing" in text
+    assert notices == [("MCP server 'notion' does not use OAuth login.", "warning")]
+    assert manager.connected == []
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_does_not_promise_a_browser_it_may_not_open() -> None:
+    """Whether a tab opens is decided by the probe, after the receipt is sent."""
+    manager = _Manager(supports=False)
+    text, _ = await start_grant(
+        _Session(manager),
+        "login",
+        "notion",
+        browser_is_reachable=True,
+        notify=lambda body, style: None,
+        spawn=lambda coro: asyncio.ensure_future(coro),
+    )
+    assert "browser tab is opening" not in text

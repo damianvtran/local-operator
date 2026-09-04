@@ -239,6 +239,63 @@ async def main() -> int:
         else:
             print("    PASS  : malformed commands ran nothing\n")
         writer.close()
+
+        # --- 4. the phone daemon dials as remote (review F1) ------------------
+        # Byte-identical to mobile/daemon.py::_dial. Before the fix it sent
+        # {"key": ...} alone, was classified local, and a phone's /mcp reauth
+        # opened a browser on this desktop.
+        session.mcp_manager = Manager()
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "locality": "remote"}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), timeout=5)
+        reply = await send_slash(reader, writer, 6, "reauth notion")
+        print(f"[4] DAEMON-class dial -> {reply['data']['text']}")
+        await asyncio.sleep(0.2)
+        if "run it from a terminal on that machine" not in reply["data"]["text"]:
+            print("    FAIL  : the phone relay would open a browser on this desktop")
+            failures += 1
+        elif session.mcp_manager.connected or session.mcp_manager.disconnected:
+            print("    FAIL  : refused but still touched the credential")
+            failures += 1
+        else:
+            print("    PASS  : the relay is refused, and nothing was touched\n")
+        writer.close()
+
+        # --- 5. a slow capability probe must not hold the reader (F2/Q1) ------
+        # The probe is up to three sequential 10s HTTP GETs. Awaited inside the
+        # request it blew past ACK_TIMEOUT_S (15s) and parked every other op on
+        # the connection behind it.
+        class SlowProbe(Manager):
+            async def server_supports_oauth_login(self, cfg: Any) -> bool:
+                await asyncio.sleep(3600)
+                return True
+
+        session.mcp_manager = SlowProbe()
+        reader, writer = await dial(record, locality=None)
+        started = asyncio.get_running_loop().time()
+        reply = await send_slash(reader, writer, 7, "login notion")
+        elapsed = asyncio.get_running_loop().time() - started
+        print("[5] `/mcp login` with an unreachable probe host")
+        print(f"    receipt after {elapsed:.2f}s (ACK_TIMEOUT_S is 15s)")
+        if elapsed > 5:
+            print("    FAIL  : the probe is still blocking the request")
+            failures += 1
+        else:
+            print("    PASS  : the receipt returned immediately")
+        # And the connection is still usable while that grant hangs.
+        started = asyncio.get_running_loop().time()
+        await send_slash(reader, writer, 8, "list")
+        elapsed = asyncio.get_running_loop().time() - started
+        print(f"    a second op on the SAME connection answered in {elapsed:.2f}s")
+        if elapsed > 5:
+            print("    FAIL  : the serial reader is parked behind the grant")
+            failures += 1
+        else:
+            print("    PASS  : the connection stayed responsive\n")
+        writer.close()
     finally:
         runtime.close()
 

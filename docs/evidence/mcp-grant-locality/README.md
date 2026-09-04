@@ -58,8 +58,12 @@ case it was meant to protect.
   every attached front end.
 - `ClientLocality` (`session/runtime/types.py`) — locality becomes a property
   the CLIENT declares in its auth frame, defaulting to `local`. The runtime no
-  longer guesses. This is the seam a future mobile relay uses to say `remote`
-  and get the refusal, which is kept for the topology it actually describes.
+  longer guesses. The refusal is kept for the topology it actually describes.
+- `mobile/daemon.py` declares `"locality": "remote"`. The phone relay dials
+  over loopback like everything else, so it was classified local and a phone's
+  `/mcp reauth` would have opened a browser on the desktop and rewritten a
+  credential the phone's owner cannot see. Loopback proves the CALLER is on
+  this machine; it does not prove the PERSON is. (Review F1.)
 - `tui/app.py` now delegates to the same core, so the attached and detached
   paths cannot diverge.
 
@@ -82,6 +86,8 @@ See `e2e_after.txt` for the captured run. Summary:
 | `/mcp reauth` (no name) | `usage: /mcp reauth <name>` |
 | `/mcp reauth a b` | `takes one server name — got 'a b'` |
 | `/mcp bogus x` | `unknown mcp subcommand: bogus` |
+| **Daemon-class dial** (byte-identical to `mobile/daemon.py::_dial`) | Refused; nothing touched (F1) |
+| **Unreachable capability-probe host** | Receipt in **0.00 s** (was 30.7 s, past the 15 s `ACK_TIMEOUT_S`), and a second op on the same connection answers in **0.00 s** rather than parking behind the grant (F2/Q1) |
 
 The script patches `mcp_logout_server` before running. Without that it deletes
 a real credential from the developer's `~/.local-operator/auth.db` as a side

@@ -196,19 +196,21 @@ async def start_grant(
 ) -> tuple[str, NoticeKind]:
     """Validate one grant verb and start it; return the IMMEDIATE receipt.
 
-    The synchronous half — does this session have MCP, is the server
-    configured, does it take an OAuth grant — is answered before returning, so
-    a typo or an ineligible server is refused right away instead of being
-    reported minutes later through a side channel.
+    Only the checks that are FREE happen before returning: does this session
+    have MCP, is the server configured, is it statically ineligible (a stdio
+    server, or one whose config names a non-OAuth auth type). Those are local
+    dictionary reads, so a typo is still refused instantly.
 
-    The interactive half runs detached via ``spawn`` and reports through
-    ``notify``. That split is what keeps the runtime's serial reader free (see
-    the module docstring): the caller gets its ``result`` frame in
-    milliseconds and the browser exchange settles on its own.
+    Everything that can touch the network or wait on a person runs detached via
+    ``spawn`` and reports through ``notify`` — including the OAuth capability
+    probe, which is up to three sequential 10 s HTTP GETs and was measured at
+    30.7 s against an unroutable host. That split is what keeps the runtime's
+    serial reader free (see the module docstring): the caller gets its
+    ``result`` frame in milliseconds no matter how slow the far side is.
 
-    ``logout`` has no browser step and no human in the loop, so it is awaited
-    inline and its real outcome is the returned receipt. Only the two verbs
-    that can block on a person are detached.
+    ``logout`` has no browser step, no probe and no human in the loop — it is
+    two local operations — so it is awaited inline and its real outcome is the
+    returned receipt. Only the verbs that can block are detached.
     """
     if not browser_is_reachable:
         return REMOTE_GRANT_NOTICE.format(sub=sub), "warning"
@@ -221,16 +223,28 @@ async def start_grant(
     if sub == "logout":
         return await run_grant(manager, sub, name)
 
-    # The half ``resolve_server`` cannot answer: it is synchronous, and "does
-    # this server take an OAuth grant?" needs a metadata round trip whenever
-    # the config does not say. Without it a deliberate login is enabled for
-    # every remote server, including API-key ones whose 401 would then open an
-    # unrelated OAuth attempt.
-    if not await login_allowed(manager, cfg):
-        return f"MCP server {name!r} does not use OAuth login.", "warning"
-
     async def _settle() -> None:
         try:
+            # The half ``resolve_server`` cannot answer: it is synchronous, and
+            # "does this server take an OAuth grant?" needs a metadata round
+            # trip whenever the config does not say. Without it a deliberate
+            # login is enabled for every remote server, including API-key ones
+            # whose 401 would then open an unrelated OAuth attempt.
+            #
+            # Run INSIDE the detached task, not before it. The probe is up to
+            # three sequential 10 s HTTP discovery GETs with no total cap, on
+            # exactly the url-only config it exists for (a Codex import, or any
+            # server just after ``/mcp logout`` — logout deletes the stored
+            # credential that was the short-circuit evidence). Awaiting it in
+            # the request measured 30.7 s against an unroutable host, past the
+            # invoker's 15 s ``ACK_TIMEOUT_S`` and holding the runtime's serial
+            # reader the whole time — the exact wedge this split exists to
+            # prevent (review F2 / QA Q1). The receipt below is deliberately
+            # provisional for that reason: the ineligible case is reported
+            # through ``notify`` like any other outcome.
+            if not await login_allowed(manager, cfg):
+                notify(f"MCP server {name!r} does not use OAuth login.", "warning")
+                return
             text, kind = await run_grant(manager, sub, name)
         except asyncio.CancelledError:
             notify(
@@ -245,8 +259,13 @@ async def start_grant(
         notify(text, kind)
 
     spawn(_settle())
+    # Deliberately does NOT promise a browser tab. Whether one opens depends on
+    # the capability probe that now runs inside the task, so a receipt claiming
+    # "a browser tab is opening" would be false for an ineligible server. It
+    # states what is certainly true — the grant is under way and the answer
+    # arrives here — and the settled ``notify`` says which way it went.
     return (
-        f"authorizing MCP server {name!r} — a browser tab is opening on this "
-        "machine; the result appears here when it completes.",
+        f"authorizing MCP server {name!r} on this machine; "
+        "the result appears here when it completes.",
         "info",
     )

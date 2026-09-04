@@ -1,7 +1,7 @@
-runtime listening on 127.0.0.1:55459
+runtime listening on 127.0.0.1:56845
 
 [1] LOCAL client, `/mcp reauth notion`
-    reply : authorizing MCP server 'notion' — a browser tab is opening on this machine; the result appears here when it completes.
+    reply : authorizing MCP server 'notion' on this machine; the result appears here when it completes.
     style : info
     PASS  : the grant was started
     effect: forgot=['notion'] disconnected=['notion'] connected=['notion']
@@ -18,5 +18,14 @@ runtime listening on 127.0.0.1:55459
 [3] `/mcp reauth a b` -> /mcp reauth takes one server name — got 'a b'
 [3] `/mcp bogus x` -> unknown mcp subcommand: bogus — try /mcp list|add|remove|login|logout|reauth <name>
     PASS  : malformed commands ran nothing
+
+[4] DAEMON-class dial -> /mcp reauth opens a browser and stores credentials on the machine running the session — run it from a terminal on that machine
+    PASS  : the relay is refused, and nothing was touched
+
+[5] `/mcp login` with an unreachable probe host
+    receipt after 0.00s (ACK_TIMEOUT_S is 15s)
+    PASS  : the receipt returned immediately
+    a second op on the SAME connection answered in 0.00s
+    PASS  : the connection stayed responsive
 
 RESULT: ALL CHECKS PASSED

@@ -1557,3 +1557,58 @@ async def test_a_handle_that_does_not_take_locality_still_works() -> None:
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_phone_daemon_dials_as_remote() -> None:
+    """The relay must declare itself, or loopback silently reads as "the user".
+
+    The daemon connects over loopback like everything else, but it is a RELAY:
+    the person is holding a phone on the other side of the mobile portal's
+    tunnel. Before this it sent `{"key": ...}` alone and was classified local,
+    so a phone's `/mcp reauth` would have opened a browser on the desktop and
+    rewritten a credential the phone's owner cannot see (review F1).
+
+    Asserted on the FRAME the daemon actually writes rather than on a constant,
+    so deleting the field from the dial fails this test.
+    """
+    import inspect as _inspect
+
+    from local_operator.mobile import daemon as daemon_module
+
+    source = _inspect.getsource(daemon_module._dial)
+    assert (
+        '"locality": "remote"' in source
+    ), "the daemon must declare locality=remote in its auth frame"
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_class_dial_is_refused_a_grant() -> None:
+    """End-to-end cover for F1: dial exactly as the daemon does, and be remote."""
+    handle = _LocalityHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        # Byte-identical to mobile/daemon.py::_dial — no `client` field, which
+        # means daemon, plus the locality it now declares.
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "locality": "remote"}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), timeout=5)  # welcome
+        writer.write(
+            json.dumps(
+                {"op": "slash_result", "req": 9, "command": "mcp", "args": "reauth n"}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 9)
+        assert handle.localities == ["remote"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
