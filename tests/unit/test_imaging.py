@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import random
 import statistics
 
 import pytest
@@ -28,6 +29,8 @@ from local_operator import imaging
 from local_operator.imaging import (
     _REBOUND_CACHE,
     _REBOUND_CACHE_MAX_BYTES,
+    IMAGE_INGEST_MAX_EDGE,
+    IMAGE_MAX_BYTES,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     IMAGE_REFUSAL_MAX_B64_BYTES,
@@ -111,7 +114,7 @@ def test_a_bounded_image_is_inside_the_many_image_limit(size, label: str) -> Non
     source = _png(size)
     payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
     width, height = Image.open(io.BytesIO(payload)).size
-    assert max(width, height) <= IMAGE_MAX_EDGE
+    assert max(width, height) <= IMAGE_INGEST_MAX_EDGE
     assert max(width, height) < MANY_IMAGE_PIXEL_LIMIT, label
 
 
@@ -141,7 +144,7 @@ def test_the_summary_names_the_source_whenever_the_bytes_changed() -> None:
     summary says so."""
     source = _png((2560, 1440))
     _payload, _mime, summary = bound_image_for_model(source, _sniffed(source))
-    assert "1568x882" in summary
+    assert f"{IMAGE_INGEST_MAX_EDGE}x576" in summary
     assert "source 2560x1440" in summary
 
 
@@ -285,7 +288,11 @@ def test_a_rotation_alone_still_declares_that_the_bytes_changed() -> None:
     A half turn leaves the size identical, so nothing but ``rotated`` can fire.
     """
     buffer = io.BytesIO()
-    image = Image.new("RGB", (1200, 900), (10, 60, 120))
+    # Inside IMAGE_INGEST_MAX_EDGE on both edges, deliberately: a fixture the
+    # ingest bound would RESIZE brings the size trigger back into play, and the
+    # `rotated` disjunct under test could then be deleted with every assertion
+    # still passing — the same hole review round 3, F9 closed for orientation 6.
+    image = Image.new("RGB", (900, 700), (10, 60, 120))
     exif = Image.Exif()
     exif[274] = 3
     image.save(buffer, format="PNG", exif=exif)
@@ -293,8 +300,8 @@ def test_a_rotation_alone_still_declares_that_the_bytes_changed() -> None:
 
     _payload, wire_mime, summary = bound_image_for_model(source, _sniffed(source))
     assert wire_mime == "image/png", "the fixture must not change format"
-    assert "1200x900, " in summary, "the fixture must come back the same SIZE"
-    assert "source 1200x900" in summary
+    assert "900x700, " in summary, "the fixture must come back the same SIZE"
+    assert "source 900x700" in summary
     assert "EXIF-rotated" in summary
 
 
@@ -638,6 +645,111 @@ def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
     assert rebound is not None
     repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
     assert max(repaired.size) == IMAGE_MAX_EDGE, "a photo was not taken to the cheap bound"
+
+
+def test_line_art_keeps_the_correctness_bound_on_ingest() -> None:
+    """PR #603 review round 1, F1.
+
+    The ingest bound is a BILLING argument measured on photographic content,
+    which has no one-pixel strokes to lose. Bilevel renderings of a small pixel
+    font do, and the repair path has carried a carve-out for exactly this since
+    review round 2, F8 — ingest took the sharper reduction with none of the
+    protection.
+
+    Not hypothetical: a snapcompact archive frame is a 1568px bilevel rendering
+    of a 5x7 pixel font, and it reaches this function whenever such a frame is
+    re-read. At 1024 its glyphs lose strokes; measured on a real
+    ``render_frame`` output, "The session was compacted" is legible at 1568 and
+    is not at 1024.
+    """
+    from local_operator.compaction import snapcompact
+
+    text = "\n".join(
+        [
+            "The session was compacted at 2026-09-04T01:12Z after the context",
+            "reached 412,336 tokens against a 600,000 ceiling. Below is the",
+            "archived middle of the conversation, rendered as pixel-font frames.",
+        ]
+        * 6
+    )
+    frame = snapcompact.render_frame(text, snapcompact.resolve_shape("anthropic", "claude-opus-5"))
+    info = _sniffed(frame)
+    assert (
+        max(info.width or 0, info.height or 0) > IMAGE_INGEST_MAX_EDGE
+    ), "the fixture must be over the ingest bound or it proves nothing"
+
+    payload, _mime, _summary = bound_image_for_model(frame, info)
+
+    # Byte-identical passthrough, not merely "not shrunk to 1024": a frame this
+    # function rewrites is also a frame a prompt cache has to re-write.
+    assert payload == frame
+    width, height = Image.open(io.BytesIO(payload)).size
+    assert max(width, height) <= IMAGE_MAX_EDGE
+
+
+def test_photographic_content_still_takes_the_cheaper_ingest_bound() -> None:
+    """The mirror of the carve-out above: it must not swallow the saving.
+
+    A photographic image has no strokes to lose, so it takes
+    :data:`IMAGE_INGEST_MAX_EDGE` and the billed-area reduction the bound
+    exists for.
+    """
+    source = _noise_png((2560, 1440))
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    width, height = Image.open(io.BytesIO(payload)).size
+    assert max(width, height) == IMAGE_INGEST_MAX_EDGE
+
+
+def test_a_repair_keeps_png_when_jpeg_would_be_bigger() -> None:
+    """The lossy rung must MEASURE rather than assume it wins.
+
+    Sharp noise over an 8-colour palette at 1568x1176 measures ~1.12 MiB as PNG
+    (over :data:`IMAGE_MAX_BYTES`, so the lossy rung fires) against ~1.70 MiB as
+    quality-85 JPEG. Taking JPEG on the way past the budget would be worse on
+    BOTH axes, bigger and lossy, so the rung declines itself.
+
+    Exercised at the REPAIR bound rather than through ``read``: bounding ingest
+    to :data:`IMAGE_INGEST_MAX_EDGE` caps the delivered area at 1024x1024, and
+    at that area the rung's two conditions never hold together. A palette-noise
+    sweep walks three regimes in order — PNG smaller and under budget, then
+    JPEG smaller and still under budget, then JPEG smaller with PNG over
+    budget — and the rung would need a fourth between the first and the last.
+
+    Figures are deliberately NOT restated here: this comment carried three
+    different wrong mechanisms across three review rounds before the generator
+    was checked in. Run ``scripts/measure_ingest_lossy_rung.py`` for the table;
+    the crossover colour counts are fixture-specific, the regime ORDERING is
+    not, and the ordering is the whole argument.
+
+    Still reachable whenever a caller passes an explicit ``max_edge``
+    (``rebound_oversize_image`` does), which is where the branch needs cover.
+    """
+    rng = random.Random(1234)
+    palette = [
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 255, 0),
+        (0, 255, 255),
+        (255, 0, 255),
+        (255, 255, 255),
+        (0, 0, 0),
+    ]
+    image = Image.new("RGB", (1568, 1176))
+    pixels = image.load()
+    assert pixels is not None
+    for y in range(1176):
+        for x in range(1568):
+            pixels[x, y] = palette[rng.randrange(len(palette))]
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True, compress_level=9)
+    source = buffer.getvalue()
+
+    payload, mime, _summary = bound_image_for_model(
+        source, _sniffed(source), max_edge=IMAGE_MAX_EDGE
+    )
+    assert mime == "image/png", "the lossy rung took a JPEG that was BIGGER"
+    assert len(payload) > IMAGE_MAX_BYTES, "the fixture no longer reaches the rung"
 
 
 def test_a_block_under_every_pixel_ceiling_can_still_be_too_heavy() -> None:

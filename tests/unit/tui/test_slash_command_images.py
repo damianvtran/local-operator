@@ -72,7 +72,7 @@ def _agent_registry(tmp: Path) -> AgentRegistry:
     return registry
 
 
-def _png(path: Path, width: int = 1568, height: int = 200) -> str:
+def _png(path: Path, width: int = 1000, height: int = 200) -> str:
     Image.new("RGB", (width, height), (30, 30, 40)).save(path)
     return str(path)
 
@@ -93,7 +93,7 @@ async def _paste(app: OperatorApp, pilot, text: str) -> None:
 @pytest.mark.asyncio
 async def test_team_request_carries_the_pasted_image(tmp_path) -> None:
     """`/team <name> <request>` sends the screenshot the request cites."""
-    path = _png(tmp_path / "shot.png", 1568, 410)
+    path = _png(tmp_path / "shot.png", 1000, 410)
     session = FakeSession()
     reg = TeamRegistry(Path(tempfile.mkdtemp()))
     reg.create_team(
@@ -119,7 +119,7 @@ async def test_team_request_carries_the_pasted_image(tmp_path) -> None:
         await pilot.pause()
 
         assert [t.name for t in session.attached_teams] == ["ops"]
-        assert session.prompts == ["look at [Image #1, 1568x410] and fix it"]
+        assert session.prompts == ["look at [Image #1, 1000x410] and fix it"]
         # The crux: one image, and it is the pixels that were pasted.
         (sent,) = session.prompt_images[0]
         decoded = Image.open(io.BytesIO(base64.b64decode(sent.data)))
@@ -240,7 +240,7 @@ async def test_team_marker_in_the_name_position_is_not_an_image(tmp_path) -> Non
 @pytest.mark.asyncio
 async def test_agent_message_carries_the_pasted_image(tmp_path) -> None:
     """`/agent <name> <message>` sends the screenshot the message cites."""
-    path = _png(tmp_path / "shot.png", 1568, 410)
+    path = _png(tmp_path / "shot.png", 1000, 410)
     session = FakeSession()
     session.agent_registry = _agent_registry(Path(tempfile.mkdtemp()))
     app = OperatorApp(lambda: _factory(session))
@@ -257,7 +257,7 @@ async def test_agent_message_carries_the_pasted_image(tmp_path) -> None:
         await pilot.pause()
 
         assert session.attached_agents == ["auditor"]
-        assert session.prompts == ["what do you make of [Image #1, 1568x410]"]
+        assert session.prompts == ["what do you make of [Image #1, 1000x410]"]
         (sent,) = session.prompt_images[0]
         decoded = Image.open(io.BytesIO(base64.b64decode(sent.data)))
         assert decoded.size[0] > 0 and decoded.size[1] > 0
