@@ -3901,6 +3901,7 @@ class OperatorApp(App[None]):
         # must not either (see the `role == "user"` branch). Deferred once to
         # the top of this method rather than inside the loop, matching the
         # file's other lazy session.* imports.
+        from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
         from local_operator.session.session import _CONTINUATION_PROMPT
 
         for message in history:
@@ -4016,7 +4017,16 @@ class OperatorApp(App[None]):
                     # Replay must make the same choice, or a resumed session
                     # shows rows the live one deliberately suppressed — the
                     # live/replay divergence review round 2 pinned.
-                    if text in (LOOP_PROMPT, _CONTINUATION_PROMPT):
+                    #
+                    # The network-continuation prompt joins them for the same
+                    # reason: it is persisted so the TRANSCRIPT explains why one
+                    # answer arrived in two pieces, but the user never typed it
+                    # and the live run showed a NoticeEvent instead.
+                    if text in (
+                        LOOP_PROMPT,
+                        _CONTINUATION_PROMPT,
+                        CONNECTIVITY_CONTINUATION_PROMPT,
+                    ):
                         continue
                     # A `$skill` invocation persists as its EXPANDED payload,
                     # because that is what the model was sent. Replaying it

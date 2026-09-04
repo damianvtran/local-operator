@@ -4066,6 +4066,125 @@ async def test_connectivity_loss_backoff_is_abortable() -> None:
     await task
 
 
+class _CutAfterDeltas:
+    """A wire client that forwards deltas and THEN dies, like a real severed
+    socket — the only shape that reaches the driver's ``forwarded_any`` arms."""
+
+    def __init__(self, exc: BaseException, deltas: int) -> None:
+        self._exc = exc
+        self._deltas = deltas
+        self.forwarded = 0
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        for index in range(self._deltas):
+            self.forwarded += 1
+            yield StreamTextDelta(delta=f"delta-{index} ")
+        raise self._exc
+
+
+async def _drive_until_error(
+    exc_factory: Any, *, deltas: int
+) -> tuple[list[Any], ProviderError | None]:
+    """Run the REAL ``stream_with_failover`` against a client that cuts out.
+
+    Deliberately goes through the driver rather than calling the classifier: the
+    property under test is the WIRING, so anything that hands the marking to the
+    test instead of making the driver perform it would defeat the purpose.
+    """
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _CutAfterDeltas(exc_factory(), deltas)
+
+    # Budgets floored so a shape that is NOT continuable still terminates fast
+    # rather than sitting in the patient wait this test is not about.
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 1,
+            "connectivityMaxRetries": 0,
+            "fallbackChains": {},
+        }
+    }
+    forwarded: list[Any] = []
+    try:
+        async for event in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+        ):
+            forwarded.append(event)
+    except ProviderError as error:
+        return forwarded, error
+    return forwarded, None
+
+
+@pytest.mark.parametrize(
+    ("arm", "exc_factory"),
+    [
+        # The arm a REAL mid-stream cut lands on: no client in clients.py catches
+        # httpx, so a socket that dies mid-body arrives here raw (failover.py's
+        # own comment says so). QA's narrower mutation deletes only this one.
+        ("raw-httpx", lambda: httpx.ReadError("")),
+        # The sibling arm, for a client that wrapped the transport failure into a
+        # ProviderError itself before it reached the driver.
+        ("pre-wrapped", lambda: wrap_transport_error(httpx.ReadError(""))),
+    ],
+)
+async def test_the_driver_marks_a_cut_that_already_forwarded_bytes(
+    arm: str, exc_factory: Any
+) -> None:
+    """THE Q1 WIRING GUARD — the driver must do the marking, not the fixture.
+
+    ``is_mid_stream_connectivity_loss`` is only ever reachable because
+    ``stream_with_failover`` calls ``_mark_mid_stream_connectivity`` at its two
+    ``forwarded_any`` raise sites. Every other test in the tree marks the error
+    ITSELF and so asserts the predicate while leaving the call sites untested:
+    both were deleted during review with the whole suite staying green, while
+    the mutant reproduced the original bug against a real severed socket.
+
+    This test therefore asserts the flag on an error that escaped the REAL
+    driver, having never touched the marker helper in test code. Delete either
+    call site and the matching parametrisation fails.
+    """
+    forwarded, error = await _drive_until_error(exc_factory, deltas=2)
+
+    # Bytes really did reach the caller — the premise of the whole inference.
+    assert len(forwarded) == 2, "the cut must land AFTER deltas or it tests nothing"
+    assert error is not None
+    assert error.connectivity_loss, (
+        f"the {arm} forwarded_any arm did not mark the escaping error continuable — "
+        "the loop cannot continue a turn it is never told was interrupted"
+    )
+
+
+@pytest.mark.parametrize(
+    ("arm", "exc_factory"),
+    [
+        ("raw-httpx", lambda: httpx.ReadError("")),
+        ("pre-wrapped", lambda: wrap_transport_error(httpx.ReadError(""))),
+    ],
+)
+async def test_the_driver_does_NOT_mark_a_cut_that_forwarded_nothing(
+    arm: str, exc_factory: Any
+) -> None:
+    """The control that keeps the mark inside the ``forwarded_any`` gate.
+
+    The SAME exception raised before any delta must stay an ordinary transient:
+    it keeps the fast retry and the fallback walk, and must never inherit the
+    patient minutes-long wait. Without this, "fixing" the guard above by marking
+    unconditionally — in ``wrap_transport_error`` or ``ProviderError.__init__``
+    — would pass while handing a genuinely broken provider a stalled session.
+    """
+    forwarded, error = await _drive_until_error(exc_factory, deltas=0)
+
+    assert forwarded == []
+    assert error is not None
+    assert not error.connectivity_loss, (
+        f"the {arm} pre-connect path must not be marked continuable — nothing was "
+        "forwarded, so there is no answer to continue and no offline inference to draw"
+    )
+
+
 def test_connectivity_config_keys_parse_camel_and_snake() -> None:
     """Both key spellings parse; defaults survive a reconnect out of the box."""
     camel = RetrySettings.from_settings(
