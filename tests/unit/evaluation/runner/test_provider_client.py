@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -32,6 +33,7 @@ from local_operator.evaluation.protocol import (
 from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     MAX_REJECTED_REPLY_CHARS,
+    MAX_TOLERATED_TRAILING_CHARS,
     DecisionParseError,
     ProviderModelClient,
     build_system_prompt,
@@ -210,6 +212,189 @@ def test_parse_decision_rejects_a_batch_bound_to_a_stale_observation() -> None:
 def test_parse_decision_rejects_malformed_replies(payload: str) -> None:
     with pytest.raises(DecisionParseError):
         parse_decision(payload, observation(), route=ROUTE)
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        # Verbatim from sealed bundle ep-e46c789ca818, which paid for this
+        # three times in one episode.
+        "原始内容",
+        " Hope that helps!",
+        "\n\n```",
+        "\nLet me know if you want me to continue.",
+    ],
+)
+def test_parse_decision_tolerates_trailing_junk_after_a_complete_value(junk: str) -> None:
+    """A complete batch is not made unusable by what the model appended to it.
+
+    The decision is already unambiguous where the junk starts, so discarding a
+    billed turn over it buys nothing.
+    """
+
+    current = observation()
+
+    decision = parse_decision(type_payload(current) + junk, current, route=ROUTE)
+
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    # The action is what the model plainly intended, not a salvaged fragment.
+    assert action.text == "hello"
+    decision.action_batch.validate_for(current)
+
+
+def test_parse_decision_reports_tolerated_trailing_junk(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Tolerated is not the same as silent: the remainder stays observable."""
+
+    current = observation()
+
+    with caplog.at_level(logging.WARNING):
+        parse_decision(type_payload(current) + "原始内容", current, route=ROUTE)
+
+    assert "原始内容" in caplog.text
+    assert "trailing text" in caplog.text
+
+
+def test_parse_decision_bounds_the_reported_trailing_junk(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A runaway remainder must not turn a log line into a wall of prose."""
+
+    current = observation()
+    junk = "x" * (MAX_TOLERATED_TRAILING_CHARS + 500)
+
+    with caplog.at_level(logging.WARNING):
+        parse_decision(type_payload(current) + junk, current, route=ROUTE)
+
+    assert "[...]" in caplog.text
+    # The full remainder is counted but never quoted in full.
+    assert str(len(junk)) in caplog.text
+    assert "x" * (MAX_TOLERATED_TRAILING_CHARS + 1) not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [
+        # Direct adjacency is the one shape a real model is LEAST likely to
+        # emit, and covering only it is what let a separator-bypass hide here.
+        "",
+        " ",
+        ",",
+        "\n",
+        "原始内容",
+        "\n\nOops, that was wrong. The correct batch is:\n",
+        "\n```\n```json\n",
+        "x" * 1000,
+    ],
+)
+def test_parse_decision_rejects_a_superseding_batch_behind_any_separator(
+    separator: str,
+) -> None:
+    """Which batch did the model mean? Guessing could execute the wrong one.
+
+    The ambiguity does not depend on the two objects being adjacent, so
+    neither may the guard: a second batch for the SAME observation is a
+    competing decision wherever it sits in the remainder.
+    """
+
+    current = observation()
+    payload = type_payload(current) + separator + finish_payload(current)
+
+    with pytest.raises(DecisionParseError, match="second action batch"):
+        parse_decision(payload, current, route=ROUTE)
+
+
+def test_parse_decision_tolerates_a_quoted_batch_for_another_observation() -> None:
+    """The shape the real bundle actually emits, and why the guard keys on the
+    observation id rather than on JSON-ness.
+
+    A model that quotes the harness's own ``The rejected reply was: {...}``
+    feedback back at itself carries a well-formed batch in its prose. That is
+    HISTORY -- it names an OLDER observation -- so it cannot supersede the
+    decision just parsed, and ``ActionBatch`` would refuse it as stale anyway.
+    Rejecting on it would discard the very turns this tolerance exists to save.
+    """
+
+    current = observation()
+    stale = observation(1)
+    quoted = json.dumps(
+        {"actions": [{"kind": "key", "observation_id": stale.observation_id, "keys": ["ctrl"]}]}
+    )
+    payload = type_payload(current) + "\nThe rejected reply was:\n  " + quoted
+
+    decision = parse_decision(payload, current, route=ROUTE)
+
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    assert action.text == "hello"
+
+
+@pytest.mark.parametrize("whitespace", ["  ", "\n", "\t", "\r\n"])
+def test_parse_decision_accepts_leading_whitespace(whitespace: str) -> None:
+    """Parity with the ``json.loads`` this replaced, which skipped leading
+    whitespace where ``raw_decode`` does not.
+
+    Pinned inside the helper rather than left to the caller's ``.strip()``:
+    this is a general entry point, and a second caller that forgot to strip
+    would lose a turn to a leading newline.
+    """
+
+    current = observation()
+
+    decision = parse_decision(whitespace + type_payload(current), current, route=ROUTE)
+
+    assert isinstance(decision.action_batch.actions[0], TypeAction)
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        "\ntrue story, that worked",
+        "\nnull hypothesis rejected",
+        "\n42 windows were listed",
+        '\n"that should do it"',
+        "\n{note: see the window list above}",
+    ],
+)
+def test_parse_decision_tolerates_prose_that_opens_like_json(junk: str) -> None:
+    """Only a second OBJECT can be a competing decision.
+
+    Asking the broader "does the remainder parse as any JSON value?" would
+    class prose beginning with a JSON literal as a second batch and reject the
+    very turn the tolerance exists to save. A brace that does not open a
+    complete object is prose too.
+    """
+
+    current = observation()
+
+    decision = parse_decision(type_payload(current) + junk, current, route=ROUTE)
+
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    assert action.text == "hello"
+
+
+def test_parse_decision_rejects_leading_junk_before_the_value() -> None:
+    """Skipping forward to the first brace means guessing where the value
+    starts, and a preamble containing a brace makes that guess wrong silently
+    -- executing a DIFFERENT batch than was sent."""
+
+    current = observation()
+
+    with pytest.raises(DecisionParseError, match="not valid JSON"):
+        parse_decision("Sure, here you go: " + type_payload(current), current, route=ROUTE)
+
+
+def test_parse_decision_still_rejects_a_truncated_value() -> None:
+    """Tolerance is for what follows a COMPLETE value, never for an incomplete
+    one: a batch cut off mid-emission is not a decision."""
+
+    current = observation()
+
+    with pytest.raises(DecisionParseError, match="not valid JSON"):
+        parse_decision(type_payload(current)[:-5], current, route=ROUTE)
 
 
 def test_parse_decision_rejects_a_wrong_discriminator_key() -> None:

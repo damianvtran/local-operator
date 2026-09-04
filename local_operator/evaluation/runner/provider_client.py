@@ -46,10 +46,13 @@ from local_operator.evaluation.runner.model import (
     ModelDecision,
     ModelUsage,
 )
+from local_operator.logger import get_logger
 
 if TYPE_CHECKING:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.types import Message
+
+logger = get_logger(__name__)
 
 #: Frames kept verbatim in the history by default. A GUI agent reads the
 #: screen as STATE: the current frame is what it acts on and the last couple
@@ -69,6 +72,21 @@ DEFAULT_REBUILD_EVERY_FRAMES = 8
 #: must see WHAT it said to fix it -- but a runaway reply (a provider's
 #: max-token wall of prose) must not cost the whole window on the retry.
 MAX_REJECTED_REPLY_CHARS = 4_000
+
+#: Longest run of tolerated trailing noise quoted into the observable warning
+#: when a decision parses as a leading JSON value followed by junk. The point
+#: of the quote is to let a reader RECOGNISE what the model appended, not to
+#: reproduce it: a model that ran away into a wall of prose must not be able to
+#: push a bounded log line into an unbounded one.
+MAX_TOLERATED_TRAILING_CHARS = 200
+
+#: How many candidate ``{`` positions the trailing-remainder scan may try
+#: before giving up. Each failed decode rescans forward one character, so an
+#: unbounded scan over a remainder full of bare braces goes quadratic -- the
+#: same bound, and the same reason, as ``_iter_json_objects`` in the tool
+#: layer. Giving up means "no competing batch found", which degrades to the
+#: tolerant path rather than to an error.
+_MAX_TRAILING_DECODE_ATTEMPTS = 256
 
 #: Rendered in place of an observation's text when it is byte-identical to the
 #: previous turn's. The adapter owns observation text and the runner never
@@ -275,6 +293,145 @@ class DecisionParseError(ValueError):
     """The provider returned something that is not a usable action batch."""
 
 
+def _decode_leading_json(payload: str) -> tuple[Any, str]:
+    """Decode the leading JSON value and return it with any trailing noise.
+
+    ``json.loads`` demands that the WHOLE string be one value, so a model that
+    emitted a complete, correct batch and then appended a stray token lost the
+    entire turn to ``Extra data: line 1 column 318 (char 317)``. That is a real
+    and repeated failure -- one sealed episode paid for it three times, each a
+    billed call discarded over noise the harness had already finished reading
+    past. ``raw_decode`` stops at the end of the first complete value and says
+    where it stopped, which is exactly the question being asked here.
+
+    The tolerance is deliberately ONE-SIDED, because the three shapes are not
+    equally knowable:
+
+    * **Trailing noise** (``{...}原始内容``, ``{...} Hope that helps!``) is
+      tolerated. The decision is already complete and unambiguous at the point
+      the junk starts; nothing after it can change which actions were chosen.
+    * **Leading noise** (``Sure, here you go: {...}``) is NOT skipped. Hunting
+      forward for the first ``{`` means guessing where the value begins, and a
+      preamble that itself contains a brace makes that guess wrong silently --
+      the failure mode is executing a DIFFERENT batch than the model sent,
+      which is far worse than losing the turn. A leading-junk reply still gets
+      the ordinary parse error and a corrective re-prompt.
+    * **A second batch for the SAME observation**, anywhere in the remainder,
+      is genuinely ambiguous -- which one did the model mean? -- so it is NOT
+      tolerated. Taking the first would execute a decision the model may have
+      superseded.
+
+    What makes the third rule safe to apply ANYWHERE, rather than only to an
+    immediately adjacent object, is that it keys on ``observation_id``. Two
+    weaker probes were measured against the real bundle and both fail:
+
+    * "Does the remainder start with ``{``?" only catches a directly adjacent
+      object. One character of anything else -- a comma, a newline, prose,
+      ``原始内容`` -- disables it, so a superseding batch behind a separator is
+      dropped silently, which is precisely what this rule claims to prevent.
+    * "Does anything in the remainder parse as JSON?" over-fires: it rejects
+      all three real bundle turns, because a model that quotes the harness's
+      own ``The rejected reply was: {...}`` feedback back at itself carries a
+      well-formed batch in its prose. Those batches are HISTORY, not a
+      competing decision -- in every one of the three they bind a DIFFERENT
+      observation than the turn being decided.
+
+    Binding on the observation id separates those two cases exactly: a batch
+    naming this observation is a decision about the screen in front of the
+    model and therefore competes; a batch naming any other observation is a
+    quotation of an older turn and cannot. ``ActionBatch`` would refuse the
+    latter as stale anyway, so nothing executable is being discarded.
+    """
+
+    decoder = json.JSONDecoder()
+    # ``json.loads`` skips leading whitespace and ``raw_decode`` does not, so
+    # stripping here keeps this helper's contract identical to the call it
+    # replaced. Doing it inside rather than relying on the caller matters
+    # because this is a general entry point: a second caller that forgot to
+    # strip would lose a turn to a leading newline, which is exactly the class
+    # of loss this function exists to prevent. Only leading WHITESPACE is
+    # skipped -- leading junk still fails at offset 0, by design.
+    payload = payload.lstrip()
+    try:
+        decoded, end = decoder.raw_decode(payload)
+    except json.JSONDecodeError as error:
+        # Includes the leading-junk case: raw_decode starts at offset 0, so a
+        # preamble fails here rather than being skipped past.
+        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+    trailing = payload[end:].strip()
+    if trailing and _competing_batch_offset(trailing, decoded, decoder) is not None:
+        raise DecisionParseError(
+            "decision carries a second action batch for the same observation; "
+            "send exactly one action batch"
+        )
+    return decoded, trailing
+
+
+def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecoder) -> int | None:
+    """Offset of a second batch in ``trailing`` that competes with ``decoded``.
+
+    "Competes" means it names the SAME ``observation_id``: only a decision
+    about the screen currently in front of the model can supersede the one
+    already parsed. See :func:`_decode_leading_json` for why that test, rather
+    than adjacency or bare JSON-ness, is the one that separates a superseding
+    batch from the harness feedback a model quotes back at itself.
+
+    Returns ``None`` when the remainder is ordinary prose, which is the common
+    case and the one that must stay cheap.
+    """
+
+    observation_ids = _batch_observation_ids(decoded)
+    if not observation_ids:
+        return None
+    # A decision is always an object, so only "{" can start a competing batch;
+    # the scan is bounded the same way ``_iter_json_objects`` is bounded, since
+    # a remainder full of bare braces would otherwise cost a rescan each.
+    index = 0
+    attempts = 0
+    while attempts < _MAX_TRAILING_DECODE_ATTEMPTS:
+        start = trailing.find("{", index)
+        if start < 0:
+            return None
+        attempts += 1
+        try:
+            candidate, end = decoder.raw_decode(trailing, start)
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: the C decoder recurses per
+            # nesting level and raises it (NOT a ValueError subclass) on a
+            # deeply nested payload. Untrusted model output must degrade to
+            # "no competing batch found", never to an unexpected exception.
+            index = start + 1
+            continue
+        index = max(end, start + 1)
+        if not isinstance(candidate, Mapping):
+            continue
+        if _batch_observation_ids(candidate) & observation_ids:
+            return start
+    return None
+
+
+def _batch_observation_ids(value: Any) -> set[str]:
+    """The observation ids an action-batch-shaped object binds to.
+
+    Read from the ACTIONS rather than from a top-level ``observation_id``: a
+    model reply carries the id per action (the runner supplies the batch-level
+    one itself), so a top-level lookup finds nothing on the very shape this
+    needs to compare. Returns an empty set for anything that is not batch
+    shaped, which the caller treats as "not a competing decision".
+    """
+
+    if not isinstance(value, Mapping):
+        return set()
+    actions = value.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return set()
+    return {
+        action["observation_id"]
+        for action in actions
+        if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
+    }
+
+
 def parse_decision(
     payload: str,
     observation: Observation,
@@ -296,14 +453,33 @@ def parse_decision(
     screen the environment has already moved past. ``ActionBatch.validate_for``
     rejects that at the adapter boundary, so the failure is surfaced here where
     it can be attributed to the model and fed back to it.
+
+    Strict about the DECISION, not about the framing around it: text appended
+    after a complete batch is tolerated and reported rather than costing the
+    turn, while a second batch for the SAME observation anywhere in that text
+    is still refused as ambiguous (see :func:`_decode_leading_json` for which
+    shapes are and are not tolerated, and why the tolerance only ever runs
+    forwards).
     """
 
-    try:
-        decoded: Any = json.loads(payload)
-    except json.JSONDecodeError as error:
-        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+    decoded, trailing = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
+    if trailing:
+        # Tolerated, but never silent. A model that reliably appends junk is a
+        # signal worth seeing -- it may point at a prompt or provider problem
+        # -- and a tolerance nobody can observe is indistinguishable from the
+        # harness quietly mangling a reply. Bounded because the remainder is
+        # untrusted model output of arbitrary length.
+        quoted = trailing[:MAX_TOLERATED_TRAILING_CHARS]
+        if len(trailing) > MAX_TOLERATED_TRAILING_CHARS:
+            quoted += "[...]"
+        logger.warning(
+            "decision carried %d character(s) of trailing text after a complete "
+            "JSON value; the batch was accepted and the remainder ignored: %r",
+            len(trailing),
+            quoted,
+        )
     actions = decoded.get("actions")
     if not isinstance(actions, list) or not actions:
         raise DecisionParseError("decision must carry a non-empty actions array")

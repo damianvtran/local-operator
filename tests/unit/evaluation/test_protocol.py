@@ -737,6 +737,33 @@ def test_key_validation_and_historical_double_click_are_explicit() -> None:
         KeyAction(observation_id="observation-7", keys=("NOT_A_KEY",))
 
 
+def test_named_key_case_is_not_meaningful_but_character_case_is() -> None:
+    """The case boundary, pinned where it actually sits.
+
+    A named key is a NAME for a physical key, so its case carries no meaning
+    and every spelling folds to one value. A single character is the character
+    that gets typed, so 'A' and 'a' are different requests and must survive
+    verbatim -- folding them would silently turn a capital into a lowercase
+    letter. Locked because both halves are easy to break while the other keeps
+    passing.
+    """
+
+    for spelling in ("ctrl", "CTRL", "Ctrl", "cTrL"):
+        assert KeyAction(observation_id="observation-7", keys=(spelling,)).keys == ("CTRL",)
+
+    # Case-folding a chord must not merge two distinct characters into one.
+    assert KeyAction(observation_id="observation-7", keys=("A",)).keys == ("A",)
+    assert KeyAction(observation_id="observation-7", keys=("a",)).keys == ("a",)
+    assert KeyAction(observation_id="observation-7", keys=("shift", "A")).keys == ("SHIFT", "A")
+
+
+def test_type_action_text_is_never_case_folded() -> None:
+    """Typed text is content, not a key name: its case is the user's data."""
+
+    text = "Hello World"
+    assert TypeAction(observation_id="observation-7", text=text).text == text
+
+
 def test_user_facing_strings_and_identifiers_reject_whitespace_only_values() -> None:
     with pytest.raises(ValidationError):
         TypeAction(observation_id="observation-7", text="   ")
