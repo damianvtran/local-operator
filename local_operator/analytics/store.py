@@ -127,7 +127,15 @@ CREATE TABLE IF NOT EXISTS calls (
   -- there is a schema change of its own (follow-up tracked on the feature
   -- PR). Answers the trade question within the 90-day ledger window
   -- (DEFAULT_RETENTION_DAYS); beyond that, price the split when it ships.
-  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0
+  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+  request_id TEXT NOT NULL DEFAULT '',
+  parent_session_id TEXT NOT NULL DEFAULT '',
+  purpose TEXT NOT NULL DEFAULT 'unknown',
+  duration_ms REAL NOT NULL DEFAULT -1,
+  ttft_ms REAL NOT NULL DEFAULT -1,
+  preparation_ms REAL NOT NULL DEFAULT -1,
+  outcome TEXT NOT NULL DEFAULT 'unknown',
+  usage_reported INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
@@ -220,6 +228,14 @@ _CALL_COLUMNS = (
     "cost_known",
     *(f"c_{key}" for key in COMPONENT_KEYS),
     "cache_write_1h_tokens",
+    "request_id",
+    "parent_session_id",
+    "purpose",
+    "duration_ms",
+    "ttft_ms",
+    "preparation_ms",
+    "outcome",
+    "usage_reported",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -248,6 +264,14 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # Rows recorded before the Anthropic 1h TTL shipped were all 5m writes, so
     # 0 here is the truth for them, not a placeholder.
     ("cache_write_1h_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("request_id", "TEXT NOT NULL DEFAULT ''"),
+    ("parent_session_id", "TEXT NOT NULL DEFAULT ''"),
+    ("purpose", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("duration_ms", "REAL NOT NULL DEFAULT -1"),
+    ("ttft_ms", "REAL NOT NULL DEFAULT -1"),
+    ("preparation_ms", "REAL NOT NULL DEFAULT -1"),
+    ("outcome", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 #: The names in ``_MIGRATION_COLUMNS`` as a set, for the "is this column optional
@@ -356,6 +380,14 @@ def _row_values(snapshot: CallSnapshot, cost_micro: int, cost_known: bool) -> tu
         1 if cost_known else 0,
         *(components[key] for key in COMPONENT_KEYS),
         snapshot.cache_write_1h_tokens,
+        snapshot.request_id,
+        snapshot.parent_session_id,
+        snapshot.purpose,
+        snapshot.duration_ms,
+        snapshot.ttft_ms,
+        snapshot.preparation_ms,
+        snapshot.outcome,
+        int(snapshot.usage_reported),
     )
 
 

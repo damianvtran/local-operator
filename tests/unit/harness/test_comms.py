@@ -634,7 +634,7 @@ async def test_a_child_that_settles_before_starting_fails_the_wait_at_once():
 
 
 @pytest.mark.asyncio
-async def test_ask_never_exceeds_the_timeout_it_was_given():
+async def test_ask_never_exceeds_the_timeout_it_was_given(monkeypatch):
     """The attach grace is deducted from the caller's budget, not added to it.
 
     ``timeout_ms`` is the whole budget a caller planned around. Spending the
@@ -648,25 +648,39 @@ async def test_ask_never_exceeds_the_timeout_it_was_given():
     jobs.add("job-1")
     comms.record_launch("job-1", "designer")
 
-    # Attach late enough to consume part of the grace, then never answer, so
-    # the call spends grace AND answer wait: the sum must still fit the budget.
-    async def attach_soon() -> None:
-        # Late enough to burn most of the 300 ms grace (half of 600 ms).
-        await asyncio.sleep(0.28)
-        comms.attach("job-1", FakeChild(), tmp_dir())
+    # Inspect the budget passed to the answer wait after a controlled attach
+    # interval. A real 280 ms sleep inside a 300 ms grace raced OS scheduling
+    # under concurrent suites and never reached the branch it claimed to test.
+    from types import SimpleNamespace
 
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    attacher = asyncio.create_task(attach_soon())
-    reply = await comms.ask("job-1", "status?", 600)
-    elapsed = loop.time() - started
-    await attacher
+    now = [100.0]
+    budgets = []
+    real_loop = asyncio.get_running_loop()
 
+    async def attach(record, timeout):
+        assert timeout == pytest.approx(0.3)
+        now[0] += 0.28
+        record.child = FakeChild()
+        return True
+
+    async def timeout_after_budget(future, timeout):
+        budgets.append(timeout)
+        future.cancel()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(comms, "_await_child", attach)
+    # Nothing yields while the controlled clock is installed, so these mocks
+    # cannot affect sibling work. Future construction still uses the real loop.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            asyncio,
+            "get_running_loop",
+            lambda: SimpleNamespace(time=lambda: now[0], create_future=real_loop.create_future),
+        )
+        patch.setattr(asyncio, "wait_for", timeout_after_budget)
+        reply = await comms.ask("job-1", "status?", 600)
     assert reply.timed_out
-    # Measured: 601 ms with the deadline honoured, 884 ms without it. The bound
-    # sits between the two, with enough slack above the correct figure that a
-    # loaded CI box does not flake it.
-    assert elapsed < 0.75, f"overshot a 600 ms budget: took {elapsed * 1000:.0f} ms"
+    assert budgets == pytest.approx([0.32])
 
 
 def test_send_to_an_unknown_job_fails_without_raising():

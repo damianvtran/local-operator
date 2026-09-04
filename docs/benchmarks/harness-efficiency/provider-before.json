@@ -1,0 +1,12 @@
+{
+  "repo": "/Users/damian/workspace/repos/lo-harness-baseline",
+  "responses_reasoning_items_replayed": 0,
+  "google_signature_preserved": false,
+  "google_tool_image_preserved": false,
+  "admission_estimate_before_after_160k_chars_appended": [
+    100000,
+    100000
+  ],
+  "child_preserves_parent_effort": false,
+  "child_router_is_independent": false
+}
