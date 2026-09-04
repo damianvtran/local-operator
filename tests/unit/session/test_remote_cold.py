@@ -507,3 +507,75 @@ async def test_a_cold_viewer_opens_when_the_checkpoint_is_unreadable(
         assert [getattr(m, "text", "") for m in viewer.history()] == ["still here?"]
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_prefers_the_live_wake_index_over_the_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MCP servers come from the checkpoint; wakes deliberately do not.
+
+    Both are chrome the pre-0.46.0 path showed and the viewer dropped (review
+    round 1, C5) — but they have different sources of truth and restoring them
+    the same way would be wrong. There is no live MCP manager to ask while
+    cold, so the durable copy is the only thing that can populate that panel.
+    The wake INDEX, by contrast, is a derived file a supervisor rewrites
+    without opening the session, so it is fresher than any checkpoint:
+    overwriting it with the durable copy would re-show a wake that already
+    fired.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        McpServerState,
+        WakeState,
+    )
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import write_entry
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+
+    # The index holds the CURRENT truth: one wake, still scheduled.
+    write_entry(
+        tmp_path,
+        SESSION_ID,
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "w-live",
+                "message": "the wake that is still pending",
+                "next_due_at": 4_102_444_800_000,
+                "created_at": 1,
+            }
+        ],
+    )
+
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        mcp_servers=[McpServerState(name="linear", status="connected")],
+        # A stale wake the supervisor has since fired and removed from the index.
+        wakes=[WakeState(id="w-stale", message="already fired", next_due_at=1)],
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert [server.name for server in state.mcp_servers] == ["linear"]
+        assert [wake.id for wake in state.wakes] == ["w-live"], (
+            "the live wake index must win over the checkpoint, or a fired wake "
+            "reappears on every resume"
+        )
+    finally:
+        await viewer.dispose()
