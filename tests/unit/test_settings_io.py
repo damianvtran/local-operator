@@ -120,6 +120,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
+    "display.heading_markers": "tui/settings.py derives its defaults from this registry",
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
     "display.notifications": "tui/settings.py derives its defaults from this registry",
@@ -169,6 +170,7 @@ def test_display_keys_are_flat_dotted() -> None:
     assert set(settings_io.flat_dotted_keys()) >= {
         "display.shimmer",
         "display.nerd_icons",
+        "display.heading_markers",
         "display.terminal_title",
         "display.images",
         "display.notifications",

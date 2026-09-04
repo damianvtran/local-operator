@@ -51,6 +51,20 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # None-vs-bool distinction IS the tri-state — `settings_get` returns None
     # only when the key is absent from `values`, which is what "auto" reads.
     "display.nerd_icons": None,
+    # The literal `###` before a heading. rich STRIPS these when it parses a
+    # heading, so restoring them is a deliberate act, not a leak of raw source.
+    #
+    # Defaults OFF, and that is a decision the colour ramp earned: the marker
+    # was introduced when h1-h6 resolved to two greys and level could not be
+    # read from ink at all. With the ramp spending a hue per level, ink and
+    # weight alone give six mutually distinct levels in all 54 themes, so the
+    # marker is no longer load-bearing and would be permanent chrome on every
+    # heading of every answer.
+    #
+    # It stays available because it is the only channel that survives a
+    # colourless terminal, `NO_COLOR`, and colour-vision deficiency — for
+    # those readers it is the difference between six levels and one.
+    "display.heading_markers": False,
     # The OSC 0 window/tab title carrying the session name and run state
     # (`tui/terminal_title.py`). Defaults ON: a terminal without OSC 0 ignores
     # the sequence entirely, and the title is saved on start and restored on

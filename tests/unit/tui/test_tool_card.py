@@ -33,6 +33,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
 
+from local_operator.tui import bindings
 from local_operator.tui import glyphs as glyph_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.glyphs import (
@@ -60,6 +61,7 @@ from local_operator.tui.widgets.tool_card import (
     RUNNING_NOTICE,
     TERSE_NO_OUTPUT_NOTICE,
     ToolCard,
+    _category_element,
     compact_path,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -1196,9 +1198,16 @@ def test_two_different_tools_do_not_share_a_row_prefix() -> None:
     assert len(set(prefixes.values())) == len(prefixes), prefixes
 
 
-def test_the_running_icon_is_the_accent_and_settles_to_dim() -> None:
-    """One of the five places the accent green is spent: a still frame has to
-    read "live" without the shimmer (D26)."""
+def test_the_running_icon_is_the_accent_and_settles_to_its_category() -> None:
+    """One of the places the accent green is spent: a still frame has to read
+    "live" without the shimmer (D26).
+
+    On settling, the icon takes its tool's CATEGORY ink rather than one flat
+    grey. The name was already category-coded, so the glyph beside it was the
+    only mark carrying identity by shape while carrying no colour — which is
+    what made a settled ledger a wall of grey. Running still wins outright:
+    liveness outranks identity.
+    """
     card = ToolCard("t", "bash", {"command": "sleep 5"})
     icon = tool_icon("bash")
     live = _style_at(card._build_row(80), icon)
@@ -1206,7 +1215,10 @@ def test_the_running_icon_is_the_accent_and_settles_to_dim() -> None:
 
     card.mark_done("ok")
     settled = _style_at(card._build_row(80), icon)
-    assert _triplet(settled.color) == _triplet(Style(color=theme_mod.semantic_color("dim")).color)
+    expected = bindings.style(_category_element("bash"))
+    assert _triplet(settled.color) == _triplet(expected.color)
+    # and it is no longer the flat grey every tool used to share
+    assert _triplet(settled.color) != _triplet(Style(color=theme_mod.semantic_color("dim")).color)
 
 
 # --- the still, colourless frame -------------------------------------------
