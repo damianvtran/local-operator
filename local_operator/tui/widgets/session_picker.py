@@ -61,7 +61,8 @@ footer (which is the only place the card says how to get out).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 
 from rich.cells import cell_len
@@ -79,7 +80,10 @@ from textual.widgets import Static
 from local_operator.resume import SessionRow, fork_haystack, format_age
 from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+logger = logging.getLogger(__name__)
 
 #: Width the card will take when the terminal allows it, and the floor it will
 #: not go below. Both are CELL counts of the card's content, inside its
@@ -198,6 +202,50 @@ BODY_MATCH_MARKER = "” "
 #: result set is forked, exactly as the body-match marker reserves its column
 #: and for the identical reason — see ``plan_columns``.
 FORK_MARKER = "[fork] "
+
+#: The needs-you mark: this session has parked a question and is holding a
+#: runtime resident until somebody answers it. The one marker here that is
+#: about the USER's attention rather than the session's state, which is why it
+#: is the only one that also reorders the list.
+NEEDS_YOU_MARKER = "!"
+
+#: A session with wakes armed. Dormant wakes (a stopped session) render the
+#: same glyph a step quieter rather than a different one: it is the same fact
+#: about the session, qualified.
+#:
+#: ONE CELL, like every other marker here, and that is a constraint rather
+#: than a preference: the column reserves ``STATE_COL_CELLS`` for glyph plus
+#: separator, so a two-cell glyph consumes the separator and the name starts
+#: flush against it. The first spelling was ⏰ (two cells) and rendered
+#: ``⏰Morning standup notes`` while every other row had its space — caught
+#: in the rendered frame, not by a test.
+WAKE_MARKER = "◷"
+
+#: An attached session — another terminal is already watching it. Resuming is
+#: still fine (that is what a viewer IS now), but the user should know they
+#: will not be alone in there.
+ATTACHED_MARKER = "○"
+
+#: A runtime that is up and warm with NOBODY watching it. A DIFFERENT glyph
+#: from ``ATTACHED_MARKER``, not the same one in a quieter ink: round 1 (D6)
+#: measured `muted` against `dim` at **1.90:1**, below any threshold for
+#: telling two states apart (WCAG's 3:1 non-text floor is the comparison), and
+#: invisible on a mismatched palette or to a reader with reduced colour
+#: discrimination. "Someone else is watching" and "nobody is, it is just warm"
+#: are two different facts, and DESIGN §10 assigns them different glyphs.
+#:
+#: Filled against the hollow ``○`` so the pair reads as a presence contrast at
+#: a glance rather than as a brightness one. One cell, like every marker here.
+IDLE_MARKER = "●"
+
+#: A live pid whose heartbeat went stale. Distinguished from cold because the
+#: remedy differs: a wedged session is one to `lop stop`, not to reopen.
+WEDGED_MARKER = "✗"
+
+#: Cells reserved for the live-state column when ANY row in the result set
+#: carries state. One cell for the state glyph plus its separating space; the
+#: spinner frames, the wake glyph and the markers above are all one cell wide.
+STATE_COL_CELLS = 2
 
 
 def filter_rows(
@@ -371,12 +419,55 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     return lines or [""]
 
 
+def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
+    """``(glyph, ink)`` for one row's live state. Empty glyph when cold.
+
+    The picker is the one place a user can see the whole fleet, so it is where
+    "which of these is actually running, and which one wants me" has to be
+    answerable at a glance. Precedence is by URGENCY, not by state machine:
+    needs-you outranks everything (a person is blocked), then wedged (broken),
+    then busy, then attached, then wakes.
+
+    The spinner reuses ``terminal_title.SPINNER_FRAMES`` rather than a second
+    animation vocabulary — the same glyphs the band and the terminal title
+    already animate with, so "this is working" looks the same everywhere.
+    """
+    if row.pending:
+        return NEEDS_YOU_MARKER, "warning"
+    if row.live_state == "wedged":
+        return WEDGED_MARKER, "danger"
+    if row.live_state == "busy":
+        return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
+    if row.live_state == "attached":
+        return ATTACHED_MARKER, "muted"
+    if row.live_state == "idle":
+        return IDLE_MARKER, "muted"
+    if row.wakes:
+        return WAKE_MARKER, "dim" if row.wakes_dormant else "muted"
+    return "", "dim"
+
+
+def sort_needs_you_first(rows: Sequence[SessionRow]) -> list[SessionRow]:
+    """Rows with a parked question first, everything else in the given order.
+
+    The ONE marker that reorders. A parked gate is a person being waited on
+    and a runtime held resident until they answer; burying it under thirty
+    recent conversations is how a session stays parked for a day. Stable
+    otherwise, so the recency order the caller established is preserved within
+    each group.
+    """
+    waiting = [row for row in rows if row.pending]
+    rest = [row for row in rows if not row.pending]
+    return waiting + rest
+
+
 def plan_columns(
     rows: Sequence[SessionRow],
     width: int,
     ages: Sequence[str],
     marked: bool = False,
     forked: bool = False,
+    stated: bool = False,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -414,6 +505,11 @@ def plan_columns(
     """
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     marker_col += cell_len(FORK_MARKER) if forked else 0
+    # The live-state column follows the same reserve-for-the-RESULT-SET rule as
+    # the two above, and for the same reason: a column that appears as a
+    # running row scrolls into view makes every name jump sideways on one
+    # arrow press.
+    marker_col += STATE_COL_CELLS if stated else 0
     age_col = max((cell_len(age) for age in ages), default=0)
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
@@ -435,6 +531,7 @@ def render_rows(
     hovered: int | None = None,
     body_matched: AbstractSet[str] = frozenset(),
     forked: bool | None = None,
+    frame: int = 0,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -466,9 +563,15 @@ def render_rows(
     any_forked = (
         bool(forked) if forked is not None else any(getattr(row, "forked", False) for row in rows)
     )
-    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked)
+    # Same result-set question as `any_forked`, same scroll-stability reason.
+    any_stated = any(
+        getattr(row, "live_state", "") or getattr(row, "pending", None) or getattr(row, "wakes", 0)
+        for row in rows
+    )
+    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked, any_stated)
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
+    state_col = STATE_COL_CELLS if any_stated else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -555,6 +658,18 @@ def render_rows(
                 _pad_cells(FORK_MARKER if getattr(row, "forked", False) else "", fork_col),
                 style=row_bg + Style(color=dim),
             )
+        # The live-state mark sits immediately before the name, where the eye
+        # scanning the name column passes it anyway. Its ink is the state's own
+        # semantic colour rather than a fixed one: `warning` for needs-you and
+        # `danger` for wedged are the two the user must not miss, and painting
+        # them at `dim` beside the age would file a blocked session as a lookup
+        # key.
+        if state_col:
+            glyph, ink = row_state_mark(row, frame)
+            line.append(
+                _pad_cells(glyph, state_col),
+                style=row_bg + Style(color=theme_mod.semantic_color(ink)),
+            )
         line.append(
             _pad_cells(truncate_cells(name, name_col), name_col),
             style=row_bg + Style(color=name_colour),
@@ -599,6 +714,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         rows: Sequence[SessionRow],
         now: float,
         digests: dict[str, str] | None = None,
+        refresh_live_state: Callable[[list[SessionRow]], list[SessionRow]] | None = None,
     ) -> None:
         super().__init__()
         self._all = list(rows)
@@ -637,6 +753,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body_matches: set[str] = set()
         self._admitted: set[str] = set()
         self._body: Static
+        #: Spinner phase for the running marker, advanced by ``_tick``.
+        self._frame = 0
+        #: Re-reads each row's live state, supplied by the host that knows how
+        #: (``OperatorApp._overlay_live_state``). Optional: a host that does
+        #: not pass one gets the pre-refresh behaviour — markers from open,
+        #: and no animation — which is what keeps this widget testable without
+        #: a registry and usable by an embedder that has none.
+        self._refresh_live_state = refresh_live_state
 
     # -- state ---------------------------------------------------------------
     # ``visible_rows``/``filter_query``/``_card_text``, not ``visible``/``query``/
@@ -1022,6 +1146,104 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         self._repaint()
+        # D1+D3, fixed together on purpose. The running marker borrowed the
+        # band's spinner GLYPH but nothing advanced it, so it sat on frame 0 —
+        # and a frozen braille dot does not read as "busy", it reads as a
+        # static bullet, which is the marker for a DIFFERENT state. That
+        # collapsed the one distinction the picker exists to make under this
+        # release: which of these is actually working right now.
+        #
+        # The liveness data is refreshed on the SAME tick rather than only the
+        # frame index, because animating a snapshot taken at open would be
+        # worse than the freeze: motion is a stronger claim of liveness than a
+        # still, so a convincing spinner over minutes-old state actively
+        # misleads. If we cannot re-read the state we stop animating too (see
+        # ``_tick``) — the two must never come apart.
+        self._timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
+
+    def _tick(self) -> None:
+        """Advance the spinner and re-read what it is claiming.
+
+        Cheap by construction: the refresh is the same one `registry.scan()` +
+        `read_index()` pair the picker already budgets for as a per-open cost,
+        and the repaint is one `Static.update`. It runs only while the picker
+        is on screen — the timer dies with the screen.
+
+        Skipped entirely when no row is animating, so a store of cold sessions
+        costs nothing: without a running session there is no motion to drive,
+        and re-scanning the registry ten times a second to discover that would
+        be the picker's own idle cost.
+        """
+        before = self._marker_signature()
+        refresh = self._refresh_live_state
+        if refresh is not None:
+            try:
+                self._all = list(refresh(self._all))
+                # The filter cache is keyed on the query, which has not
+                # changed — invalidate it explicitly or the refreshed rows are
+                # computed and then thrown away.
+                self._filtered_for = "\x00 never a real query"
+            except Exception:  # noqa: BLE001 — a stale marker is not worth the picker
+                logger.debug("picker could not refresh live state", exc_info=True)
+        # REPAINT ON ANY VISIBLE CHANGE, not only while something spins.
+        #
+        # The refresh REORDERS (`_overlay_live_state` sorts needs-you first)
+        # and `_selected` is an index into that order, so skipping the repaint
+        # left the screen painted in the old order while Enter resolved
+        # against the new one — the cursor sat on `alpha` and Enter resumed
+        # `beta` (round 3, D10). That fires on this release's headline event:
+        # a detached session parking on a gate sorts itself to the top, and
+        # nothing is spinning while it happens. The same early return also
+        # froze every non-busy marker transition (idle→wedged, idle→attached,
+        # record gone, wake armed).
+        #
+        # The frame counter still advances only while something is busy, which
+        # keeps the property the previous comment wanted: a session that starts
+        # working later picks the animation up from a clean phase.
+        after = self._marker_signature()
+        is_busy = any(getattr(row, "live_state", "") == "busy" for row in self._all)
+        if is_busy:
+            self._frame += 1
+        elif before == after:
+            return
+        self._repaint()
+
+    #: The `SessionRow` fields a repaint can actually show differently.
+    #:
+    #: DERIVED FROM THE ROW'S OWN FIELD NAMES, and asserted against them at
+    #: import (below), because the round-3 version of this signature read
+    #: ``session_id`` — a field `SessionRow` does not have. `getattr` with a
+    #: default made that silent: identity was the empty string on EVERY row,
+    #: so a pure reorder compared equal, `_tick` returned early, and the
+    #: picker went on painting one session while Enter resumed another. That
+    #: is D10, unfixed by its own fix, through 83 green picker tests
+    #: (round 4, D10).
+    #:
+    #: `mtime` is deliberately absent: it changes constantly and is rendered
+    #: as a coarse "when", so including it would repaint ten times a second
+    #: for nothing.
+    _SIGNATURE_FIELDS = ("id", "name", "forked", "live_state", "pending", "wakes", "wakes_dormant")
+    # A NAME THAT IS NOT A FIELD READS AS A CONSTANT. That is how the D10 fix
+    # shipped broken, so the names are checked against the row type itself
+    # rather than trusted: a rename in `resume.SessionRow` fails here loudly
+    # instead of silently dropping a column out of the comparison.
+    assert not set(_SIGNATURE_FIELDS) - set(SessionRow._fields), (
+        f"picker signature names unknown SessionRow fields: "
+        f"{sorted(set(_SIGNATURE_FIELDS) - set(SessionRow._fields))}"
+    )
+
+    def _marker_signature(self) -> tuple[tuple[object, ...], ...]:
+        """Everything about the rows a repaint would show differently.
+
+        Identity AND order: a reorder with no content change still has to
+        repaint, because the cursor is an index into the order (D10). Kept to
+        the fields the renderer reads so an unrelated churn (a heartbeat
+        timestamp) does not force a repaint ten times a second.
+        """
+        return tuple(
+            tuple(getattr(row, field, None) for field in self._SIGNATURE_FIELDS)
+            for row in self._all
+        )
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-measure: every column and the page size come from the screen."""
@@ -1135,6 +1357,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     # fork scrolls into view and disappears as it scrolls out
                     # makes every name jump sideways on one arrow press.
                     any(getattr(row, "forked", False) for row in rows),
+                    # The animated phase. Without it every call took the
+                    # default 0 and the running marker never moved (D1).
+                    self._frame,
                 )
             ):
                 if index:

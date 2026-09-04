@@ -62,7 +62,7 @@ from local_operator.compaction.marker import (
     replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
-from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE, ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
@@ -515,6 +515,13 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     ``todo_reminder`` (only the newest) becomes one too; other custom entries
     are dropped (bookkeeping never enters LLM context). ``provider_payload``
     rides along untouched.
+
+    ``gate_timed_out_unattended`` is rendered from its STRUCTURED payload
+    rather than a ``text`` field, because the same fact is phrased differently
+    for the three audiences that need it (the model here, the transcript
+    notice, the picker's parked row). It must never be dropped: an expiry that
+    reads as a plain denial makes the next turn re-plan around a decision
+    nobody made.
     """
     out: list[Message] = []
     # Only the NEWEST todo reminder survives the render. An earlier one asserts
@@ -558,6 +565,33 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                 Message(
                     role="user",
                     content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
+        elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
+            # An unattended gate that expired is NOT a user decision, and the
+            # difference is the whole reason the row exists: without it the
+            # next turn reads a plain denial and re-plans around a choice
+            # nobody made. Rendered here rather than carrying a `text` field
+            # like the branches below because the payload is structured (tool,
+            # description, waited_s) — the picker and the transcript notice
+            # each phrase it for their own audience, and this is the model's.
+            details = message.details or {}
+            tool = str(details.get("tool") or "a tool")
+            description = str(details.get("description") or "").strip()
+            subject = f"{tool} ({description})" if description else tool
+            out.append(
+                Message(
+                    role="user",
+                    content=[
+                        TextContent(
+                            text=(
+                                f"[system] The approval request for {subject} expired with "
+                                "nobody attached to this session and was denied automatically. "
+                                "This was a timeout, not a decision by the user."
+                            )
+                        )
+                    ],
                     id=message.id,
                 )
             )
@@ -1326,6 +1360,19 @@ def _write_roster_sidecar_if_changed(
         separators=(",", ":"),
     )
     if fingerprint == previous_fingerprint:
+        return fingerprint, False
+    # An EMPTY roster that has never been written carries no information a
+    # resume could use (``_read_roster_sidecar`` treats a missing sidecar and
+    # an empty one identically), and writing it would `mkdir` the session
+    # directory. That is how a speculatively warmed runtime materialised a
+    # directory for a draft the user abandoned despite the deferral flag
+    # (round 1, Q1): the transcript correctly held off and the roster sidecar
+    # created the directory anyway.
+    #
+    # Gated on ``previous_fingerprint is None`` \u2014 never written \u2014 rather than
+    # on emptiness alone, because a roster that goes from populated back to
+    # empty MUST persist that transition to clear the stale sidecar.
+    if previous_fingerprint is None and not payload.get("jobs") and not payload.get("records"):
         return fingerprint, False
     _write_roster_sidecar(path, payload)
     return fingerprint, True
@@ -2734,11 +2781,37 @@ class Session:
             self._tg_stack = stack
         self._handle_missed_wakes()
         await self._wake.pump()
+        if self._resume_catchup_text is not None and not self._resume_catchup_sent:
+            # A catch-up still pending after the pump: the re-armed fire lands
+            # at (or microseconds before) the grace deadline, and a COLD
+            # runtime has no later trigger to deliver it — no prompt head, no
+            # first turn. Schedule the delivery at the deadline itself so the
+            # wake's turn runs even when nothing else ever happens here
+            # (round 2, U4/Q9). A session that gets a prompt first delivers
+            # ahead of it as before; the take-then-send guard makes the two
+            # routes mutually exclusive.
+            loop = asyncio.get_running_loop()
+            delay_s = max(0.0, (self._resume_grace_ends_ms - int(time.time() * 1000)) / 1000.0)
+            loop.call_later(delay_s + 0.05, self._handle_missed_wakes)
 
     # -- identity / state (SessionProtocol) ----------------------------------
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def transcript(self) -> Any:
+        """The durable store, read-only for hosts that live beside it.
+
+        The runtime child needs it for two things only the store can answer:
+        where to drain a cold session's inbox, and where to record an
+        unattended gate timeout. Both reached for it by name and got ``None``
+        while it stayed private (round 2, U5) — silently, because a missing
+        attribute is exactly what their guards treat as "nothing to do".
+        Exposed as a property rather than a public attribute so the name is
+        stable and nothing outside the session rebinds it.
+        """
+        return self._transcript
 
     @property
     def agent_id(self) -> str:
@@ -8732,9 +8805,10 @@ class Session:
         text, self._resume_catchup_text = self._resume_catchup_text, None
         self._resume_catchup_sent = True
         self._missed_wake_occurrences = {}
-        # Clear the fold set too, so the post-send shim is a passthrough by
-        # STRUCTURE (empty set), not only by the _resume_catchup_sent guard.
-        self._resume_catchup_ids = set()
+        # The fold set is NOT cleared here: the catch-up shim consumes it one
+        # fire at a time (several folded fires arrive in the same pump), and
+        # a later PUNCTUAL fire of a recurring schedule must find its id gone
+        # so it delivers normally instead of being swallowed or doubled.
         # The receipt event fires HERE, at take time, so both delivery modes
         # (own turn via ``_deliver_resume_catchup``, or inlined ahead of a user
         # turn in ``prompt``) paint the expandable catch-up line. It is a
@@ -8778,8 +8852,30 @@ class Session:
         swallowing it would lose the message entirely (review round 3, M1).
         After the catch-up is sent the hook is a plain passthrough.
         """
-        if not self._resume_catchup_sent and due.schedule.id in self._resume_catchup_ids:
-            return  # folded into the pending catch-up; pump already advanced it
+        if due.schedule.id in self._resume_catchup_ids:
+            # The fire is folded into the catch-up text, so it never gets its
+            # own delivery — pump already advanced the schedule. If no other
+            # trigger has delivered the catch-up yet, deliver it HERE, on the
+            # first folded fire past grace: the re-armed due IS the grace
+            # deadline, and a cold runtime has no later trigger — no prompt
+            # head, no first turn — so swallowing and waiting is how the
+            # wake's message was lost (round 2, U4/Q9: the runtime started,
+            # advanced the schedule, and exited having made zero provider
+            # calls). A resumed TUI session delivers the catch-up ahead of
+            # its first prompt instead.
+            #
+            # The fold set is consumed PER FIRE, not cleared at take: several
+            # folded fires arrive in the SAME pump (every overdue schedule was
+            # re-armed to the same deadline), and the second must still be
+            # swallowed after the first delivered the catch-up — while a
+            # LATER punctual fire of a recurring schedule, whose id has been
+            # consumed by then, delivers normally instead of being lost.
+            if not self._resume_catchup_sent:
+                catchup = self._take_resume_catchup()
+                if catchup is not None:
+                    self._deliver_resume_catchup(catchup)
+            self._resume_catchup_ids.discard(due.schedule.id)
+            return
         await self._deliver_wake(due)
 
     @staticmethod

@@ -4870,7 +4870,17 @@ async def execute_send(
         ]
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
-    if error or record is None:
+    cold_session_id = ""
+    if record is None:
+        # An exact ``session`` may still name a stored session that is simply
+        # not running. A quiet note to one of those is spooled rather than
+        # refused (that is what ``wake=false`` asks for); anything wanting
+        # attention engages a runtime. See ``peer_send.deliver_peer_message``.
+        from local_operator.mobile.peer_send import resolve_cold_session
+
+        cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
+        cold_session_id = cold_session_id or ""
+    if not cold_session_id and (error or record is None):
         return _error(tool_call_id, "send", error or "no target resolved")
 
     # Self-send guard: the tool runs INSIDE the sender's session process, so
@@ -4879,7 +4889,7 @@ async def execute_send(
     # this pid would paint a "peer message from <own name>" card as though a
     # DIFFERENT session sent it and, with wake/now, self-trigger a turn.
     # Refuse before any dial.
-    if record.pid == os.getpid():
+    if record is not None and record.pid == os.getpid():
         return _error(
             tool_call_id,
             "send",
@@ -4907,13 +4917,14 @@ async def execute_send(
         if name:
             sender["conversation_name"] = name
 
-    from local_operator.mobile.peer_client import send_peer_message
+    from local_operator.mobile.peer_send import deliver_peer_message
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
         # would try to nest a loop inside the running one.
-        detail = await send_peer_message(
+        detail = await deliver_peer_message(
             record,
+            session_id=(record.session_id if record is not None else cold_session_id),
             text=params.message,
             mode=mode,
             wake=bool(params.wake),
@@ -4932,19 +4943,38 @@ async def execute_send(
         # "could not deliver" here would assert a non-delivery this side cannot
         # know, and a model that believes it retries and duplicates the message
         # (review round 1, MINOR-3).
+        target = (
+            f"{record.conversation_name or record.session_id} (pid {record.pid})"
+            if record is not None
+            else f"{cold_session_id} (not running)"
+        )
         return _error(
             tool_call_id,
             "send",
-            f"no delivery confirmation from {record.conversation_name or record.session_id} "
-            f"(pid {record.pid}): {exc}. The message may or may not have arrived — "
+            f"no delivery confirmation from {target}: {exc}. "
+            "The message may or may not have arrived — "
             "check with the peer before resending, or it may be delivered twice.",
         )
-    name = record.conversation_name or record.session_id
+    if record is not None:
+        name = record.conversation_name or record.session_id
+        return _text(
+            tool_call_id,
+            "send",
+            f"→ {name} (pid {record.pid}): {detail}",
+            details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
+        )
+    # A session with no runtime: the receipt names the session rather than a
+    # pid, because there is no process to name and claiming one would be a lie
+    # the model might then try to signal.
     return _text(
         tool_call_id,
         "send",
-        f"→ {name} (pid {record.pid}): {detail}",
-        details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
+        f"→ {cold_session_id} (not running): {detail}",
+        details={
+            "session_id": cold_session_id,
+            "mode": mode,
+            "wake": bool(params.wake),
+        },
     )
 
 

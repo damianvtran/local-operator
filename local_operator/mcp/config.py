@@ -29,6 +29,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from local_operator.paths import config_dir
+
 # Server names allow letters, digits, underscore, dash, dot, colon; max 100
 # chars (config-writer rule; the colon covers namespaced plugin entries).
 SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
@@ -355,7 +357,9 @@ def load_all_mcp_configs(
 
     project_path = root / ".local-operator" / "mcp.json"
     project_dot_path = root / ".mcp.json"
-    user_path = home / ".local-operator" / "mcp.json"
+    # Same resolver as the writer, or a sandboxed write is invisible to the
+    # read that follows it.
+    user_path = config_dir() / "mcp.json"
 
     disabled: set[str] = set()
     enabled: set[str] = set()
@@ -454,7 +458,7 @@ def _local_operator_file_paths(cwd: str | os.PathLike[str]) -> list[Path]:
     return [
         root / ".local-operator" / "mcp.json",
         root / ".mcp.json",
-        Path.home() / ".local-operator" / "mcp.json",
+        config_dir() / "mcp.json",
     ]
 
 
@@ -485,11 +489,22 @@ def list_effective_servers(cwd: str | os.PathLike[str]) -> dict[str, dict[str, A
 
 
 def _scope_path(cwd: str | os.PathLike[str] | None, scope: str) -> Path:
-    """Resolve the mcp.json path a CLI write targets."""
+    """Resolve the mcp.json path a CLI write targets.
+
+    The user scope goes through ``config_dir()``, NOT a bare ``Path.home()``:
+    that is the one resolver that honours ``LOCAL_OPERATOR_CONFIG_DIR``, and
+    every other writer in the tree (``mcp/auth.py``'s lock files, the wake
+    store, the session registry) already reads it. A raw home path here meant
+    a test or an agent probe with an isolated config dir still wrote the
+    DEVELOPER'S real ``~/.local-operator/mcp.json`` — the same "a sandbox
+    reaches the real machine" class as the LaunchAgent write and the desktop
+    notifications, and it removed a real server from a real config during
+    round 5.
+    """
     if scope == "project":
         root = Path(cwd if cwd is not None else ".").expanduser()
         return root / ".local-operator" / "mcp.json"
-    return Path.home() / ".local-operator" / "mcp.json"
+    return config_dir() / "mcp.json"
 
 
 class MCPConfigWriteError(Exception):

@@ -120,6 +120,27 @@ class SessionRecord:
     heartbeat_at: float = field(default_factory=time.time)
     capabilities: list[str] = field(default_factory=list)
 
+    # -- live state ---------------------------------------------------------
+    # Purely ADDITIVE, and PROTOCOL_VERSION deliberately does NOT move for
+    # them. Nothing is required to read these: an older reader drops unknown
+    # keys in ``from_json`` and behaves exactly as it did, and a newer reader
+    # sees the dataclass defaults for a record an older runtime wrote. Bumping
+    # the protocol would instead make every older peer refuse a record it can
+    # in fact use — the compatibility cost of a field nobody has to read is
+    # zero, and the version is the one thing that would make it non-zero.
+
+    #: A turn is running right now. The picker's liveness marker, and the
+    #: difference between a session that is working and one merely resident.
+    busy: bool = False
+    #: No front end is attached. A working session with nobody watching is
+    #: exactly what this release makes possible, so it is worth naming.
+    detached: bool = False
+    #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
+    #: None. A parked gate holds the runtime resident for up to a day, so the
+    #: cost has to be findable — this field is what puts it in `lop sessions`
+    #: and sorts it first in the picker.
+    pending: str | None = None
+
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
 

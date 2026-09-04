@@ -107,7 +107,7 @@ def no_signals(monkeypatch: pytest.MonkeyPatch):
             return
         sent.append((pid, sig))
 
-    def alive(pid: int) -> bool:
+    def alive(pid: int, *, check_zombie: bool = False) -> bool:
         handle = state["handle"]
         if handle is not None and getattr(handle, "exited", False):
             return False
@@ -171,7 +171,7 @@ async def test_dead_pid_reports_already_exited(monkeypatch: pytest.MonkeyPatch) 
     # and make pid liveness read dead (the record's pid is OURS in-process,
     # so the real probe would say live).
     registry.publish(ghost)
-    monkeypatch.setattr(registry, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(registry, "pid_alive", lambda pid, **_: False)
     try:
         outcome = await control.stop_session(ghost, timeout_s=1.0, _root=registry.run_dir())
         assert outcome.method == "gone"

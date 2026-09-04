@@ -1159,6 +1159,15 @@ async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) ->
         while not view._history_exhausted:
             view.action_home()
             await _wait_history(pilot, view)
+        # Exhausting the history and REPAINTING the hint are separate frames:
+        # `_wait_history` waits on the page worker, and the hint's text is
+        # recomputed on a later refresh, so a slow runner reads the previous
+        # "loading earlier…" caption (CI shard 3, 3.12). Poll for the settled
+        # caption rather than asserting on whichever frame arrives first.
+        for _ in range(50):
+            if view._state_hint.rendered().endswith("transcript start · read-only"):
+                break
+            await pilot.pause()
         page = " ".join(view.rendered_rows())
         assert "durable 0" in page
         assert HISTORY_START_NOTE in page

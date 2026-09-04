@@ -289,7 +289,17 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: LIVE sections whose keys have no session-side apply because the TUI owns
 #: them (``appearance``: ``OperatorApp._on_config_change`` applies
 #: ``display.*``/``tui.theme``; covered in the TUI suite).
-TUI_OWNED_LIVE_SECTIONS = {"appearance"}
+#:
+#: ``runtime`` is here for the same reason and a sharper one: its keys are
+#: read at COMMAND time by the surface that acts on them, so there is no
+#: session attribute for a probe to observe moving.
+#: ``runtime.background_on_resume`` is read by ``/resume`` in the TUI when it
+#: decides what to do with the session being left, and
+#: ``runtime.unattended_gate_timeout`` is read by the RUNTIME's gate at the
+#: moment a question parks — a different process from the ``Session`` this
+#: file drives. Both are covered where they live: the resume behaviour in the
+#: TUI suite, the gate policy in ``tests/unit/session/runtime/test_parked_gates.py``.
+TUI_OWNED_LIVE_SECTIONS = {"appearance", "runtime"}
 
 
 def _live_sections() -> set[str]:

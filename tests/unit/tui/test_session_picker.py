@@ -1585,3 +1585,246 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
     # And the populated footer is untouched.
     populated = [key for key, _ in _footer_hints(100, empty=False)]
     assert "↑↓" in populated and "enter" in populated
+
+
+def test_the_running_marker_animates_and_idle_is_not_the_attached_glyph() -> None:
+    """D1 and D6, the two findings a still frame caught and no test did.
+
+    D1: `render_rows` was correct for every frame index, but the ONE call site
+    never passed one, so the marker sat on frame 0 forever. A frozen braille
+    dot does not read as "busy" — it reads as a static bullet, which is the
+    marker for a different state, collapsing the one distinction the picker
+    exists to make.
+
+    D6: `attached` and `idle` shared `○`, separated only by muted-vs-dim ink at
+    1.90:1. Two different facts (someone else is watching / nobody is, it is
+    just warm) need two different glyphs, not two brightnesses of one.
+    """
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        row_state_mark,
+    )
+
+    busy = _row("busy00000001", "a running session")._replace(live_state="busy")
+    glyphs = {row_state_mark(busy, frame)[0] for frame in range(len(SPINNER_FRAMES))}
+    assert glyphs == set(SPINNER_FRAMES), "the running marker does not cover its cycle"
+
+    attached = _row("attach000002", "watched elsewhere")._replace(live_state="attached")
+    idle = _row("idle00000003", "an idle session")._replace(live_state="idle")
+    assert row_state_mark(attached, 0)[0] == ATTACHED_MARKER
+    assert row_state_mark(idle, 0)[0] == IDLE_MARKER
+    assert row_state_mark(attached, 0)[0] != row_state_mark(idle, 0)[0]
+
+
+def test_every_state_marker_is_exactly_one_cell() -> None:
+    """The column reserves one cell plus a separator.
+
+    A two-cell glyph eats the separator and the name starts flush against it —
+    how `⏰` was caught. Asserted over the whole marker set so a new one cannot
+    reintroduce it, including the idle glyph D6 added.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        NEEDS_YOU_MARKER,
+        WAKE_MARKER,
+        WEDGED_MARKER,
+    )
+
+    markers = (
+        NEEDS_YOU_MARKER,
+        WEDGED_MARKER,
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        WAKE_MARKER,
+        *SPINNER_FRAMES,
+    )
+    assert {cell_len(marker) for marker in markers} == {1}
+
+
+def test_the_painted_cursor_and_enter_agree_after_a_reorder() -> None:
+    """The row under the cursor must be the row Enter resumes.
+
+    `_tick` reassigns `self._all` from a refresh that REORDERS (needs-you
+    sorts first) and `_selected` is an index into that order. Skipping the
+    repaint therefore left the SCREEN in the old order while Enter resolved
+    against the new one: the cursor sat on `alpha` and Enter resumed `beta`
+    (round 3, D10). That fires on this release's headline event — a detached
+    session parking on a gate, with nothing spinning.
+
+    Asserted against what `_repaint` actually pushed to the body, NOT against
+    `render_lines_for_test`: that helper recomputes the card from current
+    state, so it can never show a stale frame and cannot catch this class.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    rows = [
+        SessionRow(id="aaaaaaaaaaa1", mtime=now, name="alpha the top row", live_state="idle"),
+        SessionRow(id="bbbbbbbbbbb2", mtime=now, name="beta", live_state="idle"),
+    ]
+    parked = {"yes": False}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        out = list(current)
+        if parked["yes"]:
+            out = [r._replace(pending="approval") if r.id == "bbbbbbbbbbb2" else r for r in out]
+            out.sort(key=lambda r: (getattr(r, "pending", None) is None,))
+        return out
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    screen._selected = 0
+
+    painted: dict[str, list[str]] = {}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            lines = text.split("\n")  # type: ignore[attr-defined]
+            painted["lines"] = [line.plain for line in lines]
+
+    screen._body = _Body()  # type: ignore[assignment]
+    screen._repaint()
+    assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+
+    # beta parks while the picker is open. Nothing is busy — the state the
+    # previous guard returned early on.
+    parked["yes"] = True
+    screen._tick()
+
+    cursor_line = next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+    would_resume = screen._all[screen._selected].id
+    assert "beta" in cursor_line, "the screen kept the pre-reorder frame"
+    assert would_resume == "bbbbbbbbbbb2"
+
+
+def test_a_marker_change_with_nothing_busy_still_repaints() -> None:
+    """Every non-busy marker transition froze too (D10's second half).
+
+    idle→wedged, idle→attached, record-gone and wake-armed all changed the
+    row's meaning while the screen kept the old glyph, because the repaint
+    was tied to the spinner rather than to the data.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    rows = [SessionRow(id="aaaaaaaaaaa1", mtime=now, name="only", live_state="idle")]
+    state = {"live": "idle"}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        return [r._replace(live_state=state["live"]) for r in current]
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    repaints = {"n": 0}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            repaints["n"] += 1
+
+    screen._body = _Body()  # type: ignore[assignment]
+
+    screen._tick()
+    assert repaints["n"] == 0, "an unchanged settled store must stay cheap"
+
+    state["live"] = "wedged"
+    screen._tick()
+    assert repaints["n"] == 1, "a marker transition must reach the screen"
+
+
+def test_a_pure_reorder_with_identical_content_still_repaints() -> None:
+    """The gate handoff: two rows SWAP marker state, so the multiset is equal.
+
+    This is the permutation the round-3 D10 fix did not catch. Its signature
+    read `session_id` — a field `SessionRow` does not have — so `getattr`'s
+    default made identity the empty string on every row, and a reorder that
+    preserves the multiset of `(live_state, pending, wakes)` tuples compared
+    EQUAL. `_tick` returned early and the screen kept the pre-reorder frame
+    while Enter resolved against the new order (round 4, D10).
+
+    Both existing D10 tests pass with that bug live, because each changes
+    tuple CONTENT (a pending appears, idle->wedged). Only a content-preserving
+    permutation needs identity in the comparison, which is why this test
+    exists alongside them.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    # alpha holds the gate; beta is idle.
+    rows = [
+        SessionRow(
+            id="aaaaaaaaaaa1", mtime=now, name="alpha", live_state="idle", pending="approval"
+        ),
+        SessionRow(id="bbbbbbbbbbb2", mtime=now, name="beta", live_state="idle"),
+    ]
+    handed_off = {"yes": False}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        if not handed_off["yes"]:
+            return list(current)
+        # alpha's gate is answered and beta parks one: the SAME multiset of
+        # marker tuples, in the opposite order, needs-you sorted first.
+        swapped = [
+            r._replace(pending="approval" if r.id == "bbbbbbbbbbb2" else None) for r in current
+        ]
+        swapped.sort(key=lambda r: (r.pending is None,))
+        return swapped
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    screen._selected = 0
+    painted: dict[str, list[str]] = {}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            lines = text.split("\n")  # type: ignore[attr-defined]
+            painted["lines"] = [line.plain for line in lines]
+
+    screen._body = _Body()  # type: ignore[assignment]
+    screen._repaint()
+    assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+
+    handed_off["yes"] = True
+    screen._tick()
+
+    cursor_line = next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+    would_resume = screen._all[screen._selected].id
+    assert would_resume == "bbbbbbbbbbb2"
+    assert "beta" in cursor_line, (
+        "a content-preserving reorder must still repaint — the cursor is an "
+        "index into the order Enter resolves against"
+    )
+
+
+def test_the_signature_names_only_real_row_fields() -> None:
+    """A misspelled field name silently drops a column from the comparison.
+
+    `getattr(row, "session_id", "")` returns the default forever rather than
+    raising, which is exactly how D10 survived its own fix. The import-time
+    assertion in the screen guards this; this test pins it so a rename in
+    `resume.SessionRow` cannot quietly re-open the hole.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    unknown = set(SessionPickerScreen._SIGNATURE_FIELDS) - set(SessionRow._fields)
+    assert not unknown, f"signature names fields SessionRow does not have: {sorted(unknown)}"
+    # Identity must be in it, or a pure reorder compares equal.
+    assert "id" in SessionPickerScreen._SIGNATURE_FIELDS

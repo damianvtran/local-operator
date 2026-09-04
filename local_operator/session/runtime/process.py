@@ -34,11 +34,13 @@ and during an upgrade a daemon of one version spawns a child of another.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import signal
 import sys
 import time
+from typing import Any, Awaitable, Callable, cast
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +201,48 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             return
 
 
+async def _drain_inbox_into(handle: object) -> int:
+    """Deliver every message spooled while this session was cold. Count sent.
+
+    Called from :func:`amain` after the session exists and before the control
+    socket listens — see the call site for why that ordering is the delivery
+    guarantee rather than an implementation detail.
+
+    Delivery uses the record-only branch (``mode="mailbox"``, ``wake=False``):
+    these arrived as QUIET notes, and a spool that opened a turn per message on
+    the next open would turn "read this when you next run" into "start work
+    now", which is the opposite of what the sender asked for.
+
+    Best-effort per message: one malformed or rejected row must not stop the
+    rest, and none of it may prevent the runtime from starting.
+    """
+    from local_operator.session.runtime.inbox import drain_inbox
+
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if directory is None:
+        return 0
+    try:
+        lines = await asyncio.to_thread(drain_inbox, directory)
+    except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
+        logger.warning("inbox drain failed", exc_info=True)
+        return 0
+    probed = getattr(handle, "receive_peer_message", None)
+    if not lines or not callable(probed):
+        return 0
+    receive = cast(Callable[..., Awaitable[str]], probed)
+    delivered = 0
+    for line in lines:
+        try:
+            await receive(line.text, mode="mailbox", wake=False, sender=line.sender)
+            delivered += 1
+        except Exception:  # noqa: BLE001 — one bad row is not the others' problem
+            logger.warning("spooled message could not be delivered", exc_info=True)
+    if delivered:
+        logger.info("delivered %d spooled message(s) at open", delivered)
+    return delivered
+
+
 async def amain() -> int:
     # Deferred for startup cost, not to break a cycle: importing the owned
     # handle pulls the composition root, and `python -m` on this module must
@@ -208,20 +252,73 @@ async def amain() -> int:
         spawn_owned_session,
     )
     from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session_lease import SessionLeaseHeldError
 
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
     model_id = os.environ.get("LOP_MOBILE_CHILD_MODEL") or None
     resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
+    if resume:
+        # A runtime ADOPTS the id it was given rather than requiring a
+        # directory to already exist. The viewer mints the session id before
+        # anything is on disk (it is a name, not a directory, until there is
+        # work), so the first engage of a brand-new session arrives here with
+        # nothing to resume — and the strict `--resume` path would refuse it.
+        # See ``session_factory._transcript_dir_and_agent_id``.
+        os.environ["LOP_RUNTIME_ADOPT_SESSION"] = "1"
 
     loop = asyncio.get_running_loop()
     try:
         handle: OwnedSessionHandle = await spawn_owned_session(
             loop, cwd=cwd, provider=provider, model_id=model_id, resume=resume
         )
+    except SessionLeaseHeldError as exc:
+        # LOSING THE LEASE IS NOT AN ERROR. Under ``engage_runtime`` every
+        # contender is allowed to spawn a candidate and the lease decides which
+        # one lives (session/runtime/launch.py) — so a loser is a race working
+        # exactly as designed, and it exits 0. Returning non-zero here made an
+        # ordinary ten-way engage look like nine crashes in the logs, and would
+        # make a supervisor's KeepAlive treat normal arbitration as a failure
+        # loop.
+        logger.info(
+            "runtime lost the lease for %s to pid %s; exiting",
+            resume or "<new>",
+            exc.pid,
+        )
+        return 0
     except Exception:
         logger.exception("session runtime child: session construction failed")
         return 2
+
+    # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
+    # session was cold are delivered here, BEFORE the control socket begins
+    # listening, so they cannot be interleaved with an errand a client sends
+    # over that socket — there is no socket yet. Draining after
+    # ``start_in_process`` would race the engaging caller's own prompt and
+    # deliver a note written minutes ago after one written just now.
+    await _drain_inbox_into(handle)
+
+    # The wake scheduler is armed HERE, after the inbox drain and before the
+    # socket listens. A runtime the supervisor starts for an overdue wake has
+    # no errand that delivers a prompt — the WakeErrand carries nothing by
+    # design — so the wake's turn comes from the session's own catch-up path,
+    # which only runs once the scheduler is pumped. Round 2 (U4/Q9) found the
+    # cold runtime never called ``async_init``: the runtime started, idled,
+    # and exited, and a one-shot wake was consumed without ever running.
+    #
+    # After the drain so spooled quiet notes land before the wake's turn
+    # starts; before the socket so a client's prompt cannot race the catch-up.
+    # ``async_init`` is idempotent and degrades to ``ensure_future`` for
+    # background work, so a host that also calls it later changes nothing.
+    session = getattr(handle, "_session", None)
+    init = getattr(session, "async_init", None)
+    if callable(init):
+        try:
+            result = init()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
+            logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
     runtime = RuntimeServer(handle, kind="daemon")
     await runtime.start_in_process()
@@ -229,6 +326,57 @@ async def amain() -> int:
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1":
+        # SIGUSR1 prints every asyncio task's stack to the child log. The
+        # child has no terminal and no attached debugger, and a wedged turn
+        # (round 2, U6) is exactly the state whose cause is "which await is
+        # the turn parked in" — invisible to py-spy without root and to the
+        # main-thread faulthandler dump, which shows the loop idling under a
+        # parked task. Opt-in so a normal runtime pays nothing.
+        def _dump_task_stacks() -> None:
+            session = getattr(handle, "_session", None)
+            try:
+                subagents = session.running_subagents() if session is not None else 0
+            except Exception as exc:  # noqa: BLE001 — the dump must not die
+                subagents = f"RAISES {type(exc).__name__}: {exc}"
+            logger.info(
+                "state: streaming=%s compacting=%s lock=%s queue=%s drain_done=%s "
+                "subagents=%s is_busy=%s",
+                getattr(session, "_is_streaming", "?"),
+                getattr(session, "_compacting", "?"),
+                getattr(getattr(session, "_turn_lock", None), "locked", lambda: "?")(),
+                len(getattr(handle, "_prompt_queue", [])),
+                getattr(getattr(handle, "_prompt_drain_task", None), "done", lambda: "?")(),
+                subagents,
+                handle.is_busy(),
+            )
+            sig = getattr(session, "_signal", None)
+            logger.info(
+                "signal: present=%s aborted=%s abort_requested=%s",
+                sig is not None,
+                getattr(sig, "aborted", None),
+                getattr(session, "_abort_requested", "?"),
+            )
+            for task in asyncio.all_tasks(loop):
+                if task.done():
+                    continue
+                # The parked await is at the BOTTOM of the coroutine chain:
+                # each awaited coroutine's frame hangs off the outer one's
+                # cr_await, not its f_back, so format_stack alone prints only
+                # the outermost frame. Walk the chain to see where the turn
+                # is actually parked.
+                lines: list[str] = []
+                obj: Any = task.get_coro()
+                while obj is not None:
+                    frame = getattr(obj, "cr_frame", None) or getattr(obj, "gi_frame", None)
+                    if frame is None:
+                        break
+                    code = frame.f_code
+                    lines.append(f"  {code.co_filename}:{frame.f_lineno} in {code.co_name}")
+                    obj = getattr(obj, "cr_await", None) or getattr(obj, "gi_yieldfrom", None)
+                logger.info("task %r await-chain:\n%s", task.get_name(), "\n".join(lines))
+
+        loop.add_signal_handler(signal.SIGUSR1, _dump_task_stacks)
     # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
     # converge on the same event, so the deny → dispose → aclose ordering
     # below runs once, identically, for both triggers.
@@ -255,7 +403,73 @@ async def amain() -> int:
         except Exception:  # noqa: BLE001
             logger.warning("child session dispose failed", exc_info=True)
     await runtime.aclose()
+
+    # THE DEFERRAL COMPLETES HERE. `LOP_RUNTIME_DEFER_MATERIALISE` keeps the
+    # transcript and the roster sidecar from creating the session directory
+    # (see `Transcript.__init__` and `_write_roster_sidecar_if_changed`), but
+    # the LEASE cannot be deferred the same way: it is the thing that
+    # arbitrates "at most one runtime per session, ever", it must exist
+    # before construction, and it lives inside the session directory.
+    #
+    # So a speculatively warmed runtime that was never given real work still
+    # holds an otherwise-empty directory while it lives, and removes it on the
+    # way out. Round 1 (R2/Q1) found the flag was written and read nowhere, so
+    # a viewer's first keystroke left `sessions/<id>/` behind for every draft
+    # the user abandoned.
+    #
+    # Deliberately narrow, because deleting a session directory is the highest
+    # -consequence operation in this file: only under the defer flag, only
+    # when no transcript was ever written, and `rmdir` (never `rmtree`) so a
+    # directory holding anything unexpected is left alone by the OS itself.
+    if os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1":
+        _remove_unwritten_session_dir(handle)
     return 0
+
+
+def _remove_unwritten_session_dir(handle: Any) -> None:
+    """Drop the directory a speculative runtime created but never wrote to.
+
+    Fail-quiet by design: this runs on the exit path, and a session that
+    cannot tidy up must still exit 0. The lease files are the runtime's own
+    bookkeeping and are removed first so the `rmdir` sees a genuinely empty
+    directory — anything else present (a transcript, a spooled message, a
+    sidecar) makes `rmdir` fail with ENOTEMPTY, which is exactly the answer
+    we want.
+    """
+    from pathlib import Path
+
+    from local_operator.session_lease import LEASE_NAME, MIRROR_NAME
+
+    try:
+        session = getattr(handle, "_session", None)
+        transcript = getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        if directory is None:
+            return
+        directory = Path(directory)
+        # A transcript on disk means real work happened; never touch it.
+        if (directory / "transcript.jsonl").exists():
+            return
+        if directory.parent.name != "sessions":
+            return
+        for bookkeeping in tuple(directory.iterdir()):
+            # Only the runtime's own liveness bookkeeping is removable. The
+            # names are matched rather than globbed so an unfamiliar file
+            # keeps the directory alive.
+            # MIRROR_NAME and the retention module's LIVE_MARKER_NAME are the
+            # same file (".session.pid"); named via the lease module because
+            # that is what wrote it.
+            if bookkeeping.name in (LEASE_NAME, MIRROR_NAME):
+                try:
+                    bookkeeping.unlink()
+                except OSError:
+                    return
+        directory.rmdir()
+        logger.info("removed unwritten speculative session directory %s", directory.name)
+    except OSError:
+        # ENOTEMPTY (something real is in there) or a vanished directory.
+        # Both mean "leave it", and neither is worth a non-zero exit.
+        logger.debug("speculative session cleanup skipped", exc_info=True)
 
 
 def main() -> int:

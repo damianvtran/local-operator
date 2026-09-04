@@ -296,6 +296,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Concurrency cap and the model each effort tier runs on.",
     ),
+    # Its own section rather than a row under "Session", and the reason is the
+    # SCOPE: scope is uniform within a section by construction, "Session" is
+    # NEW_SESSIONS, and these keys take effect on the very next /resume in this
+    # same terminal. Filing a live key under a section labelled "new sessions"
+    # is exactly the painted lie AGENTS.md warns about — split the section.
+    Section(
+        "runtime",
+        "Runtime",
+        Scope.LIVE,
+        "How sessions behave when you leave them.",
+    ),
     # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
     # and all three trigger checks read that attribute at check time.
     Section(
@@ -692,7 +703,51 @@ SETTINGS: tuple[Setting, ...] = (
         help="Write the conversation to disk as it goes.",
         choices=_bool_choices("save automatically", "save on request"),
     ),
+    # -- runtime ------------------------------------------------------------
+    Setting(
+        # `runtime.*`, matching the section it appears in and the other key in
+        # it. Round 1 (R5): filing it under `session.*` while showing it in the
+        # Runtime section made the file teach two rules — `session.reap_unused`
+        # stays in the Session section, so a user reading the Runtime page
+        # could not predict which YAML key they were editing. The scope
+        # argument for keeping it out of the Session SECTION (that section is
+        # NEW_SESSIONS, this key is LIVE) is sound and unaffected: the section
+        # is the scope boundary, the namespace is the section's name. New in
+        # this release, so there is no migration cost to settling it now.
+        key="runtime.background_on_resume",
+        path=("runtime", "background_on_resume"),
+        section="runtime",
+        label="Keep working after /resume",
+        kind=Kind.BOOL,
+        default=True,
+        help="Leave a running turn working when you switch away from its session.",
+        choices=_bool_choices(
+            "keep the turn running in the background",
+            "stop the turn when you leave the session",
+        ),
+    ),
     # -- subagents ----------------------------------------------------------
+    Setting(
+        key="session.reap_unused",
+        path=("session", "reap_unused"),
+        section="session",
+        label="Remove unused sessions",
+        kind=Kind.BOOL,
+        default=True,
+        help="Delete old session directories that never received a message.",
+        choices=_bool_choices("remove them on startup", "keep every directory"),
+    ),
+    Setting(
+        key="runtime.unattended_gate_timeout",
+        path=("runtime", "unattended_gate_timeout"),
+        section="runtime",
+        label="Unattended question timeout (h)",
+        kind=Kind.INT,
+        default=24,
+        help="How long a question waits when you are away. 0 never times out.",
+        minimum=0,
+        maximum=720,
+    ),
     Setting(
         key="subagents.max_running",
         path=("subagents", "max_running"),

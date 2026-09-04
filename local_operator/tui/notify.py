@@ -79,16 +79,22 @@ conversation as a new turn, see ``Session._on_job_completed``).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
+import threading
 import uuid
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
+
+logger = logging.getLogger(__name__)
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` and
 #: the shimmer/nerd-icon gates. Wanted by anything that records raw terminal
@@ -428,6 +434,254 @@ def cmux_command(surface_id: str, title: str, subtitle: str, body: str) -> list[
         "--body",
         argv_safe(body),
     ]
+
+
+def applescript_string(value: str) -> str:
+    """``value`` as an AppleScript string literal, quotes and all.
+
+    The macOS route is the one place in this module where the argument is not
+    an argv position but a PROGRAM: ``osascript -e`` takes AppleScript source,
+    so a conversation name containing a double quote does not merely look odd
+    — it ends the literal and the rest is parsed as code. ``argv_safe`` cannot
+    help here (the string is one argv element already, and its shape is not
+    the problem); escaping for the target language is.
+
+    Backslash first, then the quote, or the escape added second would itself
+    be escaped. Newlines become the AppleScript escape rather than a literal
+    break, which would otherwise terminate the statement.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n").replace("\r", "")
+    return f'"{escaped}"'
+
+
+def osascript_command(title: str, body: str) -> list[str]:
+    """argv delivering one Notification Centre toast on macOS.
+
+    Pure, so a test asserts the exact wire shape (and the escaping above)
+    without spawning anything — the same discipline ``cmux_command`` follows.
+    """
+    script = (
+        f"display notification {applescript_string(body)} "
+        f"with title {applescript_string(title or APP_NAME)}"
+    )
+    return ["osascript", "-e", script]
+
+
+def detached_notify(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+    """Tell the user out of band about a session they are not looking at.
+
+    The in-band paths above write escape sequences to a TERMINAL, which is
+    exactly what a detached runtime does not have: nobody is attached, so
+    there is no frame to write into. This is the route for "your session needs
+    you and you are not there" — a parked approval, most of all, which now
+    holds the runtime resident for up to a day.
+
+    STRICTLY BEST-EFFORT, and the constraint is stronger than for the in-band
+    paths: this is called from the runtime's GATE path — its only caller,
+    `_announce_pending`; a detached turn merely finishing sends nothing (the
+    docstring claimed turn-end too, which grep does not support: round 3,
+    D13) — on the event loop, so it must never block that loop and never
+    delay the process's exit.
+    Delivery is a detached spawn that is never waited on (``spawn_detached``
+    documents the three properties that makes safe), every failure is
+    swallowed, and the return value reports only whether a child was STARTED.
+    """
+    if not notifications_enabled():
+        return False
+    try:
+        if sys.platform == "darwin":
+            # PREFER OUR OWN BUNDLE. macOS attributes a notification to the
+            # process that posts it, so the `osascript` route below arrives as
+            # Script Editor — its name and its icon — however the title reads.
+            # The bundle carries our identity and can carry a click action.
+            #
+            # It is only used when it is ALREADY BUILT: `ensure_bundle`
+            # returns None on a cold machine and starts the build in the
+            # background, so this notification goes out the old way rather
+            # than waiting on a compiler in a gate path, and the next one
+            # carries the identity.
+            bundled = _identity_notifier(title, body, session_id, subtitle)
+            if bundled is not None:
+                return _spawn_detached_ok(bundled)
+            if not shutil.which("osascript"):
+                return False
+            # No subtitle field on the AppleScript route, so the state
+            # category rides the body rather than being lost entirely.
+            plain_body = f"{subtitle} · {body}" if subtitle and body else (body or subtitle)
+            if session_id:
+                # THIS TOAST IS NOT CLICKABLE and looks exactly like the one
+                # that is: `osascript` carries no activation, so the first
+                # notification on a cold machine (before the bundle finishes
+                # building) silently does nothing when clicked — at the moment
+                # a user is most likely to try (round 3, D14). Say so, rather
+                # than letting them learn the feature does not work. The next
+                # toast carries the bundle and drops this line.
+                plain_body = f"{plain_body} — reopen with: lop --resume {session_id}"
+            return _spawn_detached_ok(osascript_command(title, plain_body))
+        notifier = shutil.which("notify-send")
+        if not notifier:
+            return False
+        # Linux CAN carry an activation: `notify-send --action` prints the
+        # invoked action's key on stdout, so a tiny waiter turns a click into
+        # the resume launch. Only when a session was named — a toast with no
+        # session has nothing to reopen.
+        if session_id and _notify_send_supports_actions(notifier):
+            return _spawn_detached_ok(_clickable_notify_command(notifier, title, body, session_id))
+        return _spawn_detached_ok(desktop_notify_command(notifier, title, body, URGENCY))
+    except Exception:  # noqa: BLE001 — a toast must never affect its caller
+        logger.debug("detached notification failed", exc_info=True)
+        return False
+
+
+def _spawn_detached_ok(argv: list[str]) -> bool:
+    """``spawn_detached`` reporting whether the child started."""
+    return bool(spawn_detached(argv))
+
+
+def _identity_notifier(
+    title: str, body: str, session_id: str, subtitle: str = ""
+) -> list[str] | None:
+    """argv posting through our own bundle, or None to use the plain route.
+
+    Never raises and never blocks: a missing config dir, an unbuilt bundle or
+    an unbuildable machine all answer None, which is the caller's cue to fall
+    back to the behaviour that shipped before this existed.
+    """
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.tui import notifier_app
+
+        app = notifier_app.ensure_bundle(config_dir())
+        if app is None:
+            return None
+        click = ""
+        if session_id:
+            click = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
+        return notifier_app.notify_command(app, title, body, click, subtitle)
+    except Exception:  # noqa: BLE001 — identity is a nicety; delivery is not
+        logger.debug("identity notifier unavailable", exc_info=True)
+        return None
+
+
+#: Cached answers to the ``--action`` probe, keyed by notifier path.
+#: NEVER re-probed once known: the binary does not grow options while the
+#: process runs, and the probe is a fork+exec that was being paid on EVERY
+#: notification (round 3, B3).
+_ACTION_SUPPORT: dict[str, bool] = {}
+
+
+def _notify_send_supports_actions(notifier: str) -> bool:
+    """Whether this ``notify-send`` understands ``--action``, WITHOUT blocking.
+
+    The flag is a recent (libnotify 0.8) addition, and an older binary treats
+    it as an unknown option and delivers NOTHING — so a version probe is the
+    difference between a clickable toast and a silently missing one. Probed
+    from ``--help`` rather than a version parse because distributions patch
+    the version string more freely than the option table.
+
+    **This is called from the runtime's gate path, on the event loop.** The
+    synchronous `subprocess.run(..., timeout=2)` it used to do blocked that
+    loop for a measured 2.03 s with a slow notifier — stalling every other
+    session surface, heartbeat and socket read in the process, and directly
+    contradicting `detached_notify`'s "must never block the event loop"
+    contract (#401 class).
+
+    So the first call NEVER waits: it answers False (the plain, always-safe
+    toast) and probes on a background thread, and every later notification
+    reads the cache. The cost of that is one un-clickable first toast on a
+    Linux machine, which is the same shape as the identity bundle's
+    build-behind-the-first-notification trade.
+    """
+    cached = _ACTION_SUPPORT.get(notifier)
+    if cached is not None:
+        return cached
+
+    def _probe() -> None:
+        try:
+            result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+                [notifier, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            _ACTION_SUPPORT[notifier] = "--action" in (result.stdout + result.stderr)
+        except Exception:  # noqa: BLE001 — an unprobeable notifier is an old one
+            _ACTION_SUPPORT[notifier] = False
+
+    threading.Thread(target=_probe, name="notify-action-probe", daemon=True).start()
+    return False
+
+
+def resume_click_command(session_id: str) -> list[str]:
+    """argv that reopens ``session_id`` in the user's terminal.
+
+    Reuses the fork machinery wholesale — ``spawn.registry.active_backend``
+    picks Ghostty/kitty/WezTerm/Apple Terminal exactly as ``/fork`` does, and
+    ``broadcast.resume_argv`` builds the restore-and-idle line behind its
+    safety boundary (no prompt, no ``--exec``). Writing a second launcher
+    here would mean a second set of emulator quirks to keep in step, and a
+    second place for the "never resume execution unattended" rule to be
+    forgotten.
+
+    A notification is clicked when NOTHING is attached, so there is no
+    emulator around this process to detect — the click has to OPEN one. That
+    is the helper module's job: it asks the spawn registry for the user's
+    terminal at click time (when one may well be running) and falls back to
+    the bare argv when it cannot pick one.
+
+    THE LAUNCHER IS RESOLVED FOR THE USER, NOT FROM THIS PROCESS. Neither
+    `sys.executable` nor `broadcast.resume_executable()` is right here, and
+    both were measured wrong on this path:
+
+    - `sys.executable` is the runtime's interpreter, which lives in whatever
+      `.venv` the runtime was started from — on a shared machine a worktree
+      that may be deleted before the user clicks (mine was, twice).
+    - `resume_executable()` reads `sys.argv[0]`, which is correct for a
+      `lop` process restoring itself but is the bare INTERPRETER inside a
+      detached runtime child (`python -m …runtime.process`). Clicking that
+      opened a Python REPL.
+
+    The notification is clicked minutes or hours later, in the user's
+    session, so the right answer is the launcher THEY run: `lop` on PATH,
+    resolved at click time by the shell. An absolute path is used only when
+    one can be found now and still exists, which keeps a non-PATH install
+    working without baking in a disposable checkout.
+
+    Pure: returns the argv so it can be asserted without launching anything.
+    """
+    launcher = shutil.which("lop") or "lop"
+    return [launcher, "resume-click", session_id]
+
+
+def _clickable_notify_command(notifier: str, title: str, body: str, session_id: str) -> list[str]:
+    """``notify-send`` argv whose default action reopens the session.
+
+    ``--action=default=…`` makes the whole toast clickable (rather than
+    adding a button), which is what "click the notification to get back to
+    the session" means. ``notify-send`` prints the invoked action's key and
+    exits, so the launch rides a tiny ``sh -c`` waiter: no daemon, nothing
+    retained, and a toast that is merely dismissed exits without launching.
+    """
+    launch = " ".join(shlex.quote(part) for part in resume_click_command(session_id))
+    inner = " ".join(
+        shlex.quote(part)
+        for part in [
+            notifier,
+            "--app-name",
+            APP_NAME,
+            f"--urgency={URGENCY}",
+            "--expire-time=5000",
+            "--action=default=Open session",
+            "--",
+            title or APP_NAME,
+            body,
+        ]
+    )
+    # Only `default` launches: any other output (a dismissal prints nothing)
+    # falls through and the shell exits.
+    return ["sh", "-c", f'[ "$({inner})" = default ] && exec {launch}']
 
 
 def desktop_notify_command(

@@ -1120,6 +1120,12 @@ def _make_system_blocks_provider(
             team_brief=team_brief,
             agent_brief=agent_brief,
             model_label=model_label,
+            # Read LIVE, at turn start: the answer changes whenever a viewer
+            # attaches or detaches, and reading it here is what keeps the
+            # cost O(1) in the number of those events (round 2, operator
+            # requirement 4). Absent a probe this is True, so every host that
+            # is not a detached runtime is unaffected.
+            interactive=(goal_state.is_interactive() if goal_state is not None else True),
         )
 
     return provider
@@ -1151,6 +1157,45 @@ def _transcript_dir_and_agent_id(
     # refused, where silently starting a NEW session would look like a resume
     # that lost the history.
     if resume is not None:
+        # ADOPT vs RESUME. Under the viewer model the session id is minted in
+        # the TUI before anything exists on disk: `lop` opens a viewer bound
+        # to nothing, and the runtime the first message engages is what
+        # materialises the directory. So a runtime asked for an id with no
+        # directory is not a failed resume — it is the FIRST engage of a
+        # session that has only ever been a name, and refusing it (as
+        # `resume_dir` must, for a human typing `--resume`) would make every
+        # new detached session fail to start.
+        #
+        # Gated on the runtime's own env flag rather than applied generally,
+        # because the strictness is load-bearing everywhere else: a human's
+        # `--resume typo` must still say "no session to resume" rather than
+        # silently opening an empty conversation under that name.
+        if os.environ.get("LOP_RUNTIME_ADOPT_SESSION") == "1":
+            requested = str(resume)
+            # The adopt branch relaxes the "must already exist" rule, NOT the
+            # "must be one path component" rule. `resume_dir` enforces both
+            # together, and dropping the second along with the first let
+            # `../../escape` resolve outside `sessions/` (round 1, R3). Not
+            # user-reachable today — `cli.py` runs `resolve_resume_id` first
+            # and viewer ids are `uuid4().hex[:12]` — but the remaining
+            # feeders (the wake index, the supervisor's cwd) are derived from
+            # filenames, and this is the one branch that opted out of a
+            # strictness the comment above calls load-bearing.
+            if requested in ("", ".", "..") or Path(requested).name != requested:
+                raise ValueError(f"not a session id: {requested!r}")
+            adopted = config_dir / "sessions" / requested
+            # Under `LOP_RUNTIME_DEFER_MATERIALISE` the directory is NOT
+            # created here: a speculative warm engage (a viewer's first
+            # keystroke, before the user has committed to a message) must
+            # leave nothing on disk when the draft is abandoned. The first
+            # real write materialises it — see `Transcript.__init__`.
+            defer = os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1"
+            if not adopted.exists() and not defer:
+                # `parents` because a fresh config dir has no sessions/ yet;
+                # `exist_ok` because two contenders may race here and the
+                # lease, not this mkdir, is what arbitrates between them.
+                adopted.mkdir(parents=True, exist_ok=True)
+            return adopted, str(agent.id) if agent is not None else "main"
         resumed = resume_dir(config_dir, str(resume))
         return resumed, str(agent.id) if agent is not None else "main"
     train = bool(getattr(args, "train", False))
@@ -1558,7 +1603,15 @@ async def _prepare(
     from local_operator.session.goal import GoalState
     from local_operator.session.transcript import Transcript
 
-    transcript = Transcript(transcript_dir)
+    # See `_transcript_dir_and_agent_id`: a speculatively warmed runtime must
+    # not materialise a session directory the user may never commit to. The
+    # flag is read here rather than threaded through the signature because it
+    # is set by `_spawn_runtime` on the child's environment and consumed only
+    # on this path.
+    transcript = Transcript(
+        transcript_dir,
+        defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
+    )
     # One holder shared by the prompt provider and the session facade, so a
     # ``/goal`` change lands in the next model step without a session rebuild.
     goal_state = GoalState()

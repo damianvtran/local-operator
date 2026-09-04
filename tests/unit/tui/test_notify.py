@@ -492,3 +492,187 @@ def test_a_failing_notifier_spawn_is_silent(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("local_operator.proc.subprocess.Popen", boom)
     _spawn_detached(["notify-send", "hi"])  # must not raise
+
+
+def test_the_click_through_reopens_the_session_through_the_fork_machinery() -> None:
+    """Clicking the toast must land on ``lop --resume <id>``, not a new session.
+
+    The argv comes from ``broadcast.resume_argv``, which is a safety boundary:
+    it replays a transcript and waits: no prompt, no ``--exec``, nothing that
+    continues an interrupted turn unattended. Asserted here because this is a
+    second caller of that boundary and the property has to hold for both.
+    """
+    from local_operator.tui.notify import resume_click_command
+
+    argv = resume_click_command("abc123def456")
+
+    # `lop resume-click <id>` — the user's launcher, a real subcommand, and a
+    # POSITIONAL id. Every part of that shape was a defect once: the built
+    # command dropped the interpreter and ran a non-executable .py directly
+    # ("permission denied"), and it passed `--resume`, which this subcommand
+    # does not take.
+    assert argv[0].endswith("lop")
+    assert argv[1:] == ["resume-click", "abc123def456"]
+    assert not any(part in ("--exec", "-e") for part in argv)
+    # Never this process's interpreter or checkout: the click happens later,
+    # in the user's session, when a worktree venv may be long gone.
+    assert not any(part.endswith(".py") for part in argv)
+
+
+def test_a_clickable_toast_launches_only_on_the_default_action() -> None:
+    """A dismissed toast must launch nothing.
+
+    ``notify-send --action`` prints the invoked action's key and exits, so the
+    launch is guarded on that exact output: a dismissal prints nothing, the
+    test fails, and the shell exits without reaching the launcher.
+    """
+    from local_operator.tui.notify import _clickable_notify_command
+
+    argv = _clickable_notify_command(
+        "/usr/bin/notify-send", "lop needs you", "bash: rm -rf build/", "abc123def456"
+    )
+
+    assert argv[0:2] == ["sh", "-c"]
+    script = argv[2]
+    assert "= default ]" in script, script
+    assert "--action=default=" in script
+    assert "resume-click abc123def456" in script
+    # The title is model-derived; option parsing must still be terminated.
+    assert " -- " in script
+
+
+def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypatch) -> None:
+    """libnotify < 0.8 treats ``--action`` as an unknown option and delivers
+    NOTHING, so an unprobed flag is the difference between a clickable toast
+    and a silently missing one."""
+    import subprocess
+    import time
+
+    import local_operator.tui.notify as notify_mod
+
+    class _Result:
+        stdout = "Usage: notify-send [OPTION...]\n  --urgency\n"
+        stderr = ""
+
+    class _Modern:
+        stdout = "Usage: notify-send [OPTION...]\n  --action=KEY=LABEL\n"
+        stderr = ""
+
+    def _probe_result(binary: str):
+        # The probe is cached per binary path, so each case needs its own.
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: binary)
+        return None
+
+    # THE FIRST CALL NEVER WAITS. It used to run `subprocess.run(timeout=2)`
+    # synchronously on the runtime's event loop, blocking it a measured 2.03s
+    # from inside the gate path (round 3, B3). It now answers False — the
+    # always-safe plain toast — and probes on a background thread, so the
+    # contract is "never blocks", not "answers correctly the first time".
+    notify_mod._ACTION_SUPPORT.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    assert notify_mod._notify_send_supports_actions("/usr/bin/old-notify-send") is False
+
+    # Once the probe lands, the cached answer is used and no further process
+    # is spawned for that binary.
+    notify_mod._ACTION_SUPPORT.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Modern())
+    notify_mod._notify_send_supports_actions("/usr/bin/notify-send")
+    for _ in range(100):
+        if "/usr/bin/notify-send" in notify_mod._ACTION_SUPPORT:
+            break
+        time.sleep(0.02)
+    assert notify_mod._ACTION_SUPPORT["/usr/bin/notify-send"] is True
+    assert notify_mod._notify_send_supports_actions("/usr/bin/notify-send") is True
+
+    # An old binary caches False and stays False.
+    notify_mod._ACTION_SUPPORT.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+    notify_mod._notify_send_supports_actions("/usr/bin/old2")
+    for _ in range(100):
+        if "/usr/bin/old2" in notify_mod._ACTION_SUPPORT:
+            break
+        time.sleep(0.02)
+    assert notify_mod._ACTION_SUPPORT["/usr/bin/old2"] is False
+
+
+def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> None:
+    """A notification is only sent when nothing is watching, so the click has
+    to OPEN a terminal — there is no emulator around the sender to inherit.
+
+    The backend choice is the fork machinery's, made at click time (the user
+    may have opened a terminal since the toast was posted), and the command
+    is `resume_argv`'s restore-and-idle line.
+    """
+    from local_operator.tui import resume_click
+
+    seen: dict[str, Any] = {}
+
+    class _Backend:
+        def spawn(self, launch, env):  # noqa: ANN001
+            seen["argv"] = launch.argv
+            seen["session"] = launch.session_id
+            return True
+
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: _Backend())
+
+    assert resume_click.open_session("abc123def456") is True
+    assert seen["session"] == "abc123def456"
+    argv = tuple(seen["argv"])
+    assert argv[-2:] == ("--resume", "abc123def456")
+    assert not any(part in ("--exec", "-e") for part in argv)
+
+
+def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
+    """An unrecognised emulator must not silently swallow the user's click."""
+    from local_operator.tui import resume_click
+
+    launched: list[list[str]] = []
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
+    monkeypatch.setattr(
+        "local_operator.proc.spawn_detached",
+        lambda argv, *a, **k: bool(launched.append(list(argv))) or True,
+    )
+
+    assert resume_click.open_session("abc123def456") is True
+    assert launched and launched[0][-2:] == ["--resume", "abc123def456"]
+
+
+def test_the_built_click_command_actually_runs(tmp_path, monkeypatch) -> None:
+    """EXECUTE the command a toast carries, rather than asserting its shape.
+
+    The shipped defect was invisible to an argv assertion: the command that
+    reached the shell named a non-executable `.py` with no shebang and an
+    argument the target does not accept, so the click produced
+    `zsh: permission denied` and nothing else. Running it is what catches
+    that class — a wrong interpreter, a wrong flag, or a path that is not
+    executable all fail here and none of them fail a shape check.
+
+    A stub `lop` on PATH stands in for the user's launcher and records what
+    it was asked to do.
+    """
+    import shlex
+    import subprocess
+
+    from local_operator.tui.notify import resume_click_command
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    receipt = tmp_path / "ran.txt"
+    stub = bin_dir / "lop"
+    stub.write_text(f'#!/bin/sh\necho "$@" > {shlex.quote(str(receipt))}\n')
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+
+    argv = resume_click_command("abc123def456")
+    # Through a shell, exactly as the notifier's NSTask and notify-send's
+    # `--action` handler both do — that round trip is where the quoting and
+    # the interpreter were lost.
+    result = subprocess.run(
+        ["sh", "-c", " ".join(shlex.quote(part) for part in argv)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert receipt.read_text().strip() == "resume-click abc123def456"

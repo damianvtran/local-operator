@@ -1274,6 +1274,25 @@ class SessionRow(NamedTuple):
     #: picker's row builder sets it.
     forked: bool = False
 
+    # -- live state, supplied by the CALLER -------------------------------
+    # This module stays stdlib-only and never scans the registry itself: it
+    # sits on the CLI startup path, and `lop --resume` must not pay for a
+    # record walk. The picker does one ``registry.scan()`` and one
+    # ``wakes.store.read_index()`` when it opens and fills these in; every
+    # other construction site keeps the defaults and renders exactly as before.
+
+    #: ``"busy"`` (a turn is running), ``"idle"`` (resident, warm),
+    #: ``"attached"`` (another terminal is watching), ``"wedged"`` (a live pid
+    #: whose heartbeat went stale), or ``""`` for a cold session.
+    live_state: str = ""
+    #: ``"approval"`` / ``"ask"`` when the session is waiting for a PERSON.
+    #: The needs-you marker, and the reason a row sorts first.
+    pending: str | None = None
+    #: How many wakes are scheduled, and whether they are dormant because the
+    #: session was deliberately stopped.
+    wakes: int = 0
+    wakes_dormant: bool = False
+
 
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per
 #: surface (``session_picker.FORK_MARKER`` in the TUI, the phone's list

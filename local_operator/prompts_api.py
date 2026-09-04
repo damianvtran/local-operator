@@ -273,6 +273,7 @@ def build_system_blocks(
     team_brief: str = "",
     agent_brief: str = "",
     model_label: str = "",
+    interactive: bool = True,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -369,6 +370,31 @@ def build_system_blocks(
         # the more recent, more specific instruction, and later placement is
         # how the model reads precedence when the two briefs disagree.
         tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
+    if not interactive:
+        # WHO CAN ANSWER, stated once. A detached session has nobody at a
+        # screen, so a question costs a parked gate (holding the runtime
+        # resident) and gets no answer — the model needs to know that BEFORE
+        # it decides to ask, not after the gate times out.
+        #
+        # A single recomputed statement, deliberately, not an event: a row
+        # per attach/detach would grow the transcript without bound for a
+        # user who reattaches often, which is exactly the token accumulation
+        # this is meant to avoid. This block is rebuilt at turn start, so N
+        # attach/detach cycles cost the same as zero.
+        tail = (
+            f"{tail}\n\n<interactivity>\n"
+            "No interactive surface is attached to this session right now: "
+            "nobody is watching a screen, so a question to the user cannot be "
+            "answered until someone reopens it.\n\n"
+            "- Prefer to PROCEED with what you have, or finish the turn with a "
+            "clear statement of what you would have asked, over calling `ask`.\n"
+            "- Do not take an irreversible or destructive action to avoid "
+            "asking; when the choice genuinely needs a person, stop and say so "
+            "— that is cheaper than a wrong guess.\n"
+            "- The user will read this conversation when they return, so write "
+            "for someone catching up, not for someone watching live.\n"
+            "</interactivity>"
+        )
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into
