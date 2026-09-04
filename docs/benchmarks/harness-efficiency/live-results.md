@@ -13,6 +13,14 @@ are retained in [live-final.json](live-final.json). See
 [the method](live-method.md) and the two reproducible benchmark scripts for
 scope, isolation, source checks, budgets, and acceptance predicates.
 
+One fixture limitation affects baseline repair repeat 5: its `git status`
+discovered an ancestor repository and exposed unrelated workspace filenames in
+recorded tool output. No unrelated file contents or credentials appear in that
+output. The trial remains in every reported aggregate as an uncontrolled-state
+caveat. Future workers initialize a synthetic Git root before fixture seeding;
+that correction was verified offline, with no replacement live run. Scoped
+synthetic inputs and prompt instructions are not a filesystem sandbox.
+
 | Metric | Repair baseline | Repair candidate | Aggregate baseline | Aggregate candidate |
 | --- | ---: | ---: | ---: | ---: |
 | Accepted sessions | 5/5 | 5/5 | 5/5 | 5/5 |

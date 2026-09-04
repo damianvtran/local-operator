@@ -5,6 +5,18 @@ The benchmark runs real `Session` tool loops with native OpenAI authentication,
 Only `read`, `write`, `edit`, `bash`, `eval`, `glob`, and `grep` are available.
 Each run receives a fresh task directory, config directory, and transcript.
 There are no external MCP servers or real user tasks in these sessions.
+These scoped synthetic inputs and prompt instructions are not a filesystem
+sandbox: tools retain the worker's normal filesystem permissions.
+
+The worker now initializes a synthetic Git repository before seeding fixtures,
+clears inherited Git environment overrides, and uses local synthetic defaults
+for identity, hooks, monitoring, and ignores. This prevents ordinary Git ancestor
+discovery from reaching an unrelated enclosing repository. The published
+20-session matrix predates that fixture fix: baseline repair repeat 5 ran
+`git status` and exposed unrelated ancestor-workspace filenames in recorded
+tool output. The recorded output contains no unrelated file contents or
+credentials. That trial remains in the results as an uncontrolled-state caveat;
+it was not rerun or excluded. The fixture correction was validated offline.
 
 The native auth database stays in its original location and is opened through
 `AuthStore`; credentials are neither copied into the benchmark nor printed.

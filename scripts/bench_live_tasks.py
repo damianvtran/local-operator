@@ -20,6 +20,8 @@ import time
 import uuid
 from pathlib import Path
 
+from bench_live_workspace import initialize_workspace
+
 parser = argparse.ArgumentParser()
 parser.add_argument("repo")
 parser.add_argument("arm")
@@ -39,7 +41,7 @@ if subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "local_operator"], cw
     raise SystemExit("Runtime source has uncommitted changes")
 run = output / f"{args.arm}-{args.task}-{args.repeat}-{uuid.uuid4().hex[:8]}"
 workspace = run / "workspace"
-workspace.mkdir(parents=True)
+initialize_workspace(workspace, environment=os.environ)
 (run / "config").mkdir()
 auth_db = Path.home() / ".local-operator" / "auth.db"
 os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(run / "config")

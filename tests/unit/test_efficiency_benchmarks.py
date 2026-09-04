@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import subprocess
 
 from local_operator.harness.types import (
     AgentTool,
@@ -12,6 +14,63 @@ from local_operator.harness.types import (
 )
 from local_operator.providers.clients import AnthropicClient
 from scripts import bench_cache_rate, bench_complex_tasks
+from scripts.bench_live_workspace import initialize_workspace
+
+
+def test_live_workspace_git_discovery_stays_under_synthetic_root(tmp_path):
+    """A scratch cwd alone must not expose an enclosing repository's files.
+
+    Exercise real Git rather than mocking init: removing the initializer makes
+    both rev-parse and status escape to the ancestor, reproducing the live-trial
+    leak. No provider or live worker is imported or invoked by this fixture test.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    synthetic_home = tmp_path / "home"
+    synthetic_home.mkdir()
+    environment["HOME"] = str(synthetic_home)
+    environment["XDG_CONFIG_HOME"] = str(synthetic_home / ".config")
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--template=", str(ancestor)],
+        env=environment,
+        check=True,
+    )
+    (ancestor / "unrelated-sentinel.txt").write_text("unrelated fixture")
+    workspace = ancestor / "trial" / "workspace"
+    # Explicit Git roots are inherited by subprocesses as well as discovered.
+    # The initializer must clear them for all subsequent tools in this worker.
+    environment["GIT_DIR"] = str(ancestor / ".git")
+    environment["GIT_WORK_TREE"] = str(ancestor)
+    initialize_workspace(workspace, environment=environment)
+    (workspace / "ledger.py").write_text("synthetic fixture")
+    top_level = subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"], cwd=workspace, env=environment, text=True
+    ).strip()
+    assert top_level == str(workspace)
+    status = subprocess.check_output(
+        ["git", "status", "--short", "--untracked-files=all"],
+        cwd=workspace,
+        env=environment,
+        text=True,
+    )
+    assert status == "?? ledger.py\n"
+    assert not any(key.startswith("GIT_") for key in environment)
+    for key, expected in {
+        "core.fsmonitor": "false",
+        "core.excludesFile": os.devnull,
+        "user.email": "benchmark@example.invalid",
+    }.items():
+        assert (
+            subprocess.check_output(
+                ["git", "config", "--local", "--get", key],
+                cwd=workspace,
+                env=environment,
+                text=True,
+            ).strip()
+            == expected
+        )
 
 
 def test_cache_denominators_follow_the_provider_counting_contract():

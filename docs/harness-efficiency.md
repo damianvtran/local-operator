@@ -6,6 +6,10 @@ against `5cbea141`. The final measurements below compare committed baseline
 Both checkouts own an editable virtual environment; probes verify imported
 source paths. Local timings are observations on macOS, not promises about
 provider latency or fleet completion time. Earlier artifacts remain retained.
+Final review subsequently tightened Unicode path conflict identities and
+repaired a pre-existing deferred TUI landing race. Those correctness fixes
+are covered by structural tests; the live measurements identify the frozen
+runtime they actually exercised rather than claiming to measure later edits.
 
 ## Measured improvements
 
@@ -127,6 +131,11 @@ cache or shared cookie state. Fetch refresh still bypasses the response cache.
 Tool output remains bounded; omitted bytes are explicitly marked rather than
 advertised as recoverable full output.
 
+New-file conflicts include Unicode normalization as well as case and resolved
+symlink spelling, before an inode exists. The same identity protects transaction
+locks across separate sessions. This can conservatively serialize distinct
+names on a normalization-sensitive filesystem; the I/O path itself is unchanged.
+
 Analytics latency is observed end-to-end stream duration, including routing,
 retries and consumer backpressure. TTFT is the first text/tool delta. Preparation
 time covers request preparation. Rows identify logical requests, owning and
@@ -144,3 +153,14 @@ loop tests use a real eval subprocess, exercise discovered tools and denied or
 invalid calls, and check paired execution events. Unit tests cannot establish
 model task quality or actual provider cache hit rates; live trials are reported
 separately with their sample size and acceptance criteria.
+
+The full unit run exposed a pre-existing viewport race in unchanged upstream
+code: a delayed batch callback re-enabled tail following after the subagent
+page had explicitly released it at a row head. A release revision now prevents
+that stale callback from overriding the newer viewport choice. The forced
+callback ordering fails on baseline and with the guard removed, and passes
+with the fix; 143 subagent/stream-anchor tests passed. Rendered frames from
+the real application were inspected [before](benchmarks/harness-efficiency/viewport-before.png)
+and [after](benchmarks/harness-efficiency/viewport-after.png): the landing moved
+from offset 28 inside the error block to its head at 25, with following off.
+This is a correctness fix, not a measured task-time gain.
