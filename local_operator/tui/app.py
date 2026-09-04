@@ -19274,7 +19274,12 @@ class OperatorApp(App[None]):
 
     # -- authoritative slash results (v5) -------------------------------------
     async def run_slash_authoritative(
-        self, command: str, args: str, images: list[Any] | None = None
+        self,
+        command: str,
+        args: str,
+        images: list[Any] | None = None,
+        *,
+        locality: str = "local",
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -19286,16 +19291,23 @@ class OperatorApp(App[None]):
         local session would run, so the follower's receipt is byte-for-byte
         the standard vocabulary. ``kind`` is ``notice`` for a printed line,
         ``block`` for a renderable payload, ``noop`` when the follower opens
-        its own picker. Async because the MCP grant path awaits a browser
+        its own picker. Async because the MCP grant path starts a browser
         round trip; every other producer is synchronous work.
+
+        ``locality`` is the invoking client's declared position (see
+        ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
+        opened here is in front of a user at THIS machine, which is true of
+        every client today and false for a future relayed remote device.
 
         Only the commands a follower routes land here; process/terminal
         commands stay local and never reach this dispatcher.
         """
-        result = await self._slash_result(command, args, images)
+        result = await self._slash_result(command, args, images, locality)
         return result.model_dump(mode="json")
 
-    async def _slash_result(self, command: str, args: str, images: list[Any] | None) -> Any:
+    async def _slash_result(
+        self, command: str, args: str, images: list[Any] | None, locality: str = "local"
+    ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
         if command == "context":
@@ -19307,7 +19319,7 @@ class OperatorApp(App[None]):
         if command == "effort":
             return self._effort_slash_result(args, SlashResult)
         if command == "mcp":
-            return await self._mcp_slash_result(args, SlashResult)
+            return await self._mcp_slash_result(args, SlashResult, locality)
         if command == "team":
             return self._team_slash_result(args, SlashResult)
         if command == "agent":
@@ -19485,7 +19497,7 @@ class OperatorApp(App[None]):
             style="info",
         )
 
-    async def _mcp_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _mcp_slash_result(self, arg: str, SlashResult: Any, locality: str = "local") -> Any:
         parts = arg.split()
         if not parts:
             block = self._mcp_block()
@@ -19539,13 +19551,25 @@ class OperatorApp(App[None]):
             return SlashResult(kind="notice", text=text, style=_slash_style(kind))
         # The grant runs HERE, on the authoritative owner: the follower's MCP
         # facade is read-only and the OAuth credential store is the owner's.
-        # The interactive browser round trip opens on the owner's machine (the
-        # terminal that owns the session), and the settled receipt returns to
-        # the invoker as the result — the functional outcome is identical
-        # regardless of which terminal typed the command.
-        receipt = await self._run_mcp_grant_on_owner(sub, parts[1])
-        style = "success" if receipt.startswith(("authenticated", "logged out")) else "warning"
-        return SlashResult(kind="notice", text=receipt, style=style)
+        # The browser round trip opens on the owner's machine, which is the
+        # machine every client dials from (the control socket is loopback
+        # only), so the tab lands in front of the person who typed the verb.
+        #
+        # Started rather than awaited: the exchange waits on a human, and the
+        # invoking client abandons the request after ``ACK_TIMEOUT_S``.
+        # ``start_grant`` returns the receipt immediately and reports the
+        # settled outcome as a notice — the same shape the local worker uses.
+        from local_operator.mcp.grants import start_grant
+
+        text, kind = await start_grant(
+            self._session,
+            sub,
+            parts[1],
+            browser_is_reachable=locality != "remote",
+            notify=lambda body, style: self._system_notice(body, cast("NoticeKind", style)),
+            spawn=self._spawn_mcp_grant,
+        )
+        return SlashResult(kind="notice", text=text, style=_slash_style(kind))
 
     def _team_slash_result(self, arg: str, SlashResult: Any) -> Any:
         registry = self._team_registry()
@@ -19996,125 +20020,47 @@ class OperatorApp(App[None]):
     async def _mcp_login_allowed(self, manager: Any, cfg: Any) -> bool:
         """Whether an explicit login on ``cfg`` may proceed, per ``manager``.
 
-        Routed through the manager so the eligibility question is answered
-        against ITS effective auth store. Both grant entry points (the local
-        worker and the owner-side one) share this, because a gate that
-        disagreed with the manager's own classification would refuse a login
-        for a server the manager had just told the user to ``reauth`` (F6).
-
-        A reduced host — a follower's read-only MCP facade — may not implement
-        the accessor. Falling back to the store-less probe there is correct
-        rather than lenient: such a facade owns no auth store to consult, and
-        the static refusals still apply.
+        Delegates to :func:`local_operator.mcp.grants.login_allowed` so the
+        eligibility question has ONE answer across the local worker, the
+        routed path, and the detached runtime — a gate that disagreed with the
+        manager's own classification would refuse a login for a server the
+        manager had just told the user to ``reauth`` (F6).
         """
-        checker = getattr(manager, "server_supports_oauth_login", None)
-        if callable(checker):
-            # ``manager`` is duck-typed here (a follower hands over a facade),
-            # so the accessor's return is untyped; it is an awaitable bool.
-            return bool(await cast("Awaitable[bool]", checker(cfg)))
-        from local_operator.mcp.auth import probe_oauth_capability
+        from local_operator.mcp.grants import login_allowed
 
-        return await probe_oauth_capability(cfg)
+        return await login_allowed(manager, cfg)
 
     def _resolve_mcp_server(self, name: str) -> tuple[Any, Any] | str:
         """The authoritative ``(manager, config)`` for ``name``, or a notice body.
 
-        Shared by the local handler and the owner-side grant worker so a
+        Delegates to :func:`local_operator.mcp.grants.resolve_server` so a
         login/logout/reauth validates against the SAME server set from every
-        terminal: when the owner has no UI this worker is the terminal's whole
-        command, and it must see the real manager rather than a facade. Returns
-        a string (the warning to print) on every unavailable path so neither
-        caller duplicates the three refusal checks.
+        terminal and from a detached runtime with no UI at all. Returns a
+        string (the warning to print) on every unavailable path so no caller
+        duplicates the refusal checks.
         """
-        manager = getattr(self._session, "mcp_manager", None)
-        if manager is None:
-            return "MCP is not available in this session."
-        get_config = getattr(manager, "get_server_config", None)
-        if not callable(get_config):
-            # A remote follower exposes a read-only MCP facade with no config
-            # accessor; it never reaches this branch because its grant path is
-            # the worker below, but a reduced host could hand one here too.
-            return "MCP is not available in this session."
-        cfg = get_config(name)
-        if cfg is None:
-            return f"MCP server {name!r} is not configured — see /mcp"
-        # Only the STATICALLY impossible cases are refused here: a stdio
-        # server (no transport that can carry a bearer token) and one whose
-        # config declares a non-OAuth auth type, which is the user already
-        # telling us how that server authenticates.
-        #
-        # This used to refuse on ``auth.type != "oauth"``, which told a user
-        # with a Codex-imported server that the very command fixing their 401
-        # "does not use OAuth login" — that config carries only a ``url``,
-        # because Codex holds its grants elsewhere. Whether such a server takes
-        # OAuth is not decidable from the config, and this resolver is
-        # synchronous, so the remaining question is settled by a live
-        # capability probe in the async login path (``_mcp_login_worker``)
-        # rather than assumed either way here.
-        from local_operator.mcp.auth import server_rejects_oauth
-        from local_operator.mcp.config import MCPServerConfig
+        from local_operator.mcp.grants import resolve_server
 
-        # ``get_config`` is read off a duck-typed manager (a follower's facade
-        # implements the same accessor), so its return is untyped here; the
-        # helper only reads ``auth``/``url`` off it.
-        if server_rejects_oauth(cast(MCPServerConfig, cfg)):
-            return f"MCP server {name!r} does not use OAuth login."
-        return manager, cfg
+        return resolve_server(self._session, name)
 
-    async def _run_mcp_grant_on_owner(self, sub: str, name: str) -> str:
-        """Run one MCP grant mutation against the REAL manager; return a receipt.
+    def _spawn_mcp_grant(self, coro: Awaitable[None]) -> None:
+        """Run a detached MCP grant step on the app's loop.
 
-        The interactive browser round trip is terminal-local (it pops a tab on
-        whatever machine runs it), so a FOLLOWER that owns its own terminal runs
-        the grant against its local MCP manager via ``_cmd_mcp`` and does not
-        need this. This path is for a follower that has no local MCP manager at
-        all — its session is a facade with a read-only MCP snapshot — and is
-        also the owner-side backend when the owner is itself headless. It does
-        the entire command and returns the line the invoker prints, so the
-        invoking terminal renders the receipt regardless of which machine
-        opened the browser.
+        The grant blocks on a human, so it cannot be awaited inside the
+        request that started it (the invoking client abandons the request
+        after ``ACK_TIMEOUT_S``). ``run_worker`` keeps the task owned by the
+        app, so app shutdown cancels it rather than leaving an orphaned
+        browser exchange writing into a session that has gone away.
+
+        The same exclusive ``mcp-login`` group the local worker uses: a second
+        login/reauth for any server supersedes the first, and back-to-back
+        verbs must not leave one grant racing another's teardown.
         """
-        resolved = self._resolve_mcp_server(name)
-        if isinstance(resolved, str):
-            return resolved
-        manager, cfg = resolved
-        if sub == "logout":
-            removed = self._mcp_logout(manager, name, cfg)
-            return (
-                f"logged out of MCP server {name!r} — its credential is removed and the "
-                "server will stay disconnected until /mcp login."
-                if removed
-                else f"MCP logout failed for {name!r} — see the owner transcript."
-            )
-        # login | reauth: the SAME interactive exchange ``_mcp_login_worker``
-        # runs, awaited here so the ack carries the settled outcome — including
-        # the capability gate, which must cover this path too or a follower
-        # would reach a grant the local terminal refuses (F3). Asked of the
-        # MANAGER rather than the auth module directly: the answer depends on
-        # this session's effective auth store, and a store-less probe refused
-        # servers whose grant lives in an injected store (F6).
-        if not await self._mcp_login_allowed(manager, cfg):
-            return f"MCP server {name!r} does not use OAuth login."
-        if sub == "reauth":
-            removed = self._mcp_logout(manager, name, cfg, verb="reauth", disconnect=False)
-            if not removed:
-                return f"MCP reauth failed for {name!r} — could not forget the stored grant."
-        from local_operator.mcp.auth import McpLoginCancelledError
 
-        if sub == "reauth":
-            try:
-                await manager.disconnect_server(name)
-            except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant
-                logger.debug("MCP disconnect before reauth failed for %s", name, exc_info=True)
-        try:
-            conn = await manager.connect_configured_server(name, timeout_ms=600_000)
-        except asyncio.CancelledError:
-            raise
-        except McpLoginCancelledError as exc:
-            return f"MCP login for {name!r} cancelled: {exc}"
-        except Exception as exc:  # noqa: BLE001 — a failed grant is a notice, not a crash
-            return f"MCP login failed for {name!r}: {exc}"
-        return f"authenticated MCP server {name!r}; {len(conn.tools)} tools available."
+        async def _run() -> None:
+            await coro
+
+        self.run_worker(_run, thread=False, group="mcp-login", exclusive=True)
 
     def _mcp_logout(
         self,

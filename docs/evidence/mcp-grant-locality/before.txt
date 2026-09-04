@@ -1,0 +1,4 @@
+local-operator 0.46.0 (released build), detached runtime:
+  /mcp reauth notion -> [warning] /mcp reauth opens a browser and stores credentials on the machine running the terminal — run it from a terminal on that machine
+  /mcp login notion -> [warning] /mcp login opens a browser and stores credentials on the machine running the terminal — run it from a terminal on that machine
+  /mcp logout notion -> [warning] /mcp logout opens a browser and stores credentials on the machine running the terminal — run it from a terminal on that machine

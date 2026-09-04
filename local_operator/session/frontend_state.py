@@ -50,6 +50,7 @@ from local_operator.harness.types import (
     ModelSpec,
     Usage,
 )
+from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.tui.costs import job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -117,7 +118,11 @@ _FRONTEND_LOCAL_SLASHES = {
 # follower's MCP facade is a read-only snapshot with no config accessor, so
 # routing the mutation (not faking it locally) is the only non-crashing,
 # non-divergent answer. The dispatch splits the two shapes by argument.
-_MCP_GRANT_SUBCOMMANDS = {"login", "logout", "reauth"}
+#
+# Aliased from the module that IMPLEMENTS these verbs rather than restated:
+# two literal copies of the set is how a fourth verb ends up routed by one
+# half of the dispatch and refused by the other.
+_MCP_GRANT_SUBCOMMANDS = frozenset(_GRANT_SUBCOMMANDS)
 #: Every verb ``/mcp`` accepts, in the order the refusal offers them. Canonical
 #: HERE rather than on `OperatorApp` because both the terminal and the detached
 #: runtime validate against it, and a runtime that knew a shorter list silently

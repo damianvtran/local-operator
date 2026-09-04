@@ -238,12 +238,19 @@ async def _wait_record() -> registry.SessionRecord:
     raise AssertionError("runtime never published a live record")
 
 
-async def _dial(record: registry.SessionRecord, *, client: str | None = None):
+async def _dial(
+    record: registry.SessionRecord,
+    *,
+    client: str | None = None,
+    locality: str | None = None,
+):
     """Open + auth one connection; consume the welcome projection."""
     reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
     auth: dict[str, object] = {"key": record.control_key}
     if client is not None:
         auth["client"] = client
+    if locality is not None:
+        auth["locality"] = locality
     writer.write(json.dumps(auth).encode() + b"\n")
     await writer.drain()
     welcome = await asyncio.wait_for(reader.readline(), timeout=5)
@@ -1435,6 +1442,172 @@ async def test_an_attach_clients_watch_cannot_leak_into_the_phone_count() -> Non
         # `watch_supported` latches regardless: it is a version signal about
         # the peer speaking the op, not a count.
         assert runtime.watch_supported is True
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+# --- client locality ---------------------------------------------------------
+#
+# Some operations only make sense where the user physically is: an OAuth grant
+# opens a browser tab and writes a credential into THIS machine's auth.db.
+# That question cannot be answered from inside the runtime — trying to infer it
+# is what made `/mcp reauth` refuse every routed invocation — so the client
+# declares it and the runtime passes it to the handler.
+
+
+class _LocalityHandle(FakeHandle):
+    """Records the locality each routed slash command was dispatched with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.localities: list[str] = []
+
+    async def run_slash_authoritative(
+        self, command, args, images, *, locality="local"
+    ):  # noqa: ANN001, ANN202
+        self.localities.append(locality)
+        return {"kind": "notice", "text": f"owner ran /{command}", "style": "info"}
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_declares_nothing_is_local() -> None:
+    """Absent means local: every client today dials over loopback.
+
+    The listener binds 127.0.0.1 only, so a client that reached the runtime is
+    on its machine by construction. An older client that never heard of the
+    field must therefore keep working, not lose its grants.
+    """
+    handle = _LocalityHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps(
+                {"op": "slash_result", "req": 3, "command": "mcp", "args": "reauth n"}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 3)
+        assert handle.localities == ["local"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_relay_can_declare_its_client_remote() -> None:
+    """The seam a future mobile relay needs: forward the phone's position.
+
+    Without this the runtime would have to guess, and the only guess available
+    ("a routed command came from elsewhere") is the wrong one for every client
+    that exists today.
+    """
+    handle = _LocalityHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach", locality="remote")
+        writer.write(
+            json.dumps(
+                {"op": "slash_result", "req": 4, "command": "mcp", "args": "reauth n"}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 4)
+        assert handle.localities == ["remote"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_handle_that_does_not_take_locality_still_works() -> None:
+    """Back-compat: the parameter is probed, never forced.
+
+    A handle is an injected collaborator, so widening the call unconditionally
+    would break every implementation not updated in lockstep — including the
+    reduced doubles this suite is built on.
+    """
+    handle = FakeHandle()  # its run_slash_authoritative takes three positionals
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach", locality="remote")
+        writer.write(
+            json.dumps({"op": "slash_result", "req": 5, "command": "goal", "args": ""}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        frame = await _until(reader, "result", 5)
+        assert frame["data"]["text"] == "owner ran /goal"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_phone_daemon_dials_as_remote() -> None:
+    """The relay must declare itself, or loopback silently reads as "the user".
+
+    The daemon connects over loopback like everything else, but it is a RELAY:
+    the person is holding a phone on the other side of the mobile portal's
+    tunnel. Before this it sent `{"key": ...}` alone and was classified local,
+    so a phone's `/mcp reauth` would have opened a browser on the desktop and
+    rewritten a credential the phone's owner cannot see (review F1).
+
+    Asserted on the FRAME the daemon actually writes rather than on a constant,
+    so deleting the field from the dial fails this test.
+    """
+    import inspect as _inspect
+
+    from local_operator.mobile import daemon as daemon_module
+
+    source = _inspect.getsource(daemon_module._dial)
+    assert (
+        '"locality": "remote"' in source
+    ), "the daemon must declare locality=remote in its auth frame"
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_class_dial_is_refused_a_grant() -> None:
+    """End-to-end cover for F1: dial exactly as the daemon does, and be remote."""
+    handle = _LocalityHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        # Byte-identical to mobile/daemon.py::_dial — no `client` field, which
+        # means daemon, plus the locality it now declares.
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "locality": "remote"}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), timeout=5)  # welcome
+        writer.write(
+            json.dumps(
+                {"op": "slash_result", "req": 9, "command": "mcp", "args": "reauth n"}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 9)
+        assert handle.localities == ["remote"]
     finally:
         if writer is not None:
             writer.close()

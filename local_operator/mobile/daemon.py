@@ -640,7 +640,19 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     entry.writer = writer
     entry.degraded = False
     try:
-        writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+        # ``locality: remote`` is the truthful description of this connection.
+        # The daemon dials over loopback, but it is a RELAY: the human driving
+        # it is holding a phone, reaching this machine through the mobile
+        # portal's tunnel. Operations that act on the user's physical
+        # surroundings must not be run for it — an OAuth grant would open a
+        # browser tab on this desktop, in front of nobody, and write a
+        # credential the phone's owner cannot see or use.
+        #
+        # Loopback proves the CALLER is on this machine; it does not prove the
+        # PERSON is (`ClientLocality`). The daemon is the one client today for
+        # which those differ, and `mobile/types.py` already admits
+        # ``slash_result``, so the phone can reach `/mcp reauth` through it.
+        writer.write(json.dumps({"key": record.control_key, "locality": "remote"}).encode() + b"\n")
         await writer.drain()
         while True:
             try:
