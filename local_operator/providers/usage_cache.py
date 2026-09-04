@@ -522,6 +522,31 @@ class UsageCacheStore:
             )
         return last_good
 
+    def invalidate(self, key: str) -> None:
+        """Drop one provider's cached row so the next read re-fetches it.
+
+        The account fingerprint in the key makes login/logout self-invalidating
+        whenever the account SET changes, which covers a first login and a
+        logout. It cannot cover re-authenticating an account that is already
+        stored: providers whose identity key is a per-provider constant (kimi
+        returns no account id, so the row is replaced in place) keep the same
+        fingerprint, so the same key still matches and the row survives the one
+        event that proves its contents wrong. That is how a ``sign-in expired``
+        verdict outlived the ``/login`` it asked for.
+
+        ``with conn:`` for the same reason ``_cleanup`` documents at length: a
+        bare DELETE leaves sqlite's implicit transaction open and holds the WAL
+        write lock against every other session until something commits.
+        """
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            with conn:
+                conn.execute("DELETE FROM usage_reports WHERE key = ?", (key,))
+        except Exception:  # noqa: BLE001 — a failed drop is a stale read, never fatal
+            logger.debug("usage cache: invalidate failed", exc_info=True)
+
     def _cleanup(self, conn: sqlite3.Connection, now_ms: int) -> None:
         """Drop rows whose retention has passed. Cheap: one indexed scan.
 

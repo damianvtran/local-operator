@@ -502,15 +502,32 @@ def _account_status_note(  # noqa: ANN001
     remedy the user can act on, so it names the command instead of an age.
     An exhausted 200 (100% weekly) is quota, not this path.
     """
+    unavailable = bool(getattr(report, "usage_unavailable", False))
+    failures = int(getattr(report, "consecutive_failures", 0) or 0)
+    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
     if getattr(report, "credential_invalid", False):
         # The provider is named because the panel lists several accounts and
         # the note sits under one block; `/login kimi` is runnable as printed,
         # which `sign in again` would not be. Kept generic -- any provider's
         # OAuth grant can die this way.
-        return f"sign-in expired \u2014 /login {report.provider}"
-    unavailable = bool(getattr(report, "usage_unavailable", False))
-    failures = int(getattr(report, "consecutive_failures", 0) or 0)
-    fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+        #
+        # `sign-in expired` deliberately does NOT reuse `_credential_state`'s
+        # three-word vocabulary (`logged in` / `env key` / `needs login`,
+        # app.py). That set answers "is there a usable credential", and
+        # `needs login` covers never-logged-in and died-since alike. Here the
+        # difference is the whole message: the user HAS logged in, and what
+        # they need to know is that it stopped working. Do not "fix" this into
+        # `needs login` -- the divergence is the information.
+        #
+        # The age rides along when there is room, for the same reason this
+        # note exists at all: the block keeps rendering last-known meters, and
+        # without a vintage a two-day-old 100% sits unmarked under a title
+        # reading `just now`. `_fit_status_note` sheds it first on a narrow
+        # card, since the command is the actionable half.
+        note = f"sign-in expired \u2014 /login {report.provider}"
+        if fetched_at and report.limits:
+            return f"{note} \u00b7 numbers {format_age(max(0.0, now_ms - fetched_at))}"
+        return note
     # Older than the title by more than a rendered age step would show. The
     # threshold is the age formatter's own resolution: below a minute
     # `format_age` says `just now` for both stamps, so a note there would
@@ -541,22 +558,41 @@ def _fit_status_note(note: str, width: int) -> str:
     ``usage unavailable — last known 2h a…``. The short form states both facts in
     20 cells, so it fits where the long one cannot; the long form is preferred
     whenever there is room for it, since it reads as a sentence.
+
+    The dead-grant note descends a further ladder, because its tail is a
+    COMMAND and a truncated command is worse than no command: it still looks
+    like an instruction and then fails when followed. The provider id is the
+    argument ``/login`` requires and the one thing no other row on the card
+    supplies, so it is the last thing to go — the verb yields first, then the
+    age, and the id survives to the 32-col ``PANEL_MIN_WIDTH`` floor for every
+    id in ``USAGE_PROVIDERS`` (the longest, ``alibaba-token-plan-oauth``, needs
+    31 cells against the floor's 25 budget, so nothing shorter than dropping
+    the verb suffices).
     """
-    if cell_len(note) <= width or " — " not in note:
+    if cell_len(note) <= width:
+        return note
+    dead_grant = "/login " in note
+    if dead_grant:
+        # Shed the age first: it qualifies the meters, which are still on
+        # screen, while the command is the only actionable thing here.
+        note = note.partition(" \u00b7 numbers ")[0]
+        if cell_len(note) <= width:
+            return note
+    if " — " not in note:
         return note
     label, _, tail = note.partition(" — ")
+    if dead_grant:
+        # `sign-in expired — /login kimi` gains nothing from the generic
+        # rewrite below (both halves are already minimal), so go straight to
+        # the tail, then to the bare provider id. The verb is recoverable from
+        # `/help` and from the heading vocabulary; the id is recoverable from
+        # nothing else on this card.
+        if cell_len(tail) <= width:
+            return tail
+        return tail.replace("/login ", "")
     # `last known 2h ago` -> `2h ago`; the `·` keeps the two facts separable.
     short = f"{label.replace('usage ', '')} · {tail.replace('last known ', '')}"
-    if cell_len(short) <= width:
-        return short
-    # Last resort: the tail alone. `sign-in expired — /login kimi` gains
-    # nothing from the rewrite above (both halves are already minimal, so the
-    # short form is the same length), and truncation would eat the provider
-    # name off the end — turning a command the user can run as printed into
-    # `/login anthro…`. The tail is the half that survives, for the same
-    # reason the age does above: it is the actionable one. Only taken when the
-    # label genuinely cannot fit, so the ordinary note is untouched.
-    return tail if cell_len(tail) <= width else note
+    return short if cell_len(short) <= width else note
 
 
 def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
@@ -1313,11 +1349,18 @@ class UsagePanel(Static):
             )
         return build_usage_body(self._reports, width, self._now(), self._fetched_ms)
 
-    def _stale_account_count(self) -> int:
-        """How many blocks the title's age does NOT speak for.
+    def _flagged_account_counts(self) -> tuple[int, int]:
+        """``(stale, expired)`` — blocks the title's age does not speak for.
 
-        Same predicate the body uses, so the count and the `last known` notes
-        can never disagree about which accounts are stale.
+        Split because the two carry different instructions. A stale block is
+        waiting on the network and will catch up on its own; an expired
+        sign-in never will, and saying `1 stale` for it re-frames as a
+        freshness problem the exact category error this panel now exists to
+        correct. The title is the most-read row on the card, so a user who
+        glances only there must not be told to wait.
+
+        Same predicate the body uses, so the counts and the per-block notes
+        can never disagree about which accounts are flagged.
 
         "Stale" here means "not confirmed by the round the title reports", which
         is very nearly but not exactly "older". The title takes the newest
@@ -1328,11 +1371,15 @@ class UsagePanel(Static):
         number is misdated) and the alternative, counting only rows that are
         literally older, would leave an unconfirmed block unmarked.
         """
-        return sum(
-            1
-            for report in self._reports
-            if _account_status_note(report, self._now(), self._fetched_ms)
-        )
+        stale = expired = 0
+        for report in self._reports:
+            if not _account_status_note(report, self._now(), self._fetched_ms):
+                continue
+            if getattr(report, "credential_invalid", False):
+                expired += 1
+            else:
+                stale += 1
+        return stale, expired
 
     def _title_row(self) -> Text:
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -1341,10 +1388,10 @@ class UsagePanel(Static):
         warning = Style(color=theme_mod.semantic_color("warning"))
         row = Text()
         row.append("Usage", style=Style(color=theme_mod.semantic_color("fg")))
-        stale = 0
+        stale = expired = 0
         age = ""
         if self._fetched_ms is not None and not self._loading and not self._error:
-            stale = self._stale_account_count()
+            stale, expired = self._flagged_account_counts()
             age = f"  {format_age(self._now() - self._fetched_ms)}"
         # The target is dropped when the row cannot hold both it and the stale
         # count. The title truncates from the RIGHT, so whatever is appended
@@ -1355,9 +1402,12 @@ class UsagePanel(Static):
         # and every block header repeats it. The stale count is the thing they
         # did not know, so it is the target that yields.
         target = f"  {self._target}" if self._target else ""
-        if target and stale:
+        if target and (stale or expired):
             wanted = cell_len("Usage") + cell_len(target) + cell_len(age)
-            wanted += cell_len(f"  · {stale} stale")
+            if stale:
+                wanted += cell_len(f"  · {stale} stale")
+            if expired:
+                wanted += cell_len(f"  · {expired} sign-in expired")
             if wanted > self._content_width():
                 target = ""
         if target:
@@ -1375,6 +1425,12 @@ class UsagePanel(Static):
             if stale:
                 row.append("  · ", style=faint)
                 row.append(f"{stale} stale", style=warning)
+            # A mixed set reads `1 stale · 1 sign-in expired`. Both counts are
+            # kept rather than folded into one number, because they ask the
+            # user for opposite things: wait, versus act.
+            if expired:
+                row.append("  · ", style=faint)
+                row.append(f"{expired} sign-in expired", style=warning)
         if self._refreshing and not self._error:
             row.append("  · ", style=faint)
             row.append("refreshing…", style=dim)

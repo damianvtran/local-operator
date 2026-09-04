@@ -361,6 +361,13 @@ class ProviderController:
         # that, so the login event has to say so itself. Same hook as the CLI's
         # ``run_login``; the TUI's ``/login`` arrives here.
         _invalidate_cached_listing(storage)
+        # The cached usage row is wrong for the same reason and one more: a
+        # completed login is positive evidence this account's grant is alive,
+        # which directly contradicts any ``credential_invalid`` verdict the row
+        # still carries. Re-authenticating an ALREADY-stored account keeps the
+        # account fingerprint (and so the cache key) identical, so nothing else
+        # in the system observes this event -- see ``UsageCacheStore.invalidate``.
+        self._invalidate_cached_usage(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -503,6 +510,22 @@ class ProviderController:
             if cached:
                 reports.extend(cached)
         return reports
+
+    def _invalidate_cached_usage(self, storage_id: str) -> None:
+        """Best-effort drop of ``storage_id``'s cached usage row after a login.
+
+        Never raises, for the reason ``_invalidate_cached_listing`` gives: a
+        login that actually succeeded must not be reported as failed because a
+        cache write went wrong afterwards. The next fetch re-derives the state
+        from a live refresh either way; this only removes the stale answer that
+        would otherwise be served ahead of it.
+        """
+        try:
+            cache = self._usage_cache_store()
+            if cache is not None:
+                cache.invalidate(self._usage_cache_key(storage_id))
+        except Exception:  # noqa: BLE001 — a stale row is not worth failing a login
+            logger.debug("usage cache: post-login invalidate failed", exc_info=True)
 
     def _usage_cache_store(self) -> UsageCacheStore | None:
         """The shared usage cache, built lazily on first use.
@@ -651,19 +674,27 @@ class ProviderController:
             return False
         if previous.usage_unavailable:
             return True
-        # A dead grant cannot be re-probed into life, so the automatic cycle
-        # skips it: it is not in a cool-down, it is waiting on the user, and
-        # spending the backoff on it is the defect this flag exists to fix.
+        # NOTE: ``credential_invalid`` deliberately does NOT gate here, and
+        # that is load-bearing rather than an omission.
         #
-        # It sits BELOW the force check on purpose. ``r`` must still reach it,
-        # because that is how the state clears once the user has run ``/login``
-        # again: re-login updates the row in place for providers whose
-        # identity key is a per-provider constant (kimi), so the account
-        # fingerprint does not change and no cache invalidation would rescue a
-        # flag that ``r`` could not clear. One request on an explicit keypress
-        # is the cheap half of that trade.
-        if getattr(previous, "credential_invalid", False):
-            return True
+        # Skipping the cycle for a dead grant looks like it saves the retry
+        # budget, and measurably saves nothing: ``list_oauth_accesses`` is
+        # awaited before this loop and refreshes EVERY row, so the refresh
+        # POST is already spent by the time the gate is consulted, and the
+        # usage probe is short-circuited separately by the
+        # ``access.credential_invalid`` branch, so no usage request is made
+        # either. Measured on three consecutive cycles with and without the
+        # skip: 1 refresh POST and 0 usage probes, identically.
+        #
+        # What the skip did buy was a one-way latch. The only writer that
+        # clears the flag is ``_mark_account_success``, which is reached only
+        # through a fetch this gate prevented -- so after the user followed
+        # the panel's own ``/login`` advice, every automatic poll re-rendered
+        # ``sign-in expired`` against a freshly-minted valid grant, and only
+        # ``r`` could break the loop. That is this defect with its polarity
+        # reversed: a permanent message that the user cannot act their way
+        # out of. The verdict must be re-derived from the live refresh each
+        # cycle, never remembered as a terminal state.
         # Only a FAILURE cool-down skips the probe. A successful account
         # leaves next_probe_at_ms unset so a sibling's shorter backoff can
         # expire the provider row without freezing the healthy logins.
@@ -747,6 +778,15 @@ class ProviderController:
         panel as usage-unavailable. Last-good numbers, when they exist, stay
         on the report so the operator can still see they are logged in and
         what the last successful check said.
+
+        A transient miss also CLEARS any dead-grant verdict, which is not the
+        contradiction it first looks like. Reaching here means the store
+        handed back a usable bearer and the usage endpoint was what failed --
+        so the grant refreshed, which is direct evidence it is alive. Leaving
+        the flag set let one endpoint blip re-latch a healthy credential as
+        ``sign-in expired``, telling the user to re-authenticate when nothing
+        was wrong with their login. A cycle that genuinely still sees
+        ``invalid_grant`` sets it again on the spot.
         """
         failures = (previous.consecutive_failures if previous is not None else 0) + 1
         unavailable = failures >= USAGE_ACCOUNT_MAX_FAILURES
@@ -756,6 +796,7 @@ class ProviderController:
             report = UsageReport(provider=provider, fetched_at=now_ms, identity=identity)
         report.consecutive_failures = failures
         report.usage_unavailable = unavailable
+        report.credential_invalid = False
         report.next_probe_at_ms = None if unavailable else now_ms + account_backoff_ms(failures)
         return report
 

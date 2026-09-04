@@ -41,7 +41,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.paths import config_dir
-from local_operator.providers.oauth.callback_server import InvalidGrantError
 from local_operator.providers.registry import (
     GetApiKeyFn,
     RefreshFn,
@@ -785,6 +784,13 @@ class AuthStore:
             fresh = dict(current.data)
             if not self._needs_refresh(fresh, force=force):
                 return fresh
+            # Imported here, not at module scope: `callback_server` drags in
+            # http.server/ssl/email (~138 ms, 150-odd modules), and three
+            # separate comments in this codebase exist to stop anyone
+            # re-adding it as a top-level import. This is a refresh path that
+            # has already paid for the module, so the cost is zero here.
+            from local_operator.providers.oauth.callback_server import InvalidGrantError
+
             try:
                 refreshed = await refresh(fresh)
             except AuthStoreError:
@@ -794,6 +800,30 @@ class AuthStore:
                 # own permanent-failure type so nothing above imports the
                 # OAuth flow module to identify it, and so the existing
                 # `except AuthStoreError` handlers still catch it.
+                #
+                # The cross-process rotation race documented on the success
+                # path below reaches HERE FIRST, and is the more dangerous
+                # arrival: with a rotating refresh token (kimi rotates), the
+                # process that loses the race POSTs a token the winner has
+                # already consumed, and the IdP answers `invalid_grant`
+                # legitimately. Declaring the credential permanently dead on
+                # that evidence condemns a LIVE grant -- the winner's token is
+                # in the DB and working -- and before this classification
+                # existed the loser raised a generic AuthStoreError and
+                # self-healed on the next cycle. So the same guard runs first:
+                # if the stored refresh token is no longer the one we sent,
+                # another process refreshed successfully and our rejection is
+                # about a superseded token, not about the account.
+                now_row = self.get_credential(row.id)
+                if now_row is not None and dict(now_row.data).get("refresh") != fresh.get(
+                    "refresh"
+                ):
+                    logger.warning(
+                        "refresh race on %s: our token was already rotated by another "
+                        "process; keeping its token rather than declaring the grant dead",
+                        row.id,
+                    )
+                    return dict(now_row.data)
                 raise CredentialInvalidError(
                     f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
                 ) from exc

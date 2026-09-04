@@ -1309,6 +1309,87 @@ class TestPerAccountLastKnown:
         assert healed[0].limits[0].amount.used == 5.0
 
     @pytest.mark.asyncio
+    async def test_the_verdict_clears_on_an_automatic_poll_not_only_on_r(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Review R1/Q1: the panel's own advice must be enough to fix it.
+
+        The user reads `sign-in expired — /login kimi`, runs `/login`, and then
+        does nothing else. The next AUTOMATIC poll has to return the account to
+        normal. This is deliberately NOT a `force_refresh` test: `r` bypasses
+        the backoff gate, so the three healing tests above all passed while a
+        `credential_invalid` report was permanently skipped by the ordinary
+        cycle — the verdict was a one-way latch that outlived its own cause.
+        """
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "a", "email": "dead@example.com", "account_id": "acct-dead"},
+        )
+        dead = self._account("dead@example.com", "acct-dead")
+        dead.access_token = ""
+        dead.credential_invalid = True
+        store.oauth_accounts["anthropic"] = [dead]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return self._report("dead@example.com", 7.0)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        first = await controller.fetch_usage(["anthropic"])
+        assert first[0].credential_invalid is True
+
+        # `/login` re-mints the grant. Re-authenticating an already-stored
+        # account keeps the account fingerprint, so the cache key is unchanged
+        # and the row holding the stale verdict would otherwise be served
+        # ahead of any fetch — the login path drops it for exactly this
+        # reason (`_invalidate_cached_usage`).
+        store.oauth_accounts["anthropic"] = [self._account("dead@example.com", "acct-dead")]
+        controller._invalidate_cached_usage("anthropic")
+
+        # No `r`: this is the ordinary background poll.
+        healed = await controller.fetch_usage(["anthropic"])
+        assert healed[0].credential_invalid is False
+        assert healed[0].limits[0].amount.used == 7.0
+
+    @pytest.mark.asyncio
+    async def test_a_transient_miss_does_not_latch_a_healthy_credential(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Review R1/Q1, the worse half: a live grant must never acquire the
+        note. Reaching `_mark_account_failure` means the bearer minted and the
+        usage ENDPOINT failed — direct evidence the grant is alive — so a
+        stale verdict has to be dropped rather than carried forward."""
+        now = 1_000_000
+        previous = self._report("dead@example.com", 12.0)
+        previous.credential_invalid = True
+
+        marked = controller._mark_account_failure(
+            previous, provider="anthropic", identity="dead@example.com", now_ms=now
+        )
+
+        assert marked.credential_invalid is False
+        assert marked.consecutive_failures == 1
+        # And with the verdict gone it is an ordinary backoff, not a permanent
+        # exclusion from the automatic cycle.
+        assert controller._account_in_backoff(marked, now + 10_000_000, force=False) is False
+
+    @pytest.mark.asyncio
+    async def test_a_dead_grant_is_not_excluded_from_the_automatic_cycle(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The gate saved no network call and cost the only path that heals.
+
+        `list_oauth_accesses` refreshes every row before this gate is reached,
+        and the usage probe is short-circuited separately for a dead row, so
+        skipping the cycle spent nothing — it only prevented the fetch that
+        clears the flag.
+        """
+        report = UsageReport(provider="kimi", fetched_at=1_000, identity="cred:8")
+        report.credential_invalid = True
+        assert controller._account_in_backoff(report, 2_000, force=False) is False
+
+    @pytest.mark.asyncio
     async def test_an_override_fetches_the_api_key_not_stored_oauth_stubs(
         self, controller, store, monkeypatch
     ) -> None:

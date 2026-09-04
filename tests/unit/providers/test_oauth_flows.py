@@ -366,10 +366,51 @@ class TestATerminalGrantIsToldFromAnOutage:
 
     @pytest.mark.parametrize(
         "code",
-        ["invalid_grant", "invalid_client", "unauthorized_client", "unsupported_grant_type"],
+        ["invalid_grant", "invalid_client", "unauthorized_client"],
     )
     def test_terminal_error_codes_are_terminal(self, code: str) -> None:
         body = f'{{"error":"{code}","error_description":"nope"}}'
+        assert is_terminal_grant_response(400, body) is True
+
+    def test_unsupported_grant_type_is_a_config_error_not_a_dead_grant(self) -> None:
+        """Review R4. The endpoint is refusing the `grant_type` PARAMETER, which
+        says nothing about the stored grant — and a token-endpoint config change
+        would otherwise darken every account on the provider at once, telling
+        each of them to run a `/login` that cannot fix it."""
+        assert is_terminal_grant_response(400, '{"error":"unsupported_grant_type"}') is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # Review R3: the excluded code is the VERDICT; the terminal codes
+            # appear only in prose or in an RFC-permitted `error_uri` anchor.
+            '{"error":"invalid_request","error_description":'
+            '"invalid_grant_type: expected refresh_token"}',
+            '{"error":"invalid_request","error_description":'
+            '"the invalid_client_id parameter is unknown"}',
+            '{"error":"invalid_request",'
+            '"error_uri":"https://docs.example.com/errors#invalid_grant"}',
+            '{"error":"invalid_request","error_description":'
+            '"the invalid_grant parameter was malformed"}',
+        ],
+    )
+    def test_a_mentioned_terminal_code_does_not_override_the_error_field(self, body: str) -> None:
+        """`invalid_client` is a substring of `invalid_client_id`, so a raw scan
+        matched the EXCLUDED code through an INCLUDED one and told the user to
+        re-authenticate over a malformed request of ours."""
+        assert is_terminal_grant_response(400, body) is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "error=invalid_grant&error_description=dead",  # form-encoded
+            "<html><body>error: invalid_grant</body></html>",  # unparseable
+            '{"error":{"code":"invalid_grant"}}',  # wrapped envelope
+        ],
+    )
+    def test_non_json_and_wrapped_bodies_still_classify(self, body: str) -> None:
+        """Parsing must not silently downgrade a real dead grant to a retry loop
+        that can never end, so the substring scan stays as the fallback."""
         assert is_terminal_grant_response(400, body) is True
 
     def test_the_live_kimi_body_is_terminal(self) -> None:

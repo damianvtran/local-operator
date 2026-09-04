@@ -2833,9 +2833,7 @@ class SessionStreamFn:
         except Exception:
             accesses = []
             saw_unknown = bool(oauth_rows)
-        accesses = [
-            access for access in accesses if not getattr(access, "credential_invalid", False)
-        ]
+        accesses = [access for access in accesses if not access.credential_invalid]
         # Dropping them here restores the pre-existing arithmetic exactly: the
         # id-set comparison below then reports the same mismatch omission used
         # to produce, so a dead grant still reads as one account that could not

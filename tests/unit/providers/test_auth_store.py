@@ -4,6 +4,7 @@ rotation, blocking. No network: fakes for the refresh capability."""
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
 )
+from local_operator.providers.oauth.callback_server import InvalidGrantError
 
 pytestmark = pytest.mark.asyncio
 
@@ -731,6 +733,54 @@ class TestADeadGrantIsReportedRatherThanOmitted:
         with pytest.raises(CredentialInvalidError) as caught:
             await store._ensure_oauth_fresh(row)
         assert isinstance(caught.value, AuthStoreError)
+
+    async def test_the_rotation_race_loser_does_not_condemn_a_live_grant(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review R2. With a rotating refresh token the process that loses the
+        race POSTs a token the winner already consumed, and the IdP answers
+        `invalid_grant` legitimately — about a superseded token, not about the
+        account. Declaring the credential dead there condemns a grant that is
+        alive and stored, which the success path's own guard exists to prevent.
+        """
+        row = store.upsert_credential(
+            "kimi", {**_oauth(refresh="old-token", access="a"), "expires": 0}
+        )
+
+        async def refresh(creds):  # noqa: ANN001
+            # The winner rotates the stored token while our POST is in flight.
+            store._conn.execute(
+                "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                (json.dumps({"refresh": "winner-token", "access": "live-token"}), row.id),
+            )
+            store._conn.commit()
+            raise InvalidGrantError('Kimi refresh failed (400): {"error":"invalid_grant"}')
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        stored = store.get_credential(row.id)
+        assert stored is not None
+        data = await store._ensure_oauth_fresh(stored)
+
+        # The winner's live token is returned rather than an exception raised.
+        assert data["access"] == "live-token"
+        after = store.get_credential(row.id)
+        assert after is not None and after.disabled_cause is None
+
+    async def test_a_dead_grant_with_no_racing_writer_still_raises(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The R2 guard must not swallow the real thing: with the stored token
+        unchanged, `invalid_grant` is exactly what it says."""
+        row = store.upsert_credential("kimi", {**_oauth(refresh="r", access="a"), "expires": 0})
+
+        async def refresh(creds):  # noqa: ANN001
+            raise InvalidGrantError('Kimi refresh failed (400): {"error":"invalid_grant"}')
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        stored = store.get_credential(row.id)
+        assert stored is not None
+        with pytest.raises(CredentialInvalidError):
+            await store._ensure_oauth_fresh(stored)
 
     async def test_a_transient_refresh_error_keeps_the_generic_type(
         self, store: AuthStore, monkeypatch: pytest.MonkeyPatch

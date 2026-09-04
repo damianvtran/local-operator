@@ -133,6 +133,26 @@ def test_a_row_written_before_the_flag_existed_reads_as_valid() -> None:
     assert restored.credential_invalid is False
 
 
+def test_invalidate_drops_the_row_so_the_next_read_refetches(tmp_path) -> None:
+    """A re-login is the one event the account fingerprint cannot observe.
+
+    Logging in again to an ALREADY-stored account leaves the account set (and
+    so the cache key) identical, so without an explicit drop the row carrying
+    a `credential_invalid` verdict outlives the login that disproved it.
+    """
+    store = UsageCacheStore(tmp_path / "usage.db")
+    report = _report()
+    report.credential_invalid = True
+    store.set("kimi:fp", "kimi", [report], expires_at_ms=store._now_ms() + 300_000)
+    assert store.get("kimi:fp") is not None
+
+    store.invalidate("kimi:fp")
+    assert store.get("kimi:fp", include_expired=True) is None
+    # Idempotent: dropping an absent row is not an error.
+    store.invalidate("kimi:fp")
+    store.close()
+
+
 def test_secret_fingerprint_never_contains_the_secret() -> None:
     fp = fingerprint_secret("sk-or-very-secret")
     assert "sk-or-very-secret" not in fp
