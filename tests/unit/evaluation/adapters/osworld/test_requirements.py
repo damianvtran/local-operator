@@ -24,6 +24,7 @@ _ALWAYS = {
     "OSWORLD_FILE_BASE_URL",
     "HF_TOKEN",  # optional at episode time: the corpus is pre-materialised
     "AWS_INSTANCE_TYPE",  # optional: escape hatch from the burstable default
+    "AWS_ROOT_VOLUME_SIZE",  # optional: escape hatch from recorder disk exhaustion
     "OSWORLD_INPUTS_ROOT",  # optional: the durable root the assets live in
     "OSWORLD_TTL_SECONDS",  # optional: lease-length override
 }
@@ -104,6 +105,15 @@ def test_instance_type_override_is_optional_infra() -> None:
     # name is accepted rather than silently dropping an unknown infra value.
     by_name = _by_name(fixtures.PLAIN)
     assert by_name["AWS_INSTANCE_TYPE"] == ("infra", False)
+
+
+def test_root_volume_size_override_is_optional_infra() -> None:
+    # Optional, so preflight never demands it: omitting the knob must leave a
+    # default run exactly as it was. Declared at all because the runner's
+    # disclosure gate reads this declaration to tell an adapter build that
+    # understands the value from one that would silently drop it.
+    by_name = _by_name(fixtures.PLAIN)
+    assert by_name["AWS_ROOT_VOLUME_SIZE"] == ("infra", False)
 
 
 def test_judged_task_requires_the_judge_key_and_settings() -> None:

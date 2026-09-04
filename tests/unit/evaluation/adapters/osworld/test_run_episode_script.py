@@ -159,6 +159,7 @@ def test_script_runs_one_spawned_episode_to_a_sealed_bundle(
     # task file plus the documented default, and a stamp here would misreport
     # a default run as having used custom hardware.
     assert "aws_instance_type_override" not in manifest.metadata
+    assert "aws_root_volume_size_override" not in manifest.metadata
     assert manifest.harness_version == _checkout_version()
     assert report.outcome is not None and report.outcome.reportable is False
     assert report.outcome.reportability_label == "synthetic_model"
@@ -433,3 +434,66 @@ def test_script_refuses_an_over_long_secret_naming_only_the_ref(
     assert completed.stderr.strip() == outcome["diagnostic"]
     everything = _all_bytes_under(run_root) + completed.stdout.encode() + completed.stderr.encode()
     assert b"SECRETVALUE" not in everything and b"zzzz" not in everything
+
+
+def test_a_root_volume_override_is_disclosed_in_the_sealed_manifest(
+    durable_path: Path, adapter_wheel: Path  # noqa: F811
+) -> None:
+    """A run on a resized disk must be disclosable from the bundle alone.
+
+    Comparability is the whole point. An episode on a larger root volume
+    survives past the ~t+383s exhaustion wall where the guest's x11grab
+    recorder fills the default 2.2 GB of free space, so its score is not
+    comparable to a truncated default run -- and a reader has no other way to
+    learn that, since ``ObservationPayload`` carries no metadata and nothing
+    the worker resolves reaches the bundle except through the manifest the
+    parent seals.
+
+    Both overrides are passed together because that is what an operator
+    escaping both failure modes actually runs, and it proves the two
+    disclosures coexist rather than one clobbering the other.
+    """
+
+    selector = _selector_file(durable_path / "adapter", adapter_wheel)
+    run_root = durable_path / "run"
+
+    completed = _run(
+        [
+            "--selector",
+            str(selector),
+            "--task-id",
+            "task_plain",
+            "--route",
+            "test/fake/model:free",
+            "--run-root",
+            str(run_root),
+            "--secret-env",
+            "AWS_ACCESS_KEY_ID",
+            "--secret-env",
+            "AWS_SECRET_ACCESS_KEY",
+            "--no-store",
+            "--model-client",
+            "scripted-finish",
+            "--max-steps",
+            "3",
+            "--max-usd",
+            "0.01",
+            *INFRA,
+            "--infra",
+            "AWS_ROOT_VOLUME_SIZE=120",
+            "--infra",
+            "AWS_INSTANCE_TYPE=m5.xlarge",
+        ],
+        {"AWS_ACCESS_KEY_ID": CANARY_KEY, "AWS_SECRET_ACCESS_KEY": CANARY_SECRET},
+    )
+
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    outcome: dict[str, Any] = json.loads(completed.stdout)
+    assert outcome["status"] == "completed", outcome
+    report = verify_bundle(Path(outcome["bundle_root"]))
+    # Sealed AND valid: the manifest digest covers metadata, so a bundle that
+    # verifies is one whose disclosure cannot have been edited after the fact.
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.manifest is not None
+    assert report.manifest.metadata["aws_root_volume_size_override"] == "120"
+    assert report.manifest.metadata["aws_instance_type_override"] == "m5.xlarge"

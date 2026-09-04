@@ -177,10 +177,21 @@ def _expect_describe_images(stubs: _Stubs) -> None:
     )
 
 
-def _expect_run_instances(stubs: _Stubs, plan: provisioning.ProvisioningPlan | None = None) -> None:
+def _expect_run_instances(
+    stubs: _Stubs,
+    plan: provisioning.ProvisioningPlan | None = None,
+    *,
+    volume_gb: int | None = None,
+) -> None:
     # ``plan`` defaults to the standard one so every existing caller is
     # unchanged; a caller testing a resolved override passes its own.
     plan = plan if plan is not None else _plan()
+    # ``volume_gb`` is separate from ``plan`` because the size AWS receives is
+    # not always the plan's: with ``plan.volume_gb`` None the provider resolves
+    # it from the AMI (40 = OSWorld's floor, which the AMI's 30 does not
+    # lower). Defaulting to that keeps every existing caller unchanged while
+    # letting an override test assert the size actually sent.
+    expected_volume = volume_gb if volume_gb is not None else (plan.volume_gb or 40)
     stubs.ec2_stub.add_response(
         "run_instances",
         {"Instances": [{"InstanceId": INSTANCE}]},
@@ -204,8 +215,7 @@ def _expect_run_instances(stubs: _Stubs, plan: provisioning.ProvisioningPlan | N
                 {
                     "DeviceName": "/dev/sda1",
                     "Ebs": {
-                        # 40 = OSWorld's floor; the AMI's 30 does not lower it.
-                        "VolumeSize": 40,
+                        "VolumeSize": expected_volume,
                         "VolumeType": "gp3",
                         "Throughput": 1000,
                         "Iops": 4000,
@@ -1049,3 +1059,152 @@ def test_ttl_seconds_derivation() -> None:
 def test_credentials_repr_never_echoes_the_secret() -> None:
     assert "marker-secret" not in repr(CREDS)
     assert "marker-secret" not in str(CREDS)
+
+
+def _volume_infra(value: str) -> tuple[ScopedInfraValue, ...]:
+    return _infra() + (
+        ScopedInfraValue(name="AWS_ROOT_VOLUME_SIZE", purpose="benchmark_compute", value=value),
+    )
+
+
+def _describe_images_response(size_gb: int) -> dict[str, Any]:
+    return {
+        "Images": [
+            {
+                "ImageId": _plan().ami_id,
+                "RootDeviceName": "/dev/sda1",
+                "BlockDeviceMappings": [
+                    {"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": size_gb}},
+                ],
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_root_volume_override_reaches_run_instances(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The override must reach the actual API call, not merely the plan.
+
+    A unit test of the pure function would still pass if ``volume_gb`` were
+    dropped on the way to ``run_instances`` -- which is exactly the failure
+    that would leave the guest on the 2.2 GB-free disk its recorder exhausts
+    at ~t+383s, while every test stayed green. The stubbed client asserts the
+    exact launch parameters, so ``VolumeSize`` here is the number AWS would
+    actually receive.
+    """
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=_volume_infra("120"))
+    assert plan.volume_gb == 120
+
+    with _Stubs() as stubs:
+        # The floor check reads the AMI, so the lookup still happens -- but now
+        # to validate rather than to supply the size.
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs, plan=plan, volume_gb=120)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+
+
+@pytest.mark.asyncio
+async def test_a_root_volume_smaller_than_the_ami_snapshot_is_refused_before_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """EBS cannot restore a snapshot into a smaller volume, so this is doomed.
+
+    AWS refuses it with an InvalidBlockDeviceMapping that names neither size.
+    Failing here instead produces a message carrying both numbers and the name
+    of the knob to change -- and does it before run_instances, so no instance
+    and no volume are ever created.
+    """
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=_volume_infra("20"))
+    assert plan.volume_gb == 20
+
+    with _Stubs() as stubs:
+        # The release AMI's own root snapshot is 30 GiB; 20 cannot hold it.
+        stubs.ec2_stub.add_response(
+            "describe_images", _describe_images_response(30), {"ImageIds": [_plan().ami_id]}
+        )
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        with pytest.raises(AllocationError) as excinfo:
+            await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        message = str(excinfo.value)
+        # Both numbers and the remedy, which is the entire point of the check.
+        assert "20" in message and "30" in message
+        assert "AWS_ROOT_VOLUME_SIZE" in message
+        # No run_instances was queued, and none was attempted.
+        stubs.ec2_stub.assert_no_pending_responses()
+
+
+@pytest.mark.asyncio
+async def test_a_root_volume_equal_to_the_ami_snapshot_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The floor is >=, not >. Rejecting an exact match would refuse a size AWS
+    accepts, and would be invisible until an operator picked exactly 30."""
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=_volume_infra("30"))
+
+    with _Stubs() as stubs:
+        stubs.ec2_stub.add_response(
+            "describe_images", _describe_images_response(30), {"ImageIds": [_plan().ami_id]}
+        )
+        _expect_run_instances(stubs, plan=plan, volume_gb=30)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+
+
+@pytest.mark.asyncio
+async def test_the_default_path_still_applies_osworlds_forty_gib_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Splitting the AMI lookup must not change the no-override behaviour.
+
+    ``_resolve_root_volume_size`` keeps OSWorld's 40 GiB floor while the new
+    floor CHECK needs the AMI's real 30; a single function serving both would
+    have to pick one and be wrong for the other. This pins the default half.
+    """
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    plan = _plan()
+    assert plan.volume_gb is None
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)  # AMI declares 30
+        _expect_run_instances(stubs, plan=plan, volume_gb=40)  # floor wins
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()

@@ -44,6 +44,21 @@ _INSTANCE_TYPE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a
 # ``image`` field when that field is a valid AMI id.
 _DEFAULT_AMI = "ami-01017272139e01feb"
 _DEFAULT_INSTANCE_TYPE = "t3.xlarge"
+
+# Root volume bounds for AWS_ROOT_VOLUME_SIZE, checked at prepare time.
+#
+# The UPPER bound is AWS's own hard ceiling for a gp3 volume (16 TiB); the
+# provider pins VolumeType "gp3", so anything above this is refused by
+# run_instances no matter what. The LOWER bound is 1 because that is the
+# smallest positive size the API accepts -- the value that actually matters is
+# the AMI's own snapshot size, which is strictly larger and cannot be known
+# here, since establishing it costs the describe_images call ``resolve`` is
+# forbidden to make. That floor is enforced at launch instead (see
+# ``AwsProvider._run_instance``). Bounding the obviously absurd is still worth
+# doing at prepare time: it is free, and it catches a fat-fingered value
+# before anything is allocated.
+_MIN_ROOT_VOLUME_GB = 1
+_MAX_ROOT_VOLUME_GB = 16384
 # Public: the adapter's rescue path needs the same default when a descriptor
 # predates AWS_REGION being supplied.
 DEFAULT_REGION = "us-east-1"
@@ -106,11 +121,7 @@ def resolve(
         task.image if task.image is not None and _AMI_RE.fullmatch(task.image) else _DEFAULT_AMI
     )
     instance_type = _resolve_instance_type(task, infra_values)
-    # Volume size is left None unless the task pins it: the AMI's own
-    # BlockDeviceMappings carry a default that OSWorld resolves at launch,
-    # and replicating that lookup here would require the very describe_images
-    # call prepare must not make.
-    volume_gb = task.volume_size
+    volume_gb = _resolve_root_volume_gb(task, infra_values)
 
     region = (
         _infra(infra_values, "AWS_REGION") if _has(infra_values, "AWS_REGION") else _DEFAULT_REGION
@@ -210,6 +221,80 @@ def _resolve_instance_type(
             )
         return override
     return task.instance_type or _DEFAULT_INSTANCE_TYPE
+
+
+def _resolve_root_volume_gb(
+    task: TaskDescriptor,
+    infra_values: tuple[ScopedInfraValue, ...],
+) -> int | None:
+    """Root volume size in GiB: operator override, else the task's pin, else None.
+
+    WHY THIS KNOB EXISTS. Every OSWorld episode died at roughly the same
+    WALL-CLOCK time -- 7 of 8 runs first failed in a 424-466s window --
+    regardless of how much work the agent had done (16-32 steps) and on both
+    t3.xlarge and m5.xlarge. Instrumenting the guest's own control server
+    showed the root filesystem filling on a clock rather than on workload:
+
+        t+54s .. t+342s : 93% used, 2.2 GB free   (stable)
+        t+363s          : 95%
+        t+383s          : 100% used, 0 bytes free
+        t+424s          : first ObservationPhaseError, "no screenshot frame"
+
+    OSWorld starts an ``x11grab`` ffmpeg screen recorder in the guest on reset.
+    Its measured fill rate is ~6.8 MB/s (~410 MB/min) against only ~2.2 GB free
+    at launch, so the disk exhausts in ~330s on every run. A disk at 0 bytes
+    cannot write a screenshot, which is exactly the observed failure. This also
+    explains why AWS_INSTANCE_TYPE changed nothing: the recorder's rate does not
+    depend on CPU, and the volume is identical on either instance type.
+
+    WHY IT IS INFRA RATHER THAN A TASK FIELD. Same reason as AWS_INSTANCE_TYPE:
+    task files are content-hash verified against the release pin, so growing
+    ``volume_size`` there invalidates the very digest that makes a score
+    reproducible. The operator needs a knob reachable from outside the pin.
+
+    WHY THE OVERRIDE BEATS A TASK'S OWN PIN. Deliberately identical to
+    ``_resolve_instance_type``, and for the same reason rather than merely for
+    symmetry: the task author sized a volume against the workload they could
+    see, while the operator is working around an INFRASTRUCTURE failure -- a
+    recorder filling the disk on a clock -- that the author never saw and
+    cannot fix from inside a hash-pinned file. An override a task pin could
+    veto would silently fail on exactly the tasks most likely to run long
+    enough to hit the wall. A single precedence rule across both knobs is also
+    the one an operator can predict without reading the source.
+
+    Absent, this returns the previous value unchanged (the task's pin, else
+    None so OSWorld's own launch-time resolution from the AMI's
+    BlockDeviceMappings runs), so omitting the knob reproduces today's
+    behaviour exactly.
+    """
+
+    override = _get(infra_values, "AWS_ROOT_VOLUME_SIZE")
+    if override is None:
+        return task.volume_size
+
+    # Rejected, never ignored -- the same asymmetry with ``image`` that
+    # _resolve_instance_type documents. Quietly discarding a malformed value
+    # would launch the 2.2 GB-free default the operator was escaping and lose
+    # another paid episode at t+424s with no signal the knob never took effect.
+    #
+    # Validated by PARSING rather than by a regex: for an integer the parser is
+    # the validator, and a bare int() is too permissive on its own -- it accepts
+    # "+40", " 40 ", "4_0" and non-ASCII digits, none of which an operator meant
+    # to type. Requiring the string to be exactly its own ASCII digits rejects
+    # those along with "40.5", "1e3", "0x28" and "-1", and leaves int() total.
+    if not (override.isascii() and override.isdigit()):
+        raise ProvisioningError(
+            f"AWS_ROOT_VOLUME_SIZE {override!r} is not a whole number of GiB "
+            "(expected a plain positive integer, e.g. '80')"
+        )
+    size = int(override)
+    if not _MIN_ROOT_VOLUME_GB <= size <= _MAX_ROOT_VOLUME_GB:
+        raise ProvisioningError(
+            f"AWS_ROOT_VOLUME_SIZE {size} GiB is out of range "
+            f"({_MIN_ROOT_VOLUME_GB}-{_MAX_ROOT_VOLUME_GB} GiB); the provider pins "
+            "gp3, whose maximum volume size is 16384 GiB"
+        )
+    return size
 
 
 def _get(infra_values: tuple[ScopedInfraValue, ...], name: str) -> str | None:

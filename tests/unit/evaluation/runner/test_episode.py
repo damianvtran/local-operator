@@ -27,7 +27,10 @@ from local_operator.evaluation.evidence.models import (
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
-from local_operator.evaluation.runner.episode import EpisodeRunner
+from local_operator.evaluation.runner.episode import (
+    DISCLOSED_INFRA_METADATA_KEYS,
+    EpisodeRunner,
+)
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
     RecordingResponder,
@@ -1381,3 +1384,104 @@ async def test_an_undeclared_ordinary_infra_value_is_not_refused(
     ).run()
 
     assert outcome.status == "completed", outcome.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_a_root_volume_override_an_adapter_does_not_declare_is_refused(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The second disclosed value inherits the gate, not just the allowlist.
+
+    Adding a value to the disclosure mechanism is exactly the drift a reviewer
+    predicted when the stamp and the allowlist were two hardcoded lists: a
+    value stamped into the manifest but ungated is a FALSE disclosure sealed
+    in a bundle that verifies. The refusal must land before ``prepare``, so
+    nothing is allocated and no bundle exists to mislead a reader.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _infra_runner(
+        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_ROOT_VOLUME_SIZE"), adapter
+    ).run()
+
+    assert outcome.status == "failed_pre_bundle"
+    assert outcome.bundle_root is None
+    assert "AWS_ROOT_VOLUME_SIZE" in (outcome.diagnostic or "")
+    assert "UndeclaredDisclosedInfra" in (outcome.diagnostic or "")
+    assert "prepare" not in adapter.calls and "reset_start" not in adapter.calls
+    assert adapter.terminated
+
+
+@pytest.mark.asyncio
+async def test_a_declared_root_volume_override_runs_normally(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The inverse: a rebuilt adapter declares it, so the knob is usable.
+
+    Without this the gate could pass by refusing everything, which would break
+    the very workflow the override exists for.
+    """
+
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        declared_requirements=(
+            Requirement(
+                requirement_id="AWS_ROOT_VOLUME_SIZE",
+                kind="infra",
+                name="AWS_ROOT_VOLUME_SIZE",
+                required=False,
+            ),
+        ),
+    )
+    outcome = await _infra_runner(
+        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_ROOT_VOLUME_SIZE"), adapter
+    ).run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert "prepare" in adapter.calls and "reset_start" in adapter.calls
+
+
+def test_every_disclosed_infra_value_is_gated_and_stamped_from_one_table() -> None:
+    """The gate and the stamp must not drift apart, and this is what binds them.
+
+    ``scripts/run_episode.py`` used to repeat the disclosed names in its own
+    hardcoded branch. Nothing tied the two lists together, so a third value
+    could be stamped without a gate (a disclosure nothing verifies) or gated
+    without a stamp (a check nothing records) -- neither visible by reading
+    either file alone. Both now derive from ``DISCLOSED_INFRA_METADATA_KEYS``;
+    this asserts the derivation rather than the current contents, so it keeps
+    holding when a fourth value is added.
+    """
+
+    import scripts.run_episode as run_episode
+    from local_operator.evaluation.runner.episode import _DISCLOSED_INFRA_VALUES
+
+    # The gate's allowlist is exactly the table's keys -- not a copy of them.
+    assert _DISCLOSED_INFRA_VALUES == frozenset(DISCLOSED_INFRA_METADATA_KEYS)
+
+    # And every gated name reaches the manifest under its declared key, which
+    # is the half a reviewer cannot see from episode.py alone.
+    for name, key in DISCLOSED_INFRA_METADATA_KEYS.items():
+        metadata = run_episode._infra_disclosure_metadata([f"{name}=some-value"])
+        assert metadata == {key: "some-value"}, name
+
+    # The keys are distinct: two values sharing one key would have the second
+    # silently overwrite the first's disclosure.
+    keys = list(DISCLOSED_INFRA_METADATA_KEYS.values())
+    assert len(keys) == len(set(keys))
+
+
+def test_an_undisclosed_infra_value_is_never_stamped() -> None:
+    """The stamp is an allowlist too: an ordinary infra value must not leak
+    into the manifest, and a value with no ``=`` must not be stamped empty."""
+
+    import scripts.run_episode as run_episode
+
+    assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {}
+    assert run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"]) == {}
+    assert run_episode._infra_disclosure_metadata([]) == {}
+    # Both at once, each under its own key.
+    assert run_episode._infra_disclosure_metadata(
+        ["AWS_INSTANCE_TYPE=m5.xlarge", "AWS_ROOT_VOLUME_SIZE=120", "OSWORLD_TTL_SECONDS=900"]
+    ) == {"aws_instance_type_override": "m5.xlarge", "aws_root_volume_size_override": "120"}

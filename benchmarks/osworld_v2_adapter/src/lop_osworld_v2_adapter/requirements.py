@@ -70,8 +70,17 @@ _ALWAYS_INFRA = (
 # 10.3%) while AWS status checks read "ok". It is infra, not a task field,
 # precisely because task files are content-hash verified and cannot be edited
 # to work around the operator's hardware. See provisioning._resolve_instance_type.
+# AWS_ROOT_VOLUME_SIZE replaces the root volume size (GiB) for the benchmark VM.
+# It is the escape hatch from the OTHER failure that presents identically: the
+# guest's x11grab screen recorder fills the root filesystem at ~6.8 MB/s against
+# ~2.2 GB free, so the disk hits 0 bytes at ~t+383s and the next screenshot
+# request fails -- which is why 7 of 8 runs died in a 424-466s window on a clock
+# rather than on workload, and why changing the instance type fixed nothing.
+# Infra rather than a task field for the same content-hash reason.
+# See provisioning._resolve_root_volume_gb.
 _OPTIONAL_INFRA = (
     "AWS_INSTANCE_TYPE",
+    "AWS_ROOT_VOLUME_SIZE",
     "OSWORLD_INPUTS_ROOT",
     "OSWORLD_TTL_SECONDS",
 )

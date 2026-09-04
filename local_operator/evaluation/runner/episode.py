@@ -32,6 +32,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 from pydantic import ValidationError
@@ -158,7 +159,27 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 # (OSWORLD_PROXY_CREDENTIALS, OSWORLD_PROXY_ENDPOINT) is legitimately absent
 # from it, and a blanket rule would refuse correct proxy runs. Only a value
 # whose silent drop corrupts the evidence record belongs here.
-_DISCLOSED_INFRA_VALUES = frozenset({"AWS_INSTANCE_TYPE"})
+#
+# ONE TABLE, TWO CONSUMERS. The infra name is mapped to the manifest metadata
+# key that discloses it, because the gate below and the stamp in
+# ``scripts/run_episode.py`` are the two halves of a single guarantee and used
+# to be two independent hardcoded lists. A value present in the stamp but
+# absent here is disclosed with NO gate protecting it -- precisely the false
+# disclosure the gate exists to prevent -- and one present here but absent
+# there is gated but never disclosed. Neither mistake is detectable by reading
+# either file alone, so the pairing is expressed once and both sides derive
+# from it: adding a third value is one entry, and cannot be half-added.
+DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
+    {
+        "AWS_INSTANCE_TYPE": "aws_instance_type_override",
+        # The root volume the guest's x11grab recorder fills at ~6.8 MB/s. A
+        # score run on a larger disk survives past the ~t+383s exhaustion wall
+        # that truncated earlier runs, so it is not comparable to one that hit
+        # it, and the bundle has to say so on its own.
+        "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
+    }
+)
+_DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)
 
 
 class UndeclaredDisclosedInfra(RuntimeError):
