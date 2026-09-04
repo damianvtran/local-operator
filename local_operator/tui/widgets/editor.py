@@ -277,7 +277,7 @@ IMAGE_MARKER = re.compile(r"\[Image #(?P<index>[1-9]\d*)(?:,[^\]\n\[]*)?\]")
 
 #: Appended to a marker whose image was downscaled on the way in. One glyph,
 #: two cells, and it buys back most of what the honest label costs: every 16:9
-#: screenshot now bounds to the same 1568x882, so three different captures
+#: screenshot now bounds to the same 1024x576, so three different captures
 #: pasted together would otherwise read as three identical markers where the
 #: source dimensions had told them apart (design round 1, D1). It also answers
 #: the question the number itself provokes — "why is this not the size I
@@ -357,7 +357,7 @@ def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
     Read back from the BOUNDED payload rather than carried over from ``info``,
     which describes the file on disk. Once the paste path started resizing,
     reusing the source dimensions would print a marker claiming 2560x1440 next
-    to a 1568x882 attachment — a receipt for something that was never sent.
+    to a 1024x576 attachment — a receipt for something that was never sent.
 
     Carries :data:`RESIZED_MARK` when the two differ, so the label still
     distinguishes one paste from another and says why the number moved.
@@ -4944,7 +4944,7 @@ class Editor(TextArea):
                     ),
                     # The marker reports what was ATTACHED, not what was on the
                     # clipboard or on disk. A marker reading 2560x1440 beside a
-                    # 1568x882 attachment is a receipt for something that was
+                    # 1024x576 attachment is a receipt for something that was
                     # never sent, and the whole point of the dimensions is that
                     # the user can check them at a glance.
                     _bounded_dimensions(payload, info),

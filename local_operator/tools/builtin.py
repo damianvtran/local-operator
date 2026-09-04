@@ -93,9 +93,9 @@ from local_operator.harness.wake import (
     format_duration,
 )
 from local_operator.imaging import (
+    IMAGE_INGEST_MAX_EDGE,
     IMAGE_JPEG_QUALITY,
     IMAGE_MAX_BYTES,
-    IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
@@ -172,7 +172,7 @@ READ_IMAGE_LIMIT_BYTES = 16 * 1024 * 1024
 #: for both. Re-exported under the historical names because they are part of
 #: this module's tested surface.
 READ_IMAGE_MAX_PIXELS = IMAGE_MAX_PIXELS
-READ_IMAGE_MAX_EDGE = IMAGE_MAX_EDGE
+READ_IMAGE_MAX_EDGE = IMAGE_INGEST_MAX_EDGE
 READ_IMAGE_MAX_BYTES = IMAGE_MAX_BYTES
 READ_IMAGE_JPEG_QUALITY = IMAGE_JPEG_QUALITY
 #: Maximum lines read renders; larger files show the head plus a footer

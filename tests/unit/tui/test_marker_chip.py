@@ -1,6 +1,6 @@
 """The attachment marker as a painted object, and clicking one to select it.
 
-``[Image #1, 1568x200]`` used to render in the prose colour on the prose ground
+``[Image #1, 1000x200]`` used to render in the prose colour on the prose ground
 — indistinguishable from something the user typed, in a field where everything
 else IS something the user typed. These assert what the terminal was SENT,
 because "does it stand out" is a question about cells and colours and not about
@@ -63,7 +63,7 @@ def theme_name(request: pytest.FixtureRequest) -> Iterator[str]:
         theme_mod.set_theme(original)
 
 
-def _png(path, width: int = 1568, height: int = 200) -> str:
+def _png(path, width: int = 1000, height: int = 200) -> str:
     Image.new("RGB", (width, height), (30, 30, 40)).save(path)
     return str(path)
 
@@ -134,7 +134,7 @@ async def test_a_marker_is_painted_unlike_the_prose_beside_it(tmp_path, theme_na
         await _paste(app, pilot, _png(tmp_path / "a.png"))
         editor.insert("now")
         await pilot.pause()
-        assert editor.text == "look at [Image #1, 1568x200] now"
+        assert editor.text == "look at [Image #1, 1000x200] now"
 
         row = cells(editor, 0)
         prose = row[2]  # the "o" of "look"
@@ -165,7 +165,7 @@ async def test_two_markers_are_chips_and_the_words_between_them_are_not(tmp_path
         editor.insert("and ")
         await _paste(app, pilot, _png(tmp_path / "b.png", 640, 480))
         await pilot.pause()
-        assert editor.text == "[Image #1, 1568x200] and [Image #2, 640x480] "
+        assert editor.text == "[Image #1, 1000x200] and [Image #2, 640x480] "
 
         chip = theme_mod.semantic_color("tint-attach")
         assert grounds(editor, 0, 0, 20) == {chip}
@@ -188,7 +188,7 @@ async def test_a_marker_that_soft_wraps_is_painted_on_both_rows(tmp_path) -> Non
         editor.insert("look at this one ")
         await _paste(app, pilot, _png(tmp_path / "a.png"))
         await pilot.pause()
-        assert editor.text == "look at this one [Image #1, 1568x200] "
+        assert editor.text == "look at this one [Image #1, 1000x200] "
         # The marker opens at column 17 and the field is 30 wide, so it cannot
         # fit on the row that starts it.
         assert editor.wrapped_document.get_offsets(0), "the line did not wrap at all"
@@ -205,7 +205,7 @@ async def test_a_marker_that_soft_wraps_is_painted_on_both_rows(tmp_path) -> Non
             [character for character, _, bg in cells(editor, 0) if bg == chip]
             + [character for character, _, bg in cells(editor, 1) if bg == chip]
         )
-        assert painted.replace(" ", "") == "[Image#1,1568x200]"
+        assert painted.replace(" ", "") == "[Image#1,1000x200]"
 
 
 @pytest.mark.asyncio
@@ -244,7 +244,7 @@ async def test_a_click_inside_a_marker_selects_exactly_the_marker(tmp_path, colu
         editor.insert("look at ")
         await _paste(app, pilot, _png(tmp_path / "a.png"))
         await pilot.pause()
-        assert editor.text == "look at [Image #1, 1568x200] "
+        assert editor.text == "look at [Image #1, 1000x200] "
 
         await pilot.click(Editor, offset=at(editor, column))
         await pilot.pause()
@@ -489,8 +489,8 @@ async def test_a_double_click_inside_a_chip_takes_the_whole_marker(tmp_path) -> 
     """The marker is ATOMIC under the click chain, not just under backspace.
 
     Regression for agent review round 1, R1-1. A double-click inside
-    `[Image #1, 1568x200]` ran a word span over the raw line and selected
-    `Image` alone; typing over that selection left `[x #1, 1568x200]` in the
+    `[Image #1, 1000x200]` ran a word span over the raw line and selected
+    `Image` alone; typing over that selection left `[x #1, 1000x200]` in the
     draft, which no longer matches `IMAGE_MARKER`. `resolve_markers` then drops
     it, so the attachment is SILENTLY not sent and what remains is neither a
     chip nor prose — data loss reachable by double-clicking a chip.
@@ -508,13 +508,13 @@ async def test_a_double_click_inside_a_chip_takes_the_whole_marker(tmp_path) -> 
         await _paste(app, pilot, _png(tmp_path / "a.png"))
         editor.insert("here")
         await pilot.pause()
-        assert editor.text == "look at [Image #1, 1568x200] here"
+        assert editor.text == "look at [Image #1, 1000x200] here"
 
         # Column 10 is inside the word `Image`, which is what a user aiming at
         # the chip's label hits.
         await _multi_click(pilot, editor, editor.text.index("Image") + 2, times=2)
 
-        assert editor.selected_text == "[Image #1, 1568x200]"
+        assert editor.selected_text == "[Image #1, 1000x200]"
 
 
 @pytest.mark.asyncio
@@ -567,7 +567,7 @@ async def test_a_triple_click_over_a_chip_keeps_the_marker_intact(tmp_path) -> N
 
         await _multi_click(pilot, editor, editor.text.index("Image") + 2, times=3)
 
-        assert editor.selected_text == "look at [Image #1, 1568x200] here"
+        assert editor.selected_text == "look at [Image #1, 1000x200] here"
 
 
 @pytest.mark.asyncio
@@ -649,7 +649,7 @@ async def test_a_double_click_past_a_marker_line_keeps_the_attachment(tmp_path) 
         editor.insert("look at ")
         await _paste(app, pilot, _png(tmp_path / "a.png"))
         await pilot.pause()
-        assert editor.text == "look at [Image #1, 1568x200] "
+        assert editor.text == "look at [Image #1, 1000x200] "
         assert len(editor.attachments()) == 1
 
         # Well past the end of the text, in the composer's own empty width.
@@ -658,7 +658,7 @@ async def test_a_double_click_past_a_marker_line_keeps_the_attachment(tmp_path) 
         await pilot.pause()
 
         assert editor.attachments(), "the attachment was silently dropped"
-        assert "[Image #1, 1568x200]" in editor.text, "the marker was corrupted"
+        assert "[Image #1, 1000x200]" in editor.text, "the marker was corrupted"
 
 
 @pytest.mark.asyncio

@@ -550,8 +550,10 @@ async def test_read_png_returns_caption_then_image_block(tools, context, tmp_pat
 @pytest.mark.asyncio
 async def test_read_png_over_the_edge_cap_is_resized(tools, context, tmp_path) -> None:
     # Pixels, not bytes, are what an image costs in context (~w*h/750 tokens),
-    # and Anthropic resizes past 1568 anyway while billing the resized count —
-    # so anything above the cap is upload the model never benefits from.
+    # so anything above the ingest cap is upload the model never benefits from.
+    # The cap is IMAGE_INGEST_MAX_EDGE (1024), below the 1568 correctness
+    # ceiling: the band between them is billed pixel area that measured no
+    # legibility gain on document content (see imaging.IMAGE_INGEST_MAX_EDGE).
     _write_png(tmp_path / "wide.png", (3000, 1500))
     result = await _call(tools, "read", {"path": "wide.png"}, context)
 
@@ -559,10 +561,10 @@ async def test_read_png_over_the_edge_cap_is_resized(tools, context, tmp_path) -
     (image,) = _image_blocks(result)
     with Image.open(io.BytesIO(base64.b64decode(image.data))) as delivered:
         assert max(delivered.size) == builtin.READ_IMAGE_MAX_EDGE
-        assert delivered.size == (1568, 784)
+        assert delivered.size == (1024, 512)
     # What the model sees and what is on disk now differ; the caption must say
     # so or a later `ls -l` looks like it contradicts the read.
-    assert "1568x784" in result.text
+    assert "1024x512" in result.text
     assert "source 3000x1500 image/png" in result.text
 
 
@@ -581,26 +583,36 @@ async def test_read_photographic_png_falls_back_to_jpeg(tools, context, tmp_path
     # that is also bigger would be strictly worse on both axes.
     lossless = io.BytesIO()
     with Image.open(tmp_path / "photo.png") as original:
-        original.resize((1568, 1176), Image.Resampling.LANCZOS).save(lossless, format="PNG")
+        original.resize((1024, 768), Image.Resampling.LANCZOS).save(lossless, format="PNG")
     assert len(base64.b64decode(image.data)) < len(lossless.getvalue())
     # base64 inflates by 4/3 and Anthropic rejects an image block over 5 MB.
     assert len(image.data) < 5_000_000
 
 
 @pytest.mark.asyncio
-async def test_read_keeps_png_when_jpeg_would_be_bigger(tools, context, tmp_path) -> None:
-    # The mirror of the case above, and not hypothetical: sharp noise over an
-    # 8-colour palette measures 1145 KiB as PNG (over the budget, so the lossy
-    # rung fires) against 1704 KiB as quality-85 JPEG. Taking JPEG on the way
-    # past the budget would then be worse on BOTH axes — bigger and lossy — so
-    # the rung has to measure rather than assume it wins.
+async def test_read_stays_inside_the_byte_budget_on_incompressible_input(
+    tools, context, tmp_path
+) -> None:
+    # The PNG-wins-over-budget rung (an image PNG compresses better than JPEG
+    # AND that still blows IMAGE_MAX_BYTES) is no longer reachable through
+    # `read`: bounding to IMAGE_INGEST_MAX_EDGE caps the delivered area at
+    # 1024x1024, where the rung's two conditions never hold together: PNG is
+    # never BOTH the smaller encode AND over the budget. Figures deliberately
+    # not restated (they were wrong three times); run
+    # scripts/measure_ingest_lossy_rung.py for the sweep.
+    # It is still live on the REPAIR path at 1568 and is covered there by
+    # tests/unit/test_imaging.py::test_a_repair_keeps_png_when_jpeg_would_be_bigger.
+    #
+    # What `read` must still guarantee is this: the hardest-to-compress input
+    # lands inside the budget rather than riding to the provider at several MB.
     _write_png(tmp_path / "sharp.png", (1568, 1176), noise="sharp", colours=8)
     result = await _call(tools, "read", {"path": "sharp.png"}, context)
 
     assert result.is_error is False
     (image,) = _image_blocks(result)
-    assert image.mime_type == "image/png"
-    assert len(base64.b64decode(image.data)) > builtin.READ_IMAGE_MAX_BYTES
+    assert len(base64.b64decode(image.data)) <= builtin.READ_IMAGE_MAX_BYTES
+    with Image.open(io.BytesIO(base64.b64decode(image.data))) as delivered:
+        assert max(delivered.size) <= builtin.READ_IMAGE_MAX_EDGE
 
 
 @pytest.mark.asyncio
