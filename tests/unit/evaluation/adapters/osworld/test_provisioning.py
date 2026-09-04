@@ -188,12 +188,18 @@ def test_proxy_flag_comes_from_the_task() -> None:
 # AWS_ROOT_VOLUME_SIZE: the disk-exhaustion escape hatch
 # ---------------------------------------------------------------------------
 #
-# The failure this knob answers is a CLOCK, not a workload: the guest's x11grab
-# recorder fills the root filesystem at ~6.8 MB/s against ~2.2 GB free, so the
-# disk reaches 0 bytes at ~t+383s and the next screenshot request fails. 7 of 8
-# runs first failed in a 424-466s window regardless of agent activity (16-32
-# steps) and on both t3.xlarge and m5.xlarge -- the volume is identical either
-# way, which is why the instance-type knob changed nothing.
+# The failure this knob answers is a CLOCK, not a workload: the root filesystem
+# reaches 0 bytes at ~t+383s and the next screenshot request fails. 7 of 8 runs
+# first failed in a 424-466s window regardless of agent activity (16-32 steps)
+# and on both t3.xlarge and m5.xlarge -- the volume is identical either way,
+# which is why the instance-type knob changed nothing.
+#
+# The CONSUMER is the guest's own snapd (a 9.7 GB /var/lib/snapd/cache plus a
+# boot-time auto-refresh), NOT the x11grab recorder an earlier revision of this
+# comment named: pgrep found no ffmpeg process on a failing guest. The adapter
+# now reclaims that space itself at episode start (``guest_disk``); this knob
+# remains an independent lever, and cannot fully fix it on its own because the
+# root partition stays 29.5G inside whatever volume is requested.
 
 
 def _with_volume_size(value: str) -> tuple[ScopedInfraValue, ...]:

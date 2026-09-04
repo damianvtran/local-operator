@@ -172,10 +172,12 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
     {
         "AWS_INSTANCE_TYPE": "aws_instance_type_override",
-        # The root volume the guest's x11grab recorder fills at ~6.8 MB/s. A
-        # score run on a larger disk survives past the ~t+383s exhaustion wall
-        # that truncated earlier runs, so it is not comparable to one that hit
-        # it, and the bundle has to say so on its own.
+        # The root volume the guest's own snapd fills from boot (a 9.7 GB
+        # download cache plus an auto-refresh; NOT the x11grab recorder an
+        # earlier revision named -- no ffmpeg process was ever found on a
+        # failing guest). A score run on a larger disk survives past the
+        # ~t+383s exhaustion wall that truncated earlier runs, so it is not
+        # comparable to one that hit it, and the bundle has to say so on its own.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
     }
 )
