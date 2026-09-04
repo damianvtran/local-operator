@@ -1262,3 +1262,74 @@ async def test_a_daemon_that_dies_without_unwatch_stops_counting_as_watching() -
         if daemon_writer is not None:
             daemon_writer.close()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_daemons_late_drop_leaves_the_replacements_watchers() -> None:
+    """`_drop_client` runs TWICE on one connection, and the second must be a
+    no-op for server-global state.
+
+    The contract is the codebase's own: `_send_to` drops a client whose send
+    failed, and that connection's reader loop later observes the close and
+    drops it again from its `finally` — "a no-op second removal". The round-5
+    fix for the `phone_watchers` leak zeroed the counter UNCONDITIONALLY,
+    which broke that contract for the one piece of server-global state a
+    daemon owns.
+
+    The ordering IS the defect: an evicted daemon parked inside `_on_request`
+    unwinds only when its await returns, by which time the replacement has
+    dialled, replayed `watch` and owns the counter. So the late drop reached
+    across and wiped a LIVE watcher (round 6, R7).
+
+    Worth stating why this is the more dangerous direction. The leak it
+    replaced over-counted, which fails SAFE — a phantom viewer suppresses a
+    toast. This failed OPEN: a phone genuinely being looked at reported nobody
+    watching, so every parked approval toasted a card already on the user's
+    screen and the model was told no one could answer. That is round 4's
+    R1/Q1 failure mode by a fourth route.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer_a = writer_b = None
+    try:
+        record = await _wait_record()
+
+        # Daemon A, with a phone watching through it.
+        reader_a, writer_a = await _dial(record)
+        writer_a.write(json.dumps({"op": "watch", "req": "a1"}).encode() + b"\n")
+        await writer_a.drain()
+        await _until(reader_a, "ack", "a1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+        conn_a = next(c for c in runtime._clients.values() if c.kind == "daemon")
+
+        # Daemon A restarts: B's dial evicts A (the first, legitimate drop).
+        reader_b, writer_b = await _dial(record)
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if len(runtime._clients) == 1:
+                break
+        assert len(runtime._clients) == 1, "the evicted daemon was never removed"
+        assert runtime.phone_watchers == 0, "eviction must release the old daemon's count"
+
+        # B re-announces the session it is watching, as `_reconcile` does.
+        writer_b.write(json.dumps({"op": "watch", "req": "b1"}).encode() + b"\n")
+        await writer_b.drain()
+        await _until(reader_b, "ack", "b1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # A's parked reader loop finally unwinds and drops a connection that
+        # is ALREADY out of the registry. This is the second removal.
+        runtime._drop_client(conn_a)
+
+        assert runtime.watching_surfaces() == frozenset({"viewer"}), (
+            "a late drop of an already-evicted daemon wiped the REPLACEMENT's "
+            "live watcher count — a phone that is being looked at now reports "
+            "nobody watching"
+        )
+        assert runtime.phone_watchers == 1
+    finally:
+        for writer in (writer_a, writer_b):
+            if writer is not None:
+                writer.close()
+        runtime.close()

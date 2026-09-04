@@ -825,7 +825,14 @@ class RuntimeServer:
         The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
         and attach-cap eviction all funnel here so the registry can never
         retain an entry whose socket is closed (the reaper counts them)."""
-        self._clients.pop(id(conn.writer), None)
+        # DID THIS CALL ACTUALLY REMOVE THE CONNECTION? `_drop_client` is
+        # designed to run TWICE on one connection — `_send_to` drops a client
+        # whose send failed, and that connection's reader loop later observes
+        # the close and drops it again from its `finally`, which the docstring
+        # there calls "a no-op second removal". Anything below that mutates
+        # SERVER-GLOBAL state has to honour that contract, or the late second
+        # call reaches across to whatever connection replaced this one.
+        was_registered = self._clients.pop(id(conn.writer), None) is not None
         # The other half of the ``detached`` transition: the last terminal
         # leaving is precisely when the picker must start saying "nobody is
         # watching this". Published from the ONE removal path so no exit route
@@ -846,7 +853,18 @@ class RuntimeServer:
         # Zeroed rather than decremented: the count belongs to the connection
         # that reported it, a new daemon re-announces every session it watches,
         # and at most one daemon connection exists at a time.
-        if conn.kind == "daemon":
+        #
+        # GUARDED ON `was_registered`, because at most one daemon connection
+        # exists but its DROPS are not unique. An evicted daemon parked inside
+        # `_on_request` unwinds only when its await returns — by then the
+        # replacement has dialled, replayed `watch`, and owns the counter, so
+        # an unconditional zero here wiped a LIVE watcher (round 6, R7). That
+        # failed OPEN, unlike the leak it replaced: a phone being looked at
+        # reported nobody watching, so every parked approval toasted a card
+        # already on the user's screen and the model was told no one could
+        # answer. Derived from the registry rather than asserted, the same way
+        # the `attach` half above computes `detached`.
+        if conn.kind == "daemon" and was_registered:
             self.phone_watchers = 0
         task = conn.event_writer_task
         conn.event_writer_task = None
