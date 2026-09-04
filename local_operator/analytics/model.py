@@ -44,10 +44,12 @@ from typing import Any, Mapping
 #: Why these boundaries and not finer ones: they are exactly the seams that are
 #: RECOVERABLE from the wire ``ChatRequest`` without the session having to hand
 #: the recorder a parallel structure. ``custom_instructions`` is the operator's
-#: ``system_prompt.md`` PLUS any selected agent/team profile prompt — the
-#: harness appends the profile inside the ``<user_instructions>`` span
-#: (``prompts_api.build_system_blocks``), so on the wire they are one tagged
-#: region and splitting them further would be a guess. ``system_prompt`` is the
+#: ``system_prompt.md``, PLUS any imported user-scope file
+#: (``~/.agents/AGENTS.md``, see ``local_operator.ecosystem_instructions``),
+#: PLUS any selected agent/team profile prompt — the harness joins all three
+#: inside the ``<user_instructions>`` span (``prompts_api.build_system_blocks``),
+#: so on the wire they are one tagged region and splitting them further would
+#: be a guess. ``system_prompt`` is the
 #: packaged persona plus repo guidance (AGENTS.md/CLAUDE.md), which share block
 #: 0's stable head with the persona and carry no wire delimiter of their own.
 #: ``images`` is APPENDED, never inserted, so the CREATE TABLE / docs /

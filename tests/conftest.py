@@ -74,6 +74,11 @@ _AMBIENT_VARS = (
     "HERDR_SOCKET_PATH",
     "HERDR_TAB_ID",
     "HERDR_WORKSPACE_ID",
+    # Redirects the imported user-scope instruction paths. HOME is already
+    # scrubbed below, which covers the DEFAULT ``~/.agents/AGENTS.md``, but the
+    # override names absolute paths and would survive that — a developer who
+    # exports it gets a different prompt than CI from the same tree.
+    "LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this
