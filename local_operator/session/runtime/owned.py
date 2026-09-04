@@ -28,7 +28,7 @@ import uuid
 from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, cast
 
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -133,6 +133,10 @@ class OwnedSessionHandle(SessionHandle):
         #: without this a gate opened under a watching terminal is never
         #: announced after that terminal closes (round 3, B2).
         self._parked_announcement: tuple[str, str, str] | None = None
+        #: In-flight MCP reloads after a `/mcp add|remove` wrote the config.
+        #: Held only so a fire-and-forget task is not garbage-collected while
+        #: it runs — asyncio keeps no strong reference of its own.
+        self._mcp_reload_tasks: set[asyncio.Task[None]] = set()
         #: The RuntimeServer serving this handle, set by its constructor. The
         #: gate path needs it for two things only a server knows: how many
         #: front ends could present a card right now, and how to publish the
@@ -1582,9 +1586,36 @@ class OwnedSessionHandle(SessionHandle):
         `/approvals default` uses rather than being silently dropped.
         """
         from local_operator.session.frontend_state import _MCP_GRANT_SUBCOMMANDS
+        from local_operator.session.frontend_state import (
+            MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS,
+        )
 
         parts = (arg or "").split()
         sub = parts[0].lower() if parts else ""
+
+        # UNKNOWN VERBS ARE REFUSED BY NAME, and this check comes first. Every
+        # unrecognised token used to fall through to the server listing at the
+        # bottom, which is a PLAUSIBLE answer to `add` — the user asked about
+        # servers and got a table of servers — so a typo, or `add` itself, read
+        # as "done, here is the current state" while nothing had happened
+        # (round 5, U15). The attached path has always validated this way.
+        if sub and sub not in _MCP_SUBCOMMANDS:
+            return SlashResult(
+                kind="notice",
+                text=f"unknown mcp subcommand: {parts[0]} — try "
+                f"/mcp {'|'.join(_MCP_SUBCOMMANDS)} <name>",
+                style="warning",
+            )
+        # The same fixed-arity refusals the attached path applies, in the same
+        # order, so one typed string is answered identically wherever it is
+        # typed. Acting on something other than what the user described is the
+        # mistake this whole command guards against.
+        if sub == "list" and len(parts) > 1:
+            return SlashResult(
+                kind="notice",
+                text=f"/mcp list takes no arguments — got {' '.join(parts[1:])!r}",
+                style="warning",
+            )
         if sub in _MCP_GRANT_SUBCOMMANDS:
             # A grant awaits a browser round trip on the machine the USER is
             # sitting at, and stores credentials there. Declined in the same
@@ -1596,7 +1627,31 @@ class OwnedSessionHandle(SessionHandle):
                 "running the terminal — run it from a terminal on that machine",
                 style="warning",
             )
-        # Anything else is a LISTING (bare, or `list`). The bare form never
+        # `add`/`remove` write the GLOBAL mcp.json and reconnect THIS session's
+        # manager, so they are genuinely our work — the follower's facade is
+        # read-only and its filesystem is not the one this session reads its
+        # servers from. Shared with the terminal via `mcp.verbs` rather than
+        # reimplemented: the refusals are the substance of these commands.
+        if sub in ("add", "remove"):
+            from local_operator.mcp.verbs import mcp_add_result, mcp_remove_result
+
+            if sub == "remove":
+                if len(parts) < 2:
+                    return SlashResult(
+                        kind="notice", text=f"usage: /mcp {sub} <name>", style="warning"
+                    )
+                if len(parts) > 2:
+                    return SlashResult(
+                        kind="notice",
+                        text=f"/mcp {sub} takes one server name — got {' '.join(parts[1:])!r}",
+                        style="warning",
+                    )
+                text, kind = mcp_remove_result(parts[1], self._reconnect_mcp)
+            else:
+                text, kind = mcp_add_result(parts[1:], self._reconnect_mcp)
+            style = "info" if kind == "info" else kind
+            return SlashResult(kind="notice", text=text, style=style)
+        # What remains is a LISTING (bare, or `list`). The bare form never
         # reaches here — the viewer pulls it back to local because its own
         # facade holds the identical rows — so this answers the explicit
         # `list` and the empty case from the session's own manager.
@@ -1605,6 +1660,36 @@ class OwnedSessionHandle(SessionHandle):
         if not servers:
             return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
         return SlashResult(kind="block", data={"type": "mcp"})
+
+    def _reconnect_mcp(self) -> None:
+        """Re-read the config and reconnect after ``/mcp add|remove`` wrote it.
+
+        Without this the command is true on disk and invisible in the session:
+        the manager holds the configs it discovered at boot. Scheduled on this
+        runtime's own loop rather than awaited — the reconnect is a network
+        round trip and the receipt is already correct without it, which is the
+        same best-effort stance the terminal takes.
+        """
+        manager = getattr(self._session, "mcp_manager", None)
+        reload = getattr(manager, "reload", None)
+        if not callable(reload):
+            return
+        # ``getattr`` on a duck-typed manager yields ``object``; the callable
+        # check above is the real guard, so name the awaitable shape for the
+        # checker (the same cast `app.py` makes at its own reload site).
+        typed_reload = cast("Callable[[], Awaitable[Any]]", reload)
+
+        async def _reload() -> None:
+            try:
+                await typed_reload()
+            except Exception:  # noqa: BLE001 — a failed refresh must not fail the command
+                logger.debug("MCP reload after a config change failed", exc_info=True)
+
+        # Fire-and-forget on the loop we are already on. Held in a set so the
+        # task is not garbage-collected mid-flight.
+        task = self._loop.create_task(_reload())
+        self._mcp_reload_tasks.add(task)
+        task.add_done_callback(self._mcp_reload_tasks.discard)
 
     async def _model_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """The routed ``/model <provider>/<id>``: a REAL switch on this session.

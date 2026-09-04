@@ -1210,3 +1210,55 @@ async def test_watching_surfaces_is_derived_from_real_connections() -> None:
             if writer is not None:
                 writer.close()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_that_dies_without_unwatch_stops_counting_as_watching() -> None:
+    """The case three rounds of tests never asked: a daemon connection that
+    goes away UNCLEANLY.
+
+    `phone_watchers` is the daemon connection's state held in a server-global
+    counter, and the only decrement is an `unwatch` op the daemon sends from
+    an SSE generator's `finally` — in the process that just died. So the
+    committed tests, which always send a matching `unwatch`, could not see
+    that the count outlives its connection: a daemon restart while a phone is
+    watching left a permanent +1, and the session reported a viewer nobody
+    could see forever after. Every parked approval on it then sent no desktop
+    toast and the model was told a human was watching (round 5, R5).
+
+    That is round 3's B1 failure mode reached by a third route, which is why
+    this asserts the property (`watching_surfaces()` after an unclean drop)
+    rather than the counter: the counter is the mechanism, and the mechanism
+    has now been wrong three different ways.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    daemon_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+
+        # A phone opens the session: the real op, over the wire.
+        daemon_writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(daemon_reader, "ack", "w1")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # The daemon process DIES — no `unwatch`, because a dead process runs
+        # no `finally`. This is the whole point of the test.
+        daemon_writer.close()
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if not runtime._clients:
+                break
+        assert not runtime._clients, "the dropped connection was never reaped"
+
+        assert runtime.watching_surfaces() == frozenset(), (
+            "a phone cannot still be watching through a connection that no longer "
+            "exists — the count belongs to the connection"
+        )
+    finally:
+        if daemon_writer is not None:
+            daemon_writer.close()
+        runtime.close()

@@ -832,6 +832,22 @@ class RuntimeServer:
         # (reader-loop end, shutdown, eviction) can miss it.
         if conn.kind == "attach":
             self._republish_detached()
+        # `phone_watchers` is the daemon CONNECTION's state kept in a
+        # server-global counter, and only an `unwatch` op decrements it — an op
+        # the daemon sends from an SSE generator's `finally`, in the process
+        # that just died. So a daemon restart while a phone is watching left
+        # the +1 behind forever: the new daemon's `_reconcile` replays `watch`
+        # (a second +1), the phone's eventual close sends ONE `unwatch`, and
+        # the residue reports a viewer nobody can see. Every parked approval on
+        # that session then sends no toast and the model is told a human is
+        # watching — round 3's B1 failure mode, restored by a third route
+        # (round 5, R5).
+        #
+        # Zeroed rather than decremented: the count belongs to the connection
+        # that reported it, a new daemon re-announces every session it watches,
+        # and at most one daemon connection exists at a time.
+        if conn.kind == "daemon":
+            self.phone_watchers = 0
         task = conn.event_writer_task
         conn.event_writer_task = None
         if task is not None:

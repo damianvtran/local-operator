@@ -118,6 +118,11 @@ _FRONTEND_LOCAL_SLASHES = {
 # routing the mutation (not faking it locally) is the only non-crashing,
 # non-divergent answer. The dispatch splits the two shapes by argument.
 _MCP_GRANT_SUBCOMMANDS = {"login", "logout", "reauth"}
+#: Every verb ``/mcp`` accepts, in the order the refusal offers them. Canonical
+#: HERE rather than on `OperatorApp` because both the terminal and the detached
+#: runtime validate against it, and a runtime that knew a shorter list silently
+#: swallowed `add`/`remove` as a server listing (round 5, U15).
+MCP_SUBCOMMANDS = ("list", "add", "remove", "login", "logout", "reauth")
 _IMAGE_SLASHES = {"agent", "team"}
 
 

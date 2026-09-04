@@ -237,3 +237,29 @@ def test_no_advertised_command_tells_an_attached_user_to_reattach(command: str) 
     )
     assert command in _advertised_authoritative_commands()
     assert SlashResult is not None and OwnedSessionHandle is not None
+
+
+def test_the_runtime_knows_every_mcp_verb_the_terminal_offers() -> None:
+    """`/mcp add` and `/mcp remove` used to fall through to a server LISTING.
+
+    That was worse than an error: a table of servers is a plausible answer to
+    `add`, so the user read it as "done, here is the current state" and
+    discovered days later that nothing had been written — and `/mcp remove
+    github` had the same shape pointed at deletion (round 5, U15).
+
+    The verb list is canonical in `session.frontend_state` precisely so the
+    two surfaces cannot know different sets; this pins that they don't.
+    """
+    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+    from local_operator.tui.app import OperatorApp
+
+    assert OperatorApp.MCP_SUBCOMMANDS == MCP_SUBCOMMANDS
+
+    source = (RUNTIME_DIR / "owned.py").read_text()
+    body = source.split("def _mcp_slash", 1)[1].split("\n    def ", 1)[0]
+    # Every mutating verb must be dispatched by name somewhere in the handler.
+    for verb in ("add", "remove"):
+        assert f'"{verb}"' in body, (
+            f"/mcp {verb} is not dispatched by the runtime, so it falls through "
+            "to a listing that looks like success"
+        )
