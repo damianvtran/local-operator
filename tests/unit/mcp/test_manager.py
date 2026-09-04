@@ -2157,3 +2157,64 @@ class TestChallengeIsBoundToTheTerminalRequest:
         assert await auth_mod.probe_oauth_capability(cfg) is False
         # The manager-owned operation consults its own store and allows it.
         assert await manager.server_supports_oauth_login(cfg) is True
+
+
+class TestMcpAuthRecoveryHint:
+    """The remedy an MCP auth failure earns, and the one it must never get.
+
+    An expired MCP grant and an expired MODEL PROVIDER key are different
+    credentials with different fixes, and the provider-side hint was the only
+    one wired up — so an MCP failure either got nothing or, worse, would have
+    been told to `/login anthropic`, re-authorizing a provider that was never
+    broken.
+    """
+
+    def test_it_matches_the_error_shape_not_a_prefix(self) -> None:
+        """The prefix gate is why NO MCP error got a hint on either path.
+
+        ``append_auth_recovery`` keys off the rendered string STARTING WITH
+        "authentication failed", the form ``ProviderError.__str__`` produces.
+        An MCP failure never comes through that renderer and reaches the
+        transcript already wrapped ("MCP error: …"), so the auth fact is not at
+        position zero and a prefix test can never see it.
+        """
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+        from local_operator.providers.failover import append_auth_recovery
+
+        wrapped = "MCP error: MCP OAuth authorization required for https://mcp.linear.app/mcp"
+        assert append_auth_recovery(wrapped, "anthropic") == wrapped, "the prefix gate"
+        assert mcp_auth_recovery_hint(wrapped, "linear") is not None
+
+    def test_it_names_the_server_and_the_reauth_verb(self) -> None:
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        hint = mcp_auth_recovery_hint("MCP authorization failed", "minerva-qa")
+        assert hint is not None
+        assert "/mcp reauth minerva-qa" in hint
+        assert "/login" not in hint, "the model provider's credential is not the broken one"
+
+    def test_an_unnamed_server_still_gets_a_reachable_remedy(self) -> None:
+        """A URL-shaped failure naming no configured server must not guess."""
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        hint = mcp_auth_recovery_hint(
+            "MCP server at https://x.example/mcp refused the connection (401)"
+        )
+        assert hint is not None and "/mcp reauth <server>" in hint
+
+    def test_non_auth_failures_get_no_hint(self) -> None:
+        """A hint that fires on everything is noise, and a timeout has no remedy."""
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        assert mcp_auth_recovery_hint("MCP error: server 'linear' is not connected") is None
+        assert mcp_auth_recovery_hint("rate limit or quota exceeded (429)") is None
+        assert mcp_auth_recovery_hint("") is None
+
+    def test_an_ambiguous_message_refuses_to_name_one(self) -> None:
+        """Naming the WRONG server is the failure this remediation is about."""
+        from local_operator.mcp.manager import mcp_server_name_in
+
+        servers = ["linear", "minerva-qa"]
+        both = "MCP authorization failed for 'linear' and 'minerva-qa'"
+        assert mcp_server_name_in(both, servers) is None
+        assert mcp_server_name_in("MCP authorization failed for 'linear'", servers) == "linear"

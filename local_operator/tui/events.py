@@ -107,6 +107,31 @@ class TurnEnded(Message):
         self.context_is_estimate = context_is_estimate
 
 
+class TurnAbandoned(Message):
+    """A turn whose worker returned without a terminal ``agent_end`` reaching us.
+
+    Posted by the APP's turn worker, not by the controller — the controller
+    knows nothing of the worker that awaits ``prompt()``. It is deliberately a
+    DISTINCT type rather than a synthetic :class:`TurnEnded`: a synthetic end
+    would make ``TurnEnded`` mean two different things (a priced, sourced turn
+    end and a "we simply stopped hearing about it"), which is the exact class
+    of ambiguity that let the status band and the working line be retired by
+    two different mechanisms and diverge in the first place. It also carries no
+    ``usage``/``context_tokens``, because a turn that produced no ``agent_end``
+    has no honest source for those numbers and must not fabricate them.
+
+    ``epoch`` is the ``_turn_epoch`` the worker started under, so a fallback
+    that dispatches after a NEWER turn has already opened is dropped rather
+    than retiring the live turn's UI.
+    """
+
+    def __init__(self, epoch: int, *, aborted: bool, error: str | None) -> None:
+        super().__init__()
+        self.epoch = epoch
+        self.aborted = aborted
+        self.error = error
+
+
 class ContextUsageReported(Message):
     """One model call reported how large the context was when it ran.
 

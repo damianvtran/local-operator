@@ -1012,6 +1012,10 @@ class StatusLine:
         # the tool-approval prompt). Only the terminal title reads it; see
         # :meth:`set_attention` for why it is not inferred from `_streaming`.
         self._attention: bool = False
+        #: Whether the last SETTLED turn ended in an error. Turn-scoped: set by
+        #: `_finalize_turn` on the error branch and cleared when the next turn
+        #: opens, so the title never carries a cross into work that is running.
+        self._failed: bool = False
         # And whether that mode is the SAVED default rather than this session's
         # choice. Two different promises — "until I close this window" and
         # "every window from now on" — and the alarm is the only place a user
@@ -1060,15 +1064,25 @@ class StatusLine:
     def _title_state(self) -> TitleState:
         """The run state the title should show.
 
-        Only two of the three states are derivable here: ``attention`` is the
-        app's to declare (it owns the approval prompt), and it is applied by
-        :meth:`set_attention` rather than inferred, because the band has no
-        way to distinguish "streaming, working" from "streaming, parked on a
-        question" — the session is streaming in both.
+        Only ``working``/``idle`` are derivable here. ``attention`` is the app's
+        to declare (it owns the approval prompt) and is applied by
+        :meth:`set_attention` rather than inferred, because the band has no way
+        to distinguish "streaming, working" from "streaming, parked on a
+        question" — the session is streaming in both. ``failed`` is the app's for
+        the same reason: only the turn's outcome says so, and the band sees only
+        that streaming stopped.
+
+        ORDER IS PRECEDENCE. A live turn outranks a previous failure, so
+        ``streaming`` is tested before ``failed``: the mark describes the last
+        SETTLED outcome and must not sit on a session that is working again.
+        ``attention`` outranks both — a turn parked on the user is the only
+        state that asks for something.
         """
         if self._attention:
             return "attention"
-        return "working" if self._streaming else "idle"
+        if self._streaming:
+            return "working"
+        return "failed" if self._failed else "idle"
 
     def set_starting(self, starting: bool) -> None:
         """Show "starting…" while a runtime is being brought up for this viewer.
@@ -1105,6 +1119,21 @@ class StatusLine:
         if attention == self._attention:
             return
         self._attention = attention
+        self._sync_terminal_title()
+
+    def set_failed(self, failed: bool) -> None:
+        """Whether the last settled turn ended in an ERROR.
+
+        Only the title changes, exactly as :meth:`set_attention` only changes
+        the title: a user looking AT this session already has the error notice
+        in the transcript, and the surface this is for is the one where they are
+        looking at five session labels at once and cannot tell which finished
+        badly. Cleared by the next turn opening \u2014 see :meth:`_title_state` for
+        why a live turn outranks the mark.
+        """
+        if failed == self._failed:
+            return
+        self._failed = failed
         self._sync_terminal_title()
 
     def _sync_terminal_title(self) -> None:

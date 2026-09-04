@@ -36,7 +36,7 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -129,6 +129,84 @@ DEFAULT_MCP_TIMEOUT_MS = 30_000.0
 
 class McpConnectionError(RuntimeError):
     """Raised when a server cannot be reached (deferred execute path)."""
+
+
+#: Rendered forms that mean "an MCP server would not authorize us", matched as
+#: SHAPE rather than as a prefix. Every one of these is a string this package
+#: itself produces — ``McpAuthRequiredError``/``McpAuthChallengeError``'s own
+#: ``__str__``, and the ``MCP error: <exc>`` envelope ``_execute_tool_call``
+#: wraps a failed connection in — so the set is closed by construction rather
+#: than by guessing at provider prose.
+#:
+#: A SERVER NAME is what makes the hint actionable, and it is why this cannot
+#: be a prefix test the way the provider hint is: an MCP failure reaches the
+#: transcript already wrapped ("MCP error: …"), quoted inside a tool result, or
+#: appended to a turn's error, so the auth fact is rarely at position zero.
+_MCP_AUTH_MARKERS = (
+    "mcp oauth authorization required",
+    "refused the connection (401)",
+    "refused the connection (403)",
+    "mcp authorization failed",
+    "authorization expired",
+    "rejected our credentials",
+)
+
+
+def mcp_auth_recovery_hint(rendered_error: str, server_name: str | None = None) -> str | None:
+    """The local remedy for an MCP server that would not authorize us, or None.
+
+    The provider-side :func:`~local_operator.providers.failover.auth_recovery_hint`
+    cannot serve this case and must not be reused for it. It names
+    ``/login <provider>`` and ``credential update <PROVIDER_API_KEY>``, which
+    replace the MODEL provider's key — and an expired MCP grant on ``linear``
+    has nothing to do with the Anthropic key. Sending a user to re-authorize a
+    provider that was never broken is worse than saying nothing: they do the
+    work, the failure persists, and the real cause is now further away.
+
+    Returns ``None`` rather than the input unchanged, so callers can tell
+    "no hint applies" from "hint applied" without comparing strings. Names the
+    specific server when it is known, because ``/mcp reauth`` is not a command
+    a user can run without one.
+    """
+    if not rendered_error:
+        return None
+    haystack = rendered_error.lower()
+    if not any(marker in haystack for marker in _MCP_AUTH_MARKERS):
+        return None
+    if server_name:
+        return (
+            f"To fix: `/mcp reauth {server_name}` to replace that server's "
+            "expired authorization."
+        )
+    return (
+        "To fix: `/mcp` to see which server needs authorizing, then "
+        "`/mcp reauth <server>` to replace its expired authorization."
+    )
+
+
+def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str | None:
+    """The configured server ``rendered_error`` is about, when exactly one is.
+
+    Read out of the message rather than threaded down from the raise site,
+    because the string is what the display surfaces actually hold — the same
+    reason the provider hint works on rendered text. Quoted forms are what this
+    package emits (``MCP server 'linear' …``), so they are tried first and a
+    bare substring is the fallback for the URL-shaped messages.
+
+    AMBIGUITY YIELDS None, deliberately: naming the wrong server is the exact
+    failure this whole remediation is about, so two candidates means the
+    caller falls back to the unnamed hint that tells the user how to look.
+    """
+    if not rendered_error:
+        return None
+    haystack = rendered_error.lower()
+    quoted = [name for name in known_servers if f"'{name.lower()}'" in haystack]
+    if len(quoted) == 1:
+        return quoted[0]
+    loose = [name for name in known_servers if name and name.lower() in haystack]
+    if len(loose) == 1:
+        return loose[0]
+    return None
 
 
 def _unwrap_auth_required(exc: BaseException) -> BaseException:
