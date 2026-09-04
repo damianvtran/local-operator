@@ -714,7 +714,40 @@ class AgentLoop:
                                         new_messages,
                                         redact=config.redact_tool_result,
                                     )
-                                elif resumable_text:
+                                if resumable_text:
+                                    # KEYED ON PROSE ALONE, independently of the
+                                    # pairing above — an `elif` here silently lost
+                                    # the instruction for the one shape that most
+                                    # needs it. A cut that produced BOTH partial
+                                    # prose and a complete call took the pairing
+                                    # arm and never reached this one, so text the
+                                    # user had already read was committed to
+                                    # history with nothing telling the model not
+                                    # to repeat it, and the answer could restart
+                                    # mid-sentence ("Paris is the capital of Paris
+                                    # is the capital of France."). Keeping the
+                                    # calls (above) is what made that shape
+                                    # reachable: before it, any turn with a call
+                                    # had its calls cleared and fell into the
+                                    # text arm, which did append this prompt.
+                                    #
+                                    # Ordering is load-bearing: the synthetic tool
+                                    # results are appended FIRST, so the prompt
+                                    # still lands after them and the `tool_use` →
+                                    # `tool_result` adjacency the wire requires is
+                                    # never broken by a user turn wedged between.
+                                    # Verified on both real serializers for this
+                                    # shape: Anthropic gets blocks
+                                    # `[[text],[text,tool_use],[tool_result],[text]]`
+                                    # with no unpaired id, OpenAI gets roles
+                                    # `user,assistant,tool,user`. Anthropic renders
+                                    # a `tool_result` as a USER turn, so the prompt
+                                    # follows one — legal since Anthropic began
+                                    # accepting consecutive same-role messages
+                                    # (Oct 2024), and the alternation concern the
+                                    # comment below raises is about a TRAILING
+                                    # assistant turn, which this shape never has.
+                                    #
                                     # A CONTINUATION INSTRUCTION, not a bare
                                     # trailing assistant turn. Leaving the partial
                                     # answer last is "prefilling", which current
@@ -743,7 +776,13 @@ class AgentLoop:
                                     # then summarises. It is harness chrome, so
                                     # the front ends suppress it on replay the
                                     # same way they already suppress the
-                                    # compaction continuation prompt.
+                                    # compaction continuation prompt. REPLAY is
+                                    # the only surface that needs it: this row
+                                    # reaches the transcript via
+                                    # `_persist_new_messages`, which appends
+                                    # without emitting a `MessageStartEvent`, so
+                                    # there is no live announcement to suppress
+                                    # and the announce loop is correctly untouched.
                                     prompt = Message.user(CONNECTIVITY_CONTINUATION_PROMPT)
                                     context.messages.append(prompt)
                                     new_messages.append(prompt)

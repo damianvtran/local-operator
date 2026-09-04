@@ -2933,6 +2933,22 @@ def test_a_provider_that_answered_cannot_claim_the_machine_is_offline() -> None:
     assert not spoof.transport
     _mark_mid_stream_connectivity(spoof)
     assert not spoof.connectivity_loss
+    # THE CASE THAT ACTUALLY NEEDS THE PROVENANCE GATE. The spoof above is
+    # already rejected by the NAME-position match — its message does not begin
+    # with a mid-stream class name — so it holds whether or not `transport` is
+    # checked, and on its own it left the gate untested. This one clears the
+    # name match exactly: a provider narrating its own upstream trouble in a
+    # word-for-word imitation of what our client writes for a severed socket.
+    # Only provenance separates them, so deleting the `transport` gate flips
+    # this assertion and nothing else does.
+    impersonation = ProviderError(
+        None,
+        "ReadError: upstream link to model host reset",
+        retryable=True,
+    )
+    assert not impersonation.transport
+    _mark_mid_stream_connectivity(impersonation)
+    assert not impersonation.connectivity_loss
     # And a provider that answered with a STATUS is never continuable either.
     for status in (500, 503, 429, 401, 400):
         answered = ProviderError(status, "boom", retryable=True)
@@ -3178,6 +3194,15 @@ async def test_connectivity_continuation_keeps_a_COMPLETE_tool_call() -> None:
         and m.tool_call_id == carried[0].tool_calls[0].id
     ]
     assert len(paired) == 1
+    # R9: THE PROSE STILL GETS ITS CONTINUATION INSTRUCTION. A cut that produced
+    # both partial text and a complete call used to take the pairing arm and skip
+    # the prompt, so "Let me check that. " was committed as history with nothing
+    # saying not to repeat it — the model may restart the sentence and the user
+    # reads it twice. The prompt must follow the tool result, not sit between the
+    # `tool_use` and its `tool_result`, or the wire is illegal.
+    roles = [m.role for m in retry_history if isinstance(m, Message)]
+    assert roles == ["user", "assistant", "tool", "user"], roles
+    assert retry_history[-1].text == loop_module.CONNECTIVITY_CONTINUATION_PROMPT
     assert any(isinstance(m, Message) and m.text == "done" for m in messages)
 
 
