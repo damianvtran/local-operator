@@ -9100,7 +9100,7 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 # you want it handled?" — a research result reported as a question. So the
 # affordance and its limit ship together, in both places a model reads about the
 # tool: here (in the tools array of every request) and in the system prompt's
-# fuller trigger-then-brake paragraph. Naming the three legitimate triggers is
+# fuller trigger-then-brake paragraph. Naming the legitimate triggers is
 # what keeps this from reading as "never ask": the goal is fewer calls of higher
 # value, not a model that pushes on through a genuinely irreversible fork.
 

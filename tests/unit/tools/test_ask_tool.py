@@ -121,13 +121,14 @@ def test_ask_advertises_itself_as_a_last_resort_not_a_checkpoint() -> None:
     assert "subagent" in text
 
 
-def test_ask_names_the_three_cases_that_do_warrant_a_question() -> None:
+def test_ask_names_the_cases_that_do_warrant_a_question() -> None:
     """Restraint must not become silence on an irreversible fork.
 
     "Ask less" with no stated trigger overshoots into a model that deletes the
-    production index rather than spend a picker. The three legitimate triggers
-    are therefore enumerated in the same breath as the brake: irreversible and
-    unauthorized, genuinely ambiguous, or something only the user has.
+    production index rather than spend a picker. The legitimate triggers are
+    therefore enumerated in the same breath as the brake: irreversible without
+    explicit approval, genuinely ambiguous, something only the user has, or an
+    answer that is theirs to state and cannot be researched.
     """
 
     async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:

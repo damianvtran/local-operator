@@ -318,19 +318,34 @@ def base_ask_description() -> str:
         text=True,
         check=True,
     ).stdout
-    # Pull the literal out of the base source without executing it: the module
-    # is far too heavy to import twice, and only this one string is wanted.
-    marker = source.index('name="ask",')
-    start = source.index("description=(", marker)
-    end = source.index("),", start)
-    literal = source[start + len("description=(") : end]
-    # `ast.literal_eval` over the DEDENTED, parenthesised concatenation: the
-    # source is indented inside a call, which is a syntax error on its own, and
-    # literal_eval keeps this to data rather than executing base-revision code.
+    # Walk the base module's AST for the `AgentTool(name="ask", ...)` call and
+    # read its `description` keyword. Parsed, never executed: only this one
+    # string is wanted, and the module is far too heavy to import twice.
+    #
+    # An AST walk rather than a string scan, for a reason that already bit
+    # once. The first version ended the literal at the first `),` after
+    # `description=(` — correct until a description CONTAINS that sequence, and
+    # this very change introduced one ("(a credential, an access decision), or
+    # when…"). It passed only because the merge base predated that text, so it
+    # would have begun failing on every run the moment this PR merged and
+    # became somebody's merge base. A parser does not care where a parenthesis
+    # falls inside a string literal.
     import ast
-    import textwrap
 
-    return " ".join(ast.literal_eval("(" + textwrap.dedent(literal).strip() + ")").split())
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        name = keywords.get("name")
+        description = keywords.get("description")
+        if description is None:
+            continue
+        if not (isinstance(name, ast.Constant) and name.value == "ask"):
+            continue
+        # Adjacent string literals are folded into one `Constant` by the
+        # parser, so the implicit concatenation needs no manual joining.
+        return " ".join(str(ast.literal_eval(description)).split())
+    raise RuntimeError("no `ask` tool description found at the merge base")
 
 
 if __name__ == "__main__":
