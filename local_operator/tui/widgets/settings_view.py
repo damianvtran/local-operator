@@ -4344,7 +4344,7 @@ def _suggestion_detail(row: ModelRow) -> str:
     """
     from local_operator.tui.widgets.model_picker import format_price_pair
 
-    price = format_price_pair(row.input_price, row.output_price)
+    price = format_price_pair(row.input_price, row.output_price, routed=row.routed)
     parts = [row.provider]
     if price:
         parts.append(price)

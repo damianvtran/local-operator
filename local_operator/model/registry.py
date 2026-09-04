@@ -288,6 +288,12 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     model_info = unknown_model_info
 
     if hosting == "radient":
+        # The router is a KNOWN endpoint and gets its own row; every other id
+        # an aggregator serves is genuinely undescribed and keeps the template's
+        # unknown sentinels. See `aggregator_router_model_info` for why the two
+        # cannot share one row.
+        if model in AGGREGATOR_ROUTER_MODEL_IDS:
+            return aggregator_router_model_info
         return radient_default_model_info
     elif hosting == "anthropic":
         if model in anthropic_models:
@@ -303,6 +309,8 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "openai":
         return openai_models[model]
     elif hosting == "openrouter":
+        if model in AGGREGATOR_ROUTER_MODEL_IDS:
+            return aggregator_router_model_info
         return openrouter_default_model_info
     elif hosting == "alibaba":
         if model in qwen_models:
@@ -741,6 +749,59 @@ radient_default_model_info: ModelInfo = ModelInfo(
     name="Radient",
     recommended=False,
 )
+
+#: The ROUTER endpoint of an aggregator — `radient/auto`, `openrouter/auto` —
+#: as distinct from a model reached THROUGH that aggregator.
+#:
+#: Deliberately separate from the two templates above, and the distinction is
+#: the whole point. Those describe "a model this aggregator serves that we know
+#: nothing else about", so their ``-1`` is honest: an arbitrary unlisted model
+#: could have any window, and claiming a large one would suppress compaction
+#: for a small model — the failure the ``-1`` sentinel exists to prevent. The
+#: router is the opposite case. It is ONE known endpoint whose product is
+#: dispatching to a frontier model, so these are properties of the ROUTE:
+#:
+#: * ``context_window``: ``-1`` is normalised by ``configure.build_model_spec``
+#:   to ``UNKNOWN_CONTEXT_WINDOW`` (128k), and that number is not inert — the
+#:   session derives its compaction threshold from it, so a router that will
+#:   happily accept 1M compacted at an eighth of its room, and the picker
+#:   advertised ``128k`` for it. 1,048,576 is a window every model these
+#:   routers select today actually carries, so it is a conservative floor
+#:   rather than an optimistic claim, and a live listing that states its own
+#:   number still wins (``discovery._merge_one``).
+#: * ``supports_images``: ``False`` is a POSITIVE STATEMENT OF INCAPACITY in
+#:   the three-state scheme ``DiscoveredModel.supports_images`` documents, not
+#:   an "unknown" — and it was a false one. It made the session strip images
+#:   and announce "the current model does not accept images" on a router that
+#:   accepts them, which is the user-visible half of this bug.
+#:
+#: ``max_tokens`` deliberately stays ``-1``. Unlike the window it has no honest
+#: router-wide floor: the output cap is the SELECTED model's, it varies by an
+#: order of magnitude across the routes, and ``build_model_spec``'s 8,192
+#: fallback merely truncates a long answer where a wrong window silently
+#: mis-compacts an entire conversation. Stating a number nobody can stand
+#: behind is the error these templates exist to avoid.
+aggregator_router_model_info: ModelInfo = ModelInfo(
+    max_tokens=-1,
+    context_window=1_048_576,
+    supports_images=True,
+    supports_prompt_cache=False,
+    input_price=0.0,
+    output_price=0.0,
+    cache_writes_price=0.0,
+    cache_reads_price=0.0,
+    description="Automatic model selection across the aggregator's catalogue",
+    id="auto",
+    name="Automatic",
+    recommended=False,
+)
+
+#: Model ids that ARE the router rather than a model, by aggregator spelling.
+#: Mirrors ``discovery._META_ROUTE_IDS``; kept here as well because this module
+#: must not import the discovery layer (it is the leaf the registry is built
+#: from), and the set is two literals that change only when an aggregator adds
+#: a router.
+AGGREGATOR_ROUTER_MODEL_IDS = frozenset({"auto", "openrouter/auto"})
 
 anthropic_default_model_info: ModelInfo = ModelInfo(
     max_tokens=64_000,

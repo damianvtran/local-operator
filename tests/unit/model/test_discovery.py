@@ -299,6 +299,105 @@ def test_the_free_flag_survives_a_cache_round_trip(tmp_path) -> None:
     assert cached[0].free is True, "the stated zero must survive the document"
 
 
+def test_a_meta_route_is_flagged_routed_by_either_price_shape_or_id() -> None:
+    """The router is a FOURTH answer, and the parser is where it is decided.
+
+    ``"-1"`` is the principled signal and the one OpenRouter publishes. The id
+    fallback exists for exactly one live defect: Radient quotes ``auto`` at
+    ``{"prompt": "0", "completion": "0"}``, and a symmetric quoted zero is
+    indistinguishable from a genuinely free route by price alone — so without
+    it the router keeps advertising a frontier-model dispatch as free.
+    """
+    body = {
+        "data": [
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            # Radient's CURRENT shape, which has no price signal to read.
+            {"id": "auto", "pricing": {"prompt": "0", "completion": "0"}},
+            # A router by price alone, under an id nothing was told about.
+            {"id": "some/future-router", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "google/gemma:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "priced/model", "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+            {"id": "terse/model"},
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.routed for row in rows} == {
+        "openrouter/auto": True,
+        "auto": True,
+        "some/future-router": True,
+        "google/gemma:free": False,
+        "priced/model": False,
+        "terse/model": False,
+    }
+    # The two flags are mutually exclusive by construction: a router quoted at
+    # zero must lose ``free``, which is the whole user-visible bug.
+    assert {row.id: row.free for row in rows}["auto"] is False
+    assert {row.id: row.free for row in rows}["google/gemma:free"] is True
+
+
+def test_the_router_id_fallback_is_scoped_to_aggregators() -> None:
+    """R1: this parser serves the ``openai-compat`` wire GENERALLY.
+
+    ollama, deepseek, mistral, kimi, xai, zai, alibaba and openai all reach
+    ``_row_from_openai_entry``, so an ungated id test is not confined to the two
+    aggregators it was reasoned about. Ollama is the case that bites: its
+    "listing" is the user's own filesystem, so a local model named ``auto`` is
+    something a user can simply have — and ollama is the ONE provider with
+    ``allows_missing_api_key``, whose quoted zero is a REAL free that
+    ``_price`` deliberately preserves. Ungated, that row rendered
+    ``usage-based`` where it had correctly read ``free``.
+
+    The PRICE leg stays unscoped on purpose: a quoted ``-1`` is self-describing
+    whoever sent it, so a hypothetical direct provider publishing one is
+    telling the truth about itself.
+    """
+    body = {"data": [{"id": "auto"}, {"id": "qwen3:8b"}]}
+
+    local = fetch_models("ollama", api_key=None, client=_StubClient([_Response(200, body)]))
+    assert local is not None
+    assert {row.id: row.routed for row in local} == {"auto": False, "qwen3:8b": False}
+    assert {row.id: row.free for row in local} == {
+        # The genuine free survives, which is the regression this guards.
+        "auto": False,
+        "qwen3:8b": False,
+    }
+
+    # The SAME id on an aggregator is a router, which is the whole point of the
+    # fallback: the two differ only by which wire the entry came off.
+    routed = fetch_models("radient", api_key=None, client=_StubClient([_Response(200, body)]))
+    assert routed is not None
+    assert {row.id: row.routed for row in routed} == {"auto": True, "qwen3:8b": False}
+
+    # The price leg needs no provider: a stated ``-1`` is unambiguous anywhere.
+    priced_body = {"data": [{"id": "x", "pricing": {"prompt": "-1", "completion": "-1"}}]}
+    direct = fetch_models(
+        "deepseek", api_key="k", client=_StubClient([_Response(200, priced_body)])
+    )
+    assert direct is not None
+    assert direct[0].routed is True
+
+
+def test_the_routed_flag_survives_a_cache_round_trip(tmp_path) -> None:
+    """Same argument as the ``free`` round trip: the reader is a different
+    function from the parser, and a field it forgets reverts to the unstated
+    default — here that means the router silently goes back to reading
+    ``free``."""
+    body = {"data": [{"id": "auto", "pricing": {"prompt": "0", "completion": "0"}}]}
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models("radient", api_key=None, client=client, cache_dir=tmp_path)
+    assert live_status == "ok" and live[0].routed is True
+
+    cached, cached_status = available_models(
+        "radient", api_key=None, client=client, cache_dir=tmp_path
+    )
+    assert cached_status == "cached", "premise: served from disk, not refetched"
+    assert len(client.calls) == 1
+    assert cached[0].routed is True, "the router statement must survive the document"
+
+
 def test_a_registry_price_clears_a_stale_free_flag() -> None:
     """The merge falls back to the bundled numbers for a silent listing, so a row
     that ends up quoting a real price must not also claim to be free — the two
@@ -1856,12 +1955,15 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     carries the ungated ``true`` for the per-song-billed rows and the reader has
     no modality left to re-judge it with. And once more (5) at the
     reasoning-effort ladder, a FIELD the version-4 writer never recorded, which
-    only the two aggregators' wire carries at all.
+    only the two aggregators' wire carries at all. And once more (6) at the
+    ``routed`` meta-route flag, stored COMPUTED like ``free``: a version-5
+    document carries ``routed: false`` for the routers, so without the bump
+    ``radient/auto`` keeps rendering the word ``free`` until its TTL rolls.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 5
-    assert discovery.listing_capture_version("radient") == 5
-    assert discovery.listing_capture_version("radient-key") == 5
+    assert discovery.listing_capture_version("openrouter") == 6
+    assert discovery.listing_capture_version("radient") == 6
+    assert discovery.listing_capture_version("radient-key") == 6
     # Ollama's reader never changed: an OpenAI-compatible document with no
     # pricing object has nothing new to capture, so its stamp stays at 1.
     assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
@@ -2243,7 +2345,7 @@ def test_cached_available_models_reads_valid_disk_cache(tmp_path) -> None:
             {
                 "fetched_at": time.time(),
                 "payload": {
-                    "capture": 5,
+                    "capture": 6,
                     "models": [
                         {
                             "id": "meta/llama-3.3-70b",
