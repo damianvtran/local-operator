@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from rich.console import Console
 
@@ -327,7 +327,10 @@ def _args_summary(args: dict[str, Any]) -> str:
 
 
 async def run_print_mode(
-    session: SessionProtocol, messages: list[str], json_mode: bool = False
+    session: SessionProtocol,
+    messages: list[str],
+    json_mode: bool = False,
+    before_dispose: Callable[[], Awaitable[None]] | None = None,
 ) -> int:
     """One-shot headless run mirroring the print-mode semantics.
 
@@ -336,6 +339,17 @@ async def run_print_mode(
     mode prints the last assistant text to stdout; json mode already emitted
     one line per event. Returns 0 on success, 1 when any turn errored or was
     aborted. Disposes the session before returning (one-shot by contract).
+
+    ``before_dispose`` is awaited in the teardown, after the last event and
+    BEFORE the session is disposed. It exists because the dispose is this
+    function's own contract and a caller therefore cannot sequence anything
+    ahead of it from the outside: ``exec --control`` needs its control surface
+    announced-and-closed while the session is still whole, so an attached
+    supervisor reads a deliberate end rather than a dropped socket, and the
+    runtime's heartbeat is not still reading through a handle into a session
+    being torn down. Awaited on every exit path including a raising prompt,
+    and its own failure must not mask that error — the callable owns swallowing
+    what it can (see ``ExecControl.aclose``).
     """
     renderer = PrintRenderer(stream_text=False, json_mode=json_mode)
     unsubscribe = renderer.attach(session)
@@ -351,4 +365,6 @@ async def run_print_mode(
     finally:
         if callable(unsubscribe):
             unsubscribe()
+        if before_dispose is not None:
+            await before_dispose()
         await session.dispose()

@@ -314,9 +314,106 @@ def test_build_worker_argv_omits_unset_flags() -> None:
     assert parsed.json_mode is False
     assert parsed.agent is None
     assert parsed.hosting is None
+    # Opt-in: a detached run publishes no record unless asked.
+    assert "--control" not in argv
+    assert parsed.control is False
+
+
+def test_build_worker_argv_threads_control_to_the_worker() -> None:
+    """`--background --control` is the same request run elsewhere.
+
+    A detached run is the one that most needs steering — nobody is watching its
+    log — so a flag dropped at this process boundary would be accepted by the
+    front end and silently lost, the failure the ``resume`` field records.
+    """
+    argv = build_worker_argv("do it", ExecArgs(control=True))
+    assert "--control" in argv
+    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    assert parsed.control is True
 
 
 # --- exec_mode foreground -------------------------------------------------------
+
+
+def test_run_exec_starts_no_control_surface_by_default(fake_factory, monkeypatch, capsys) -> None:
+    """The default exec run stays invisible: no record, no socket, no line.
+
+    Opt-in is the whole design (`lop sessions` filters on nothing, so every
+    scripted run would otherwise become a `lop send` target), and this is the
+    pin on it.
+    """
+    started: list[bool] = []
+    monkeypatch.setattr(
+        "local_operator.session.runtime.exec_control.start_exec_control",
+        lambda *a, **k: started.append(True),
+    )
+    session = FakeSession([_success_script()])
+    fake_factory(session)
+    assert exec_mode.run_exec("say hello", ExecArgs()) == 0
+    assert started == []
+    assert "lop exec control" not in capsys.readouterr().err
+
+
+def test_run_exec_control_prints_the_endpoint_on_stderr(fake_factory, monkeypatch, capsys) -> None:
+    """stdout is the payload stream; chrome that lands in it corrupts the only
+    output the run has."""
+
+    class _Control:
+        endpoint_line = "lop exec control: session_id=x pid=1 port=2 record=/r"
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    closed: list[bool] = []
+
+    async def fake_start(session, *, enabled, cwd, yolo=False):  # noqa: ANN001
+        assert enabled is True
+        return _Control()
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.exec_control.maybe_start_exec_control", fake_start
+    )
+    session = FakeSession([_success_script()])
+    fake_factory(session)
+    assert exec_mode.run_exec("say hello", ExecArgs(control=True)) == 0
+    captured = capsys.readouterr()
+    assert "lop exec control:" in captured.err
+    assert "lop exec control:" not in captured.out
+    assert closed == [True]
+
+
+def test_run_exec_control_closes_before_the_session_is_disposed(fake_factory, monkeypatch) -> None:
+    """The ordering that lets an attached supervisor see a deliberate end.
+
+    Closing after the dispose would leave the runtime reading through its handle
+    into a session being torn down, and the supervisor would see a bare EOF it
+    cannot tell from a crash.
+    """
+    order: list[str] = []
+
+    class _Control:
+        endpoint_line = "endpoint"
+
+        async def aclose(self) -> None:
+            order.append("control-closed")
+
+    async def fake_start(session, *, enabled, cwd, yolo=False):  # noqa: ANN001
+        return _Control()
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.exec_control.maybe_start_exec_control", fake_start
+    )
+    session = FakeSession([_success_script()])
+    original_dispose = session.dispose
+
+    async def tracking_dispose() -> None:
+        order.append("session-disposed")
+        await original_dispose()
+
+    session.dispose = tracking_dispose  # type: ignore[method-assign]
+    fake_factory(session)
+    assert exec_mode.run_exec("say hello", ExecArgs(control=True)) == 0
+    assert order == ["control-closed", "session-disposed"]
 
 
 def test_run_exec_foreground_success(fake_factory, capsys) -> None:
@@ -574,6 +671,49 @@ async def test_run_print_mode_prompts_sequentially(capsys) -> None:
     code = await run_print_mode(session, ["first", "second"])
     assert code == 0
     assert session.prompts == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_run_print_mode_runs_before_dispose_ahead_of_the_dispose() -> None:
+    """The hook exists because the dispose is this function's own contract, so
+    a caller cannot sequence anything ahead of it from the outside."""
+    order: list[str] = []
+    session = FakeSession([_success_script()])
+    original = session.dispose
+
+    async def tracking() -> None:
+        order.append("disposed")
+        await original()
+
+    session.dispose = tracking  # type: ignore[method-assign]
+
+    async def hook() -> None:
+        order.append("hook")
+
+    assert await run_print_mode(session, ["go"], before_dispose=hook) == 0
+    assert order == ["hook", "disposed"]
+
+
+@pytest.mark.asyncio
+async def test_run_print_mode_runs_before_dispose_when_the_prompt_raises() -> None:
+    """A control surface must be closed on the failure path too, or a crashed
+    run leaves a published record for a scanner to reap."""
+    order: list[str] = []
+
+    class Exploding(FakeSession):
+        async def prompt(self, text, images=None):  # noqa: ANN001, ANN201
+            raise RuntimeError("boom")
+
+        async def dispose(self) -> None:
+            order.append("disposed")
+            await super().dispose()
+
+    async def hook() -> None:
+        order.append("hook")
+
+    with pytest.raises(RuntimeError):
+        await run_print_mode(Exploding([_success_script()]), ["go"], before_dispose=hook)
+    assert order == ["hook", "disposed"]
 
 
 # --- exec_mode background --------------------------------------------------------
