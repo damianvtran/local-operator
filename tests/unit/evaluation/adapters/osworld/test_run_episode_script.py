@@ -154,6 +154,11 @@ def test_script_runs_one_spawned_episode_to_a_sealed_bundle(
     assert manifest.metadata["route_model_id"] == "fake/model:free"
     assert manifest.metadata["route_provider_id"] == "test"
     assert manifest.metadata["model_client"] == "scripted-finish"
+    # No override was passed, so the bundle must NOT claim one: with the key
+    # absent the effective instance type is fully determined by the hash-pinned
+    # task file plus the documented default, and a stamp here would misreport
+    # a default run as having used custom hardware.
+    assert "aws_instance_type_override" not in manifest.metadata
     assert manifest.harness_version == _checkout_version()
     assert report.outcome is not None and report.outcome.reportable is False
     assert report.outcome.reportability_label == "synthetic_model"
@@ -168,6 +173,60 @@ def test_script_runs_one_spawned_episode_to_a_sealed_bundle(
     everything = _all_bytes_under(run_root) + completed.stdout.encode() + completed.stderr.encode()
     assert CANARY_SECRET.encode() not in everything
     assert CANARY_KEY.encode() not in everything
+
+
+def test_an_instance_type_override_is_disclosed_in_the_sealed_manifest(
+    durable_path: Path, adapter_wheel: Path  # noqa: F811
+) -> None:
+    """A score run on non-default hardware must be disclosable from the bundle.
+
+    Comparability is the whole point: an episode run on m5.xlarge instead of
+    the release-default t3.xlarge is not directly comparable to one that used
+    the default, and a reader of the bundle has no other way to learn that --
+    ``ObservationPayload`` carries no metadata, so nothing the worker resolves
+    reaches the bundle except through the manifest the parent seals.
+    """
+
+    selector = _selector_file(durable_path / "adapter", adapter_wheel)
+    run_root = durable_path / "run"
+
+    completed = _run(
+        [
+            "--selector",
+            str(selector),
+            "--task-id",
+            "task_plain",
+            "--route",
+            "test/fake/model:free",
+            "--run-root",
+            str(run_root),
+            "--secret-env",
+            "AWS_ACCESS_KEY_ID",
+            "--secret-env",
+            "AWS_SECRET_ACCESS_KEY",
+            "--no-store",
+            "--model-client",
+            "scripted-finish",
+            "--max-steps",
+            "3",
+            "--max-usd",
+            "0.01",
+            *INFRA,
+            "--infra",
+            "AWS_INSTANCE_TYPE=m5.xlarge",
+        ],
+        {"AWS_ACCESS_KEY_ID": CANARY_KEY, "AWS_SECRET_ACCESS_KEY": CANARY_SECRET},
+    )
+
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    outcome: dict[str, Any] = json.loads(completed.stdout)
+    assert outcome["status"] == "completed", outcome
+    report = verify_bundle(Path(outcome["bundle_root"]))
+    # Sealed AND valid: the manifest digest covers metadata, so a bundle that
+    # verifies is one whose disclosure cannot have been edited after the fact.
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.manifest is not None
+    assert report.manifest.metadata["aws_instance_type_override"] == "m5.xlarge"
 
 
 def test_script_fails_pre_bundle_on_a_missing_secret_naming_only_the_ref(
