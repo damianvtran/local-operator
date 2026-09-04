@@ -1,0 +1,40 @@
+runtime listening on 127.0.0.1:65496
+
+[1] LOCAL client, `/mcp reauth notion`
+    reply : authorizing MCP server 'notion' on this machine; the result appears here when it completes.
+    style : info
+    PASS  : the grant was started
+    effect: forgot=['notion'] disconnected=['notion'] connected=['notion']
+    PASS  : reauth forgot the old grant, then reconnected
+    notice: [("authenticated MCP server 'notion'; 5 tools available.", 'info')]
+    PASS  : outcome delivered as a NoticeEvent
+
+[2] REMOTE client (a future phone relay), same command
+    reply : /mcp reauth opens a browser and stores credentials on the machine running the session — run it from a terminal on that machine
+    effect: disconnected=[] connected=[]
+    PASS  : refused, and nothing was touched
+
+[3] `/mcp reauth` -> usage: /mcp reauth <name>
+[3] `/mcp reauth a b` -> /mcp reauth takes one server name — got 'a b'
+[3] `/mcp bogus x` -> unknown mcp subcommand: bogus — try /mcp list|add|remove|login|logout|reauth <name>
+    PASS  : malformed commands ran nothing
+
+[4] DAEMON-class dial -> /mcp reauth opens a browser and stores credentials on the machine running the session — run it from a terminal on that machine
+    PASS  : the relay is refused, and nothing was touched
+
+[5] `/mcp login` with an unreachable probe host
+    receipt after 0.00s (ACK_TIMEOUT_S is 15s)
+    PASS  : the receipt returned immediately
+    a second op on the SAME connection answered in 0.00s
+    PASS  : the connection stayed responsive
+
+[6] `/mcp reauth notion` superseded by `/mcp login other`
+    forgot : ['notion']
+    notice : ["MCP login for 'notion' cancelled before the browser completed it; this attempt changed nothing — run /mcp login notion to authenticate the server.", "MCP reauth for 'notion' was cancelled after its old credential was removed, so the server is now unauthenticated — run /mcp login notion to finish."]
+    PASS  : the loss is named, with the recovery step
+
+[7] retry-then-cancel; the LAST line the user reads
+    last  : MCP login for 'notion' cancelled before the browser completed it; this attempt changed nothing — run /mcp login notion to authenticate the server.
+    PASS  : no false claim about the server's state
+
+RESULT: ALL CHECKS PASSED
