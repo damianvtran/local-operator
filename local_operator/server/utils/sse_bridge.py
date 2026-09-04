@@ -33,6 +33,26 @@ the :class:`EventBroker` it already has, which keeps the dependency pointing one
 way: a host decides it wants a stream, rather than the stream reaching into
 hosts. A host with no broker calls nothing and pays nothing.
 
+WHO CALLS THIS (and who deliberately does not)
+----------------------------------------------
+The broker is created by, and lives inside, the ``lop serve`` process
+(``server/app.py``), and the SSE routes are read-only — there is no ingest
+endpoint. So this seam is for a host that owns a session **in the same process
+as a broker**, and it is the seam any such host should use rather than growing
+a second projection.
+
+A separate ``lop exec`` process is therefore NOT a caller and cannot be one
+without new ingest surface. That is deliberate rather than an oversight: a
+headless run's events already leave the process as NDJSON on stdout, and the
+supervisors that drive lop as a subprocess (Minerva's ``agent-runtime-svc``)
+parse that stream and own the UI-facing SSE fan-out — with the auth,
+heartbeating and ``Last-Event-ID`` resume — one layer up. Adding an ingest
+route here would put a second, public-ish streaming surface on the workload
+process to duplicate a fan-out that already exists and already works.
+
+So: in-process host with a broker -> call this. Out-of-process supervisor ->
+read stdout, and relay from wherever you already serve UIs.
+
 IMPORT COST
 -----------
 ``tests/unit/test_import_graph.py`` pins what the CLI drags in at startup, so

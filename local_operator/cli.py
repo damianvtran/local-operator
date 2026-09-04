@@ -695,7 +695,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "Publish a session record and serve the control socket for this run, "
             "so an external supervisor can steer, cancel and answer gates "
-            "mid-run. Prints the endpoint on stderr. Off by default."
+            "mid-run. Prints the endpoint on stderr. Off by default. "
+            "Note: this routes tool approvals to the supervisor, so a run "
+            "WITHOUT --yolo parks on each gate until one answers (then denies). "
+            "An unattended run wants --control --yolo."
         ),
     )
 
