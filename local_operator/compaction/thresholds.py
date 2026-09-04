@@ -30,9 +30,15 @@ __all__ = [
     "DEFAULT_RESERVE_TOKENS",
     "DEFAULT_THRESHOLD_PERCENT",
     "DEFAULT_THRESHOLD_TOKENS",
+    "DEFAULT_WIRE_BYTES_BUDGET",
+    "DEFAULT_WIRE_BYTES_TRIGGER",
     "CompactionSettings",
     "RECOVERY_BAND",
+    "WIRE_RECOVERY_BAND",
     "cleared_headroom",
+    "cleared_wire_headroom",
+    "resolve_wire_bytes_budget",
+    "resolve_wire_bytes_trigger",
     "compaction_context_tokens",
     "effective_reserve_tokens",
     "resolve_advisor_floor_tokens",
@@ -57,6 +63,28 @@ DEFAULT_THRESHOLD_PERCENT = 0.80
 #: Absolute trigger default: compact once the context passes 600k tokens even
 #: when that is a small fraction of a very large window.
 DEFAULT_THRESHOLD_TOKENS = 600_000
+
+#: HARD ceiling on the serialized request, in bytes — the number the render
+#: seam sheds frames to satisfy. NOT a token figure; see
+#: :func:`~.tokens.estimate_wire_bytes` for why the two rulers stay apart.
+#:
+#: 24 MB is Anthropic's 32 MB Messages-API cap minus 25% headroom for the
+#: system prompt, the tool schemas, the ~2.2% JSON envelope, and the growth
+#: the NEXT request adds before another guard runs.
+#:
+#: Calibrated against real traffic rather than guessed: a scan of all **4,738
+#: sessions** in a production session store found exactly **one** above 24 MB
+#: (the session that wedged on HTTP 413), two above 16 MB, ten above 8 MB, and
+#: none above 32 MB. So this budget sheds nothing that works today — it fires
+#: only on the shape that was already failing outright.
+DEFAULT_WIRE_BYTES_BUDGET = 24_000_000
+
+#: SOFT trigger: fires a real compaction pass (with a summary) well before the
+#: hard budget forces amputation. ~2/3 of the hard budget, which on the
+#: measured store is above every session but the three largest — the point is
+#: that a screenshot-heavy session compacts *properly and early* instead of
+#: surviving by shedding frames at the wall.
+DEFAULT_WIRE_BYTES_TRIGGER = 16_000_000
 
 
 class CompactionSettings(BaseModel):
@@ -123,6 +151,16 @@ class CompactionSettings(BaseModel):
     # at $262. So the knob is opt-in per surface, and ``None`` means the frame
     # prune is not even consulted — ``run_compaction_pass`` with the defaults
     # is byte-identical to a pass without it, which a test pins.
+    #
+    # EXTENDED, not reversed: ``None`` now means "never prune frames for
+    # size-of-CONTEXT reasons", and a byte shed engages underneath it when the
+    # request would otherwise be REFUSED outright (``wire_bytes_budget``). The
+    # argument above assumes pruning frames costs the user content for no
+    # forced reason, which is exactly right up to the wall; at the wall the
+    # alternative is not "keep every frame", it is losing the whole session —
+    # a session that 413s loses all 42 frames, while the shed keeps 28. The
+    # default and the distinct-attachments reasoning are both untouched, and a
+    # session under budget still performs no work here at all.
     keep_recent_frames: int | None = Field(
         default=None,
         description=(
@@ -130,6 +168,36 @@ class CompactionSettings(BaseModel):
             " replaced by a short notice. None = never prune frames (ordinary"
             " sessions, where images are distinct attachments). Screen-driving"
             " surfaces opt in with a small count."
+        ),
+    )
+
+    # --- Transport size budget (BYTES, not tokens) --------------------------
+    #
+    # These two are the only knobs in this model measured in bytes, and the
+    # separation is deliberate: the token thresholds above answer "how much of
+    # the context WINDOW is occupied", these answer "will the HTTP request be
+    # accepted". A screenshot-heavy session can sit at 15% of a 1M window and
+    # still be over a provider's request cap, because a flat per-image token
+    # charge (correct for billing) is blind to base64 length. Never compare a
+    # value here against a token figure.
+    #
+    # Registered in ``settings_io.SETTINGS`` so an operator on a provider with
+    # a different cap can move them without editing code.
+    wire_bytes_budget: int = Field(
+        default=DEFAULT_WIRE_BYTES_BUDGET,
+        description=(
+            "Hard ceiling on the serialized request in BYTES. Older screenshots"
+            " are shed from the rendered history (never from the transcript) to"
+            " stay under it. Non-positive disables the shed."
+        ),
+    )
+    wire_bytes_trigger: int = Field(
+        default=DEFAULT_WIRE_BYTES_TRIGGER,
+        description=(
+            "Soft trigger in BYTES: a compaction pass fires once the serialized"
+            " request passes this, so a screenshot-heavy session summarises"
+            " early instead of shedding frames at the hard budget."
+            " Non-positive disables the byte trigger."
         ),
     )
 
@@ -386,6 +454,7 @@ def should_compact(
     settings: CompactionSettings,
     *,
     advisory_ok: bool = False,
+    wire_bytes: int = 0,
 ) -> bool:
     """Whether the current context exceeds the compaction threshold.
 
@@ -411,15 +480,79 @@ def should_compact(
     the disabled/off short-circuit — is untouched, so a future reader citing
     this as precedent should carry those constraints too.
 
-    With ``advisory_ok`` false (its default, and what every caller but the
-    plan gate passes) the function is byte-identical to its previous form.
+    ``wire_bytes`` is the second input with that posture, and it is here for
+    the same reason ``advisory_ok`` is: it is a different QUESTION about the
+    same decision ("will the request be accepted?" beside "does the context
+    fit the window?"), and a separate ``should_compact_for_size()`` beside
+    this one would be exactly the trigger drift the module docstring forbids.
+    So it is OR-ed into the one resolved answer, where it can only pull the
+    trigger EARLIER.
+
+    The byte term is what makes an image-heavy session compact at all. Its
+    token estimate is honest and small — 42 screenshots read as 154,690
+    tokens, 15.5% of a 1M window — while the serialized request is 34 MB,
+    past the provider's cap. No token threshold can see that, because the
+    per-image token charge is flat by design (see
+    :func:`~.tokens.estimate_wire_bytes`).
+
+    Monotonicity is preserved in BOTH numeric arguments, which the session's
+    cheap upper-bound pre-gate depends on: raising either can only turn a
+    ``False`` into a ``True``. Bytes are exact and cheap, so the pre-gate can
+    pass the real figure rather than a bound.
+
+    With ``advisory_ok`` false and ``wire_bytes`` 0 (their defaults, and what
+    every caller but the plan gate passes) the function is byte-identical to
+    its previous form.
     """
     if not settings.enabled or settings.strategy == "off" or window_tokens <= 0:
         return False
     threshold = resolve_threshold_tokens(window_tokens, settings)
     if advisory_ok and getattr(settings, "advisor_enabled", False):
         threshold = min(threshold, resolve_advisor_floor_tokens(window_tokens, settings))
-    return context_tokens > threshold
+    if context_tokens > threshold:
+        return True
+    byte_trigger = resolve_wire_bytes_trigger(settings)
+    return byte_trigger > 0 and wire_bytes > byte_trigger
+
+
+def resolve_wire_bytes_budget(settings: CompactionSettings) -> int:
+    """THE hard byte ceiling, resolved in one place.
+
+    Same discipline as :func:`resolve_threshold_tokens`: one resolver, no
+    caller re-deriving the number from the settings model. A non-positive
+    value means "no byte ceiling" and is returned as ``0`` so every caller can
+    test it the same way; a garbage value falls back to the default rather
+    than disabling the guard silently, because a typo here is the difference
+    between a session that recovers and one that 413s forever.
+    """
+    raw = getattr(settings, "wire_bytes_budget", DEFAULT_WIRE_BYTES_BUDGET)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("compaction.wire_bytes_budget is not an integer; using the default")
+        return DEFAULT_WIRE_BYTES_BUDGET
+    return value if value > 0 else 0
+
+
+def resolve_wire_bytes_trigger(settings: CompactionSettings) -> int:
+    """THE soft byte trigger, resolved in one place.
+
+    Clamped to the hard budget: a trigger ABOVE the ceiling would mean the
+    render seam amputates frames before a proper compaction pass ever fires,
+    which inverts the whole design — the soft trigger exists so the session
+    summarises with a model call instead of surviving by amputation. Returns
+    ``0`` when the byte trigger is disabled.
+    """
+    raw = getattr(settings, "wire_bytes_trigger", DEFAULT_WIRE_BYTES_TRIGGER)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("compaction.wire_bytes_trigger is not an integer; using the default")
+        value = DEFAULT_WIRE_BYTES_TRIGGER
+    if value <= 0:
+        return 0
+    budget = resolve_wire_bytes_budget(settings)
+    return min(value, budget) if budget > 0 else value
 
 
 def compaction_context_tokens(provider_reported: int | None, local_estimate: int) -> int:
@@ -450,6 +583,40 @@ def cleared_headroom(residual_tokens: int, threshold_tokens: int) -> int:
     auto-continue, so marginal passes never sustain a dead loop.
     """
     return threshold_tokens - residual_tokens
+
+
+#: The byte-side twin of :data:`RECOVERY_BAND`, and it exists because that
+#: constant CANNOT cover the byte trigger. ``RECOVERY_BAND`` is defined on
+#: tokens against the token threshold; a pass fired by byte pressure can leave
+#: the token residual comfortably inside the token band while the request is
+#: still over the byte budget — the token side would then say "headroom
+#: created", schedule an auto-continue, and the next turn would fire the byte
+#: trigger again on a context nothing had shrunk. That is precisely the live
+#: dead-loop ``RECOVERY_BAND`` was added for, arrived at through the new
+#: trigger, so the guard has to be restated in the new trigger's own units.
+#:
+#: Same 0.8 ratio, same meaning: a pass counts as having created byte headroom
+#: only when the residual request lands at or below ``0.8 x`` the soft byte
+#: trigger.
+WIRE_RECOVERY_BAND = 0.8
+
+
+def cleared_wire_headroom(residual_bytes: int, settings: CompactionSettings) -> bool:
+    """Whether a pass created real BYTE headroom, for the auto-continue gate.
+
+    Returns ``True`` when the byte trigger is disabled, so a session that
+    never opted into byte pressure keeps exactly the token-only behaviour it
+    has today — this must not become a second veto on ordinary text sessions.
+
+    Otherwise the residual must sit at or below
+    ``WIRE_RECOVERY_BAND * trigger``. A pass that shaved a screenshot or two
+    and is still near the trigger has NOT recovered, and scheduling a
+    continuation on it re-enters the same pass next turn.
+    """
+    trigger = resolve_wire_bytes_trigger(settings)
+    if trigger <= 0:
+        return True
+    return residual_bytes <= WIRE_RECOVERY_BAND * trigger
 
 
 def resolve_strategy(
