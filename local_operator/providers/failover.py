@@ -217,6 +217,48 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
 )
 
 
+#: Substrings by which a provider says "this ACCOUNT may not use fast mode",
+#: as distinct from "this account has run out".
+#:
+#: Anthropic answers an unentitled fast-mode request with
+#: ``HTTP 429 {'type': 'rate_limit_error', 'message': 'Usage credits are
+#: required for fast mode.'}`` — measured 2026-09-04 on a live Claude
+#: subscription that serves the very same model at standard speed without
+#: complaint. Every signal a 429 normally carries is therefore WRONG here: the
+#: account has quota, waiting will not help, and rotating to a sibling account
+#: reproduces it (the entitlement is per-account, and the next account is no
+#: more entitled than the first). Left unclassified, one ``/fast`` on an
+#: unentitled account would walk the whole cascade marking healthy credentials
+#: quota-blocked and cooling down routes that were never exhausted — spending
+#: the user's actual capacity to discover a permission answer.
+#:
+#: Matched on the provider's own words because the status cannot distinguish
+#: them, which is the same reasoning \:data:`_USAGE_LIMIT_MARKERS` records for
+#: reading bodies rather than statuses. Deliberately narrow: "fast mode" must
+#: appear, so a genuine credit exhaustion that merely mentions credits is still
+#: read as the exhaustion it is.
+_FAST_MODE_REFUSAL_MARKERS = (
+    "required for fast mode",
+    "fast mode is not available",
+    "fast mode is not supported",
+    "unsupported service_tier",
+    "service_tier",
+)
+
+
+def is_fast_mode_refusal(status: int | None, message: str) -> bool:
+    """Whether this failure is the provider refusing FAST MODE specifically.
+
+    True means the request would have succeeded at standard speed, so the honest
+    recovery is to drop the speed dial and re-ask — never to blame the
+    credential. See :data:`_FAST_MODE_REFUSAL_MARKERS`.
+    """
+    if status is not None and status >= 500:
+        return False
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _FAST_MODE_REFUSAL_MARKERS)
+
+
 def _is_usage_limit(status: int | None, message: str) -> bool:
     """429, or a body that SAYS it ran out.
 
@@ -240,6 +282,13 @@ def _is_usage_limit(status: int | None, message: str) -> bool:
       :func:`is_direct_credential_rotation_error`, without claiming that its
       credential is worth staying on.
     """
+    if is_fast_mode_refusal(status, message):
+        # A fast-mode entitlement refusal wears a 429 but is a PERMISSION
+        # answer: the same credential serves this model fine at standard speed.
+        # Classifying it as quota would block a healthy account and send the
+        # user to wait out a window that is not closed. See
+        # :data:`_FAST_MODE_REFUSAL_MARKERS`.
+        return False
     if status == 429:
         return True
     if status is not None and status >= 500:
@@ -1894,6 +1943,19 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
                     _carried_effort(base, provider) or target_spec.reasoning_effort,
                 )
             ),
+            # Fast mode carries as a session PREFERENCE but is clamped by what
+            # the target can actually do — the same shape as the effort clamp
+            # above, and for the same reason. "Serve this fast" is a wish about
+            # latency that stays true across a hop, so dropping it would
+            # silently cost the user the dial they set; but the target's own
+            # `supports_fast_mode` is authoritative about whether the key may
+            # be sent at all, since a route that does not sell the tier rejects
+            # it with a 400 on the request meant to RESCUE the turn.
+            #
+            # `and` rather than a carry: False on either side means off. The
+            # target spec is freshly built above, so its support flag is the
+            # route's own answer, never the primary's.
+            "fast_mode": bool(base.fast_mode and target_spec.supports_fast_mode),
         }
     )
 
@@ -2540,6 +2602,39 @@ async def stream_with_failover(
                     # diagnostic failure of the walk, same as any other
                     # exhaustion, so the reported-error semantics stay intact.
                     raise (reported if reported is not None else exc) from exc
+                if (
+                    is_fast_mode_refusal(exc.status, str(exc))
+                    and getattr(current_request.model, "fast_mode", False)
+                    and not forwarded_any
+                ):
+                    # The provider sells this model but will not serve THIS
+                    # account fast (Anthropic's "Usage credits are required for
+                    # fast mode", a backend that rejects the tier outright).
+                    # The request is otherwise perfectly good, so drop the speed
+                    # dial and re-ask on the SAME credential rather than
+                    # rotating: nothing about the account is wrong, and the next
+                    # one is no more entitled.
+                    #
+                    # Only when nothing has been forwarded yet — a retry after
+                    # partial output would replay text the user already read,
+                    # the rule `forwarded_any` enforces everywhere else here.
+                    #
+                    # The clone is scoped to THIS attempt's request, so the
+                    # session's own preference is untouched: the user keeps the
+                    # dial they set, the turn just does not die on it. Guarded
+                    # by the flag actually being on, so this can never loop.
+                    current_request = current_request.model_copy(
+                        update={
+                            "model": current_request.model.model_copy(update={"fast_mode": False})
+                        }
+                    )
+                    logger.info(
+                        "fast mode refused by %s (%s); retrying at standard speed",
+                        spec.provider,
+                        exc.status,
+                    )
+                    retry_same_key = True
+                    continue
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests

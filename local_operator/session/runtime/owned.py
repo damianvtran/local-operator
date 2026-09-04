@@ -1526,6 +1526,8 @@ class OwnedSessionHandle(SessionHandle):
             return self._rename_slash(session, args, SlashResult)
         if command == "effort":
             return await self._effort_slash(session, args, SlashResult)
+        if command == "fast":
+            return self._fast_slash(session, args, SlashResult)
         if command == "approvals":
             return self._approvals_slash(session, args, SlashResult)
         if command == "compact":
@@ -2005,6 +2007,62 @@ class OwnedSessionHandle(SessionHandle):
         except Exception as error:  # noqa: BLE001 — a bad rung is a user error
             return SlashResult(kind="notice", text=str(error), style="warning")
         return SlashResult(kind="notice", text=str(detail), style="info")
+
+    def _fast_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Report or switch fast mode on the runtime's own spec.
+
+        The same rules as the terminal's ``/fast`` (`OperatorApp._cmd_fast`),
+        restated here because the detached runtime builds its requests from
+        ITS spec: a phone toggling the dial must reach the spec the next
+        provider call is built from, and the app's copy of the rule is not
+        loaded in a headless process. Bare toggles, ``on``/``off`` name the
+        resulting state, ``status`` only reports. Session-scoped and never
+        persisted — fast mode is billed at a premium, so it must not outlive
+        the task it was switched on for.
+        """
+        spec = getattr(session, "model", None)
+        label = getattr(session, "model_label", "") or "this model"
+        if spec is None or not hasattr(session, "set_model"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not getattr(spec, "supports_fast_mode", False):
+            return SlashResult(
+                kind="notice", text=f"fast mode: not available on {label}", style="info"
+            )
+        current = bool(getattr(spec, "fast_mode", False))
+        wanted = (arg or "").strip().lower()
+
+        def status() -> Any:
+            text = (
+                f"fast mode: on for {label} — faster output at premium pricing"
+                if current
+                else f"fast mode: off for {label} — /fast turns it on"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+
+        if wanted in ("status", "show"):
+            return status()
+        if wanted in ("on", "yes", "true", "enable", "enabled"):
+            target = True
+        elif wanted in ("off", "no", "false", "disable", "disabled"):
+            target = False
+        elif not wanted:
+            target = not current
+        else:
+            return SlashResult(
+                kind="notice",
+                text=f"fast mode: {wanted!r} is not on/off — /fast toggles, /fast status reports",
+                style="warning",
+            )
+        if target == current:
+            return status()
+        session.set_model(spec.model_copy(update={"fast_mode": target}))
+        self._notify()
+        text = (
+            f"fast mode → on for {label} — faster output at premium pricing, this session"
+            if target
+            else f"fast mode → off for {label} — standard speed and pricing"
+        )
+        return SlashResult(kind="notice", text=text, style="info")
 
     def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.

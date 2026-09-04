@@ -49,6 +49,7 @@ from local_operator.providers.failover import (
     is_auth_error,
     is_connectivity_loss,
     is_direct_credential_rotation_error,
+    is_fast_mode_refusal,
     is_image_rejection,
     is_transient_error,
     is_usage_limit_error,
@@ -4506,3 +4507,83 @@ async def test_a_content_free_start_event_does_not_block_the_retry() -> None:
     )
     # The failing key was actually tried (the retry is real, not vacuous).
     assert failing.calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# Fast mode refusals — a 429 that does NOT mean "you ran out"
+# ---------------------------------------------------------------------------
+
+
+def test_a_fast_mode_entitlement_refusal_is_not_classified_as_quota() -> None:
+    """The measured hazard this guard exists for.
+
+    Anthropic answers an unentitled fast-mode request with HTTP 429
+    ``{'type': 'rate_limit_error', 'message': 'Usage credits are required for
+    fast mode.'}`` — observed 2026-09-04 on a live subscription that serves the
+    SAME model at standard speed without complaint. Every signal a 429 normally
+    carries is wrong here: the account has quota, waiting will not help, and the
+    next account is no more entitled.
+
+    Left classified as quota, one `/fast` would walk the whole cascade marking
+    healthy credentials blocked and cooling down routes that were never
+    exhausted — spending the user's real capacity to discover a permission
+    answer.
+    """
+    error = ProviderError(429, "Usage credits are required for fast mode.")
+    assert error.kind != "quota"
+
+
+def test_a_rejected_service_tier_is_not_classified_as_quota() -> None:
+    """The OpenAI-shaped half of the same hazard (HTTP 400, measured)."""
+    error = ProviderError(400, "Unsupported service_tier: fast")
+    assert error.kind != "quota"
+
+
+def test_a_genuine_credit_exhaustion_is_still_quota() -> None:
+    """The guard is NARROW: "fast mode" must appear.
+
+    A real exhaustion that merely mentions credits must keep its quota
+    classification, or this fix would trade one misclassification for another.
+    """
+    assert ProviderError(429, "You have run out of credits").kind == "quota"
+    assert ProviderError(429, "rate limit exceeded").kind == "quota"
+
+
+def test_a_5xx_mentioning_fast_mode_is_still_a_server_failure() -> None:
+    """A server fault is a server fault whatever its body says — the same bound
+    `_is_usage_limit` documents for the markers it reads."""
+    assert is_fast_mode_refusal(503, "fast mode is not available") is False
+
+
+def test_fast_mode_is_clamped_by_what_the_fallback_target_can_serve() -> None:
+    """A hop carries the user's dial only where the target sells the tier.
+
+    The same shape as the effort clamp beside it: "serve this fast" is a wish
+    about latency that stays true across a hop, so dropping it would silently
+    cost the user the dial they set — but a route that sells no fast tier
+    rejects the key with a 400 on the request meant to RESCUE the turn.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    base = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
+    assert base.supports_fast_mode is True
+
+    # Onto a target that CAN serve it, the preference rides.
+    carried = spec_for_target(base, FallbackTarget(selector="openai/gpt-5.4"))
+    assert carried.fast_mode is True
+
+    # Onto one that cannot, it is dropped rather than sent into a 400.
+    clamped = spec_for_target(base, FallbackTarget(selector="google/gemini-3-pro"))
+    assert clamped.supports_fast_mode is False
+    assert clamped.fast_mode is False
+
+
+def test_a_hop_never_switches_fast_mode_on_for_a_user_who_left_it_off() -> None:
+    """The premium dial must not arrive on by inference — off stays off."""
+    from local_operator.model.configure import build_model_spec
+
+    base = build_model_spec("anthropic", "claude-opus-5")
+    assert base.fast_mode is False
+
+    hopped = spec_for_target(base, FallbackTarget(selector="openai/gpt-5.4"))
+    assert hopped.fast_mode is False

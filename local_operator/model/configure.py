@@ -50,6 +50,7 @@ from local_operator.model.registry import (
     get_model_info,
     unknown_model_info,
 )
+from local_operator.model.speed import supports_fast_mode
 from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
@@ -750,6 +751,18 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # diverge as soon as the user picks a level, which is precisely when
         # `/effort auto` needs the original still recorded somewhere.
         reasoning_default_effort=reasoning_effort,
+        # Derived from the CANONICAL provider and the model together, because
+        # the fast-mode dialect belongs to the route rather than to the model
+        # (`model.speed` opens with why). `canonical` and not `hosting`: the
+        # same normalisation the rest of this function runs on, so an alias
+        # spelling of a provider cannot silently lose the dial.
+        #
+        # Only the AVAILABILITY is seeded. `fast_mode` stays False until the
+        # user turns it on, and that asymmetry is deliberate: fast mode is
+        # billed at a premium (Anthropic and OpenAI both charge roughly double),
+        # so it is the one dial that must never arrive switched on by
+        # inference. `/fast` is an explicit, session-scoped opt-in.
+        supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
 
