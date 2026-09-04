@@ -1608,11 +1608,17 @@ class OwnedSessionHandle(SessionHandle):
             return SlashResult(
                 kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
             )
+        # ``member_count()``, matching the TUI's own producer (D2). The old
+        # `len(members) + 1` assumed the manager is not on the roster — false
+        # for real teams — and collapsed multi-count slots; the plural was also
+        # keyed to a different number than the one displayed. A detached
+        # runtime and an in-process one must answer the same question with the
+        # same number.
         items = [
             (
                 team.name,
-                f"Led by {team.manager} · {len(team.members) + 1} "
-                f"{'role' if len(team.members) == 0 else 'roles'}",
+                f"Led by {team.manager} · {team.member_count()} "
+                f"{'member' if team.member_count() == 1 else 'members'}",
                 (team.description or "").strip(),
             )
             for team in teams

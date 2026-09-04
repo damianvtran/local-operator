@@ -346,7 +346,13 @@ async def test_bare_team_lists_without_a_user_row() -> None:
         painted = _painted(app)
     assert rows == [], rows
     assert "feature-release" in painted, painted
-    assert "Led by manager · 2 roles" in painted, painted
+    # D2/R6: `member_count()` with the label that matches it. One roster member
+    # is "1 member" — the manager is named by "Led by" in the same line and is
+    # deliberately not in the count, exactly as the org chart badges it. The
+    # original assertion pinned `len(members) + 1` ("2 roles"), which counted
+    # the manager twice over; calling the corrected number "roles" then read
+    # one short against the chart.
+    assert "Led by manager · 1 member" in painted, painted
     assert "Ship a change" in painted, painted
     assert "Send: /team <name> <message>" in painted, painted
     assert "manager=" not in painted, painted
@@ -1715,3 +1721,531 @@ async def test_genuine_still_starting_keeps_its_wording() -> None:
         assert app._no_session_notice() == ("session is still starting…", "warning")
         release.set()
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_shows_real_rows_not_an_eternal_placeholder() -> None:
+    """`/stop` is TERMINAL: nothing is arriving, so the list must answer.
+
+    The reserve was keyed to ``self._session is None`` with a single
+    subtraction for the failed boot, so every LATER way to sit without a
+    session inherited "loading teams…" forever. ``/stop`` detaches the session
+    on purpose (``_stop_local_session``), which is exactly that shape: the user
+    ended the session, no roster is on its way, and the picker promised one
+    anyway. Worse than a blank row, because ``is_loading()`` gates Tab/Enter.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Exactly what `_stop_local_session` leaves behind.
+        app._session = None
+        app._stopped_session_id = "sess-abc123"
+
+        assert app._name_list_pending_notice("team") == ""
+        assert app._name_list_pending_notice("agent") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_setup_state_shows_real_rows_not_an_eternal_placeholder() -> None:
+    """First-run setup is TERMINAL too, and is NOT covered by `_boot_failed`.
+
+    ``_enter_setup_state`` returns from ``_on_boot_failed`` BEFORE the
+    ``_boot_failed = True`` assignment — deliberately, because "no hosting
+    configured" is guidance rather than a crash. So the one subtraction the old
+    gate made did not apply here, and a user who opened `lop` with nothing
+    configured got a permanent "loading teams…" with Tab and Enter swallowed.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = None
+        app._setup_state = True
+        # The flag the old gate keyed on is explicitly NOT set in this state.
+        assert app._boot_failed is False
+
+        assert app._name_list_pending_notice("team") == ""
+        assert app._name_list_pending_notice("agent") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
+    """The other half of the reported breakage, through the real surface.
+
+    ``is_loading()`` gates Tab/Enter, so a stranded reserve does not merely
+    withhold rows — it eats the keys that would dismiss the list or submit the
+    line. That is what makes an empty list read as "the command is broken".
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = None
+        app._stopped_session_id = "sess-abc123"
+
+        editor = app._editor()
+        editor.focus()
+        await pilot.pause()
+        for ch in "/team ":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.pause()
+
+        # No latch, so accept keys reach their ordinary handlers.
+        assert editor.picker.is_loading() is False
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == "", "Enter was swallowed by a stranded loading reserve"
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_arriving_roster_still_reserves_its_row() -> None:
+    """The reserve must survive for the window it was written for (D1).
+
+    Both real windows: the boot worker still constructing, and a transition the
+    user just asked for. Removing the placeholder from these would bring back
+    the one-row dock jump the reserve exists to prevent.
+    """
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Boot worker still running: no session, and no terminal state set.
+        assert app._session is None
+        assert app._boot_failed is False
+        assert app._setup_state is False
+        assert app._stopped_session_id == ""
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        assert app._name_list_pending_notice("agent") == "loading agent roster…"
+
+        # A transition promises rows even from a terminal state.
+        app._stopped_session_id = "sess-abc123"
+        app._session_transition_pending = True
+        assert app._name_list_pending_notice("team") == "loading teams…"
+
+        app._session_transition_pending = False
+        app._stopped_session_id = ""
+        release.set()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_team_launch_refuses_instead_of_sending_without_the_briefs(tmp_path) -> None:
+    """A session that cannot attach a team must not run the request anyway.
+
+    The guard was ``if callable(attach):`` with NO else, so a session whose
+    implementation has no ``attach_team`` fell through to the prompt: the
+    receipt said "<manager> is coordinating" while the turn ran with no roster
+    and no briefs. A confidently wrong persona is worse than a refusal, because
+    nothing on screen distinguishes the two.
+
+    Reachable on the viewer (`RemoteSession`), which lists teams from local
+    config but has no seam to stamp an attachment onto the runtime that builds
+    the turn.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="alpha", description="d", manager="manager"))
+
+    # Exactly the viewer's shape: the LISTING resolves, the ATTACH does not.
+    # A subclass rather than `del type(session).attach_team`, which would strip
+    # the method from the SHARED FakeSession class for every later test.
+    class NoAttachSession(FakeSession):
+        attach_team = None  # type: ignore[assignment]
+
+    session = NoAttachSession()
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is session
+        assert not callable(getattr(app._session, "attach_team", None))
+
+        app._cmd_team("alpha do the thing", app._notice, None)
+        await pilot.pause()
+
+        # The request was NOT sent: no briefs, no turn.
+        assert session.prompts == [], "the request ran without the team briefs"
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        assert "but not run one" in rendered, rendered
+        # The old wording would now be a lie: `/team` lists them one line up.
+        assert "teams are unavailable" not in rendered, rendered
+        # It names a capability this session HAS rather than one it lacks (D3).
+        assert "/team chart" in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_agent_clear_refuses_instead_of_reporting_a_detach_that_did_not_happen() -> None:
+    """The symmetric half of the anti-asymmetry fix, pinned (R2).
+
+    ``/agent clear`` had the same shape the team guard was fixed for:
+    ``if callable(detach): detach()`` with no else, then the notice below it
+    announced "no agent active; this session uses its base instructions" —
+    on a session where nothing had cleared. A user shedding a role kept
+    talking to it while being told they had not.
+
+    This PR's own argument is that the team/agent asymmetry is what let the
+    silent path ship, so the agent half must be pinned or the same refactor
+    can reintroduce it with nothing objecting.
+    """
+
+    class NoDetachSession(FakeSession):
+        # The viewer's shape: no local detach seam.
+        clear_agent_profile = None  # type: ignore[assignment]
+
+    session = NoDetachSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is session
+        assert not callable(getattr(app._session, "clear_agent_profile", None))
+
+        app._cmd_agent("clear", app._notice, None)
+        await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        # D3: states the SITUATION rather than refusing an action — a viewer
+        # never attached a profile, so there is genuinely nothing to detach.
+        assert "nothing to detach" in rendered, rendered
+        # The lie the unguarded path told must not appear.
+        assert "no agent active" not in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_neither_refusal_promises_a_retry_that_answers_with_silence() -> None:
+    """R1: the guards must not send the user somewhere worse than here.
+
+    "Send a message first, then run /team again" was false. Sending a message
+    BINDS the viewer, and a bound viewer adopts the owner's
+    ``slash_capabilities`` where `team`/`agent` are scoped
+    ``authoritative_session`` — so the retry never reaches these guards. It
+    routes to the owner, which answers the mutating form with
+    ``noop {"type": "team_mutate"}``, and ``_render_authoritative_slash``
+    returns without printing on a noop: zero prompts, zero transcript rows,
+    no notice at all.
+
+    A guard whose purpose is to stop the app claiming something happened must
+    not itself promise a remedy that does nothing, so it makes no promise.
+    """
+    from local_operator.session.frontend_state import _slash_capabilities
+
+    # The states the old advice named are BOTH authoritative, which is the
+    # mechanism that made the retry silent. Pin it so the wording cannot drift
+    # back to promising one.
+    scopes = {
+        capability.command: getattr(capability.scope, "value", capability.scope)
+        for capability in _slash_capabilities()
+    }
+    assert scopes["team"] == "authoritative_session"
+    assert scopes["agent"] == "authoritative_session"
+
+    class NoAttachSession(FakeSession):
+        attach_team = None  # type: ignore[assignment]
+        clear_agent_profile = None  # type: ignore[assignment]
+
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    with tempfile.TemporaryDirectory() as directory:
+        registry = TeamRegistry(Path(directory))
+        registry.create_team(TeamEditFields(name="alpha", description="d", manager="manager"))
+
+        session = NoAttachSession()
+        session.team_registry = registry
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+
+            app._cmd_team("alpha do the thing", app._notice, None)
+            app._cmd_agent("clear", app._notice, None)
+            await pilot.pause()
+
+            rendered = " ".join(
+                str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+            )
+            # No retry instruction of any shape.
+            assert "run /team again" not in rendered, rendered
+            assert "run /agent clear again" not in rendered, rendered
+            assert "Send a message first" not in rendered, rendered
+            # No open-ended "yet" either: `attach_team` exists only on the
+            # `Session` `lop` no longer builds, so a wait would never end (D3).
+            assert "yet" not in rendered, rendered
+            # It still says what IS true.
+            assert "but not run one" in rendered, rendered
+            assert "nothing to detach" in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_no_notice_calls_a_registry_unavailable_while_its_rows_are_listed(tmp_path) -> None:
+    """Q2: restoring the registries made the old attach copy false.
+
+    `/agent <name> <message>` answered "agents are unavailable in this
+    session" on a session whose `/agent ` list had just rendered 13 profiles.
+    That wording was true only while the REGISTRY was also missing; once the
+    registry resolves, the sentence contradicts the rows the user is looking
+    at — the same defect this PR fixes for `/team`, introduced by this PR's
+    own fix and closed in the same commit.
+
+    The distinction the copy must keep: the agents are fine and listable; the
+    ATTACH SEAM is what a viewer lacks.
+    """
+    from local_operator.agents import AgentRegistry
+
+    class NoAttachSession(FakeSession):
+        # A viewer's shape: registries resolve, attach seams do not.
+        attach_agent_profile = None  # type: ignore[assignment]
+
+    session = NoAttachSession()
+    session.agent_registry = AgentRegistry(tmp_path)
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        # The listing resolves — that is what makes "unavailable" a lie.
+        assert app._agent_profile_rows(), "the fixture must offer rows for this to be a lie"
+
+        app._cmd_agent("reviewer hello", app._notice, None)
+        await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        assert "but not attach one" in rendered, rendered
+        assert "agents are unavailable" not in rendered, rendered
+        # Points at the surface that DOES work in this session (D3).
+        assert "/agent shows the roster" in rendered, rendered
+        # And no retry promise, for the R1 reason.
+        assert "Send a message first" not in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_the_roster_count_matches_the_chart_it_opens(tmp_path) -> None:
+    """D2: `len(members) + 1` overcounts every team whose manager is a member.
+
+    The old arithmetic assumed the manager sits OUTSIDE the roster. On real
+    teams it often does not — two of the three on the reference machine list
+    their manager as a member — so the picker advertised 8 roles for a 7-role
+    team. The org chart is TWO KEYSTROKES from that row and counts with
+    ``member_count()``, so the picker contradicted the boxes it opens.
+
+    ``member_count()`` also sums slot counts, so a ``reviewer x2`` slot stops
+    being reported as one member.
+    """
+    from local_operator.org_chart import _team_detail
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    # The shape that broke: the manager is ALSO on the roster.
+    registry.create_team(
+        TeamEditFields(
+            name="onroster",
+            manager="manager",
+            members=[TeamMember(role="manager"), TeamMember(role="coder")],
+        )
+    )
+    # And a multi-count slot, which the old count collapsed to one.
+    registry.create_team(
+        TeamEditFields(
+            name="doubled",
+            manager="boss",
+            members=[TeamMember(role="reviewer", count=2)],
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        details = {choice.name: choice.detail for choice in app._team_choices()}
+
+    for name, expected in (("onroster", 2), ("doubled", 2)):
+        team = registry.get_team_by_name(name)
+        assert team is not None
+        assert team.member_count() == expected
+        # The picker's number and the chart's number are the SAME number.
+        assert details[name] == f"{expected} members", details[name]
+        assert f"{expected} members" in _team_detail(team), _team_detail(team)
+
+
+@pytest.mark.asyncio
+async def test_the_detail_column_leaves_room_for_the_description(tmp_path) -> None:
+    """D1: a wide detail silences the description at ordinary widths.
+
+    The picker reserves the detail column BEFORE the description and drops the
+    description first, so a 44-cell ``<n> roles · led by <manager>`` blanked
+    the description outright between roughly 76 and 123 columns — the band an
+    ordinary terminal sits in, including the 100-column frame this PR's own
+    first evidence was captured at. The manager is one keystroke away in the
+    listing and the chart; the description is the only thing telling the user
+    which team a row IS.
+    """
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="data-investigations",
+            manager="data-investigations-manager",
+            description="Investigates global-public subjects and turns them into records",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        choices = app._team_choices()
+
+    detail = choices[0].detail
+    # The manager's name is what made this column wide, and it is not a fact
+    # the row needs to carry.
+    assert "led by" not in detail, detail
+    assert detail == "1 member", detail
+    # Comfortably inside `/agent`'s 15-cell detail, which never had this bug.
+    assert len(detail) <= 15, detail
+
+
+@pytest.mark.asyncio
+async def test_the_picker_count_equals_the_boxes_the_chart_draws(tmp_path) -> None:
+    """The invariant BOTH count bugs violated, pinned directly.
+
+    D2 counted `len(members) + 1`, which overcounted a team whose manager is
+    also a roster member. R6 then labelled `member_count()` "roles", which read
+    one SHORT for a team whose manager is not — the same contradiction pointing
+    the other way. Neither existing test expressed the property the two
+    surfaces actually have to share, so each fix could satisfy its own test
+    while disagreeing with the chart.
+
+    The property: the number `/team ` renders for a team is the number of
+    member boxes `/team chart <name>` draws for it — the manager excluded from
+    both, because the chart draws him as a structural node and badges the rest
+    (`org_render._member_badge`). Exercised with the manager ON the roster and
+    OFF it, which is exactly the pair that separates the two arithmetics.
+    """
+    from local_operator.org_chart import resolve_org
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tui.org_render import _member_badge
+
+    registry = TeamRegistry(tmp_path)
+    # manager NOT on the roster — the shape R6 got wrong.
+    registry.create_team(
+        TeamEditFields(name="mgr-off", manager="boss", members=[TeamMember(role="coder")])
+    )
+    # manager ALSO on the roster — the shape D2 got wrong.
+    registry.create_team(
+        TeamEditFields(
+            name="mgr-on",
+            manager="manager",
+            members=[TeamMember(role="manager"), TeamMember(role="coder")],
+        )
+    )
+    # A multi-count slot, which `len(members)` collapses either way.
+    registry.create_team(
+        TeamEditFields(
+            name="doubled", manager="boss", members=[TeamMember(role="reviewer", count=2)]
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        details = {choice.name: choice.detail for choice in app._team_choices()}
+
+    for name, expected in (("mgr-off", 1), ("mgr-on", 2), ("doubled", 2)):
+        # What the picker row says.
+        word = "member" if expected == 1 else "members"
+        assert details[name] == f"{expected} {word}", details[name]
+
+        # What the chart actually draws for the same team, counted from the
+        # resolved tree rather than restated from the same helper — otherwise
+        # this asserts a function equals itself.
+        root = resolve_org(name, teams=registry, agents=None)
+        leaf_kinds = ("role", "specialist", "seed", "unresolved", "cycle", "depth")
+        drawn = sum(child.count for child in root.children if child.kind in leaf_kinds)
+        assert drawn == expected, f"{name}: picker says {expected}, chart draws {drawn}"
+        # And the badge the collapsed box carries agrees too.
+        assert _member_badge(root).strip() == f"·{expected}", _member_badge(root)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_listing_does_not_end_on_a_dangling_spacer(tmp_path) -> None:
+    """D7: the blank row must go with the footer it was spacing.
+
+    The D6 remediation made the `Send:`/`Detach:` footer conditional on the
+    attach seam but left the `Text()` spacer above it unconditional, so a
+    viewer's `/agent` listing ended on a blank row separating the entries from
+    nothing at all. The owner's listing and both `/team` listings are flush;
+    only this one drifted, because it is the only listing whose footer can be
+    absent.
+    """
+    from rich.console import Console
+
+    from local_operator.agents import AgentRegistry
+
+    class NoAttachSession(FakeSession):
+        attach_agent_profile = None  # type: ignore[assignment]
+
+    def _trailing_blanks(app: OperatorApp) -> tuple[int, list[str]]:
+        block = app._agent_list_block([("architect", "role", "Decide how")])
+        console = Console(width=100, no_color=True)
+        with console.capture() as captured:
+            console.print(getattr(block, "_renderable", None) or block.renderable)
+        lines = captured.get().rstrip("\n").split("\n")
+        blanks = 0
+        for line in reversed(lines):
+            if line.strip():
+                break
+            blanks += 1
+        return blanks, lines
+
+    for session_cls, expects_footer in ((FakeSession, True), (NoAttachSession, False)):
+        session = session_cls()
+        session.agent_registry = AgentRegistry(tmp_path)
+        app = OperatorApp(lambda s=session: _factory(s))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            blanks, lines = _trailing_blanks(app)
+
+        assert blanks == 0, f"{session_cls.__name__} listing ends on {blanks} blank row(s): {lines}"
+        # The spacer is only correct when it is actually spacing something.
+        assert ("Send: /agent <name> <message>" in "\n".join(lines)) is expects_footer, lines
