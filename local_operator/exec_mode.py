@@ -330,6 +330,30 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
     return factory
 
 
+#: The conventional "read the prompt from stdin" argument, as codex and other
+#: CLI harnesses spell it. Supervisors pipe a composed prompt file rather than
+#: passing it in argv, which is both visible in ``ps`` and bounded by ARG_MAX.
+STDIN_PROMPT_SENTINEL = "-"
+
+
+def resolve_prompt(command: str, *, stdin_text: str | None = None) -> str:
+    """Return the prompt to run, reading stdin when ``command`` is ``-``.
+
+    Resolved BEFORE the ``--background`` branch on purpose: the background
+    worker receives its prompt through argv (:func:`build_worker_argv`), so a
+    stdin prompt left unresolved would spawn a worker whose prompt is the
+    literal ``-`` — the same class of silent-wrong-input bug the ``resume``
+    field documents having already been fixed once, one process boundary out.
+
+    ``stdin_text`` is injectable so the behaviour is testable without a real
+    pipe on the process.
+    """
+    if command != STDIN_PROMPT_SENTINEL:
+        return command
+    text = sys.stdin.read() if stdin_text is None else stdin_text
+    return text.strip()
+
+
 def run_exec(command: str, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
@@ -340,7 +364,14 @@ def run_exec(command: str, args: ExecArgs) -> int:
     first, prompt once, map error/abort to exit 1. A ``prompt()`` that
     RAISES also maps to exit 1 with the error on stderr (CL-19), never the
     interactive red banner: exec is machine-driven.
+
+    A ``command`` of ``-`` means "read the prompt from stdin"; it is resolved
+    here so the foreground and ``--background`` paths run the same text.
     """
+    command = resolve_prompt(command)
+    if not command:
+        print("exec failed: empty prompt", file=sys.stderr)
+        return 1
     if args.background:
         return _spawn_background(command, args)
 

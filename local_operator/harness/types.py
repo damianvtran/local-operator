@@ -1056,6 +1056,33 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     context_tokens: int | None = None
 
 
+class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
+    """The provider began generating for the request that is on the wire.
+
+    THE acceptance boundary for an external supervisor. A runtime that drives
+    lop as a subprocess (Minerva's agent-runtime-svc does) commits "this prompt
+    was accepted and must not be resubmitted" when it sees this event, because
+    resubmitting a prompt the provider already acted on can duplicate external
+    side effects — a pushed commit, an opened MR, a sent message.
+
+    It is deliberately NOT ``message_start``. The loop yields that one from a
+    bare placeholder message before the ``ChatRequest`` exists, so a boundary
+    keyed on it would mark a prompt un-retryable that DNS, auth, or a rate
+    limit could still reject — silently losing the work while the supervisor
+    believed it was accepted.
+
+    ``response_id`` is the provider's native turn identity, or ``None`` when
+    the provider exposes none (Google). A consumer that requires no-replay
+    proof must treat ``None`` as indeterminate and fail closed rather than
+    substituting an id of its own.
+    """
+
+    type: Literal["provider_turn_start"] = "provider_turn_start"
+    response_id: str | None = None
+    provider: str | None = None
+    model_id: str | None = None
+
+
 class TurnStartEvent(AgentEvent[Literal["turn_start"]]):
     type: Literal["turn_start"] = "turn_start"
 
@@ -1469,6 +1496,13 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Asks the host whether a boundary-respecting cancel is pending. Consulted
+    #: at the post-tool boundary, where every call in the batch has produced a
+    #: paired result and the next model request has not yet been spent — so a
+    #: supervisor can stop a run WITHOUT cutting a tool that has external side
+    #: effects (a push, an MR write) mid-flight. ``None`` leaves the behaviour
+    #: exactly as it was: only the abort signal ends a turn early.
+    graceful_cancel_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
@@ -1788,6 +1822,30 @@ class ChatRequest(BaseModel):
     isolated: bool = False
 
 
+class StreamStartEvent(BaseModel):
+    """The provider began responding to THIS request, on the wire.
+
+    Emitted by a wire client the moment the provider reveals its own identity
+    for the turn — the first chunk of an OpenAI-compatible stream, the
+    ``response.created`` event on the Responses API, Anthropic's
+    ``message_start``. It exists to give supervisors a boundary that means
+    "the request crossed the wire and the provider started generating", which
+    is NOT what ``MessageStartEvent`` means: the loop emits that one from a
+    bare placeholder message before the ``ChatRequest`` is even constructed
+    (see ``loop.py``), so a supervisor keying "accepted" on it would mark a
+    prompt un-retryable that DNS, auth, or a rate limit could still reject.
+
+    ``response_id`` is the provider's native turn identity, and is the token an
+    external runtime commits as no-replay proof. It is ``None`` when the
+    provider exposes no stable per-response id on its streaming surface
+    (Google), and a consumer must then treat acceptance as indeterminate
+    rather than inventing one.
+    """
+
+    type: Literal["start"] = "start"
+    response_id: str | None = None
+
+
 class StreamTextDelta(BaseModel):
     type: Literal["text_delta"] = "text_delta"
     delta: str
@@ -1822,4 +1880,6 @@ class StreamEndEvent(BaseModel):
     error: str | None = None
 
 
-StreamEvent = StreamTextDelta | StreamToolCallDelta | StreamUsageEvent | StreamEndEvent
+StreamEvent = (
+    StreamStartEvent | StreamTextDelta | StreamToolCallDelta | StreamUsageEvent | StreamEndEvent
+)

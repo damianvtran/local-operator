@@ -126,13 +126,37 @@ class PrintRenderer:
         #: provider in its recovery hint. ``None`` until :meth:`attach`.
         self._session: SessionProtocol | None = None
 
+    @property
+    def session_id(self) -> str | None:
+        """The attached session's id, or ``None`` before :meth:`attach`.
+
+        Read defensively: a test double satisfying only the parts of
+        ``SessionProtocol`` a renderer touches may not carry an id, and a
+        missing id must degrade to an unstamped line rather than break the
+        stream that is the run's only output.
+        """
+        session = self._session
+        if session is None:
+            return None
+        value = getattr(session, "session_id", None)
+        return value if isinstance(value, str) and value else None
+
     # -- subscription entry point -------------------------------------------
 
     def handle(self, event: AgentEvent) -> None:
         """Event handler for ``session.subscribe`` (sync; the harness accepts
         sync or async handlers)."""
         if self.json_mode:
-            sys.stdout.write(json.dumps(printable_event(event), ensure_ascii=False) + "\n")
+            payload = printable_event(event)
+            # Stamp the session on EVERY line rather than once in a header.
+            # External supervisors parse this stream line-by-line and
+            # statelessly (Minerva's sentinel runner is a per-line jq filter),
+            # so a header they happened to start after is unrecoverable — and
+            # the id is what lets them resume the session later.
+            session_id = self.session_id
+            if session_id:
+                payload.setdefault("session_id", session_id)
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
             sys.stdout.flush()
             self._track_outcome(event)
             return

@@ -1848,6 +1848,12 @@ class Session:
         # usage objects that lifetime cost and analytics still need.
         self._held_context_tokens: int | None = None
         self._abort_requested = False  # sticky across the continuation gap
+        # Boundary-respecting cancel (see request_graceful_cancel). Sticky like
+        # ``_abort_requested`` and cleared on the same edges, but honoured at
+        # the loop's post-tool boundary instead of by firing the abort signal,
+        # so a tool with external side effects is never cut mid-flight.
+        self._graceful_cancel_requested = False
+        self._graceful_cancel_reason = "cancelled"
         # --- Speculative compaction advisor (BETA; inert unless the config
         # opts in via values.compaction.advisor_enabled). All of it is session
         # state rather than plan state because the advisor runs OFF the turn:
@@ -4200,6 +4206,10 @@ class Session:
             self._flush_context_journal()
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
+            # ...and any earlier boundary cancel, for the same reason: the
+            # request applied to the turn the caller was stopping, not to the
+            # one they have just submitted.
+            self._graceful_cancel_requested = False
             if self._is_streaming:
                 raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
             # INLINE a pending wake catch-up ahead of the user's message, in
@@ -4716,6 +4726,36 @@ class Session:
         self.cancel_fork()
         if self._signal is not None:
             self._signal.abort(reason)
+
+    def request_graceful_cancel(self, reason: str = "cancelled") -> None:
+        """Stop after the current tool call finishes, not in the middle of it.
+
+        The difference from :meth:`abort` is what happens to work already in
+        flight. ``abort`` fires the turn's :class:`AbortSignal` immediately,
+        which cancels the running tool task — correct for a human pressing Esc,
+        who wants the thing to stop NOW and can see and repair whatever was
+        half-done.
+
+        A supervised agent is the opposite case. Its tools have external side
+        effects a machine operator cannot see or repair: a ``git push`` cut
+        mid-transfer, a merge request half-created, a row written without its
+        companion. Minerva's sentinel runner defends against exactly this today
+        by holding SIGTERM until a boundary, and this method is the in-process
+        equivalent so an external supervisor gets the same guarantee through
+        the control socket instead of through process signals.
+
+        The request is sticky and is honoured at the loop's post-tool boundary
+        — after every call in the batch has produced a paired result, before
+        the next model request is spent. The turn then ends as ``aborted``,
+        with the completed work intact in the transcript.
+        """
+        self._graceful_cancel_requested = True
+        self._graceful_cancel_reason = reason
+
+    @property
+    def graceful_cancel_requested(self) -> bool:
+        """Whether a boundary-respecting cancel is pending for this turn."""
+        return self._graceful_cancel_requested
 
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Cancel every running SUBAGENT and report how many were stopped.
@@ -5349,6 +5389,7 @@ class Session:
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
+                graceful_cancel_requested=lambda: self._graceful_cancel_requested,
                 has_urgent_steering_messages=self._has_urgent_steering,
                 # Rides the SAME interrupt poll steering uses, so a fork
                 # requested mid-tool reaches its boundary in ~250 ms instead of

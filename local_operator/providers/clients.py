@@ -45,6 +45,7 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
     StreamEvent,
+    StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -154,6 +155,21 @@ def _usage_token(raw_usage: Mapping[str, Any], *names: str) -> int:
                 # stream; treating it as absent preserves the authoritative totals.
                 continue
     return 0
+
+
+def _stream_id(value: Any) -> str | None:
+    """Normalize a provider's native turn id for ``StreamStartEvent``.
+
+    An external runtime commits this value as no-replay proof, so the only
+    honest answers are a non-empty string or ``None``. A blank or whitespace-
+    only id is coerced to ``None`` rather than forwarded: a consumer that sees
+    an empty string cannot tell "the provider gave no id" from "the provider
+    gave one and it was lost", and the first must fail closed as indeterminate.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
 
 
 def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int, int]:
@@ -2140,6 +2156,14 @@ class OpenAICompatClient:
         # reading as if the model replied normally.
         refusal_parts: list[str] = []
         streamed_text = False
+        #: Whether the on-the-wire acceptance boundary has been announced, and
+        #: the provider's native turn id once it is known. An OpenAI-compatible
+        #: stream carries ``id`` on its first chunk, so the two are usually set
+        #: together; ``started`` is tracked separately because a provider that
+        #: omits ``id`` must still produce the boundary (with a null id) rather
+        #: than none at all.
+        started = False
+        response_id: str | None = None
 
         async with self._http.stream(
             "POST",
@@ -2163,6 +2187,14 @@ class OpenAICompatClient:
                     # Raise it NAMED; swallowing it left turns dying as
                     # wordless interruptions (see _compat_stream_error).
                     raise _compat_stream_error(chunk)
+                if not started:
+                    # First decoded chunk: the request is on the wire and the
+                    # provider is generating. Announce the boundary HERE rather
+                    # than at the end, because a supervisor commits no-replay
+                    # proof against it (see StreamStartEvent) and must not learn
+                    # the turn was accepted only once it has already finished.
+                    started = True
+                    yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
                 if isinstance(chunk.get("usage"), Mapping):
                     raw = chunk["usage"]
                     cache_read, cache_write = _compat_cache_usage(raw)
@@ -2227,6 +2259,8 @@ class OpenAICompatClient:
                         "id": chunk.get("id"),
                         "system_fingerprint": chunk.get("system_fingerprint"),
                     }
+                    if not response_id:
+                        response_id = _stream_id(chunk.get("id"))
 
         stop_reason = _FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop")
         # A refusal delta with a non-filter finish (OpenAI sends
@@ -2310,6 +2344,15 @@ class OpenAICompatClient:
                 except json.JSONDecodeError:
                     continue
                 event_type = payload.get("type", "")
+                if event_type == "response.created":
+                    # The Responses API names the turn as soon as it opens it.
+                    # Capture the boundary HERE, not at ``response.completed``:
+                    # a supervisor keying no-replay proof on completion would
+                    # learn the turn was accepted only after it had already
+                    # produced its whole answer, which defeats the purpose.
+                    yield StreamStartEvent(
+                        response_id=_stream_id((payload.get("response") or {}).get("id"))
+                    )
                 # Requesting ``include: ["reasoning.encrypted_content"]`` (defect
                 # #2) makes the stream carry ``reasoning`` output items and their
                 # ``response.reasoning*`` deltas that a non-reasoning include
@@ -3025,6 +3068,15 @@ class AnthropicClient:
                     continue
                 event_type = event.get("type")
                 if event_type == "message_start":
+                    # Anthropic names the turn on its own ``message_start``,
+                    # which is the moment it began generating for this request.
+                    # The id was previously read past for usage alone, leaving
+                    # an Anthropic-pinned run with NO native turn identity on
+                    # any event — and therefore no way for an external runtime
+                    # to commit no-replay proof.
+                    yield StreamStartEvent(
+                        response_id=_stream_id((event.get("message") or {}).get("id"))
+                    )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))

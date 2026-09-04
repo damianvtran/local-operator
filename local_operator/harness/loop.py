@@ -60,10 +60,12 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    ProviderTurnStartEvent,
     RenderedStreamError,
     StaleAside,
     StreamEndEvent,
     StreamEvent,
+    StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -945,7 +947,19 @@ class AgentLoop:
                             redact=config.redact_tool_result,
                         )
 
-                    if signal is not None and signal.aborted:
+                    graceful_cancel = False
+                    if config.graceful_cancel_requested is not None:
+                        # Asked HERE, at the boundary, precisely because the
+                        # tools that just ran may have pushed a commit or opened
+                        # a merge request. A supervisor's cancel stops the run
+                        # without tearing one of those in half; the completed
+                        # work stays in the transcript and the turn ends as
+                        # aborted, exactly like a signalled stop would.
+                        try:
+                            graceful_cancel = bool(config.graceful_cancel_requested())
+                        except Exception:  # noqa: BLE001 — a broken host hook must not strand the turn
+                            graceful_cancel = False
+                    if (signal is not None and signal.aborted) or graceful_cancel:
                         # The abort landed while the batch was running. Its
                         # results are already appended above (every call paired,
                         # cancelled ones as synthetic ``aborted`` results), so
@@ -1184,7 +1198,18 @@ class AgentLoop:
             )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
-                if isinstance(event, StreamTextDelta):
+                if isinstance(event, StreamStartEvent):
+                    # The provider is generating for THIS request. Republish it
+                    # as a harness event so supervisors get a boundary that
+                    # means "on the wire" — ``MessageStartEvent`` above is
+                    # yielded from a placeholder before the request is even
+                    # built, so it cannot carry that meaning.
+                    yield ProviderTurnStartEvent(
+                        response_id=event.response_id,
+                        provider=model.provider,
+                        model_id=model.model_id,
+                    )
+                elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
