@@ -1333,3 +1333,109 @@ async def test_an_evicted_daemons_late_drop_leaves_the_replacements_watchers() -
             if writer is not None:
                 writer.close()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_watch_frame_buffered_behind_a_parked_op_cannot_move_the_count() -> None:
+    """A `watch`/`unwatch` that arrives after its connection is gone is inert.
+
+    Closing a connection does not stop the frames it already sent. The reader
+    loop is strictly serial — `readline()` then `await _on_request(...)` — so
+    while an op is parked, anything the daemon wrote sits in the socket
+    buffer; `_drop_client` closes the WRITER, but the `StreamReader` keeps
+    yielding those lines. `_on_request` therefore runs on a connection that is
+    no longer in the registry.
+
+    Production produces exactly this ordering: `notify_watch_transition`
+    pushes `unwatch` from the SSE generator's `finally` IN THE DAEMON THAT IS
+    DYING, while the relaunched daemon dials and replays `watch`. The late
+    frame then wiped the replacement's live count (round 7, R8) — the fifth
+    instance of this predicate failing OPEN, where a phone genuinely being
+    looked at reports nobody watching, so a parked approval toasts a card
+    already on screen and the model is told no one can answer.
+
+    The R7 guard closed the `_drop_client` path only; this is the request
+    path, which is a different context onto the same server-global counter.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", "w1")
+        assert runtime.phone_watchers == 1
+        conn = next(c for c in runtime._clients.values() if c.kind == "daemon")
+
+        # The connection goes away (eviction by a replacement daemon, or any
+        # other drop). Its buffered frames have NOT gone away with it.
+        runtime._drop_client(conn)
+        assert runtime.phone_watchers == 0
+
+        # A replacement daemon dials and replays its watch, so the count is
+        # live again and owned by a different connection.
+        reader2, writer2 = await _dial(record)
+        writer2.write(json.dumps({"op": "watch", "req": "w2"}).encode() + b"\n")
+        await writer2.drain()
+        await _until(reader2, "ack", "w2")
+        assert runtime.watching_surfaces() == frozenset({"viewer"})
+
+        # Now the dead connection's buffered frame is finally processed. This
+        # is the delivery the reader loop performs; it must not be able to
+        # reach the live count.
+        await runtime._on_request({"op": "unwatch", "req": "late"}, conn)
+
+        assert runtime.watching_surfaces() == frozenset({"viewer"}), (
+            "a frame buffered behind a parked op moved the counter after its "
+            "connection was dropped, wiping the REPLACEMENT daemon's live "
+            "watcher count"
+        )
+        assert runtime.phone_watchers == 1
+        writer2.close()
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_attach_clients_watch_cannot_leak_into_the_phone_count() -> None:
+    """Only the daemon's count is ever released, so only it may be taken.
+
+    `_drop_client` clears the counter for `kind == "daemon"` alone, so a
+    `watch` accepted from an `attach` client incremented something no drop
+    path could ever clear — a phantom viewer for the lifetime of the runtime
+    (round 7, R9). Unreachable today because only `mobile/daemon.py` sends the
+    op, but the asymmetry is one refactor away from being live.
+
+    An attached terminal is already represented: `watching_surfaces` derives
+    `attach` from the registry, which is the shape this counter should have.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(json.dumps({"op": "watch", "req": "a1"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", "a1")
+
+        assert runtime.phone_watchers == 0, (
+            "an attach client incremented the phone watcher count, which only "
+            "a daemon drop can clear"
+        )
+        # The terminal is still reported, by the registry-derived path.
+        assert "attach" in runtime.watching_surfaces()
+
+        # `watch_supported` latches regardless: it is a version signal about
+        # the peer speaking the op, not a count.
+        assert runtime.watch_supported is True
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()

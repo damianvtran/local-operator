@@ -373,6 +373,39 @@ class RuntimeServer:
         # Phone SSE watchers, fed by the daemon's watch/unwatch pushes. Floored
         # at 0: a daemon restart redials without unwatching, and a counter that
         # went negative would read as "watchers" to an == 0 check forever.
+        #
+        # READ THIS BEFORE YOU TOUCH THE COUNTER. It is SERVER-GLOBAL state
+        # mutated from THREE per-connection contexts, and that mismatch — not
+        # any one line — is what has produced four separate defects in this
+        # predicate across four review rounds:
+        #
+        #   1. removal          `_drop_client` never released a dead daemon's
+        #                       count, so a phantom viewer suppressed toasts
+        #                       forever (R5).
+        #   2. second removal   `_drop_client` is documented to run TWICE on
+        #                       one connection; an unconditional release on the
+        #                       late call wiped the REPLACEMENT's live count
+        #                       (R7).
+        #   3. request          a `watch`/`unwatch` buffered behind a parked op
+        #                       still arrives after its connection is evicted,
+        #                       because closing the writer does not stop the
+        #                       `StreamReader` (R8) — and an `attach` client's
+        #                       `watch` incremented a count only a `daemon`
+        #                       drop could clear (R9).
+        #
+        # Every instance failed the same way: the count outlives, or is stolen
+        # from, the connection it describes. Each is now defended separately,
+        # which is why three guards say "is this connection still registered?"
+        # in three places.
+        #
+        # THE DURABLE FIX IS STRUCTURAL, and deliberately not taken here: hold
+        # the count on `_ClientConn` and fold over the live registry, exactly
+        # as `watching_surfaces` already does for `attach` clients. A dropped
+        # connection then removes its own contribution BY CONSTRUCTION — no
+        # zeroing, no registry guards, and every one of these spellings becomes
+        # unrepresentable rather than separately defended. It was scoped out of
+        # this release as too large for a review round; do it before adding a
+        # fourth mutation site, not after the fifth defect.
         self.phone_watchers: int = 0
         # Latched True on the first watch/unwatch EVER received. Until then
         # watcher count is UNKNOWN (an old daemon never sends the ops), and
@@ -1048,9 +1081,29 @@ class RuntimeServer:
             elif op in ("watch", "unwatch"):
                 # The reaper's phone-watcher signal (§2.8). watch_supported
                 # latches on the FIRST op seen so a mixed-version child never
-                # mistakes silence for zero watchers.
+                # mistakes silence for zero watchers. Deliberately OUTSIDE the
+                # registry guard below: it is a version signal, not a count,
+                # and a frame proves the daemon speaks the op whenever it
+                # arrived.
                 self.watch_supported = True
-                if op == "watch":
+                # ONLY A REGISTERED CONNECTION MAY MOVE THE COUNT. The reader
+                # loop is strictly serial — `readline()` then `await
+                # _on_request(...)` — so anything the daemon sent before it
+                # died is still in the socket buffer while an op is parked.
+                # `_drop_client` closes the WRITER, but the `StreamReader`
+                # keeps yielding those buffered lines, so this runs on a
+                # connection already evicted from the registry. A dying
+                # daemon's `unwatch` (pushed from the SSE generator's
+                # `finally`) then wiped the REPLACEMENT daemon's live count
+                # (round 7, R8).
+                #
+                # Gated on `conn.kind` too: only the daemon's count is ever
+                # cleared (`_drop_client` zeroes for `kind == "daemon"`), so an
+                # attach client's `watch` would increment something nothing can
+                # clear — a permanent phantom viewer (round 7, R9).
+                if conn.kind != "daemon" or id(conn.writer) not in self._clients:
+                    pass
+                elif op == "watch":
                     self.phone_watchers += 1
                 else:
                     self.phone_watchers = max(0, self.phone_watchers - 1)
