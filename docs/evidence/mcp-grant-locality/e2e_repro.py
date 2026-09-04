@@ -91,9 +91,7 @@ class Session:
 
 
 async def dial(record: Any, locality: str | None) -> tuple[Any, Any]:
-    reader, writer = await asyncio.open_connection(
-        "127.0.0.1", record.control_port, limit=1 << 20
-    )
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
     auth: dict[str, Any] = {"key": record.control_key, "client": "attach"}
     if locality is not None:
         auth["locality"] = locality
@@ -177,9 +175,11 @@ async def main() -> int:
             await asyncio.sleep(0.02)
             if session.mcp_manager.connected:
                 break
-        print(f"    effect: forgot={forgotten} "
-              f"disconnected={session.mcp_manager.disconnected} "
-              f"connected={session.mcp_manager.connected}")
+        print(
+            f"    effect: forgot={forgotten} "
+            f"disconnected={session.mcp_manager.disconnected} "
+            f"connected={session.mcp_manager.connected}"
+        )
         if forgotten != ["notion"]:
             print("    FAIL  : reauth did not forget the stored grant first")
             failures += 1
@@ -204,8 +204,10 @@ async def main() -> int:
         print("[2] REMOTE client (a future phone relay), same command")
         print(f"    reply : {text}")
         await asyncio.sleep(0.2)
-        print(f"    effect: disconnected={session.mcp_manager.disconnected} "
-              f"connected={session.mcp_manager.connected}")
+        print(
+            f"    effect: disconnected={session.mcp_manager.disconnected} "
+            f"connected={session.mcp_manager.connected}"
+        )
         if "run it from a terminal on that machine" not in text:
             print("    FAIL  : a remote device would open a browser nobody sees")
             failures += 1
