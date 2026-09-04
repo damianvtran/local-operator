@@ -24,6 +24,19 @@ from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 from local_operator.evaluation.adapters.api import ScopedInfraValue
 
 _AMI_RE = re.compile(r"^ami-[a-f0-9]{8,17}$")
+# ``<family>.<size>``, lowercase, both halves allowed internal hyphens so the
+# real oddballs still parse: ``u-6tb1.metal``, ``m7i.metal-24xl``, ``c5n.18xlarge``.
+# Shape borrowed from _AMI_RE on purpose -- a malformed value must fail in
+# ``resolve`` (prepare time, nothing allocated) rather than as an opaque
+# botocore InvalidParameterValue midway through a paid run_instances.
+#
+# SHAPE ONLY, deliberately: 'zz99.megahuge' is well-formed and nonexistent, and
+# still reaches run_instances. Confirming a type EXISTS needs a live
+# describe-instance-types call, and ``resolve`` performs no I/O by contract --
+# that is the whole reason ``prepare`` can be declarative. So this narrows the
+# failure window rather than closing it: a typo in the FORM of the value fails
+# free, a plausible-but-fictional type still costs a launch attempt.
+_INSTANCE_TYPE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # The V2 release manifest pins exactly one AMI for the 1920x1080 Ubuntu guest
 # in us-east-1. Stated identically in benchmark_releases/osworld-v2-2026.08.08.json
@@ -92,7 +105,7 @@ def resolve(
     ami_id = (
         task.image if task.image is not None and _AMI_RE.fullmatch(task.image) else _DEFAULT_AMI
     )
-    instance_type = task.instance_type or _DEFAULT_INSTANCE_TYPE
+    instance_type = _resolve_instance_type(task, infra_values)
     # Volume size is left None unless the task pins it: the AMI's own
     # BlockDeviceMappings carry a default that OSWorld resolves at launch,
     # and replicating that lookup here would require the very describe_images
@@ -138,4 +151,69 @@ def resolve(
 
 
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
-    return any(value.name == name for value in infra_values)
+    # Delegates to _get so this module has ONE lookup rule: a second scan with
+    # its own matching logic is how "present" and "readable" drift apart.
+    return _get(infra_values, name) is not None
+
+
+def _resolve_instance_type(
+    task: TaskDescriptor,
+    infra_values: tuple[ScopedInfraValue, ...],
+) -> str:
+    """``AWS_INSTANCE_TYPE`` > the task's own pin > the release default.
+
+    WHY THIS EXISTS. Five paid episodes died on
+    ``ObservationError: environment returned no screenshot frame``. The cause
+    was measured, not guessed: the default ``t3.xlarge`` is a BURSTABLE
+    instance, and at the failure moment CloudWatch reported CPUCreditBalance
+    4.2 with CPUSurplusCreditBalance 0.0 while CPU sat at 10.3% -- throttled
+    to its baseline, not idle. A starved guest cannot answer its screenshot
+    HTTP server, so the episode dies at step 9-32 having already spent
+    $0.12-$0.32, and AWS status checks stay "ok" throughout because from the
+    hypervisor's side nothing is wrong. Swapping to a non-burstable family
+    (m5/c5) is the fix, and it has to be reachable WITHOUT editing task files:
+    those are content-hash verified against the release pin, so editing one
+    invalidates the very digest that makes a score reproducible.
+
+    WHY THE OVERRIDE BEATS A TASK'S OWN PIN. A task pins ``instance_type``
+    for a task-specific reason (a heavy build wants more cores), which argues
+    for deferring to it. It loses anyway, because the two knobs answer
+    different questions: the task author chose a SIZE against hardware they
+    could reach, while the operator is working around an INFRASTRUCTURE
+    failure that author never saw and cannot fix from inside a hash-pinned
+    file. An override that a task pin could veto would silently fail exactly
+    on the tasks most likely to be starved -- the ones heavy enough to pin a
+    bigger box -- which is the opposite of the intent. The override is opt-in
+    and absent by default, so this precedence is unreachable unless an
+    operator deliberately supplied it; omitting the value reproduces the
+    previous behaviour exactly, which is what keeps a default run comparable.
+
+    Because the override changes the hardware a score was produced on, the
+    host stamps it into the evidence manifest's metadata (see
+    ``scripts/run_episode.py``), so a run on non-default hardware is
+    disclosable from the bundle alone rather than only from operator memory.
+    """
+
+    override = _get(infra_values, "AWS_INSTANCE_TYPE")
+    if override is not None:
+        # Rejected, never ignored -- the asymmetry with ``image`` above is
+        # deliberate. An invalid ``task.image`` falls back to the manifest AMI
+        # because the task file is hash-pinned and the adapter cannot correct
+        # it. An invalid override is something the operator typed seconds ago
+        # and can fix; quietly discarding it would launch the burstable
+        # default they were trying to escape and destroy more paid episodes
+        # with no signal that the knob never took effect.
+        if not _INSTANCE_TYPE_RE.fullmatch(override):
+            raise ProvisioningError(
+                f"AWS_INSTANCE_TYPE {override!r} is not a valid EC2 instance type "
+                "(expected '<family>.<size>', e.g. 'm5.xlarge')"
+            )
+        return override
+    return task.instance_type or _DEFAULT_INSTANCE_TYPE
+
+
+def _get(infra_values: tuple[ScopedInfraValue, ...], name: str) -> str | None:
+    for value in infra_values:
+        if value.name == name:
+            return value.value
+    return None

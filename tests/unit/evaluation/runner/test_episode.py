@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
     CleanupPayload,
@@ -1262,3 +1263,121 @@ async def test_detail_publish_os_error_cannot_escape_the_failure_handler(
         recovered.close()
     assert record.reason == "infrastructure_failure"
     assert verify_bundle(root).terminal_state == "abandoned"
+
+
+# ---------------------------------------------------------------------------
+# Disclosed infra values must not be silently dropped by an older adapter
+# ---------------------------------------------------------------------------
+#
+# The defect these cover is a FALSE disclosure, which is strictly worse than a
+# missing one: the caller stamps "this run used m5.xlarge" into the sealed
+# manifest from the CLI string alone, while an adapter build that predates the
+# knob resolves t3.xlarge and drops it. The bundle then verifies, the run exits
+# 0, and a reader reports a burstable-starved score as starvation-corrected.
+# ``inspect_requirements`` is the only signal that separates two builds sharing
+# one version string, so the runner binds it and fails closed.
+
+
+def _spec_with_infra(episode_id: str, *names: str) -> Any:
+    spec = build_spec(episode_id)
+    object.__setattr__(
+        spec,
+        "infra_values",
+        tuple(
+            ScopedInfraValue(name=name, purpose="benchmark_compute", value="m5.xlarge")
+            for name in names
+        ),
+    )
+    return spec
+
+
+def _infra_runner(
+    tmp_path: Path, episode_id: str, spec: Any, adapter: FakeAdapter
+) -> EpisodeRunner:
+    return EpisodeRunner(
+        spec,
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["finish"]),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The reviewer's reproduction, as a test: old adapter + new host script.
+
+    A ``FakeAdapter`` declaring no requirements is exactly how a build that
+    predates ``AWS_INSTANCE_TYPE`` answers for that name. Pre-fix this ran to
+    a sealed, valid bundle claiming hardware the episode never used; the
+    refusal must land BEFORE ``prepare``, so nothing is allocated and there is
+    no bundle to mislead a reader.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _infra_runner(
+        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+    ).run()
+
+    assert outcome.status == "failed_pre_bundle"
+    assert outcome.bundle_root is None
+    assert "AWS_INSTANCE_TYPE" in (outcome.diagnostic or "")
+    assert "UndeclaredDisclosedInfra" in (outcome.diagnostic or "")
+    # The side-effect boundary was never crossed and the worker was reaped.
+    assert "prepare" not in adapter.calls and "reset_start" not in adapter.calls
+    assert adapter.terminated
+
+
+@pytest.mark.asyncio
+async def test_a_declared_disclosed_infra_value_runs_normally(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The inverse direction: a rebuilt adapter DOES declare it, so it runs.
+
+    Without this the gate could pass by refusing everything, which would break
+    the very workflow the knob exists for.
+    """
+
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        declared_requirements=(
+            Requirement(
+                requirement_id="AWS_INSTANCE_TYPE",
+                kind="infra",
+                name="AWS_INSTANCE_TYPE",
+                required=False,
+            ),
+        ),
+    )
+    outcome = await _infra_runner(
+        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+    ).run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert "prepare" in adapter.calls and "reset_start" in adapter.calls
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_ordinary_infra_value_is_not_refused(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The gate is a narrow allowlist, and that scoping is load-bearing.
+
+    ``inspect_requirements`` runs BEFORE the task is named, so it returns only
+    the adapter's unconditional baseline -- a task-conditional requirement
+    (OSWORLD_PROXY_ENDPOINT for a proxy task) is legitimately absent from it.
+    A blanket "refuse every undeclared infra value" rule would therefore break
+    correct proxy runs, which is why only values whose silent drop corrupts the
+    evidence record are gated.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _infra_runner(
+        tmp_path, episode_id, _spec_with_infra(episode_id, "OSWORLD_PROXY_ENDPOINT"), adapter
+    ).run()
+
+    assert outcome.status == "completed", outcome.diagnostic

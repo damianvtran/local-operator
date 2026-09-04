@@ -63,7 +63,15 @@ _ALWAYS_INFRA = (
 # holding the gated assets and the prepared checkout (the workspace pins their
 # manifests by sha but cannot hold the 4.2 GB of assets under its 4 GiB cap);
 # OSWORLD_TTL_SECONDS overrides the budget-derived lease length.
+# AWS_INSTANCE_TYPE replaces the EC2 instance type for the benchmark VM. It is
+# the escape hatch from burstable-credit exhaustion: the default t3.xlarge is
+# BURSTABLE and a starved guest stops answering its screenshot server, which
+# killed five paid episodes (CPUCreditBalance 4.2, surplus 0.0, CPU pinned at
+# 10.3%) while AWS status checks read "ok". It is infra, not a task field,
+# precisely because task files are content-hash verified and cannot be edited
+# to work around the operator's hardware. See provisioning._resolve_instance_type.
 _OPTIONAL_INFRA = (
+    "AWS_INSTANCE_TYPE",
     "OSWORLD_INPUTS_ROOT",
     "OSWORLD_TTL_SECONDS",
 )

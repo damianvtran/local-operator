@@ -44,6 +44,7 @@ from local_operator.evaluation.adapters.api import (
     Handshake,
     InspectRequirementsParams,
     PrepareParams,
+    RequirementsResult,
     RescueDescriptor,
     ResetStartParams,
     ResolvedSecret,
@@ -130,6 +131,44 @@ from local_operator.evaluation.runner.secrets import (
 # session is the one resource the parent always knows exists before the adapter
 # has described anything, which is what makes the provisional plan expressible.
 _PROVISIONAL_CLEANUP_ACTION = "close-session"
+
+# Infra values whose EFFECT a caller discloses in the sealed manifest, and which
+# an adapter that does not understand them would silently ignore.
+#
+# The pairing is what makes these special. An ordinary infra value an adapter
+# ignores is a no-op: the run is what it is, and the bundle says nothing about
+# it. But when a caller records "this run used X" in the manifest, an adapter
+# that drops X turns that record into a FALSE statement sealed inside a
+# verify_bundle-valid bundle -- a score that reads as comparable to a
+# corrected run when it is nothing of the sort. A reader can see a missing
+# disclosure; they cannot see a lying one.
+#
+# This is reachable today, not hypothetical: the deployed OSWorld pilot wheel
+# predates AWS_INSTANCE_TYPE support, and the committed selectors still pin it
+# by digest. The digest pin catches a MISMATCHED wheel; it cannot catch a
+# correctly-pinned OLD one. Skipping any step of an adapter rebuild would
+# otherwise yield rc 0, green CI, and a bundle claiming hardware the episode
+# never ran on.
+#
+# Deliberately a NARROW allowlist rather than "reject every undeclared infra
+# value". ``inspect_requirements`` runs before the task is named, so it returns
+# only the adapter's UNCONDITIONAL baseline -- a task-conditional requirement
+# (OSWORLD_PROXY_CREDENTIALS, OSWORLD_PROXY_ENDPOINT) is legitimately absent
+# from it, and a blanket rule would refuse correct proxy runs. Only a value
+# whose silent drop corrupts the evidence record belongs here.
+_DISCLOSED_INFRA_VALUES = frozenset({"AWS_INSTANCE_TYPE"})
+
+
+class UndeclaredDisclosedInfra(RuntimeError):
+    """A disclosed infra value was supplied to an adapter that does not declare it.
+
+    Raised from ``_launch_and_prepare`` -- before ``prepare``, and therefore
+    before any resource can exist -- so it surfaces as ``failed_pre_bundle``
+    with no bundle to mislead anyone. Failing closed is the same rule the
+    adapter already applies to a malformed value: an override the adapter will
+    silently drop is the same class of defect as one it cannot parse.
+    """
+
 
 EpisodeStatus = Literal[
     "completed",
@@ -385,10 +424,11 @@ class EpisodeRunner:
         )
         self._session = session
 
-        await session.inspect_requirements(
+        requirements = await session.inspect_requirements(
             InspectRequirementsParams(),
             timeout=self._config.prepare_timeout,
         )
+        self._refuse_undeclared_disclosed_infra(requirements)
 
         # Secrets are resolved HERE -- after the handshake, before the
         # provisional descriptor and before ``prepare`` -- for two reasons.
@@ -1377,6 +1417,36 @@ class EpisodeRunner:
             # sweep (``instance-absent``) -- harmless, and strictly better than
             # failing an already-clean episode over inbox hygiene.
             pass
+
+    def _refuse_undeclared_disclosed_infra(self, requirements: RequirementsResult) -> None:
+        """Refuse a disclosed infra value the adapter build does not understand.
+
+        ``inspect_requirements`` is the only signal that distinguishes two
+        adapter builds carrying the SAME version string, which is exactly the
+        situation here: the OSWorld adapter source gained AWS_INSTANCE_TYPE
+        without a distribution bump (the bump was withheld on purpose, because
+        it feeds ``_release_digest`` and would have falsified the pinned
+        attestation of what the paid pilot ran on). Version therefore cannot
+        tell the builds apart -- the declared requirement set can, and the
+        runner already makes this call, so nothing new crosses the wire and no
+        schema version changes.
+
+        Matched by NAME rather than by the ``required`` flag: these values are
+        optional by construction (an operator knob defaults to absent), so the
+        flag says nothing about whether the adapter understands the name.
+        """
+
+        declared = {requirement.name for requirement in requirements.requirements}
+        supplied = {value.name for value in self._spec.infra_values}
+        undeclared = sorted((supplied & _DISCLOSED_INFRA_VALUES) - declared)
+        if undeclared:
+            raise UndeclaredDisclosedInfra(
+                f"adapter {self._selector.adapter_id!r} version "
+                f"{self._selector.version!r} does not declare {undeclared}, so the "
+                "value would be silently ignored while the evidence bundle "
+                "recorded it as applied; rebuild the adapter workspace and "
+                "selector, or drop the value"
+            )
 
     def _build_manifest(self, handshake: Handshake, plan: CleanupPlan) -> EvidenceManifest:
         spec = self._spec

@@ -32,6 +32,7 @@ from local_operator.evaluation.adapters.api import (
     ObservationResult,
     PrepareResult,
     PythonRuntime,
+    Requirement,
     RequirementsResult,
     ScoreResult,
     observation_content_id,
@@ -226,9 +227,14 @@ class FakeAdapter:
         cleanup_status: str = "succeeded",
         failures: dict[str, BaseException] | None = None,
         fail_after: dict[str, int] | None = None,
+        declared_requirements: tuple[Requirement, ...] = (),
     ) -> None:
         self.tmp_path = tmp_path
         self.episode_id = episode_id
+        # What ``inspect_requirements`` answers. Defaults to none, which is
+        # also how an OLDER adapter build behaves for a name it predates --
+        # the case the runner must refuse rather than silently ignore.
+        self.declared_requirements = declared_requirements
         self.score = score or ScoreArtifact(status="scored", binary=1)
         self.cleanup_status = cleanup_status
         self.failures = failures or {}
@@ -262,7 +268,7 @@ class FakeAdapter:
         self.calls.append(method)
         self._maybe_fail(method)
         if method == "inspect_requirements":
-            return RequirementsResult(requirements=())
+            return RequirementsResult(requirements=self.declared_requirements)
         if method == "prepare":
             return PrepareResult(cleanup_plan=cleanup_plan(self.episode_id))
         if method == "reset_start":

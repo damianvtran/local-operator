@@ -177,8 +177,10 @@ def _expect_describe_images(stubs: _Stubs) -> None:
     )
 
 
-def _expect_run_instances(stubs: _Stubs) -> None:
-    plan = _plan()
+def _expect_run_instances(stubs: _Stubs, plan: provisioning.ProvisioningPlan | None = None) -> None:
+    # ``plan`` defaults to the standard one so every existing caller is
+    # unchanged; a caller testing a resolved override passes its own.
+    plan = plan if plan is not None else _plan()
     stubs.ec2_stub.add_response(
         "run_instances",
         {"Instances": [{"InstanceId": INSTANCE}]},
@@ -369,6 +371,43 @@ async def test_allocate_launches_with_client_token_and_both_tag_specs(
     assert envs[0].reset_calls == [{"id": "task_plain"}]
     # Readiness probed the guest's control port on the public IP.
     assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+
+
+@pytest.mark.asyncio
+async def test_an_instance_type_override_reaches_the_real_run_instances_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The override must survive resolve -> plan -> EC2, not just resolve.
+
+    A unit test of the pure function would still pass if the plan field were
+    dropped on the way to ``run_instances``, which is precisely the failure
+    that would leave the operator on the starved burstable box while every
+    test stayed green. The stubbed client asserts the exact launch parameters,
+    so ``InstanceType`` here is the value AWS would actually receive.
+    """
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    infra = _infra() + (
+        ScopedInfraValue(name="AWS_INSTANCE_TYPE", purpose="benchmark_compute", value="m5.xlarge"),
+    )
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=infra)
+    assert plan.instance_type == "m5.xlarge"
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        # Built from the OVERRIDDEN plan: the stub rejects the call if any
+        # launch parameter differs, so a dropped override fails right here.
+        _expect_run_instances(stubs, plan=plan)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ _ALWAYS = {
     "OSWORLD_CLIENT_PASSWORD",
     "OSWORLD_FILE_BASE_URL",
     "HF_TOKEN",  # optional at episode time: the corpus is pre-materialised
+    "AWS_INSTANCE_TYPE",  # optional: escape hatch from the burstable default
     "OSWORLD_INPUTS_ROOT",  # optional: the durable root the assets live in
     "OSWORLD_TTL_SECONDS",  # optional: lease-length override
 }
@@ -95,6 +96,14 @@ def test_inputs_root_and_ttl_are_optional_infra() -> None:
     by_name = _by_name(fixtures.PLAIN)
     assert by_name["OSWORLD_INPUTS_ROOT"] == ("infra", False)
     assert by_name["OSWORLD_TTL_SECONDS"] == ("infra", False)
+
+
+def test_instance_type_override_is_optional_infra() -> None:
+    # Optional, so preflight never demands it: omitting the knob must leave a
+    # default run exactly as it was. Declared at all so the host knows the
+    # name is accepted rather than silently dropping an unknown infra value.
+    by_name = _by_name(fixtures.PLAIN)
+    assert by_name["AWS_INSTANCE_TYPE"] == ("infra", False)
 
 
 def test_judged_task_requires_the_judge_key_and_settings() -> None:

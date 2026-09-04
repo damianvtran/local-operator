@@ -464,6 +464,37 @@ def _parse_infra(values: Sequence[str], purpose: str) -> tuple[ScopedInfraValue,
     return tuple(out)
 
 
+def _instance_type_metadata(infra: Sequence[str]) -> dict[str, Any]:
+    """Manifest metadata disclosing an EC2 instance-type override, if any.
+
+    The key records what was **requested** on the command line, not a value
+    read back from the adapter -- there is no channel for the latter, since
+    ``ObservationPayload`` carries no metadata and neither ``PrepareResult``
+    nor ``AckResult`` returns the resolved plan. Widening the wire to return it
+    would be an ``ADAPTER_SCHEMA_VERSION`` bump, which breaks mixed-version
+    interop in both directions (see the schema notes in ``adapters/api.py``)
+    for a field only this script reads.
+
+    "Requested" is only honest because the runner refuses the mismatch that
+    would make it a lie: ``EpisodeRunner._refuse_undeclared_disclosed_infra``
+    fails the episode before ``prepare`` when this value is supplied to an
+    adapter build that does not declare ``AWS_INSTANCE_TYPE``. Requested and
+    applied can therefore differ only on a run that produced no bundle at all.
+
+    Reads the raw ``--infra NAME=VALUE`` strings rather than the parsed
+    ``ScopedInfraValue`` tuple so this stays a pure function of the CLI input
+    and can be tested without building a whole spec. Reporting an unparseable
+    value verbatim is correct: the run fails at prepare, and a bundle, if one
+    exists at all, should still show what was asked for.
+    """
+
+    for item in infra:
+        name, sep, value = item.partition("=")
+        if sep and name == "AWS_INSTANCE_TYPE" and value:
+            return {"aws_instance_type_override": value}
+    return {}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--selector", required=True, type=Path, help="AdapterSelector JSON file")
@@ -605,6 +636,20 @@ async def run(args: argparse.Namespace) -> int:
             # read as a result.
             "model_client": args.model_client,
             "script": "scripts/run_episode.py",
+            # Hardware disclosure: the instance type REQUESTED for this run.
+            # A score produced on non-default hardware is not comparable to one
+            # produced on the release default, so the bundle has to say so on
+            # its own -- reading it must not depend on operator memory of which
+            # --infra flags were passed. Only the OVERRIDE is stamped, and only
+            # when supplied: with it absent the effective type is fully
+            # determined by the hash-pinned task file plus the documented
+            # default, so the disclosure is complete in both directions. The
+            # adapter cannot report this itself -- ``ObservationPayload``
+            # carries no metadata field, so nothing the worker resolves reaches
+            # the bundle except through the manifest. Requested can only differ
+            # from applied on an episode that produced no bundle: the runner
+            # refuses an override an adapter build does not declare.
+            **_instance_type_metadata(args.infra),
         },
     )
 

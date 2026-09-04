@@ -64,6 +64,91 @@ def test_volume_defaults_to_none_for_launch_time_resolution() -> None:
     assert plan.instance_type == "t3.xlarge"
 
 
+def _with_instance_type(value: str) -> tuple[ScopedInfraValue, ...]:
+    return _INFRA + (
+        ScopedInfraValue(name="AWS_INSTANCE_TYPE", purpose="benchmark_compute", value=value),
+    )
+
+
+def test_instance_type_defaults_to_the_release_default_without_an_override() -> None:
+    # Omitting the knob must reproduce the previous behaviour EXACTLY: a score
+    # run on default hardware stays comparable to every earlier run.
+    plan = _resolve(fixtures.PLAIN)
+    assert plan.instance_type == "t3.xlarge"
+
+
+def test_an_instance_type_override_replaces_the_default() -> None:
+    # The reason the knob exists: t3.xlarge is burstable, and credit
+    # exhaustion (CPUCreditBalance 4.2, surplus 0.0) silently killed five paid
+    # episodes by starving the guest's screenshot server.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    plan = provisioning.resolve(
+        descriptor, episode_id="ep-1", infra_values=_with_instance_type("m5.xlarge")
+    )
+    assert plan.instance_type == "m5.xlarge"
+
+
+def test_an_instance_type_override_beats_a_task_pinned_instance_type() -> None:
+    # The precedence decision, asserted rather than assumed. CUSTOM_INSTANCE
+    # pins t3.2xlarge -- still burstable, so a task pin that could veto the
+    # override would leave exactly the starvation case unfixable from outside
+    # a hash-pinned task file.
+    descriptor = taskfile.load_static(fixtures.CUSTOM_INSTANCE.encode(), module_name="tasks/t.py")
+    assert descriptor.instance_type == "t3.2xlarge"
+    plan = provisioning.resolve(
+        descriptor, episode_id="ep-1", infra_values=_with_instance_type("m5.2xlarge")
+    )
+    assert plan.instance_type == "m5.2xlarge"
+
+
+def test_a_task_pinned_instance_type_still_wins_without_an_override() -> None:
+    # The override is opt-in: absent it, the task's own pin is untouched.
+    plan = _resolve(fixtures.CUSTOM_INSTANCE)
+    assert plan.instance_type == "t3.2xlarge"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-an-instance-type",  # no size separator at all
+        "m5",  # family without a size
+        "m5.",  # empty size
+        ".xlarge",  # empty family
+        "M5.XLarge",  # EC2 types are lowercase; a case slip must not launch
+        "m5 .xlarge",  # whitespace
+        "m5.xlarge; rm -rf /",  # anything that is not the closed shape
+    ],
+)
+def test_a_malformed_instance_type_override_is_rejected_at_prepare_time(bad: str) -> None:
+    # Rejected, not ignored: silently discarding it would launch the burstable
+    # default the operator was escaping, with no signal the knob never applied.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    with pytest.raises(ProvisioningError) as excinfo:
+        provisioning.resolve(descriptor, episode_id="ep-1", infra_values=_with_instance_type(bad))
+    assert "AWS_INSTANCE_TYPE" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "good",
+    [
+        "m5.xlarge",
+        "c5n.18xlarge",
+        "u-6tb1.metal",  # hyphenated family
+        "m7i.metal-24xl",  # hyphenated size
+        "t3.nano",
+    ],
+)
+def test_real_ec2_instance_type_spellings_are_accepted(good: str) -> None:
+    # The validator must not reject the oddballs AWS actually sells; a regex
+    # that only knows ``m5.xlarge`` would block the metal instances that are
+    # the strongest answer to a starved burstable guest.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    plan = provisioning.resolve(
+        descriptor, episode_id="ep-1", infra_values=_with_instance_type(good)
+    )
+    assert plan.instance_type == good
+
+
 def test_screen_is_always_the_native_1920x1080() -> None:
     assert _resolve(fixtures.PLAIN).screen == (1920, 1080)
 
