@@ -1715,3 +1715,162 @@ async def test_genuine_still_starting_keeps_its_wording() -> None:
         assert app._no_session_notice() == ("session is still starting…", "warning")
         release.set()
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_shows_real_rows_not_an_eternal_placeholder() -> None:
+    """`/stop` is TERMINAL: nothing is arriving, so the list must answer.
+
+    The reserve was keyed to ``self._session is None`` with a single
+    subtraction for the failed boot, so every LATER way to sit without a
+    session inherited "loading teams…" forever. ``/stop`` detaches the session
+    on purpose (``_stop_local_session``), which is exactly that shape: the user
+    ended the session, no roster is on its way, and the picker promised one
+    anyway. Worse than a blank row, because ``is_loading()`` gates Tab/Enter.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Exactly what `_stop_local_session` leaves behind.
+        app._session = None
+        app._stopped_session_id = "sess-abc123"
+
+        assert app._name_list_pending_notice("team") == ""
+        assert app._name_list_pending_notice("agent") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_setup_state_shows_real_rows_not_an_eternal_placeholder() -> None:
+    """First-run setup is TERMINAL too, and is NOT covered by `_boot_failed`.
+
+    ``_enter_setup_state`` returns from ``_on_boot_failed`` BEFORE the
+    ``_boot_failed = True`` assignment — deliberately, because "no hosting
+    configured" is guidance rather than a crash. So the one subtraction the old
+    gate made did not apply here, and a user who opened `lop` with nothing
+    configured got a permanent "loading teams…" with Tab and Enter swallowed.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = None
+        app._setup_state = True
+        # The flag the old gate keyed on is explicitly NOT set in this state.
+        assert app._boot_failed is False
+
+        assert app._name_list_pending_notice("team") == ""
+        assert app._name_list_pending_notice("agent") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
+    """The other half of the reported breakage, through the real surface.
+
+    ``is_loading()`` gates Tab/Enter, so a stranded reserve does not merely
+    withhold rows — it eats the keys that would dismiss the list or submit the
+    line. That is what makes an empty list read as "the command is broken".
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = None
+        app._stopped_session_id = "sess-abc123"
+
+        editor = app._editor()
+        editor.focus()
+        await pilot.pause()
+        for ch in "/team ":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.pause()
+
+        # No latch, so accept keys reach their ordinary handlers.
+        assert editor.picker.is_loading() is False
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == "", "Enter was swallowed by a stranded loading reserve"
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_arriving_roster_still_reserves_its_row() -> None:
+    """The reserve must survive for the window it was written for (D1).
+
+    Both real windows: the boot worker still constructing, and a transition the
+    user just asked for. Removing the placeholder from these would bring back
+    the one-row dock jump the reserve exists to prevent.
+    """
+    release = asyncio.Event()
+
+    async def delayed_factory() -> FakeSession:
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Boot worker still running: no session, and no terminal state set.
+        assert app._session is None
+        assert app._boot_failed is False
+        assert app._setup_state is False
+        assert app._stopped_session_id == ""
+        assert app._name_list_pending_notice("team") == "loading teams…"
+        assert app._name_list_pending_notice("agent") == "loading agent roster…"
+
+        # A transition promises rows even from a terminal state.
+        app._stopped_session_id = "sess-abc123"
+        app._session_transition_pending = True
+        assert app._name_list_pending_notice("team") == "loading teams…"
+
+        app._session_transition_pending = False
+        app._stopped_session_id = ""
+        release.set()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_team_launch_refuses_instead_of_sending_without_the_briefs(tmp_path) -> None:
+    """A session that cannot attach a team must not run the request anyway.
+
+    The guard was ``if callable(attach):`` with NO else, so a session whose
+    implementation has no ``attach_team`` fell through to the prompt: the
+    receipt said "<manager> is coordinating" while the turn ran with no roster
+    and no briefs. A confidently wrong persona is worse than a refusal, because
+    nothing on screen distinguishes the two.
+
+    Reachable on the viewer (`RemoteSession`), which lists teams from local
+    config but has no seam to stamp an attachment onto the runtime that builds
+    the turn.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="alpha", description="d", manager="manager"))
+
+    # Exactly the viewer's shape: the LISTING resolves, the ATTACH does not.
+    # A subclass rather than `del type(session).attach_team`, which would strip
+    # the method from the SHARED FakeSession class for every later test.
+    class NoAttachSession(FakeSession):
+        attach_team = None  # type: ignore[assignment]
+
+    session = NoAttachSession()
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is session
+        assert not callable(getattr(app._session, "attach_team", None))
+
+        app._cmd_team("alpha do the thing", app._notice, None)
+        await pilot.pause()
+
+        # The request was NOT sent: no briefs, no turn.
+        assert session.prompts == [], "the request ran without the team briefs"
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        assert "teams cannot be attached in this session" in rendered, rendered
+        # The old wording would now be a lie: `/team` lists them one line up.
+        assert "teams are unavailable" not in rendered, rendered

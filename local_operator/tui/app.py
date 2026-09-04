@@ -6355,40 +6355,51 @@ class OperatorApp(App[None]):
         filled frames geometrically identical: the placeholder is REPLACED
         in place by the first real row, so nothing moves.
 
-        Scoped to the windows where the roster is genuinely still ARRIVING, on
-        purpose (the reviewer's constraint, not a guess):
+        The reserve is owed to exactly ONE question — *is a roster still
+        arriving?* — so the gate asks that question rather than enumerating the
+        states that happen to answer it. Enumerating is what made this wrong
+        twice: the old gate reserved a row for ``self._session is None`` and
+        then subtracted the single terminal state it knew about, so every LATER
+        way to sit without a session silently inherited an eternal "loading…".
 
-        * ``_session_transition_pending`` — a resume/attach the user just asked
-          for. Set by ``_run_session_transition`` and cleared on BOTH success
-          and refusal, so the placeholder cannot outlive the transition.
-        * ``self._session is None`` — no session has been adopted yet. That is
-          the original reported boot race: ``/team lop`` typed while the boot
-          worker was still constructing. The transition flag is False during
-          initial boot, so without this explicit readiness check the race this
-          PR fixes would reserve nothing. This is deliberately NOT keyed to the
-          welcome/boot LAYOUT: an adopted but empty session keeps the welcome
-          visible, while its empty roster is already authoritative and must not
-          leave an eternal placeholder hole.
+        Three cases, in the order they are asked:
 
-        An ADOPTED session past both windows with an empty roster is a real
-        answer ("no teams yet"), and holding a blank hole there forever would
-        read as a stuck list, so it gets no row. No timer drives any of this:
-        the editor re-syncs the picker on every keystroke and the app refills
-        at adoption, so the placeholder retires the moment a window closes.
+        * ``_session_transition_pending`` — a resume/attach/new the user just
+          asked for. Set by ``_run_session_transition`` and cleared on BOTH
+          success and refusal, so the placeholder cannot outlive the
+          transition. Asked FIRST because it promises rows regardless of what
+          the app's state was before it.
+        * an ADOPTED session — its roster is authoritative, empty or not. "No
+          teams yet" is a real answer and must not be dressed up as a wait.
+        * no session and no transition — a roster is genuinely arriving only
+          while the BOOT WORKER is still constructing one. Every other
+          sessionless state is TERMINAL: nothing further arrives until the user
+          acts, and that act is itself a transition, which the first branch
+          already covers.
 
-        A FAILED boot closes the window too (U7-1). ``self._session is None`` is
-        permanently true after ``_on_boot_failed``, so the reserve promised
-        "loading teams…" forever and — because ``is_loading()`` gates Tab/Enter
-        — swallowed every Enter with no feedback, where the same key on an
-        unfixed app at least answered "session is still starting…". A boot
-        failure is as AUTHORITATIVE as an empty roster: nothing is arriving any
-        more, so no row is reserved and Enter reaches the ordinary submit path
-        that reports the session state.
+        The terminal states are named rather than inferred because there is no
+        "boot worker is running" flag to read: ``_boot_failed``
+        (``_on_boot_failed``), ``_setup_state`` (``_enter_setup_state``, which
+        returns BEFORE setting ``_boot_failed`` and so is not covered by it),
+        and ``_stopped_session_id`` (``_stop_local_session``, which detaches the
+        session deliberately). A future way to sit sessionless must be added
+        here; the regression tests pin each one.
+
+        Why an eternal reserve is worse than a blank row: ``is_loading()`` GATES
+        Tab/Enter, so a stuck reserve does not merely withhold the rows the app
+        already has — it also swallows the keys that would dismiss the list or
+        submit the line, with no feedback (U7-1). That is what makes a stranded
+        placeholder read as "this command is broken" rather than "this list is
+        empty".
         """
-        if self._boot_failed and not self._session_transition_pending:
-            return ""
-        if not self._session_transition_pending and self._session is not None:
-            return ""
+        if not self._session_transition_pending:
+            if self._session is not None:
+                # Adopted: its roster is authoritative, empty or not.
+                return ""
+            # Terminal sessionless states: nothing is arriving, so answer with
+            # the real rows (or an honest empty list) rather than a reserve.
+            if self._boot_failed or self._setup_state or self._stopped_session_id:
+                return ""
         # Same voice as every other picker notice (the `/effort` and `/logout`
         # rows): lowercase, no period, says why the list is empty. The registry
         # is named in the text because `/team` and `/agent` share this row and
@@ -6726,12 +6737,36 @@ class OperatorApp(App[None]):
             )
             return
         attach = getattr(session, "attach_team", None)
-        if callable(attach):
-            try:
-                attach(team)
-            except Exception as exc:
-                self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
-                return
+        if not callable(attach):
+            # REFUSE rather than half-execute. This branch used to fall through
+            # to `_submit_command_prompt` below, so a session whose
+            # implementation cannot attach a team still sent the request — and
+            # the receipt said "<manager> is coordinating" while the turn ran
+            # with no roster, no collaboration brief and no project brief. A
+            # wrong persona answering confidently is worse than a refusal,
+            # because nothing on screen tells the user which one they got.
+            #
+            # Reachable on a viewer (`RemoteSession`), which serves the teams
+            # LISTING from local config but has no seam to stamp an attachment
+            # onto the runtime that will build the turn. The wording says
+            # exactly that: the teams are fine, attaching them here is what is
+            # not available — "teams are unavailable" would now be a lie, since
+            # `/team` lists them one line earlier.
+            #
+            # Mirrors the `/agent` guard's shape and voice deliberately: the
+            # asymmetry between the two (that one returned and this one did
+            # not) is what let the silent path ship.
+            self._system_notice(
+                "teams cannot be attached in this session yet. "
+                "Send a message first, then run /team again.",
+                "warning",
+            )
+            return
+        try:
+            attach(team)
+        except Exception as exc:
+            self._system_notice(f"could not attach team {name!r}: {exc}", "warning")
+            return
         # U2: the band names the roster now managed by this session. Synced from
         # the session after the attach, so the segment matches what was actually
         # stamped rather than the name the user typed.
@@ -6994,8 +7029,19 @@ class OperatorApp(App[None]):
         # falls through to normal resolution, which reports the unknown name.
         if name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
-            if callable(detach):
-                detach()
+            if not callable(detach):
+                # Same silent-skip shape as the team attach above, and the same
+                # refusal: without this the notice below reported the persona
+                # detached ("this session uses its base instructions") on a
+                # session that never cleared anything, so a user trying to shed
+                # a role kept talking to it while being told they had not.
+                self._system_notice(
+                    "agents cannot be detached in this session yet. "
+                    "Send a message first, then run /agent clear again.",
+                    "warning",
+                )
+                return
+            detach()
             # U2: the band's active-agent segment disappears on detach. Synced
             # from the session (the source of truth `clear_agent_profile` just
             # blanked), not by pushing "" directly, so the band and session can

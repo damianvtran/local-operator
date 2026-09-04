@@ -263,6 +263,69 @@ class RemoteSession:
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
+        # Teams and agent profiles are LOCAL CONFIG, not runtime state: they
+        # live in `<config_dir>/teams` and `<config_dir>/agents`, the same
+        # files `lop team`/`lop agents` read with no session at all. So a
+        # viewer answers them from its OWN config dir rather than asking a
+        # runtime — which is what makes `/team` and `/agent` work on a COLD
+        # session, where there is no runtime to ask and never will be until
+        # the first message engages one.
+        #
+        # This is the invariant that regressed in the viewer transition: the
+        # TUI reads both registries off the SESSION object
+        # (`_team_registry()`, `_agent_profile_rows()`), and `Session`
+        # supplied them while `RemoteSession` did not, so every `/team` and
+        # `/agent` surface silently answered "unavailable" once `lop` stopped
+        # building a `Session`. Anything the TUI reads off the session has to
+        # exist on BOTH implementations or it fails only on the viewer path.
+        #
+        # Built lazily and cached: constructing a registry walks the config
+        # tree (and `TeamRegistry.__init__` runs crash recovery), which a
+        # session that never types `/team` must not pay at boot.
+        self._team_registry_cache: Any | None = None
+        self._agent_registry_cache: Any | None = None
+
+    @property
+    def team_registry(self) -> Any | None:
+        """The teams on this machine, read from the viewer's own config dir.
+
+        Mirrors the attribute ``Session`` carries so the TUI's
+        ``_team_registry()`` — a plain ``getattr(session, "team_registry")`` —
+        resolves identically whichever session implementation it holds.
+
+        Failure degrades ONE feature rather than the session, the same
+        discipline ``session_factory`` applies to its own construction: a
+        stranded backup or an unreadable ``teams`` directory leaves ``/team``
+        reporting "teams are unavailable" instead of taking the conversation
+        down with it. The registry itself still refuses to answer with a
+        half-truth (see ``TeamRegistry._raise_if_recovery_failed``).
+        """
+        if self._team_registry_cache is None:
+            from local_operator.teams import TeamRegistry
+
+            try:
+                self._team_registry_cache = TeamRegistry(self._config_dir)
+            except Exception:  # noqa: BLE001 — one feature must not break the session
+                return None
+        return self._team_registry_cache
+
+    @property
+    def agent_registry(self) -> Any | None:
+        """The agent profiles on this machine, from the viewer's own config dir.
+
+        The sibling of :attr:`team_registry`, and broken by the same
+        mechanism: ``/agent``'s listing and launch both read this off the
+        session (``_agent_profile_rows``, ``_cmd_agent``). Same lazy
+        construction and same degrade-one-feature guard.
+        """
+        if self._agent_registry_cache is None:
+            from local_operator.agents import AgentRegistry
+
+            try:
+                self._agent_registry_cache = AgentRegistry(self._config_dir)
+            except Exception:  # noqa: BLE001 — one feature must not break the session
+                return None
+        return self._agent_registry_cache
 
     @classmethod
     async def connect(
