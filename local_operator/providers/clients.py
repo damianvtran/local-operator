@@ -3340,11 +3340,22 @@ class GoogleClient:
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
+            started = False
             async for data in _iter_sse_lines(response):
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if not started:
+                    # Gemini's streaming surface exposes no stable per-response
+                    # id, so the boundary carries ``None``. It is still emitted:
+                    # a supervisor needs to know the provider began generating,
+                    # and a MISSING boundary is worse than an id-less one — it
+                    # cannot be distinguished from "the request never went out",
+                    # so a consumer waits forever instead of failing closed on an
+                    # indeterminate acceptance (which is the documented contract).
+                    started = True
+                    yield StreamStartEvent(response_id=None)
                 for candidate in chunk.get("candidates") or []:
                     for part in (candidate.get("content") or {}).get("parts") or []:
                         text = part.get("text")
@@ -3445,6 +3456,10 @@ class MockClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        # Mirror the real clients: the boundary leads every stream, including
+        # the refusal path, so anything exercised against the mock sees the
+        # same event shape a provider produces.
+        yield StreamStartEvent(response_id="mock-response-id")
         if any("[refuse]" in message.text for message in request.messages):
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))
             yield StreamEndEvent(
