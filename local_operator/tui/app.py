@@ -4958,6 +4958,12 @@ class OperatorApp(App[None]):
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
+            # An engage still in flight belongs to the session being left.
+            # Cancel it before the dispose so it cannot land afterwards: the
+            # facade also refuses to bind once disposed (`_ensure_bound`),
+            # but a cancelled worker is the cheaper of the two and it also
+            # clears the band's "starting…" through the worker's `finally`.
+            self._cancel_runtime_engage()
             if not keep_context:
                 # `/resume` and `/new` LEAVE this conversation, so a runtime
                 # engaged at mount and never used goes back now rather than
@@ -5936,7 +5942,8 @@ class OperatorApp(App[None]):
             # `/resume` onto a LIVE session, which reaches here instead of
             # `_reload_session`. Same abandonment, same offer: the runtime this
             # viewer engaged at mount and never used goes back before the
-            # socket closes.
+            # socket closes — and the same cancel first, for the same reason.
+            self._cancel_runtime_engage()
             await self._retire_unused_runtime(self._session)
             try:
                 await self._session.dispose()
@@ -8502,6 +8509,26 @@ class OperatorApp(App[None]):
         """
         self._start_runtime_engage(reason="mount")
 
+    def _runtime_can_start(self) -> bool:
+        """Whether the viewer's session names a provider AND a model.
+
+        Read off the viewer's own canonical state, which for a cold viewer is
+        synthesised from config at construction (``_synthesise_cold_state``)
+        and for an attached one is the runtime's truth — so this is one
+        question with one answer on both. Reduced facades in tests carry no
+        ``frontend_state``; they are treated as startable, which is what the
+        pre-existing tests expect and costs nothing because their engage is
+        stubbed.
+        """
+        session = self._session
+        state = getattr(session, "frontend_state", None)
+        if state is None:
+            return True
+        model = getattr(state, "effective_model", None) or getattr(state, "selected_model", None)
+        if model is None:
+            return False
+        return bool(getattr(model, "provider", "")) and bool(getattr(model, "model_id", ""))
+
     def _warm_runtime_for_draft(self) -> None:
         """Engage a runtime for a cold viewer, at most once per binding.
 
@@ -8520,6 +8547,19 @@ class OperatorApp(App[None]):
         session = self._session
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
+            return
+        if not self._runtime_can_start():
+            # First run, or `hosting`/`model_name` cleared: there is nothing to
+            # spawn against. The cold viewer opens on an empty config on
+            # purpose (it is the screen that tells the user to `/login`), but
+            # a runtime spawned against it exits with rc=2, and the engage
+            # loop respawned three of those and then sat on "starting…" for
+            # its 30 s deadline on the onboarding screen (review round 1,
+            # MAJOR-2). Gated HERE, on both triggers, because a keystroke on
+            # that screen costs exactly the same three spawns. `/login` and
+            # `/model` rebuild the session, which adopts and engages again
+            # with a real provider in place.
+            logger.debug("%s engage skipped: no provider/model configured", reason)
             return
         self._warm_engage_started = True
         self._set_starting(True)
@@ -8540,6 +8580,22 @@ class OperatorApp(App[None]):
                 self._set_starting(False)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _cancel_runtime_engage(self) -> None:
+        """Stop an engage that is still in flight for the session being left.
+
+        The mount engage runs in a worker that outlives nothing on its own: a
+        `/resume` or `/new` typed inside the first second of a fresh `lop`
+        (the engage takes ~0.5–2 s with a dozen MCP servers) used to let it
+        finish AFTER the swap had disposed its viewer, attaching a socket to a
+        dead facade that then held the old runtime resident for the life of
+        the process (review round 1, MAJOR-1). Cancelling at the swap closes
+        that from this side; `RemoteSession._ensure_bound` refusing to bind a
+        disposed facade closes it from the other, for callers that are not
+        this app.
+        """
+        self.workers.cancel_group(self, "warm-engage")
+        self._set_starting(False)
 
     async def _retire_unused_runtime(self, session: Any) -> None:
         """Hand back a runtime this viewer started but never used.
@@ -8568,7 +8624,7 @@ class OperatorApp(App[None]):
         if not callable(retire):
             return
         try:
-            detail = await retire()
+            detail = await cast(Callable[[], Awaitable[str]], retire)()
             logger.debug("unused runtime offer: %s", detail)
         except Exception:  # noqa: BLE001 — teardown must not fail over this
             logger.debug("could not offer the unused runtime back", exc_info=True)
@@ -8576,9 +8632,10 @@ class OperatorApp(App[None]):
     def _set_starting(self, starting: bool) -> None:
         """Show or clear the band's "starting…" state.
 
-        The one visible consequence of the viewer model at rest: between the
-        first keystroke and the runtime being ready there is a real interval,
-        and a band that said nothing would read as a dropped keystroke.
+        The one visible consequence of the viewer model: between adopting a
+        session and its runtime being ready there is a real interval (the
+        engage runs at mount, and again on the first keystroke after a failed
+        one), and a band that said nothing would read as half-loaded.
         """
         if self._starting_runtime == starting:
             return

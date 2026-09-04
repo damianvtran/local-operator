@@ -434,7 +434,12 @@ class OwnedSessionHandle(SessionHandle):
         Wakes are checked because a scheduled wake is the one piece of session
         state that is durable, invisible in the transcript, and worth more than
         the process holding it — retiring a runtime whose scheduler is armed
-        would silently drop the schedule the user asked for.
+        would silently drop the schedule the user asked for. Both the live
+        scheduler AND the on-disk wake index are consulted: the scheduler is
+        the truth while it is armed, but it reports "no wakes" once disposed or
+        absent on a reduced host, and the index row is what a cold resume
+        re-arms from — so an index row alone is enough to say "not pristine"
+        (review round 1, MINOR-4).
         """
         if self.is_busy():
             return False
@@ -461,6 +466,16 @@ class OwnedSessionHandle(SessionHandle):
                 return False
         except Exception:  # noqa: BLE001
             logger.debug("pristine probe: wake scheduler unreadable", exc_info=True)
+            return False
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.wakes.store import read_entry
+
+            entry = read_entry(config_dir(), str(getattr(session, "session_id", "") or ""))
+            if entry and (entry.get("schedules") or []):
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: wake index unreadable", exc_info=True)
             return False
         try:
             if session.history():

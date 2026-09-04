@@ -24,7 +24,7 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -821,10 +821,10 @@ class RemoteSession:
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
         """
-        if not self._can_go_cold or not self.is_cold:
+        if not self._can_go_cold or not self.is_cold or self._disposed:
             return
         async with self._bind_lock:
-            if not self.is_cold:
+            if not self.is_cold or self._disposed:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -835,11 +835,24 @@ class RemoteSession:
                 WarmErrand(),
                 config_dir=self._config_dir,
             )
+            # Re-checked AFTER the engage, which is the long await here (a
+            # spawn plus up to ~2 s of construction). The TUI engages at mount
+            # now, so `/resume` or `/new` typed in that first second disposes
+            # this facade while the engage is in flight; binding anyway would
+            # attach a live `attach` socket to a dead viewer — one nobody
+            # closes, which holds the old runtime resident (residency term 3)
+            # and never offers it back (review round 1, MAJOR-1). The runtime
+            # that was spawned is left to the drain: with no viewer attached
+            # and nothing written it exits in ~3 s and removes its directory.
+            if self._disposed:
+                return
             record, _owner = await asyncio.to_thread(
                 find_owner_record, self._config_dir, self._session_id
             )
             if record is None:
                 raise ConnectionError("could not start a runtime for this session")
+            if self._disposed:
+                return
             await self._bind_to(record)
 
     async def _bind_to(self, record: SessionRecord) -> None:
@@ -891,6 +904,13 @@ class RemoteSession:
             on_frontend_update=self._on_frontend_update,
         )
         await client.connect(record, self._session_id)
+        if self._disposed:
+            # The facade was disposed while the socket was connecting. Holding
+            # the client would leave an `attach` connection nobody owns on the
+            # runtime, which pins it resident. Close it here, where the socket
+            # was opened; `dispose` has already run and will not run again.
+            client.close()
+            raise ConnectionError("viewer disposed while attaching")
         self._client = client
 
     async def _await_frontend(self) -> FrontendSync:
@@ -2162,7 +2182,7 @@ class RemoteSession:
         if not callable(ask):
             return "client cannot ask for retirement"
         try:
-            return await ask()
+            return str(await cast(Callable[[], Awaitable[str]], ask)())
         except Exception as exc:  # noqa: BLE001 — the drain is the fallback
             logger.debug("retire-if-pristine request failed", exc_info=True)
             return f"request failed: {exc}"

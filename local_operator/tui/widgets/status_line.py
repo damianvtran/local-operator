@@ -1048,10 +1048,12 @@ class StatusLine:
     def set_starting(self, starting: bool) -> None:
         """Show "starting…" while a runtime is being brought up for this viewer.
 
-        The one visible consequence of the viewer model at rest. A viewer holds
-        no runtime until it needs one, so between the first keystroke and the
-        runtime being ready there is a real interval — short, but long enough
-        that a band saying nothing reads as a dropped keystroke.
+        The one visible consequence of the viewer model. The runtime is a
+        separate process the TUI engages as soon as it adopts a session (and
+        again on the first keystroke if that engage failed), so between boot
+        and the runtime being ready there is a real interval — a second or
+        two with a full MCP roster — during which the band would otherwise
+        show only what a cold viewer can read off disk.
 
         Deliberately the SAME glyph the working indicator uses
         (:data:`_SPINNER_FRAMES`) rather than a second animation vocabulary:

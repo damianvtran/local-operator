@@ -1189,10 +1189,13 @@ class RuntimeServer:
                 # between its own "looks empty" read and the stop arriving, a
                 # wake can fire, a peer's `lop send` can open a turn, or a
                 # second terminal can attach and start typing. Asking the
-                # runtime to judge ITSELF closes that window, because the
-                # decision and the stop happen in the same step on the
-                # runtime's own event loop with no await in between for
-                # anything to change underneath.
+                # runtime to judge ITSELF shrinks that window to the runtime's
+                # own loop — and what remains of it is closed in
+                # ``_retire_if_pristine``: the ONE await between the decision
+                # and the stop is the ``stopping`` broadcast, the pristine
+                # check is repeated after it, and anything that still lands
+                # inside is aborted by the stop the same way ``stop`` and
+                # SIGTERM abort a turn (review round 1, MINOR-3).
                 #
                 # Two independent reasons to refuse, and both matter:
                 #
@@ -1312,7 +1315,31 @@ class RuntimeServer:
             return "kept: this runtime cannot stop itself gracefully"
         # The same announcement the ``stop`` op makes, for the same reason: a
         # follower must be able to tell a deliberate stop from owner death.
+        #
+        # This broadcast is the one await between the decision and the stop,
+        # and it is a real one: ``_broadcast`` drains each client's writer
+        # under its send lock (1 s cap), and the loop can run another
+        # connection's reader meanwhile — a daemon-class ``peer_message`` or
+        # ``prompt`` can open a turn in that gap. So the probe is asked AGAIN
+        # after it, from the same loop step as ``request_stop()``. A turn that
+        # starts between this re-check and the stop is aborted by the stop
+        # itself (``OwnedSessionHandle.dispose`` aborts in-flight work and
+        # flushes the transcript), which is exactly what a ``stop`` op or a
+        # SIGTERM racing a turn already does; the message is not lost, it is
+        # persisted and the sender's next engage starts a fresh runtime.
         await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
+        try:
+            if not pristine():
+                # Refusing AFTER announcing is safe: ``stopping`` only latches
+                # the disconnect REASON in an attach client (attach_client.py),
+                # and does nothing unless the socket then closes. The only
+                # attach client here is the leaving viewer (the caller counted
+                # the others and found none), and it is about to close its own
+                # socket anyway.
+                return "kept: work arrived while stopping was announced"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pristine re-check failed; keeping runtime", exc_info=True)
+            return f"kept: pristine probe failed ({exc})"
         result = request_stop()
         if inspect.isawaitable(result):
             await result
