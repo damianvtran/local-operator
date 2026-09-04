@@ -5706,15 +5706,32 @@ class OperatorApp(App[None]):
         if session is None or not bool(getattr(session, "is_remote", False)):
             return False
         # A local runtime publishes a discovery record here; a genuinely
-        # foreign one does not. Absence of proof is treated as elsewhere,
-        # because wrongly persisting is the costlier of the two mistakes.
+        # foreign one does not.
+        #
+        # NOTE on the "absence of proof" rule below, which used to return True
+        # for every unprovable case: today there is no client for which
+        # refusing is right. ``AttachClient`` dials ``127.0.0.1`` only and the
+        # runtime listener binds ``127.0.0.1`` only ("THE security invariant",
+        # ``mobile/service.py``), so an ATTACHED session's runtime is on this
+        # machine by construction, and two terminals on one machine share one
+        # ``config.yml``. The record scan is kept as the positive proof, and the
+        # genuinely unknown cases below are the conservative ones — but the
+        # no-session-id case above is NOT unknown, it is known-local.
         try:
             from local_operator.paths import config_dir
             from local_operator.session.runtime import registry
 
             session_id = getattr(session, "session_id", "") or ""
             if not session_id:
-                return True
+                # No session id yet = no runtime has been spawned yet, which is
+                # the COLD viewer: `lop` has launched, the user opens the picker
+                # and sets a default before typing anything. There is no remote
+                # runtime to be governed by the wrong config, because there is
+                # no runtime at all — the next one this terminal starts is
+                # exactly what this write is for. Treating that as "elsewhere"
+                # refused the write in the single most common moment a user sets
+                # a default (round: the operator's own report).
+                return False
             # ``registry.scan`` rather than ``find_owner_record``: the latter
             # deliberately excludes the CALLING process, which is the right
             # answer for "who else owns this" and the wrong one here — the
@@ -13926,8 +13943,19 @@ class OperatorApp(App[None]):
         editor.forget_prompt(text)
         editor.load_text(text)
 
-    def _render_authoritative_slash(self, command: str, arg: str, outcome: Any) -> None:
+    def _render_authoritative_slash(
+        self,
+        command: str,
+        arg: str,
+        outcome: Any,
+        attachments: Mapping[int, Marked] | None = None,
+    ) -> None:
         """Render a follower's routed slash outcome in THIS terminal.
+
+        ``attachments`` is the composer's image map at submit time, needed by
+        the attach receipts below: ``/team <name> <request>`` sends the request
+        as a real user turn from here, and a screenshot the request cites has
+        to reach the manager as pixels rather than a dead ``[Image #N]``.
 
         The owner ran the command and returned a :class:`SlashResult` dict
         (``kind``/``text``/``style``/``data``); the strings are the standard
@@ -13950,6 +13978,19 @@ class OperatorApp(App[None]):
         if kind == "noop":
             # The invoker hosts the interactive surface itself (bare /model's
             # picker is opened up-front); nothing arrives to print.
+            #
+            # Every ``noop`` MUST correspond to a surface this terminal opens
+            # on its own. ``team_mutate``/``agent_mutate`` did not — they were
+            # produced and never consumed, so the command vanished (see
+            # ``owned.py::_team_slash``). ``tests/unit/tui/test_noop_consumers.py``
+            # now fails CI on any ``data.type`` that reaches here with no
+            # handler, so a future producer cannot reintroduce the silence.
+            if data.get("type") == "agent_list":
+                rows = self._agent_profile_rows()
+                if not rows:
+                    self._notice("no agents yet. Ask the agent to create one.")
+                else:
+                    self._append_block(self._agent_list_block(rows))
             return
         if kind == "block":
             block_type = data.get("type")
@@ -13974,6 +14015,16 @@ class OperatorApp(App[None]):
             if style == "error":
                 notice_kind = "error"
             self._notice(text, notice_kind)
+        # The attach happened on the OWNER (that is where the roster and briefs
+        # are stamped); the request is sent from HERE so it carries this
+        # terminal's own images and paste expansion, and so the transcript row
+        # is written by the one path that writes user rows. Order matters: the
+        # receipt prints first, then the turn starts beneath it.
+        if data.get("type") in ("team_attached", "agent_attached"):
+            self._sync_team_band()
+            request = str(data.get("request") or "")
+            if request:
+                self._submit_command_prompt(request, attachments)
 
     def _team_listing_block(self, items: list[Any]) -> RichBlock:
         """Rebuild the bare ``/team`` roster block from wire rows.
@@ -14083,6 +14134,23 @@ class OperatorApp(App[None]):
         # so the bare form is pulled back to local here by inspecting args.
         if command == "/mcp" and not arg:
             remote_capability = None
+        # ``/model default`` is the same shape as bare ``/model``: it writes
+        # THIS machine's config.yml, which governs what THIS terminal launches.
+        # Routed to the owner it hit a blanket refusal there, so on a viewer —
+        # every fresh `lop` since 0.46.0 — the operator could not set a default
+        # model at all. Pulled back so the local handler runs, and that handler
+        # asks `_session_runs_elsewhere()`, which answers the question the
+        # refusal always meant: would this write reach the runtime's machine?
+        if command == "/model" and arg.strip().lower().split(" ")[0] == "default":
+            remote_capability = None
+        # ``/team chart`` is the same shape: the org chart is a VIEW this
+        # terminal paints, so charting is pulled back to the local handler
+        # while every other ``/team`` form routes to the owner that holds the
+        # session state an attach mutates. Matched case-folded and on the first
+        # token only, exactly as ``_cmd_team`` parses it, so ``/team =chart``
+        # (talk to a team named ``chart``) still routes.
+        if command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart":
+            remote_capability = None
         if (
             callable(remote_route)
             and remote_capability is not None
@@ -14109,7 +14177,7 @@ class OperatorApp(App[None]):
                 except Exception as error:
                     self._system_notice(str(error), "warning")
                 else:
-                    self._render_authoritative_slash(command, arg, outcome)
+                    self._render_authoritative_slash(command, arg, outcome, attachments)
 
             self.run_worker(run_remote_slash(), thread=False, group="session")
             return
@@ -14126,6 +14194,13 @@ class OperatorApp(App[None]):
             # (round 5, MAJOR). Only subcommand forms keep the authoritative
             # route and therefore the refusal.
             and not (command == "/mcp" and not arg)
+            # Same exemption for the ``/team chart`` pullback: charting is a
+            # local view, so its deliberate None must not be read as an owner
+            # that fails to advertise ``/team``.
+            and not (command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart")
+            # ...and for the ``/model default`` pullback, which is a local
+            # config write rather than an unadvertised command.
+            and not (command == "/model" and arg.strip().lower().split(" ")[0] == "default")
         ):
             # A command the registry classifies as shared (not follower-local)
             # that the owner's capability list does NOT advertise would fall
@@ -15157,10 +15232,17 @@ class OperatorApp(App[None]):
         row = picker.highlighted()
         if row is None:
             return
-        if bool(getattr(self._session, "is_remote", False)):
-            # Same refusal `/model default` gives a follower, and for the same
-            # reason: this writes the LOCAL machine's config, and a follower
-            # would persist a default governing a terminal nobody is sitting at.
+        if self._session_runs_elsewhere():
+            # Same refusal `/model default` gives, through the same predicate —
+            # which is the point. This guard asked `is_remote` directly while
+            # `_cmd_model` had already migrated to `_session_runs_elsewhere()`,
+            # so the two halves of one feature disagreed: since 0.46.0 EVERY
+            # session is remote, and `d` refused every local user in their own
+            # terminal while `/model default` allowed them.
+            #
+            # The question a config write actually asks is "would writing this
+            # machine's config govern the runtime?", not "is there a socket in
+            # the way" — see `_session_runs_elsewhere`.
             self._system_notice(
                 "the boot default persists to the local machine's config — run it "
                 "on the terminal whose launches it should govern",
@@ -18580,9 +18662,24 @@ class OperatorApp(App[None]):
             parse_credential_command,
         )
 
-        store = getattr(self._session, "variables", None) if self._session is not None else None
+        session = self._session
+        if session is None:
+            # Genuinely pending (or a definitive boot failure): the shared
+            # helper tells those two apart, which "still starting…" alone
+            # cannot.
+            self._system_notice(*self._no_session_notice())
+            return
+        store = getattr(session, "variables", None)
         if store is None or not hasattr(store, "store_credential"):
-            self._system_notice("session is still starting…", "warning")
+            # NOT "still starting". A viewer has no local store and never will
+            # — the value belongs on the owner, where the agent's bash commands
+            # read it — so the work is routed there instead of refused. Only a
+            # session that can do NEITHER lands past this point.
+            route = getattr(session, "credential_op", None)
+            if callable(route):
+                self.run_worker(self._credential_remote_flow(arg), thread=False, group="credential")
+                return
+            self._system_notice("this session cannot hold credentials", "warning")
             return
         parsed = parse_credential_command(arg)
         if parsed.action == "error":
@@ -18609,6 +18706,110 @@ class OperatorApp(App[None]):
             return
         self.run_worker(
             self._credential_store_flow(store, parsed.key), thread=False, group="credential"
+        )
+
+    async def _credential_remote_flow(self, arg: str) -> None:
+        """``/credential`` on a viewer: paste HERE, store on the OWNER.
+
+        Deliberately reuses ``parse_credential_command`` and the same
+        ``format_credential_*`` helpers the local path uses, so the two
+        implementations cannot drift into answering the same command
+        differently — the split is only about WHERE the store lives.
+
+        The masked paste stays local because the user is sitting at this
+        terminal; only the resulting value crosses, over the dedicated
+        ``credential`` op.
+        """
+        from local_operator.variables import (
+            SessionCredential,
+            describe_store_failure,
+            format_credential_forget,
+            format_credential_forget_all,
+            format_credential_list,
+            parse_credential_command,
+        )
+
+        route = cast(
+            "Callable[..., Awaitable[Mapping[str, Any]]] | None",
+            getattr(self._session, "credential_op", None),
+        )
+        if route is None or not callable(route):
+            self._system_notice("this session cannot hold credentials", "warning")
+            return
+        parsed = parse_credential_command(arg)
+        if parsed.action == "error":
+            self._system_notice(parsed.message, "warning")
+            return
+
+        def _refused(answer: Mapping[str, Any]) -> bool:
+            if answer.get("ok"):
+                return False
+            reason = str(answer.get("reason") or "")
+            self._system_notice(
+                (
+                    "the session that holds this conversation is not reachable; "
+                    "credentials are stored there"
+                    if reason == "disconnected"
+                    else "this session cannot hold credentials"
+                ),
+                "warning",
+            )
+            return True
+
+        if parsed.action == "list":
+            answer = await route("list")
+            if _refused(answer):
+                return
+            self._notice(
+                format_credential_list(
+                    [
+                        # The wire carries a plain string; the model's field is
+                        # a Literal. Anything unrecognised is reported as the
+                        # command source rather than dropped, since the row
+                        # exists either way and the SOURCE is a detail.
+                        SessionCredential(
+                            key=str(row.get("key", "")),
+                            source=("ask" if str(row.get("source", "")) == "ask" else "command"),
+                        )
+                        for row in answer.get("credentials") or []
+                    ]
+                )
+            )
+            return
+        if parsed.action == "forget":
+            answer = await route("forget", parsed.key)
+            if _refused(answer):
+                return
+            self._notice(format_credential_forget(bool(answer.get("removed")), parsed.key))
+            return
+        if parsed.action == "forget-all":
+            answer = await route("forget-all")
+            if _refused(answer):
+                return
+            self._notice(format_credential_forget_all(int(answer.get("count") or 0)))
+            return
+        value = await self._request_login_key(parsed.key, secret=True, sole_path=True)
+        if value is None:
+            self._notice(f"Cancelled; {parsed.key} not stored.")
+            return
+        answer = await route("store", parsed.key, value)
+        if not answer.get("ok"):
+            reason = str(answer.get("reason") or "")
+            if reason in ("disconnected", "unavailable"):
+                _refused(answer)
+                return
+            self._notice(
+                describe_store_failure(
+                    "empty-key" if reason == "empty-key" else "empty-value", parsed.key
+                ),
+                "warning",
+            )
+            return
+        stored_key = str(answer.get("key") or parsed.key)
+        verb = "Replaced" if answer.get("replaced") else "Stored"
+        self._notice(
+            f"{verb} {stored_key}. Injected into every bash command "
+            "as an environment variable; the agent cannot read the value."
         )
 
     async def _credential_store_flow(self, store: object, key: str) -> None:
@@ -19794,7 +19995,13 @@ class OperatorApp(App[None]):
                 for team in teams
             ]
             return SlashResult(kind="block", data={"type": "team_list", "items": items})
-        return SlashResult(kind="noop", data={"type": "team_mutate", "args": arg})
+        # The attach runs HERE, on the authoritative session, for the same
+        # reason ``owned.py::_team_slash`` does it: stamping the roster and the
+        # briefs mutates session state the follower does not have. This used to
+        # return an unconsumed ``noop {"type": "team_mutate"}``, so a follower
+        # attached to a TUI-hosted session got the same silence a viewer got
+        # from the detached runtime.
+        return self._team_attach_slash_result(arg, registry, SlashResult)
 
     def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
         if not arg:
@@ -19806,7 +20013,112 @@ class OperatorApp(App[None]):
                     style="info",
                 )
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
-        return SlashResult(kind="noop", data={"type": "agent_mutate", "args": arg})
+        return self._agent_attach_slash_result(arg, SlashResult)
+
+    def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
+        """``/team <name> [<request>]`` for a follower of THIS TUI's session.
+
+        The mirror of ``owned.py::_team_attach_slash``; the two exist because
+        a session can be hosted either by a detached runtime or by this app,
+        and a follower must get the same answer from both.
+
+        The registry is PASSED IN rather than re-read, the same way
+        ``_cmd_team_chart`` takes it: the caller has already proved it answers
+        ``list_teams``, and re-reading it here would be a second lookup that
+        could disagree with the one the guard checked.
+        """
+        session = self._session
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        if name.startswith("="):
+            name = name[1:]
+        request = request.strip()
+        try:
+            team = registry.get_team_by_name(name)
+        except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
+            return SlashResult(
+                kind="notice", text=f"could not load team {name!r}: {exc}", style="warning"
+            )
+        if team is None:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"no team named {name!r}. Run /team to list teams, "
+                    "or ask the agent to create one."
+                ),
+                style="warning",
+            )
+        attach = getattr(session, "attach_team", None)
+        if not callable(attach):
+            return SlashResult(
+                kind="notice",
+                text="this session cannot run a team. /team chart <name> shows a roster",
+                style="warning",
+            )
+        try:
+            attach(team)
+        except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
+            return SlashResult(
+                kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
+            )
+        self._sync_team_band()
+        return SlashResult(
+            kind="notice",
+            text=(
+                f"team {team.name} is ready. {team.manager} leads it. "
+                f"Send a request with /team {team.name} <message>."
+                if not request
+                else f"sending to {team.name}. {team.manager} is coordinating."
+            ),
+            style="info",
+            data={
+                "type": "team_attached",
+                "team": team.name,
+                "manager": team.manager,
+                "request": request,
+            },
+        )
+
+    def _agent_attach_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """``/agent <name> [<message>]`` for a follower of THIS TUI's session."""
+        session = self._session
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        request = request.strip()
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "clear_agent_profile", None)
+            if not callable(detach):
+                return SlashResult(kind="notice", text="nothing to detach", style="info")
+            detach()
+            return SlashResult(
+                kind="notice",
+                text="this session uses its base instructions",
+                style="info",
+                data={"type": "agent_attached", "agent": "", "request": ""},
+            )
+        attach = getattr(session, "attach_agent_profile", None)
+        if not callable(attach):
+            return SlashResult(
+                kind="notice", text="this session cannot adopt an agent profile", style="warning"
+            )
+        try:
+            resolved = attach(name)
+        except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
+            return SlashResult(
+                kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"
+            )
+        if not resolved:
+            return SlashResult(
+                kind="notice",
+                text=f"no agent named {name!r}. Run /agent to list agents.",
+                style="warning",
+            )
+        return SlashResult(
+            kind="notice",
+            text=f"{resolved} is answering in this session.",
+            style="info",
+            data={"type": "agent_attached", "agent": resolved, "request": request},
+        )
 
     def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """The routed, non-bare ``/model``: a REAL switch on the owner session.
