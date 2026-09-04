@@ -45,6 +45,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
     Transcript,
     TranscriptEntry,
     TranscriptPage,
@@ -4312,22 +4313,36 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         succeeded = 0
         real_read = subagent_view.read_transcript_page
 
+        # The failure is aimed at the PROBE, identified by the only thing that
+        # distinguishes it: it is the read that happens once the transcript
+        # exists. Two weaker keys were tried and both are scheduling-dependent
+        # -- "the first read" and a plain one-shot latch each let an in-flight
+        # read left over from the open above spend the failure on a call this
+        # test is not about, after which the probe SUCCEEDED and the footer read
+        # `start of transcript` where the unchanged note belonged. That is the
+        # shape CI failed on twice.
+        #
+        # Keying on the file makes the injection indifferent to how many reads
+        # the loop happens to settle, while still being the real production
+        # shape: a network home directory hiccuping once, on the read that
+        # matters.
+        armed = True
+
         def flaky(*args, **kwargs):
-            nonlocal reads, failed, succeeded
+            nonlocal reads, failed, succeeded, armed
             reads += 1
-            # Transient, and on the FIRST probe only — a network home
-            # directory hiccuping once is the reachable production shape.
-            #
-            # Counted by OUTCOME rather than by total, because the total is a
-            # scheduling detail: a loaded shard can settle an extra refresh
-            # before an assertion is reached. "One probe failed" and "a later
-            # read succeeded" are the two facts this test is actually about,
-            # and both are stable under load.
-            if reads == 1:
+            if armed and (child_dir / TRANSCRIPT_FILENAME).exists():
+                armed = False
                 failed += 1
                 raise OSError("transient NFS hiccup")
-            succeeded += 1
-            return real_read(*args, **kwargs)
+            # Counted by OUTCOME rather than by total: the total is a
+            # scheduling detail, while "the probe failed" and "a later read
+            # succeeded" are the two facts this test is about, and both are
+            # stable under load.
+            result = real_read(*args, **kwargs)
+            if failed:
+                succeeded += 1
+            return result
 
         monkeypatch.setattr(subagent_view, "read_transcript_page", flaky)
 
@@ -4341,27 +4356,37 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         # `reads` at 0 — which is exactly how this went red on a loaded CI
         # shard. Bounded by loop turns, so contention stretches how long a turn
         # takes rather than how many the probe needs.
+        # Sample the footer on EVERY settle, and assert over the whole
+        # observed sequence rather than at one chosen instant.
+        #
+        # The window between the failed probe and the re-look that heals it is
+        # not reliably observable: both can complete inside a single settle
+        # under load, so "read the footer once the probe has failed" sometimes
+        # legitimately reads the HEALED footer and the test failed for
+        # observing the fix working. The durable property does not depend on
+        # catching that instant -- across the entire recovery the reader must
+        # never be shown `load failed`, because they never asked for the read
+        # that failed. That is what R2 is about, and it is true at every
+        # sample regardless of how the turns fall.
+        notes_during_recovery = [view._history_state_text()]
+        error_during_recovery = view._history_error
         for _ in range(200):
             await _wait_history(pilot, view)
+            notes_during_recovery.append(view._history_state_text())
+            error_during_recovery = error_during_recovery or view._history_error
             if failed:
                 break
         else:
             raise AssertionError("the probe never ran")
-
-        # `>= 1`, not `== 1`: the probe having run and failed is the
-        # precondition this test needs, and pinning the exact COUNT pins a
-        # scheduling detail instead. A loaded shard can settle two refreshes
-        # (the explicit one and the spinner's) before the assertion is
-        # reached, which is not a defect in anything this test is about --
-        # the count itself is owned by
-        # `test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh`,
-        # where a ceiling is the actual subject.
         assert failed == 1, "the probe must actually have run and failed"
-        # The failed peek concluded nothing, so the previous conclusion stands
-        # rather than being replaced by an error the reader never provoked.
-        assert HISTORY_ERROR_NOTE not in view._history_state_text()
-        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
-        assert not view._history_error
+        # The failed peek concluded nothing, so no sample anywhere in the
+        # recovery shows the reader an error they never provoked, and the
+        # error latch -- the gate that would end the self-healing -- is never
+        # taken by a read nobody asked for.
+        assert not any(
+            HISTORY_ERROR_NOTE in note for note in notes_during_recovery
+        ), notes_during_recovery
+        assert not error_during_recovery
 
         # The point of the fix: the page is STILL looking. No Home, no keypress.
         app._refresh_subagent_view(view.job_id)
