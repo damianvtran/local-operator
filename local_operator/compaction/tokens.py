@@ -650,7 +650,9 @@ _JSON_SHORT_ESCAPES = '"\\\n\t\r\b\f'
 #: six-byte ``\\uXXXX`` — five bytes more than the source character. Rare in
 #: real arguments, which is why they are counted only when the cheap
 #: whole-string check below says at least one is present.
-_JSON_LONG_ESCAPES = tuple(chr(code) for code in range(0x20) if chr(code) not in _JSON_SHORT_ESCAPES)
+_JSON_LONG_ESCAPES = tuple(
+    chr(code) for code in range(0x20) if chr(code) not in _JSON_SHORT_ESCAPES
+)
 
 #: Every character that expands at all, as one string, for a single membership
 #: sweep before any per-character counting happens.

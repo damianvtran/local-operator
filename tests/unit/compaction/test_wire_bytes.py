@@ -331,9 +331,7 @@ def test_wire_recovery_band_is_inert_when_the_byte_trigger_is_off() -> None:
 
 def _wire_json_bytes(value: object) -> int:
     """Exactly what httpx puts on the wire for ``value`` inside a JSON body."""
-    return len(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    )
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 #: Payload shapes chosen so each one breaks a DIFFERENT wrong assumption:
@@ -427,8 +425,6 @@ def test_a_cjk_history_is_not_waved_under_the_budget() -> None:
     the wire at 36,007,390 — under the 24 MB budget by the guard's reckoning
     and over Anthropic's 32 MB cap in reality.
     """
-    from local_operator.compaction.tokens import _argument_bytes
-
     messages: list[Message] = []
     for index in range(300):
         message = Message.assistant("")
@@ -445,9 +441,9 @@ def test_a_cjk_history_is_not_waved_under_the_budget() -> None:
     )
 
     assert seam >= actual, "the seam under-counted a CJK history"
-    assert not (seam <= DEFAULT_WIRE_BYTES_BUDGET < actual), (
-        "the guard believes an over-cap payload fits"
-    )
+    assert not (
+        seam <= DEFAULT_WIRE_BYTES_BUDGET < actual
+    ), "the guard believes an over-cap payload fits"
 
 
 def test_raw_arguments_are_still_preferred_when_present() -> None:
