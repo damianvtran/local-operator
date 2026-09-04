@@ -989,9 +989,10 @@ def _rebound_history_images(messages: list[Message]) -> list[Message]:
 #: assumes the session is blind will re-send screenshots that are already
 #: visible.
 FRAMES_SHED_NOTICE = (
-    "This conversation grew past the provider's request size limit, so the oldest "
-    "screenshots were dropped from the model's context to keep it working. Recent "
-    "screenshots are unaffected, and nothing was removed from the saved transcript."
+    "This conversation grew past the provider's request size limit, so older "
+    "screenshots were dropped from the model's context to keep it working. Nothing "
+    "was removed from the saved transcript. If the model cannot see an image you "
+    "just sent, it was large enough to be dropped too — send it again on its own."
 )
 
 
@@ -2410,9 +2411,39 @@ class Session:
            trigger fires a real compaction pass — snapcompact archives
            LOCALLY with no provider call, so it works while every request is
            still being refused.
-        3. Only when the budget has ratcheted to its floor AND there are no
-           frames left to shed is the sticky image degrade the honest answer;
-           at that point there is genuinely nothing left to give back.
+        3. When there is nothing left to buy — the budget cannot tighten any
+           further, or shedding cannot move the payload at all — the ladder
+           applies the sticky image degrade ITSELF and stops.
+
+        **THE INVARIANT, and why it is spelled out.** Every path through this
+        method must either MAKE PROGRESS (tighten the budget to a value that
+        will shed something on the next render) or REACH A TERMINAL STATE that
+        does (the sticky degrade, which drops every image at once). Returning
+        ``True`` without doing one of those is a permanent wedge — the session
+        answers every later turn with the same 413, which is the exact bug
+        this whole change exists to delete.
+
+        Round 1 review got this wrong in TWO ways at once, so a future reader
+        should treat both as traps:
+
+        - The handover was gated on ``tightened >= budget and frames_left ==
+          0``. At the floor the budget cannot move, but any surviving frame
+          short-circuits the ``and``, so this returned "handled" forever while
+          changing nothing. Measured: 15 consecutive 413s pinned at 4 MB.
+        - The terminal rung DELEGATED to ``_degrade_if_image_rejected`` by
+          returning ``False``. That method is guarded by ``is_image_rejection``,
+          which is ``False`` for a 413 **by construction** — deliberately, since
+          a size refusal is not a poisoned block and must not inherit that
+          predicate's sticky whole-session meaning. Two correct predicates that
+          cannot hand off to each other: the documented terminal rung was
+          structurally unreachable. Measured at a 2 MB cap: rendered 3,224,059
+          bytes where the degrade would have produced 8,767 and fit.
+
+        So the degrade is applied HERE, directly, rather than delegated. Do not
+        "simplify" this by returning ``False`` and letting the caller's
+        ``_degrade_if_image_rejected`` handle it, and do not fix it by teaching
+        ``is_image_rejection`` about 413 — that would give every size refusal
+        the sticky degrade this ladder exists to avoid.
 
         The failing turn is NOT retried here. ``_degrade_if_image_rejected``
         declines to for a documented reason — retrying from inside the loop's
@@ -2445,11 +2476,20 @@ class Session:
             if any(isinstance(block, ImageContent) for block in message.content)
         )
         tightened = max(int(budget * _WIRE_BUDGET_RATCHET), _WIRE_BUDGET_FLOOR)
-        if tightened >= budget and frames_left == 0:
-            # Step 3: the floor is reached and there is nothing left to shed.
-            # A request this size is not about images any more, but dropping
-            # them is the only lever left, so hand over to the sticky degrade.
-            return False
+
+        # Two INDEPENDENT ways to have nothing left to buy, and either one on
+        # its own is terminal — joining them with ``and`` is the round 1
+        # blocker. The budget being stuck does not help if frames remain, and
+        # frames remaining does not help if shedding them all still leaves the
+        # payload over: both mean the next turn would refuse identically.
+        at_floor = tightened >= budget
+        # ``frames_left`` counts what survives a shed to the CURRENT budget, so
+        # zero means the render seam has already given everything it can and a
+        # tighter budget would change nothing (the text-heavy history: the
+        # payload never moves while the budget ratchets away beneath it).
+        nothing_to_shed = frames_left == 0
+        if at_floor or nothing_to_shed:
+            return await self._degrade_images_for_size(budget, frames_left)
 
         self._wire_budget_override = min(budget, tightened)
         logger.warning(
@@ -2462,9 +2502,59 @@ class Session:
         await self._emit(
             NoticeEvent(
                 text=(
-                    "The provider refused the request as too large. Older screenshots "
+                    "The provider refused the request as too large. Some screenshots "
                     "have been dropped from the context and the size limit tightened — "
                     "send your message again."
+                ),
+                kind="warning",
+            )
+        )
+        return True
+
+    async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:
+        """The ladder's terminal rung: drop every image, for SIZE reasons.
+
+        Sets the same sticky flag ``_degrade_if_image_rejected`` does, and for
+        the same ultimate purpose — a session that cannot shrink any further
+        stops sending images rather than refusing every turn forever. It is a
+        separate method because the CAUSE differs and the user is owed the
+        real one: nothing was rejected as a bad block, the conversation simply
+        outgrew what this provider will accept.
+
+        Applied here rather than delegated to the image degrade because that
+        method's ``is_image_rejection`` guard is ``False`` for a 413 by
+        construction (see the ladder's invariant note). Setting the flag
+        directly is what makes the terminal rung reachable at all.
+
+        Returns ``True`` unconditionally: whether or not there were images to
+        drop, this error has been handled as far as it can be, and the caller
+        must not then run the image degrade — which would decline anyway.
+        """
+        if self._images_rejected:
+            # Already terminal. Nothing further to give; say so honestly
+            # rather than emitting the same notice on every later turn.
+            logger.warning(
+                "provider still refuses the request at %d bytes with images already "
+                "dropped; the conversation must be compacted or shortened",
+                budget,
+            )
+            return True
+
+        self._images_rejected = True
+        logger.warning(
+            "provider refused a %d-byte request with %d frame(s) left and no budget "
+            "headroom; dropping images from this session's context (%s)",
+            budget,
+            frames_left,
+            self._image_drop_diagnostic(),
+        )
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    "The conversation is too large for this provider even after "
+                    "dropping screenshots, so images have been removed from the "
+                    "context to keep the session working. If it still fails, run "
+                    "/compact or start a new conversation."
                 ),
                 kind="warning",
             )
@@ -2908,6 +2998,15 @@ class Session:
         # and the journal stays one row per switch, not one per keystroke.
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
+        # The measured byte cap belonged to the provider that demonstrated it,
+        # and that provider is gone. Keeping it would pin a session to a
+        # departed connection's limit — shedding screenshots a laxer provider
+        # would have accepted — which the field's own comment already rules
+        # out ("what one provider did on one connection", not a preference).
+        # Only genuine switches reach this line; a knob change took the
+        # same-pair early return above, so an `/effort` keystroke does not
+        # discard a limit that is still in force (round 1 review, R4a).
+        self._wire_budget_override = None
         # An explicit switch withdraws the fallback pin's premise: the pin
         # rescued the PREVIOUS selection, and the stream fn's preflight will
         # clear its own route state the moment it sees the new selector. The
@@ -6348,9 +6447,15 @@ class Session:
         Resolved by name off the module for the same tolerance ``_offloaded``
         grants its rulers: a partial test double that predates the byte
         trigger degrades to 0, which reads as "no byte pressure" and leaves
-        the token trigger exactly as it was. Not offloaded to a thread — it is
-        a byte sum with no tokenizer behind it, so the thread hop would cost
-        more than the work.
+        the token trigger exactly as it was.
+
+        Not offloaded to a thread: it is a byte sum with no tokenizer behind
+        it, so on the image-heavy histories this exists for the ~50-100 us hop
+        round trip is a real fraction of the work. That holds because tool-call
+        arguments are sized structurally rather than re-serialized — the naive
+        form measured 6.5-7.9 ms on real tool-heavy transcripts, where the
+        trade would flip (agent review round 1, R3). If that sizing ever goes
+        back to ``json.dumps``, this decision has to be revisited with it.
         """
         estimate: Any = getattr(compaction_api, "estimate_wire_bytes", None)
         if not callable(estimate):
@@ -6586,9 +6691,13 @@ class Session:
             # "no". A MANUAL pass is going to load it anyway, so it skips
             # straight to the exact figure it has to report.
             bound = compaction_api.messages_tokens_upper_bound(llm_history)
-            # Bytes are EXACT and essentially free (no tokenizer, measured at
-            # 0.06 ms over a 546-message history), so unlike the token side
-            # this pre-gate passes the real figure rather than a bound — and
+            # Bytes are EXACT and cheap — no tokenizer to load, and tool-call
+            # arguments are sized structurally rather than re-serialized
+            # (``_argument_bytes``, agent review round 1, R3) — so unlike the
+            # token side this pre-gate passes the real figure rather than a
+            # bound. Not free, though: on a long tool-heavy history it is a
+            # few milliseconds, which is the reason that sizing is structural
+            # and not a ``json.dumps``. It must pass the figure, or
             # it must pass it, or the cheap gate would answer "no pass due"
             # for a payload the plan gate would have compacted on size, which
             # is the same disagreement the advisory peek above exists to
@@ -9431,6 +9540,18 @@ class Session:
                 _coerce_compaction_settings(dict(raw)) if isinstance(raw, Mapping) else None
             )
             self._compaction_settings = fresh
+            if "compaction.wire_bytes_budget" in changed:
+                # An operator editing the byte budget mid-session is a
+                # DELIBERATE act, and almost always a reaction to watching this
+                # session shed. A refusal-driven override is only ever a guess
+                # refined from one provider's behaviour, so the explicit edit
+                # outranks it — without this, ``_wire_bytes_budget``'s
+                # ``min()`` would swallow the new value and the key's LIVE
+                # registration would be a painted lie: the operator would have
+                # to restart to get their frames back, which is exactly what
+                # LIVE scope promises they will not have to do (round 1
+                # review, R4b). A later 413 simply measures the cap again.
+                self._wire_budget_override = None
         # ``effort.*`` is deliberately NOT in this condition (review round 1,
         # M1). The stream fn does read ``self._settings["effort"]`` per message
         # (``configure._effort_for``), but those keys are not in the

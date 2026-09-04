@@ -576,7 +576,16 @@ def is_request_too_large(error: BaseException | str) -> bool:
     if isinstance(error, ProviderError):
         if error.status == 413:
             return True
-        if error.status is not None and not 400 <= error.status < 500:
+        # Gate on the KIND, not on a duplicated status range, so the two entry
+        # points agree by construction rather than by two hand-kept rules. The
+        # rendered form below can only check the kind's label, and an earlier
+        # revision gated the exception on ``400 <= status < 500`` instead:
+        # that made ``ProviderError(429, "...too large")`` answer True from
+        # the exception and False from its own rendered string, and a
+        # status-less error True from one and False from the other (agent
+        # review round 1, R5). A 429 is the provider metering us and a 5xx is
+        # weather; neither is a body we can shrink.
+        if error.kind != "request":
             return False
         haystack = error.message.lower()
     else:

@@ -37,7 +37,6 @@ __all__ = [
     "WIRE_RECOVERY_BAND",
     "cleared_headroom",
     "cleared_wire_headroom",
-    "over_wire_budget",
     "resolve_wire_bytes_budget",
     "resolve_wire_bytes_trigger",
     "compaction_context_tokens",
@@ -554,16 +553,6 @@ def resolve_wire_bytes_trigger(settings: CompactionSettings) -> int:
         return 0
     budget = resolve_wire_bytes_budget(settings)
     return min(value, budget) if budget > 0 else value
-
-
-def over_wire_budget(wire_bytes: int, settings: CompactionSettings) -> bool:
-    """Whether ``wire_bytes`` is past the HARD ceiling.
-
-    The render seam's question ("must I shed before sending?"), kept beside
-    the trigger's question so the two read the same resolved number.
-    """
-    budget = resolve_wire_bytes_budget(settings)
-    return budget > 0 and wire_bytes > budget
 
 
 def compaction_context_tokens(provider_reported: int | None, local_estimate: int) -> int:

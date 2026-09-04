@@ -15,6 +15,8 @@ session could not recover from the inside.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
@@ -417,3 +419,178 @@ async def asyncio_yield() -> None:
 
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# The ladder's terminal rung (agent review round 1 R1/R2, QA round 1 Q1/Q2)
+# ---------------------------------------------------------------------------
+#
+# Both round 1 gates independently reproduced a permanent wedge here, which is
+# the exact failure class this whole change exists to delete. The two traps:
+#
+#   R1 — the handover was gated on ``at_floor AND frames_left == 0``, so at the
+#        floor any surviving frame short-circuited it and the ladder returned
+#        "handled" forever while changing nothing.
+#   R2/Q1 — the terminal rung DELEGATED to ``_degrade_if_image_rejected``,
+#        whose ``is_image_rejection`` guard is False for a 413 by construction,
+#        so it was structurally unreachable.
+#
+# The previous tests missed both because their caps sat ABOVE
+# ``_WIRE_BUDGET_FLOOR`` and their histories were all frames. These cover the
+# cap BELOW the floor and the text-only history specifically.
+
+
+@pytest.mark.asyncio
+async def test_a_cap_below_the_floor_reaches_the_terminal_rung(tmp_path):
+    """R1: at the floor the budget cannot move, so the ladder must hand over.
+
+    A proxy capping below ``_WIRE_BUDGET_FLOOR`` is the ratchet docstring's own
+    stated reason to exist. Before the fix this ratcheted to 4 MB and then
+    returned "handled" on every subsequent turn with nothing changing —
+    measured at 15 consecutive 413s.
+    """
+    from local_operator.session.session import _WIRE_BUDGET_FLOOR
+
+    stream = RefusesOversizeRequests(cap=2_000_000)
+    assert stream.cap < _WIRE_BUDGET_FLOOR, "the trap needs a cap below the floor"
+
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    for turn in range(12):
+        await session.prompt(f"t{turn}")
+        if stream.requests and _request_bytes(stream.requests[-1]) <= stream.cap:
+            break
+
+    assert session._images_rejected, "the terminal rung was never reached"
+    assert _request_bytes(stream.requests[-1]) <= stream.cap, "never became sendable"
+    assert _image_blocks(stream.requests[-1]) == 0
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_oversize_history_reaches_the_terminal_rung(tmp_path):
+    """R2/Q2: with no frames to shed, tightening the budget buys nothing.
+
+    The payload never moves while the budget ratchets away beneath it, and the
+    user is told "send your message again" — advice that cannot work. The
+    ladder must recognise it has no lever and stop claiming success.
+    """
+    stream = RefusesOversizeRequests(cap=1_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history([Message.user("T" * 5_000_000), Message.assistant("ack")])
+
+    for turn in range(6):
+        await session.prompt(f"t{turn}")
+
+    # Nothing to shed means the FIRST refusal is already terminal: there is no
+    # sequence of budget cuts that makes a text payload smaller.
+    assert session._images_rejected, "the ladder kept ratchetting a budget it could not use"
+    assert session._wire_budget_override is None, "the budget was tightened for no gain"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_rung_is_reached_without_loosening_is_image_rejection(tmp_path):
+    """The invariant, stated as a test: the ladder sets the sticky flag ITSELF.
+
+    Both gates agreed that teaching ``is_image_rejection`` about 413 is the
+    WRONG fix — it would give every size refusal the sticky whole-session
+    degrade this ladder exists to avoid. So the predicate must still decline
+    the very error that just drove the terminal rung.
+    """
+    from local_operator.providers.failover import is_image_rejection
+
+    stream = RefusesOversizeRequests(cap=1_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history([Message.user("T" * 5_000_000)])
+
+    await session.prompt("go")
+
+    assert session._images_rejected, "the terminal rung did not fire"
+    assert not is_image_rejection(ProviderError(413, "Request exceeds the maximum size"))
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_rung_does_not_repeat_its_notice(tmp_path):
+    """Once terminal, later refusals must not re-announce the same degrade."""
+    stream = RefusesOversizeRequests(cap=1_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history([Message.user("T" * 5_000_000)])
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    for turn in range(3):
+        await session.prompt(f"t{turn}")
+
+    degrade_notices = [n for n in notices if "even after" in n]
+    assert len(degrade_notices) == 1, f"the degrade announced itself {len(degrade_notices)}x"
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Override lifetime (agent review round 1, R4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_provider_switch_clears_the_measured_budget(tmp_path):
+    """R4a: the cap belonged to the provider that demonstrated it.
+
+    Keeping it pins the session to a departed connection's limit, shedding
+    screenshots the new provider would have accepted.
+    """
+    stream = RefusesOversizeRequests(cap=12_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    await session.prompt("first")
+    assert session._wire_budget_override is not None, "no ratchet to clear"
+
+    session.set_model(ModelSpec(provider="other", model_id="lax", context_window=1_000_000))
+    assert session._wire_budget_override is None, "the departed provider's cap survived"
+    assert session._wire_bytes_budget() == 24_000_000
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_same_model_knob_change_keeps_the_measured_budget(tmp_path):
+    """The other half of R4a: an `/effort` keystroke is not a provider change,
+    so it must not discard a limit that is still in force."""
+    stream = RefusesOversizeRequests(cap=12_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    await session.prompt("first")
+    measured = session._wire_budget_override
+    assert measured is not None
+
+    session.set_model(MODEL.model_copy(update={"temperature": 0.5}))
+    assert session._wire_budget_override == measured, "a knob change dropped a real limit"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_raising_the_live_setting_clears_the_measured_budget(tmp_path):
+    """R4b: the key is registered LIVE precisely so an operator watching a
+    session shed can raise it without restarting. The ``min()`` against the
+    ratchet made that a painted lie."""
+    stream = RefusesOversizeRequests(cap=12_000_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(42))
+
+    await session.prompt("first")
+    assert session._wire_budget_override is not None
+
+    session._apply_config_change(
+        types.SimpleNamespace(
+            changed_keys=frozenset({"compaction.wire_bytes_budget"}),
+            values={"compaction": {"wire_bytes_budget": 30_000_000}},
+        )
+    )
+
+    assert session._wire_budget_override is None
+    assert session._wire_bytes_budget() == 30_000_000, "the explicit edit was swallowed"
+    await session.dispose()

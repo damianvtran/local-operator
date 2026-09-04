@@ -25,7 +25,6 @@ from local_operator.compaction.thresholds import (
     WIRE_RECOVERY_BAND,
     CompactionSettings,
     cleared_wire_headroom,
-    over_wire_budget,
     resolve_wire_bytes_budget,
     resolve_wire_bytes_trigger,
     should_compact,
@@ -193,13 +192,6 @@ def test_soft_trigger_is_clamped_to_the_hard_budget() -> None:
     would amputate frames before a proper compaction pass ever fired."""
     settings = CompactionSettings(wire_bytes_budget=10_000_000, wire_bytes_trigger=50_000_000)
     assert resolve_wire_bytes_trigger(settings) == 10_000_000
-
-
-def test_over_wire_budget_reads_the_resolved_number() -> None:
-    settings = CompactionSettings()
-    assert over_wire_budget(DEFAULT_WIRE_BYTES_BUDGET, settings) is False  # strict >
-    assert over_wire_budget(DEFAULT_WIRE_BYTES_BUDGET + 1, settings) is True
-    assert over_wire_budget(10**12, CompactionSettings(wire_bytes_budget=0)) is False
 
 
 # ---------------------------------------------------------------------------
