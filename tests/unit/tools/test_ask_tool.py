@@ -136,11 +136,20 @@ def test_ask_names_the_three_cases_that_do_warrant_a_question() -> None:
     text = " ".join(_tools(_context(hook))["ask"].description.split())
     assert "destructive or irreversible" in text
     assert "only the user has" in text
+    # The fourth case, added in review: a preference, a name, a roster. Shipped
+    # guides (teams, mobile) tell an agent to ask for exactly these, and a
+    # closed set of three contradicted them.
+    assert "genuinely theirs to state" in text
     # Ambiguity is pinned to the REQUEST, not to the work: probed against the
     # live model, a draft that said only "materially different work" was quoted
     # back as justification for asking which of two valid designs to build.
-    assert "the REQUEST ITSELF has two plausible readings" in text
+    assert "REQUEST ITSELF has two plausible readings" in text
     assert "Two technical approaches is not ambiguity" in text
+    # Authorization must not reach an irreversible step by implication — the
+    # same hole fixed in `system.md`, closed on the surface that survives
+    # compaction.
+    assert "not EXPLICITLY approved that action" in text
+    assert "never extends to an irreversible step by implication" in text
 
 
 def test_ask_states_that_requested_work_is_already_authorized() -> None:
