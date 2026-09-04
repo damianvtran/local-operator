@@ -999,3 +999,51 @@ def test_the_toast_body_never_repeats_the_tool_name(
 
     assert sent, "no notification was produced"
     assert sent[0][1] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_that_refuses_corrects_its_own_receipt(tmp_path) -> None:
+    """`/compact` answers optimistically, so a refusal MUST be reported.
+
+    A pass that runs narrates itself through the canonical compaction events;
+    a refusal emits nothing at all, which is what made it invisible on the
+    routed path — the runtime replied "compacting context…" and then discarded
+    the outcome, so the user was told a pass had started and nothing ever
+    contradicted it (round 5, U17).
+
+    Driven against a real empty session, whose genuine answer is
+    `nothing_to_compact`, rather than a stubbed outcome: the copy the user
+    reads comes from the session and a fake would not prove it arrives.
+    """
+    import json
+    from pathlib import Path
+
+    from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+    from local_operator.providers.clients import MockClient
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from tests.e2e.harness import build_session
+
+    session = build_session(tmp_path, MockClient().stream)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        result = await handle._slash_result("compact", "", SlashResult)
+        assert result.text == "compacting context…"
+
+        # The reporting task is fire-and-forget by design (a long pass cannot
+        # be awaited inside a request/response op), so settle it explicitly
+        # rather than sleeping — a sleep here measures a race, not the answer.
+        for task in list(handle._background_tasks):
+            await asyncio.shield(task)
+
+        rows = [
+            json.loads(line)["payload"]
+            for line in Path(session.transcript.path).read_text().splitlines()
+            if line.strip()
+            and json.loads(line).get("payload", {}).get("custom_type") == COMPACTION_REFUSED_TYPE
+        ]
+        assert len(rows) == 1, "the refusal never reached the transcript"
+        detail = (rows[0].get("details") or {}).get("detail") or ""
+        assert "nothing to compact" in detail, detail
+    finally:
+        await session.dispose()

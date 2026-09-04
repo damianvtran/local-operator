@@ -1941,6 +1941,16 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     # (round 4, R3/Q2/U14).
                     "every_ms": raw.get("every_ms"),
                     "until_at": raw.get("until_at"),
+                    # Computed here beside `due_in_s`, against the SAME clock
+                    # read: the renderer has no `now` of its own, and two
+                    # clock reads in one listing can disagree across a second
+                    # boundary.
+                    "until_in_s": (
+                        (int(raw["until_at"]) - now_ms) / 1000.0
+                        if isinstance(raw.get("until_at"), int)
+                        and not isinstance(raw.get("until_at"), bool)
+                        else None
+                    ),
                     "limit": raw.get("limit"),
                     "fired_count": raw.get("fired_count") or 0,
                 }
@@ -1996,6 +2006,16 @@ def wake_command(args: argparse.Namespace) -> int:
                     repeat += f", {int(row['fired_count'])}/{int(row['limit'])} fired"
                 elif row.get("fired_count"):
                     repeat += f", {int(row['fired_count'])} fired"
+                # The TIME bound, shown for the same reason the count bound is:
+                # a `--limit` wake advertised its bound while an `--until` one
+                # was indistinguishable from an unbounded repeat, so the bound
+                # a user is most likely to forget was the one not rendered
+                # (round 5, R6/U16). Relative, matching the `when` column —
+                # "until in 7d" answers "is this still running next week"
+                # without the reader converting a timestamp.
+                left = row.get("until_in_s")
+                if left is not None:
+                    repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
             print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
         return 0
 

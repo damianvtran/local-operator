@@ -1841,12 +1841,68 @@ class OwnedSessionHandle(SessionHandle):
                 text="no session yet — there is no context to compact",
                 style="warning",
             )
-        task = self._loop.create_task(compact())
+
+        async def _run_and_report() -> None:
+            """Await the pass so a REFUSAL is not lost.
+
+            A pass that runs narrates itself through the canonical
+            `compaction_start`/`compaction_end` events, so this reports only
+            what those events never emit: a refusal, and a crash. That is
+            exactly the split `app.py::_compact_worker` documents — and it
+            matters more here, because the optimistic "compacting context…"
+            receipt has already been sent. Without this the user is told a
+            pass started and nothing ever contradicts it, which is the one
+            outcome that produces no events to render (round 5, U17).
+            """
+            try:
+                outcome = await compact()
+            except Exception as exc:  # noqa: BLE001 — a failed pass must not kill the runtime
+                logger.debug("manual compaction failed", exc_info=True)
+                await self._record_compaction_refusal(f"compaction failed: {exc}")
+                return
+            if not getattr(outcome, "ran", True):
+                # The session's own `detail` is the good copy ("nothing to
+                # compact: the whole conversation is ~18 tokens…"); it just
+                # never left the runtime before.
+                detail = getattr(outcome, "detail", "") or "compaction did not run"
+                await self._record_compaction_refusal(str(detail))
+
+        task = self._loop.create_task(_run_and_report())
         # Same retention discipline as the gate tasks above: an un-retained
         # task can be collected mid-flight and the pass would vanish silently.
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return SlashResult(kind="notice", text="compacting context…", style="info")
+
+    async def _record_compaction_refusal(self, detail: str) -> None:
+        """Append the row that CORRECTS the optimistic receipt.
+
+        Same shape as the gate-timeout row and for the same reason: a MESSAGE
+        entry carrying a `CustomMessage`, so it reaches the model AND every
+        viewer that replays the history — a detached session may have no
+        terminal attached at the moment the refusal lands, and the user who
+        comes back later is the one who most needs to know the pass never ran.
+        """
+        transcript = getattr(self._session, "transcript", None)
+        append = getattr(transcript, "append_message", None)
+        if not callable(append):
+            return
+        try:
+            from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+            from local_operator.harness.types import CustomMessage
+
+            result = append(
+                CustomMessage(
+                    custom_type=COMPACTION_REFUSED_TYPE,
+                    attribution="system",
+                    details={"detail": detail},
+                )
+            )
+            if inspect.isawaitable(result):
+                await result
+            self._notify()
+        except Exception:  # noqa: BLE001 — the refusal still stands
+            logger.debug("could not record the compaction refusal", exc_info=True)
 
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.

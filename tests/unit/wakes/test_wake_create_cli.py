@@ -205,3 +205,26 @@ def test_a_bound_without_a_repeat_is_refused(tmp_path: Path) -> None:
     assert _wake_create(_args(limit=3)) == 1
     assert _wake_create(_args(until="in 7d")) == 1
     assert _wake_create(_args(every="1h", limit=0)) == 1
+
+
+def test_the_listing_shows_a_time_bound(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--until` was carried in `--json` and dropped from the human listing, so
+    a `--limit` wake advertised its bound while an `--until` one was
+    indistinguishable from an unbounded repeat — the bound a user is most
+    likely to forget was the one not rendered (round 5, R6/U16)."""
+    import argparse
+
+    from local_operator.cli import _wake_create, wake_command
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(when="in 5m", message="unbounded", every="1h")) == 0
+    assert _wake_create(_args(when="in 6m", message="time bound", every="30m", until="in 7d")) == 0
+    capsys.readouterr()
+
+    wake_command(argparse.Namespace(wake_command="list", json=False))
+    out = capsys.readouterr().out
+    unbounded = next(line for line in out.splitlines() if "unbounded" in line)
+    bounded = next(line for line in out.splitlines() if "time bound" in line)
+
+    assert "every 1h" in unbounded and "until" not in unbounded
+    assert "every 30m" in bounded and "until in 6d" in bounded, bounded

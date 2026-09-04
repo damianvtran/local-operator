@@ -75,6 +75,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
@@ -4117,6 +4118,19 @@ class OperatorApp(App[None]):
                 if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
                     details = getattr(message, "details", None) or {}
                     self._append_block(NoticeBlock(_gate_timeout_notice(details), kind="warning"))
+                    appended = True
+                    continue
+                # A compaction that did NOT run. Rendered here for the same
+                # reason as the row above: a custom row with no renderer is a
+                # row nobody sees, and this one exists to CORRECT the
+                # optimistic "compacting context…" receipt the routed command
+                # already showed (round 5, U17). `warning` ink because the
+                # context the user asked to reclaim is still there.
+                if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    text = str(details.get("detail") or "compaction did not run").strip()
+                    kind = "error" if text.startswith("compaction failed") else "warning"
+                    self._append_block(NoticeBlock(text, kind=kind))
                     appended = True
                     continue
                 role = getattr(message, "role", None)
