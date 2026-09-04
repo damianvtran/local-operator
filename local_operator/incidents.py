@@ -51,37 +51,68 @@ SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
 #: replays the switch history too.
 SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
 
+#: Provider wordings that mean "this request does not fit", in every phrasing
+#: the vendors actually use (anthropic's "prompt is too long", google's token
+#: counts, the openai family's "maximum context length").
+#:
+#: Exported rather than inlined into :data:`_RULES` because the provider layer
+#: needs the same judgement: ``clients._relayed_upstream_failure`` has to know
+#: that a RELAYED overflow complaint is deterministic — the request is too big
+#: and will stay too big — so it must not be retried as upstream weather. Two
+#: independently-maintained lists in one repo would silently drift into
+#: disagreeing about what an overflow looks like, and the failure mode of that
+#: drift (a turn retried for ~35s against a defect no wait can fix) is exactly
+#: what this list exists to prevent.
+CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
+    "context length",
+    "context window",
+    "maximum context",
+    "too long for the model",
+    "prompt is too long",
+    "request too large",
+    "request was too large",
+    "input too large",
+    "input was too large",
+    # The SIZE-of-body wordings, which none of the above matched.
+    # "Request exceeds the maximum size" is Anthropic's literal 413
+    # text, and a session that hit it was classified ``unknown`` with
+    # an empty hint — so the model was told nothing actionable and
+    # retried the identical 34 MB request, forever. The rest cover the
+    # proxy edge and the provider's own error code.
+    #
+    # Matched on wording, NOT on a bare "413": that substring occurs
+    # in ordinary token and byte counts ("used 413000 tokens" already
+    # classifies correctly as rate-limit) and would misfire.
+    "exceeds the maximum size",
+    "request_too_large",
+    "request entity too large",
+    "payload too large",
+    # Vendors that describe the same overflow by COUNTING tokens rather than by
+    # naming the context. Added after an audit found the list recognised 6 of
+    # 10 real vendor wordings: google/vertex ("input token count ... exceeds"),
+    # mistral ("too many tokens in prompt"), and bedrock ("input is too long")
+    # all fell through, which for the provider layer meant a deterministic
+    # overflow was retried as though it were upstream weather.
+    #
+    # Qualified rather than bare, because this list is the FIRST rule in
+    # `_RULES` and therefore outranks "rate-limit". A bare "token count"
+    # swallows a TPM message that happens to quote one ("Limit 90000 token
+    # count per min"), and a bare "too many tokens" is verbatim AWS Bedrock's
+    # ThrottlingException -- both are rate limits, and miscategorising them
+    # tells the user to /compact a request whose only problem is that it
+    # arrived too soon. The qualifiers name the INPUT, which a throttle never
+    # does.
+    "input token count",
+    "prompt token count",
+    "too many tokens in prompt",
+    "too many input tokens",
+    "input is too long",
+)
+
 #: Ordered (category, patterns) rules. First category whose pattern matches
 #: (case-insensitive) wins; order is specificity, not severity.
 _RULES: list[tuple[str, tuple[str, ...]]] = [
-    (
-        "context-length",
-        (
-            "context length",
-            "context window",
-            "maximum context",
-            "too long for the model",
-            "prompt is too long",
-            "request too large",
-            "request was too large",
-            "input too large",
-            "input was too large",
-            # The SIZE-of-body wordings, which none of the above matched.
-            # "Request exceeds the maximum size" is Anthropic's literal 413
-            # text, and a session that hit it was classified ``unknown`` with
-            # an empty hint — so the model was told nothing actionable and
-            # retried the identical 34 MB request, forever. The rest cover the
-            # proxy edge and the provider's own error code.
-            #
-            # Matched on wording, NOT on a bare "413": that substring occurs
-            # in ordinary token and byte counts ("used 413000 tokens" already
-            # classifies correctly as rate-limit) and would misfire.
-            "exceeds the maximum size",
-            "request_too_large",
-            "request entity too large",
-            "payload too large",
-        ),
-    ),
+    ("context-length", CONTEXT_LENGTH_MARKERS),
     (
         "rate-limit",
         (

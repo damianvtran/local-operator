@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -1379,7 +1380,7 @@ class TestErrorMessageExtraction:
             )
         )
         assert error.message == (
-            "Provider returned error: Quota exceeded for quota metric 'Requests'"
+            "Google returned error: Quota exceeded for quota metric 'Requests'"
         )
         assert error.kind == "quota"
 
@@ -1429,8 +1430,10 @@ class TestOpaqueAggregator400:
         """The exact wire body from the session: bare "ERROR" in ``raw``."""
         error = self._error(httpx.Response(400, json=self._openrouter_body("ERROR")))
         assert (error.kind, error.retryable) == ("transient", True)
-        # The frame still shows what the wire said — no invented diagnostics.
-        assert error.message == "Provider returned error: ERROR"
+        # The frame still shows what the wire said — no invented diagnostics —
+        # but the generic "Provider" is replaced by the origin host the
+        # aggregator named, so the reader knows WHO failed.
+        assert error.message == "Stealth returned error: ERROR"
 
     def test_a_quoted_json_string_sentinel_is_transient_too(self) -> None:
         """``raw`` is defined as JSON-encoded, so the sentinel can arrive as
@@ -1489,18 +1492,351 @@ class TestOpaqueAggregator400:
         assert (error.kind, error.retryable) == ("transient", True)
 
     def test_unbalanced_quote_runs_stay_request(self) -> None:
-        """Only MATCHED quote pairs are peeled. ``str.strip`` would take any run
-        of either character and reduce this to the sentinel; an unbalanced body
-        is malformed rather than empty, so it keeps its ``request`` answer."""
+        """Only MATCHED quote pairs are peeled, so this does NOT reduce to the
+        sentinel -- and on a 400 that is the whole question.
+
+        A body that says something, even something malformed, is the origin
+        refusing our request, and a relayed 400 is not retried. Only a body
+        that reduces exactly to the sentinel proves nobody tried to say
+        anything. ``str.strip`` would take any run of either character and
+        collapse this to "error", handing it the transient path by accident;
+        peeling pairs keeps that a decision rather than an artefact of the
+        API."""
         error = self._error(httpx.Response(400, json=self._openrouter_body("'''ERROR\"\"")))
         assert (error.kind, error.retryable) == ("request", False)
 
     def test_opaque_5xx_shape_is_unchanged(self) -> None:
-        """The predicate only widens 400s: a 5xx carrying the same opaque body
-        was already retryable by status and must stay that way."""
+        """A 5xx carrying the same opaque body was already retryable by status
+        and must stay that way."""
         body = self._openrouter_body("ERROR")
         body["error"]["code"] = 502
         error = self._error(httpx.Response(502, json=body))
+        assert (error.kind, error.retryable) == ("transient", True)
+
+
+class TestRelayedUpstream404:
+    """A relayed upstream 404 whose text READS like an answer but is weather.
+
+    Session 2be018a98088 (2026-09-04) died twice in 75 seconds on
+    ``openrouter/meta/muse-spark-1.3`` with HTTP 404 and the upstream words
+    "The requested model was not found." Six successful calls on the IDENTICAL
+    model id landed between the two failures, and the model's single endpoint
+    reported 99.98% 30-minute uptime, so the id cannot have been the cause: it
+    was Meta transiently failing to resolve its own snapshot, relayed by
+    OpenRouter under a 404.
+
+    The old predicate missed it on two counts \u2014 it was gated on 400, and it
+    demanded a bare sentinel where this body carried plausible prose \u2014 so the
+    failure was classified ``request`` and the turn was aborted with no retry
+    and no failover.
+
+    The discrimination pinned here is STRUCTURAL, verified against the live API
+    on 2026-09-04: OpenRouter answers a model id it does not know with a flat
+    400 naming the slug, and a routing refusal with a flat 404 naming the
+    preference. Neither carries ``metadata.raw``. Only a genuine relay does.
+    """
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    @staticmethod
+    def _relay(status: int, raw: str, provider: str = "Meta") -> dict[str, Any]:
+        return {
+            "error": {
+                "message": "Provider returned error",
+                "code": status,
+                "metadata": {"raw": raw, "provider_name": provider, "is_byok": False},
+            }
+        }
+
+    def test_the_recorded_404_is_transient_and_names_the_upstream(self) -> None:
+        """The exact wire body from the session."""
+        raw = json.dumps(
+            {
+                "error": {
+                    "message": "The requested model was not found.",
+                    "type": "invalid_request_error",
+                }
+            }
+        )
+        error = self._error(httpx.Response(404, json=self._relay(404, raw)))
+        assert (error.kind, error.retryable) == ("transient", True)
+        # The frame must name Meta rather than the ambiguous "Provider": the
+        # user is looking at an aggregator, so "provider" alone does not say
+        # whether the gateway or the model host failed.
+        assert str(error) == (
+            "transient provider error (HTTP 404): "
+            "Meta returned error: The requested model was not found."
+        )
+
+    def test_flat_unknown_model_400_still_fails_fast(self) -> None:
+        """OpenRouter's OWN refusal of a bad slug: flat body, no relay
+        envelope, names the slug. This is the case a user really can fix, so it
+        must keep failing immediately instead of burning the retry budget."""
+        body = {"error": {"message": "meta/muse-spark-9.9 is not a valid model ID", "code": 400}}
+        error = self._error(httpx.Response(400, json=body))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_flat_routing_404_still_fails_fast(self) -> None:
+        """The aggregator's own routing refusal, also flat and also actionable
+        (the caller's provider preference is wrong)."""
+        body = {
+            "error": {
+                "message": (
+                    "No allowed providers are available for the selected model. "
+                    "Providers serving meta/muse-spark-1.3-20260902: meta, but your "
+                    "request's provider.only preference permits only: groq."
+                ),
+                "code": 404,
+                "metadata": {"available_providers": ["meta"], "requested_providers": ["groq"]},
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_a_relayed_complaint_naming_a_request_field_stays_request(self) -> None:
+        """Review finding B1, pinned.
+
+        The relay envelope proves PROVENANCE, not retryability. These bodies
+        were captured from the LIVE API on 2026-09-04 by sending deliberately
+        malformed requests: each arrives fully wrapped, with a
+        ``provider_name``, and each is a defect in our own bytes that no retry
+        can fix. An earlier draft keyed on the envelope alone and retried them
+        12 times over ~35s apiece.
+
+        What separates them from the incident is ``param``: the origin names
+        the offending field of OUR request. The incident names none, because
+        nothing about the request was the problem."""
+        for inner in (
+            {
+                "message": "Invalid 'tools[0].function.name': does not match pattern.",
+                "type": "invalid_request_error",
+                "param": "tools[0].function.name",
+                "code": "invalid_value",
+            },
+            {
+                "message": "Invalid schema for response_format 'x'.",
+                "type": "invalid_request_error",
+                "param": "response_format",
+                "code": None,
+            },
+            {
+                "message": "Invalid value: 'wizard'.",
+                "type": "invalid_request_error",
+                "param": "messages[0].role",
+            },
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": inner}), "OpenAI"))
+            )
+            assert (error.kind, error.retryable) == ("request", False), inner["param"]
+
+    def test_type_alone_cannot_discriminate(self) -> None:
+        """Why the predicate does not key on ``type``.
+
+        The incident and the malformed-request bodies are BOTH
+        ``invalid_request_error``. Only the presence of ``param`` tells them
+        apart, so a future edit that reaches for ``type`` instead has this test
+        to explain why that cannot work."""
+        shared = {"message": "...", "type": "invalid_request_error"}
+        weather = self._error(
+            httpx.Response(404, json=self._relay(404, json.dumps({"error": dict(shared)})))
+        )
+        ours = self._error(
+            httpx.Response(
+                400, json=self._relay(400, json.dumps({"error": {**shared, "param": "top_p"}}))
+            )
+        )
+        assert weather.kind == "transient"
+        assert ours.kind == "request"
+
+    def test_relayed_overflow_without_param_stays_request(self) -> None:
+        """Review finding M1, pinned.
+
+        A provider can report an overflow WITHOUT naming a param -- anthropic's
+        "prompt is too long" and google's token-count wording both do. Those
+        are deterministic in the same way (the request is too big and stays too
+        big), so they are carved out by the harness's canonical
+        ``CONTEXT_LENGTH_MARKERS`` rather than by a second list maintained
+        here, which is what stops the two from drifting apart."""
+        for text in (
+            "prompt is too long: 250000 tokens > 200000 maximum",
+            "The input token count exceeds the maximum context window",
+            "This model's maximum context length is 16385 tokens",
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": {"message": text}})))
+            )
+            assert (error.kind, error.retryable) == ("request", False), text
+
+    def test_the_shared_marker_list_is_the_harness_one(self) -> None:
+        """The carve-out must stay wired to the canonical list, not a copy.
+
+        Asserting identity rather than contents is deliberate: a test that
+        re-listed the wordings would itself become the third copy this finding
+        was about."""
+        from local_operator.incidents import CONTEXT_LENGTH_MARKERS as canonical
+        from local_operator.providers import clients
+
+        assert clients.CONTEXT_LENGTH_MARKERS is canonical
+
+    def test_a_quoted_overflow_is_still_recognised(self) -> None:
+        """Quoting is the aggregator's formatting, not part of the signal: a
+        quoted overflow must carve out exactly like a bare one, or a
+        deterministic failure would be retried purely because it arrived
+        wrapped in quotes."""
+        raw = json.dumps("This model's maximum context length is 16385 tokens")
+        error = self._error(httpx.Response(400, json=self._relay(400, raw)))
+        assert (error.kind, error.retryable) == ("request", False)
+
+    def test_a_relayed_400_fails_fast_in_every_vendor_dialect(self) -> None:
+        """Review finding B2 (round 2), pinned.
+
+        The round-1 fix keyed on the OpenAI-dialect ``param`` field, which
+        anthropic (via Vertex), google AI Studio and cohere do not send \u2014 so
+        their malformed requests were still retried 12 times over ~35s. These
+        bodies were captured from the LIVE API on 2026-09-04 and carry NO
+        ``param``.
+
+        The dialect-independent signal is the status. Probing a deliberately
+        malformed request across six model families, every relayed complaint
+        about our request was a 400 and not one was a 404, because "the request
+        was bad" is what 400 MEANS. Keying on it needs no vendor schema
+        knowledge, which is what made the previous attempt fragile: new
+        provider, new dialect, same bug."""
+        for provider, inner in (
+            ("Google", {"message": "tools.0.custom.name: String should match pattern"}),
+            (
+                "Google AI Studio",
+                {"message": "Invalid function name.", "code": 400, "status": "INVALID_ARGUMENT"},
+            ),
+            ("Cohere", {"message": "invalid request: tool name invalid"}),
+            ("Meta", {"message": "`max_output_tokens` The number must be `>= 16`."}),
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": inner}), provider))
+            )
+            assert (error.kind, error.retryable) == ("request", False), provider
+
+    def test_a_relayed_overflow_on_a_404_stays_request(self) -> None:
+        """QA finding Q3 (round 2), pinned.
+
+        An overflow is deterministic however it is delivered, so it must not
+        take the 404 weather path. These are the vendor wordings an audit found
+        the canonical list missing \u2014 google/vertex counts tokens, mistral and
+        bedrock phrase it differently again \u2014 each of which would otherwise
+        have re-created the very cascade this PR removes."""
+        for text in (
+            "The input token count (1200000) exceeds the maximum number of tokens allowed",
+            "Too many tokens in prompt",
+            "Input is too long for requested model",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+        ):
+            error = self._error(
+                httpx.Response(404, json=self._relay(404, json.dumps({"error": {"message": text}})))
+            )
+            assert (error.kind, error.retryable) == ("request", False), text
+
+    def test_caller_status_bodies_never_become_retryable(self) -> None:
+        """Review finding M1 (round 3), pinned.
+
+        401/403/402 describe the CALLER's standing, not a request, and each has
+        its own recovery: rotation, or a bill. A draft that short-circuited a
+        bare sentinel to retryable before checking the status bought a 401 ten
+        same-credential retries (~51s) before rotation was reached, because the
+        driver's ladder returns early on ``not retryable``.
+
+        Asserts ``retryable`` as well as ``kind`` deliberately: the previous
+        version of this test checked only the kind, so it passed throughout the
+        regression and did not test the thing its name promised. 429 is
+        included to pin the other direction -- it was already retryable by
+        status and must stay so."""
+        for status, kind, retryable in (
+            (401, "auth", False),
+            (403, "auth", False),
+            (402, "quota", False),
+            (429, "quota", True),
+        ):
+            error = self._error(httpx.Response(status, json=self._relay(status, "ERROR")))
+            assert (error.kind, error.retryable) == (kind, retryable), status
+
+    def test_an_absurdly_long_provider_name_is_not_rendered(self) -> None:
+        """Review finding M3, pinned.
+
+        ``provider_name`` is provider-controlled text sharing the 500-char
+        frame budget with the upstream diagnostics. A 300-char attribution
+        would push the part that says what actually went wrong off the end,
+        making the frame strictly worse than the generic wording it replaced,
+        so an implausible name is dropped instead of trusted."""
+        body = {
+            "error": {
+                "message": "Provider returned error",
+                "code": 404,
+                "metadata": {
+                    "raw": json.dumps({"error": {"message": "the real diagnostics"}}),
+                    "provider_name": "X" * 300,
+                },
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert "the real diagnostics" in error.message
+        assert "XXX" not in error.message
+
+    def test_a_hostile_provider_name_cannot_corrupt_the_frame(self) -> None:
+        """Review B3 / QA Q2 (round 2), pinned.
+
+        ``provider_name`` is provider-controlled text rendered into a terminal
+        frame. An earlier draft collapsed whitespace only, which left ESC
+        untouched \u2014 QA drove the real app and found the notice rendering as
+        nothing but its ``!`` glyph, with a live ``ESC[2J`` and an OSC title
+        injection reaching the terminal.
+
+        Sanitised through the approval prompts' own primitive, so control
+        sequences, C1 8-bit forms, and bidi/format characters (which reverse
+        rendered order without being control codes) are all neutralised by the
+        rule the rest of the app already trusts."""
+        hostile = {
+            "ansi-erase": "Meta\x1b[2K\x1b[1G",
+            "ansi-clear": "Meta\x1b[2J",
+            "osc-title": "Meta\x1b]0;pwned\x07",
+            "c1-csi": "Meta\x9b31m",
+            "bel": "Meta\x07",
+            "nul": "Meta\x00",
+            "rtl-override": "Meta\u202e",
+            "zero-width-joiner": "Me\u200dta",
+            "newline": "Meta\nFAKE: approved",
+        }
+        for label, name in hostile.items():
+            body = {
+                "error": {
+                    "message": "Provider returned error",
+                    "code": 404,
+                    "metadata": {
+                        "raw": json.dumps({"error": {"message": "the real diagnostics"}}),
+                        "provider_name": name,
+                    },
+                }
+            }
+            message = self._error(httpx.Response(404, json=body)).message
+            assert "the real diagnostics" in message, label
+            for char in message:
+                assert unicodedata.category(char) != "Cf", (label, message)
+                assert not (ord(char) < 0x20 or 0x80 <= ord(char) <= 0x9F), (label, message)
+
+    def test_message_without_provider_name_keeps_its_wording(self) -> None:
+        """Attribution is never invented: a relay body that omits
+        ``provider_name`` keeps the aggregator's original wording."""
+        body = {
+            "error": {
+                "message": "Provider returned error",
+                "code": 404,
+                "metadata": {"raw": json.dumps({"error": {"message": "upstream exploded"}})},
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert error.message == "Provider returned error: upstream exploded"
         assert (error.kind, error.retryable) == ("transient", True)
 
 
@@ -1550,7 +1886,7 @@ class TestOpaqueAggregator400InBand:
         error = await self._stream_error(self._chunk("ERROR"))
         assert error.status == 400
         assert (error.kind, error.retryable) == ("transient", True)
-        assert "Provider returned error" in str(error)
+        assert "Stealth returned error" in str(error)
 
     async def test_in_band_actionable_diagnostics_stay_request(self) -> None:
         """Real upstream diagnostics in-band are still an answer, not weather."""

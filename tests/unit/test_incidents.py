@@ -93,3 +93,50 @@ def test_model_switch_without_previous_label_reads_cleanly():
 def test_model_switch_message_type_constant_is_stable():
     # Persisted into transcripts; renaming it would orphan replay of old sessions.
     assert SESSION_MODEL_SWITCH_MESSAGE_TYPE == "session_model_switch"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "This model's maximum context length is 16385 tokens",
+        "prompt is too long: 250000 tokens > 200000 maximum",
+        "The input token count (1200000) exceeds the maximum number of tokens allowed",
+        "The request exceeds the model's maximum context window",
+        "Too many tokens in prompt",
+        "too many tokens: input is larger than the model's context length",
+        "request too large for model",
+        "Input is too long for requested model",
+    ],
+)
+def test_every_vendor_overflow_wording_is_recognised(raw: str) -> None:
+    """The overflow rule has to cover how vendors ACTUALLY phrase it.
+
+    An audit against real vendor output found the list recognising 6 of 10
+    wordings: google/vertex counts input tokens, mistral and bedrock phrase it
+    differently again. The gap mattered beyond this classifier, because
+    `providers.clients` shares the list to decide that a relayed overflow is
+    deterministic and must not be retried as upstream weather.
+    """
+    assert classify_incident(raw).category == "context-length"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Verbatim AWS Bedrock ThrottlingException wording.
+        "ThrottlingException: Too many tokens, please wait before trying again.",
+        # A TPM limit that quotes a token count in passing.
+        "Rate limit reached for gpt-4: Limit 90000 token count per min",
+        "Number of request tokens has exceeded your per-minute rate limit",
+    ],
+)
+def test_a_throttle_that_mentions_tokens_is_not_an_overflow(raw: str) -> None:
+    """Rate limits must not be read as context overflows.
+
+    context-length is the FIRST rule, so it outranks rate-limit: a bare "too
+    many tokens" or "token count" marker captures these and tells the user to
+    /compact a request whose only problem is that it arrived too soon. The
+    markers are therefore qualified to name the INPUT, which a throttle never
+    does.
+    """
+    assert classify_incident(raw).category != "context-length"
