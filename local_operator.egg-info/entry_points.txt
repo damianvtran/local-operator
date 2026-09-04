@@ -1,0 +1,3 @@
+[console_scripts]
+local-operator = local_operator.cli:main
+lop = local_operator.cli:main
