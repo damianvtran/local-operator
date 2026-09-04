@@ -866,6 +866,36 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 dest="resume",
                 help="Resume a previous session by id. Pass with no id for the most recent.",
             )
+            # The run-shaping trio, for the same reason and by the same
+            # mechanism. An external supervisor driving `lop exec` composes its
+            # argv programmatically and naturally writes the flags AFTER the
+            # subcommand — `lop exec - --json --model X` — which failed with
+            # "unrecognized arguments" and an exit 2 that reads like a bad
+            # install rather than a word-order rule. They select which model
+            # answers and where it runs, so silently ignoring them would be
+            # worse than the parse error: the run would proceed against the
+            # wrong model, in the wrong directory.
+            subparser.add_argument(
+                "--hosting",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="hosting",
+                help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+            )
+            subparser.add_argument(
+                "--model",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="model",
+                help="Model to use for this run",
+            )
+            subparser.add_argument(
+                "--run-in",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="run_in",
+                help="Working directory to run the operator in",
+            )
             _propagate_global_flags(subparser)
 
 

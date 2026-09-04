@@ -365,13 +365,18 @@ def test_run_exec_foreground_json_mode(fake_factory, capsys) -> None:
         "agent_end",
     ]
     # Quadratic-growth fix: message_update keeps ONLY the delta — plus the
-    # message_id so JSON consumers can attribute deltas (CL-15).
+    # message_id so JSON consumers can attribute deltas (CL-15), and the
+    # session_id every json-mode line carries for stateless per-line parsers.
+    # Asserted as an exact shape (minus the session stamp, which the fake
+    # session supplies) because the property under test is what is ABSENT:
+    # no full-message snapshot may creep back in.
     update = lines[2]
-    assert update == {
+    assert {key: value for key, value in update.items() if key != "session_id"} == {
         "type": "message_update",
         "message_id": reply.id,
         "delta": "streamed",
     }
+    assert "message" not in update, "the full message snapshot must not return"
 
 
 def test_printable_event_strips_provider_payload() -> None:
