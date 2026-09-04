@@ -129,21 +129,31 @@ def _redacted(value: str, limit: int, redactions: RedactionSet | None) -> str:
     secrets at all (nothing was ever delivered to leak), which keeps the
     no-secret episode from paying for a scan that cannot match.
 
-    This is the SECOND line of defence, not the only one. The parent's evidence
-    writer scans every artifact it publishes against the episode's own
-    RedactionSet, so a value this worker never saw still cannot reach the
-    bundle. Checking here as well means a leak is refused before it is written
-    to a pipe, rather than after.
+    ORDER IS THE SECURITY PROPERTY: scan the UNBOUNDED value, then truncate.
+    ``RedactionSet.assert_clear`` is a SUBSTRING check, so truncating first
+    severs the canary and the surviving prefix is returned verbatim -- a
+    40-character AWS key sitting across the 512-character message cut emitted
+    25 characters of itself, and an 808-character JWT emitted 488. This is
+    systematic rather than a corner case: ANY secret longer than its field
+    bound can never match once it has been cut. Reversing these two lines
+    reintroduces that leak silently, which is why the regression test
+    positions a secret to straddle the boundary.
+
+    The parent's artifact scan is NOT a second line of defence against this
+    particular failure, and must not be mistaken for one: it applies the same
+    substring semantics to whatever bytes it receives, so it returns PASSED on
+    an already-truncated secret for exactly the same reason. Both checks are
+    blind to the same case, and this ordering is what closes it. The parent
+    scan remains valuable for its own case -- values the worker never held.
     """
 
-    bounded = _control_safe(value, limit)
-    if not bounded or redactions is None:
-        return bounded
-    try:
-        redactions.assert_clear(bounded)
-    except ValueError:
-        return WITHHELD
-    return bounded
+    if redactions is not None and value:
+        try:
+            # The FULL value, before any bound is applied.
+            redactions.assert_clear(value)
+        except ValueError:
+            return WITHHELD
+    return _control_safe(value, limit)
 
 
 def _error_detail(

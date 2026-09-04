@@ -1099,10 +1099,17 @@ class EpisodeRunner:
         # the whole of "adapter_error: adapter operation failed" after 19 billed
         # steps. ``_diagnostic`` itself strips pydantic's ``input_value=`` echo
         # (the one place a resolved secret could surface) and truncates to 500
-        # chars, and
-        # ``publish_artifact`` independently scans every byte against the
-        # episode's RedactionSet, so a leaked credential fails the write rather
-        # than reaching the bundle.
+        # chars, and ``publish_artifact`` independently scans every byte
+        # against the episode's RedactionSet.
+        #
+        # That parent scan is NOT a backstop for a secret the harness itself
+        # truncated, and must not be read as one. ``assert_clear`` is a
+        # SUBSTRING check, so a value already cut by ``_diagnostic``'s 500-char
+        # bound (or by the worker's field bounds) no longer matches its canary
+        # and the scan returns clean on the surviving prefix. The defence that
+        # actually closes that case is ordering: the worker scans the UNBOUNDED
+        # string before truncating (``worker._redacted``), so a straddled
+        # secret is withheld whole before it ever reaches this side.
         detail: Any = None
         try:
             detail = self._publish(_failure_detail(error).encode("utf-8"), media_type="text/plain")

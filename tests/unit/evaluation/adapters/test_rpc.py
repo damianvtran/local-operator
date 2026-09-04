@@ -182,3 +182,50 @@ def test_unbuildable_canary_set_withholds_rather_than_assuming_no_secrets() -> N
     assert _redacted("anything at all", MAX_DETAIL_MESSAGE, _DENY_ALL) == WITHHELD
     # No secrets delivered at all: the text is kept, because none can leak.
     assert _redacted("plain text", MAX_DETAIL_MESSAGE, None) == "plain text"
+
+
+def test_a_secret_straddling_the_truncation_boundary_is_still_withheld() -> None:
+    """Scan the UNBOUNDED value: truncating first severs the canary.
+
+    ``RedactionSet.assert_clear`` is a substring check, so a secret cut by the
+    field bound stops matching and its surviving prefix is returned verbatim.
+    Round 1's F1: a 40-character AWS key positioned across the 512-character
+    message cut emitted 25 characters of itself, and an 808-character JWT
+    emitted 488. It is systematic -- ANY secret longer than its field bound can
+    never match once cut -- and the parent's artifact scan cannot catch it
+    either, because it applies the same substring semantics to the already
+    truncated bytes.
+
+    Both field bounds are covered because they truncate at different lengths,
+    and the JWT case additionally pins a secret LONGER than the bound, which is
+    the shape that can never match after cutting.
+    """
+
+    from local_operator.evaluation.adapters.rpc import (
+        MAX_DETAIL_MESSAGE,
+        MAX_DETAIL_NAME,
+        WITHHELD,
+    )
+    from local_operator.evaluation.adapters.worker import _redacted
+    from local_operator.evaluation.receipts import RedactionSet
+
+    key = "AKIAIOSFODNN7EXAMPLE" + "QWERTYUIOPASDFGH1234"
+    assert len(key) == 40
+    jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9." + "a" * 400 + "." + "b" * 370
+    assert len(jwt) > MAX_DETAIL_MESSAGE
+
+    for secret, limit in (
+        (key, MAX_DETAIL_MESSAGE),
+        (key, MAX_DETAIL_NAME),
+        (jwt, MAX_DETAIL_MESSAGE),
+    ):
+        redactions = RedactionSet.from_resolved_values((secret,))
+        # Place the secret so the cut lands INSIDE it rather than before it.
+        filler = "adapter failed: " + "x" * max(limit - 16 - len(secret) // 2, 0)
+        result = _redacted(filler + secret + " trailing context", limit, redactions)
+        assert result == WITHHELD
+        # No contiguous run of the secret survives -- the assertion that fails
+        # if the scan is ever moved back after the truncation.
+        assert not any(
+            secret[:length] in result for length in range(8, len(secret) + 1)
+        ), "a prefix of the secret survived truncation"

@@ -667,9 +667,12 @@ class LeakyAdapter:
 
     async def reset_start(self, params):
         # The adapter does exactly what a careless one does: puts the
-        # credential it was just handed into its own error message.
+        # credential it was just handed into its own error message. The
+        # padding places the secret so the message field's 512-character bound
+        # cuts THROUGH it: truncating before the canary scan would sever the
+        # match and emit the surviving prefix verbatim (round 1, F1).
         token = {s.name: s.value for s in params.secrets}["AWS_SECRET_ACCESS_KEY"]
-        raise RuntimeError("auth rejected for key " + token)
+        raise RuntimeError("auth rejected: " + ("x" * 500) + token + " (retry)")
 
     async def observe(self, params): raise NotImplementedError
 
@@ -818,3 +821,11 @@ async def test_error_detail_withholds_a_secret_the_adapter_put_in_its_message(
     ):
         assert marker not in surface
         assert "AKIA-canary" not in surface
+        # No PREFIX of the credential survives either. The adapter pads its
+        # message so the field bound cuts through the secret, which is the
+        # shape a truncate-then-scan ordering leaks (round 1, F1): the canary
+        # stops matching once severed, and the surviving prefix crosses the
+        # pipe verbatim.
+        assert not any(
+            marker[:length] in surface for length in range(8, len(marker) + 1)
+        ), "a prefix of the credential crossed the boundary"
