@@ -46,10 +46,13 @@ from local_operator.evaluation.runner.model import (
     ModelDecision,
     ModelUsage,
 )
+from local_operator.logger import get_logger
 
 if TYPE_CHECKING:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.types import Message
+
+logger = get_logger(__name__)
 
 #: Frames kept verbatim in the history by default. A GUI agent reads the
 #: screen as STATE: the current frame is what it acts on and the last couple
@@ -69,6 +72,13 @@ DEFAULT_REBUILD_EVERY_FRAMES = 8
 #: must see WHAT it said to fix it -- but a runaway reply (a provider's
 #: max-token wall of prose) must not cost the whole window on the retry.
 MAX_REJECTED_REPLY_CHARS = 4_000
+
+#: Longest run of tolerated trailing noise quoted into the observable warning
+#: when a decision parses as a leading JSON value followed by junk. The point
+#: of the quote is to let a reader RECOGNISE what the model appended, not to
+#: reproduce it: a model that ran away into a wall of prose must not be able to
+#: push a bounded log line into an unbounded one.
+MAX_TOLERATED_TRAILING_CHARS = 200
 
 #: Rendered in place of an observation's text when it is byte-identical to the
 #: previous turn's. The adapter owns observation text and the runner never
@@ -275,6 +285,64 @@ class DecisionParseError(ValueError):
     """The provider returned something that is not a usable action batch."""
 
 
+def _decode_leading_json(payload: str) -> tuple[Any, str]:
+    """Decode the leading JSON value and return it with any trailing noise.
+
+    ``json.loads`` demands that the WHOLE string be one value, so a model that
+    emitted a complete, correct batch and then appended a stray token lost the
+    entire turn to ``Extra data: line 1 column 318 (char 317)``. That is a real
+    and repeated failure -- one sealed episode paid for it three times, each a
+    billed call discarded over noise the harness had already finished reading
+    past. ``raw_decode`` stops at the end of the first complete value and says
+    where it stopped, which is exactly the question being asked here.
+
+    The tolerance is deliberately ONE-SIDED, because the three shapes are not
+    equally knowable:
+
+    * **Trailing noise** (``{...}原始内容``, ``{...} Hope that helps!``) is
+      tolerated. The decision is already complete and unambiguous at the point
+      the junk starts; nothing after it can change which actions were chosen.
+    * **Leading noise** (``Sure, here you go: {...}``) is NOT skipped. Hunting
+      forward for the first ``{`` means guessing where the value begins, and a
+      preamble that itself contains a brace makes that guess wrong silently --
+      the failure mode is executing a DIFFERENT batch than the model sent,
+      which is far worse than losing the turn. A leading-junk reply still gets
+      the ordinary parse error and a corrective re-prompt.
+    * **Two concatenated objects** (``{...}{...}``) is genuinely ambiguous --
+      which batch did the model mean? -- so it is NOT tolerated either. Silently
+      taking the first would execute a decision the model may have superseded.
+
+    The ambiguity probe is deliberately narrowed to a trailing OBJECT. A
+    decision is always an object, so only a second object can be a competing
+    decision; asking the broader question "does the remainder parse as any
+    JSON value?" misreads ordinary prose whose first word happens to be a JSON
+    literal ("true story, that worked", "42 windows were listed", a quoted
+    sentence) as a second decision, and would reject the very turn this
+    function exists to save.
+    """
+
+    decoder = json.JSONDecoder()
+    try:
+        decoded, end = decoder.raw_decode(payload)
+    except json.JSONDecodeError as error:
+        # Includes the leading-junk case: raw_decode starts at offset 0, so a
+        # preamble fails here rather than being skipped past.
+        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+    trailing = payload[end:].strip()
+    if trailing.startswith("{"):
+        try:
+            decoder.raw_decode(trailing)
+        except json.JSONDecodeError:
+            # A brace that does not open a complete object is prose, not a
+            # competing decision ("{note: see above}"), so it stays tolerated.
+            pass
+        else:
+            raise DecisionParseError(
+                "decision carries more than one JSON object; send exactly one action batch"
+            )
+    return decoded, trailing
+
+
 def parse_decision(
     payload: str,
     observation: Observation,
@@ -296,14 +364,31 @@ def parse_decision(
     screen the environment has already moved past. ``ActionBatch.validate_for``
     rejects that at the adapter boundary, so the failure is surfaced here where
     it can be attributed to the model and fed back to it.
+
+    Strict about the DECISION, not about the framing around it: text appended
+    after a complete batch is tolerated and reported rather than costing the
+    turn (see :func:`_decode_leading_json` for which shapes are and are not
+    tolerated, and why the tolerance only ever runs forwards).
     """
 
-    try:
-        decoded: Any = json.loads(payload)
-    except json.JSONDecodeError as error:
-        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+    decoded, trailing = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
+    if trailing:
+        # Tolerated, but never silent. A model that reliably appends junk is a
+        # signal worth seeing -- it may point at a prompt or provider problem
+        # -- and a tolerance nobody can observe is indistinguishable from the
+        # harness quietly mangling a reply. Bounded because the remainder is
+        # untrusted model output of arbitrary length.
+        quoted = trailing[:MAX_TOLERATED_TRAILING_CHARS]
+        if len(trailing) > MAX_TOLERATED_TRAILING_CHARS:
+            quoted += "[...]"
+        logger.warning(
+            "decision carried %d character(s) of trailing text after a complete "
+            "JSON value; the batch was accepted and the remainder ignored: %r",
+            len(trailing),
+            quoted,
+        )
     actions = decoded.get("actions")
     if not isinstance(actions, list) or not actions:
         raise DecisionParseError("decision must carry a non-empty actions array")
