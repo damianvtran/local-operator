@@ -492,3 +492,45 @@ async def test_live_appends_reach_only_the_watched_job(tmp_path: Path, monkeypat
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_the_turn_end_checkpoint_does_not_grow_with_the_conversation() -> None:
+    """The transcript pays for this row once per turn, forever.
+
+    The attach frame is only half the budget the unbounded lists blew. The
+    same state is appended to the transcript at EVERY turn end, so a list that
+    grows with conversation length is re-serialized in full on every turn:
+    quadratic. On the reference machine those rows were 64.3% of a 103 MB
+    transcript, and ``usage_components`` alone was 48.2% of the whole file.
+
+    Asserted as a RATIO between an early and a late checkpoint rather than as
+    an absolute size, so the test states the property (the row stops growing)
+    instead of pinning a byte count that legitimate new fields would break.
+    """
+
+    class _Transcript:
+        def __init__(self) -> None:
+            self.rows: list[int] = []
+
+        async def append_custom(self, _custom_type: str, details: dict[str, Any]) -> None:
+            self.rows.append(len(json.dumps(details).encode()))
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    session = SimpleNamespace(effective_model=_priced_spec())
+    transcript = _Transcript()
+
+    for turn in range(40):
+        for call in range(20):
+            store.accrue_usage(session, _receipt(turn * 20 + call))
+        await store.checkpoint(transcript)
+
+    # Compared between two points that are BOTH past the cap's saturation
+    # point, because the row legitimately grows while the bounded tail is
+    # still filling. What must not happen is continued growth after that.
+    settled, late = transcript.rows[19], transcript.rows[-1]
+    assert late <= settled * 1.05, (
+        f"the checkpoint grew from {settled:,} to {late:,} bytes between turn 20 "
+        "and turn 40; something in the durable state accumulates with "
+        "conversation length and is re-written in full on every turn"
+    )

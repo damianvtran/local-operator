@@ -1863,10 +1863,37 @@ class FrontendStateStore:
         # Trajectories are reconstructable from durable child transcripts and
         # live_events are transient by definition; persisting them appended
         # ~71 KiB per busy child to the transcript at EVERY turn end.
+        #
+        # The per-job receipt lists are folded for the same reason and by the
+        # same measurement: this row is rewritten IN FULL on every turn end, so
+        # anything that grows with the conversation is paid for once per turn
+        # forever. On the reference machine the checkpoint rows were 64.3% of a
+        # 103 MB transcript. The fold is lossless for cost (see
+        # ``_folded_components``), so the restored spend is unchanged — which
+        # is the only property the durable copy owes anyone.
         durable = state.model_copy(
             update={
                 "live_events": [],
-                "jobs": [job.model_copy(update={"trajectory": []}) for job in state.jobs],
+                "jobs": [
+                    job.model_copy(
+                        update={
+                            "trajectory": [],
+                            "usage": (
+                                job.usage.model_copy(
+                                    update={
+                                        "cost_components": _folded_components(
+                                            job.usage.cost_components
+                                        )
+                                    }
+                                )
+                                if job.usage is not None
+                                else None
+                            ),
+                            "descendant_usage": _folded_components(job.descendant_usage),
+                        }
+                    )
+                    for job in state.jobs
+                ],
             }
         )
         await transcript.append_custom(
