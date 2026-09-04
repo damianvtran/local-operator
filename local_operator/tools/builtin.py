@@ -985,6 +985,20 @@ ToolExecutor = Callable[
 _FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
+def _file_path_identity(path: Path) -> str:
+    """Coalesce spelling aliases before a new file has an inode to lock.
+
+    macOS can resolve composed/decomposed Unicode names to the same file while
+    ``Path.resolve`` preserves their different spellings. Both the scheduler
+    and cross-session transaction locks must share this identity, otherwise
+    two creators can enter concurrently before either can observe an inode.
+    Folding/normalizing may conservatively serialize distinct files on other
+    filesystems; it only affects coordination, never the actual I/O path.
+    Normalize after folding because folding can introduce decomposed text.
+    """
+    return unicodedata.normalize("NFC", str(path.resolve(strict=False)).casefold())
+
+
 def _file_resource_keys(args: dict[str, Any], cwd: str) -> tuple[str, ...]:
     """Declare mutation conflicts without weakening the transaction locks.
 
@@ -998,8 +1012,7 @@ def _file_resource_keys(args: dict[str, Any], cwd: str) -> tuple[str, ...]:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = Path(cwd) / path
-    path = path.resolve(strict=False)
-    keys = ["file:path:" + str(path).casefold()]
+    keys = ["file:path:" + _file_path_identity(path)]
     try:
         stat = path.stat()
     except FileNotFoundError:
@@ -1015,11 +1028,11 @@ def _file_transaction(path: Path) -> Iterator[None]:
 
     The path stripe is always held, so a transaction that creates a file
     cannot be bypassed by a second caller that observes the new inode. The
-    inode stripe additionally coalesces hardlinks. Symlink/case aliases share
-    the resolved, case-folded path key. Multiple stripes are acquired in
+    inode stripe additionally coalesces hardlinks. Symlink/case/Unicode aliases
+    share the canonical path key. Multiple stripes are acquired in
     numeric order to make overlapping alias sets deadlock-free.
     """
-    canonical = ("path", str(path.resolve(strict=False)).casefold())
+    canonical = ("path", _file_path_identity(path))
     keys: list[object] = [canonical]
     try:
         stat = path.stat()

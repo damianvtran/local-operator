@@ -102,3 +102,33 @@ def test_mutation_resources_match_hardlinks_and_new_paths(tmp_path):
     right = set(builtin._file_resource_keys({"path": str(alias)}, str(tmp_path)))
     assert left & right
     assert not left & set(builtin._file_resource_keys({"path": "new"}, str(tmp_path)))
+
+
+@pytest.mark.parametrize("names", [("café.txt", "cafe\u0301.txt"), ("CAFÉ.txt", "cafe\u0301.txt")])
+def test_new_unicode_aliases_share_scheduler_and_transaction_identity(tmp_path, monkeypatch, names):
+    """Pre-creation aliases must conflict even before stat can identify them.
+
+    A macOS probe demonstrated both real transactions entering before either
+    created this file. Assert the two independent coordination surfaces: a
+    scheduler key alone cannot protect separate parent/child loops. Observe
+    transaction hash inputs so a random stripe collision cannot hide a broken
+    identity. This remains conservative on normalization-sensitive filesystems.
+    """
+    paths = [tmp_path / name for name in names]
+    assert not any(path.exists() for path in paths)
+    resources = [
+        set(builtin._file_resource_keys({"path": str(path)}, str(tmp_path))) for path in paths
+    ]
+    assert resources[0] & resources[1]
+    transaction_keys = []
+
+    def hash_spy(key):
+        transaction_keys.append(key)
+        return hash(key)
+
+    monkeypatch.setattr(builtin, "hash", hash_spy, raising=False)
+    for path in paths:
+        with builtin._file_transaction(path):
+            pass
+    assert len(transaction_keys) == 2  # No inode exists yet.
+    assert transaction_keys[0] == transaction_keys[1]
