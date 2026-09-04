@@ -1325,6 +1325,13 @@ class FrontendStateStore:
                     "output_price": float(getattr(entry, "output_price", 0.0) or 0.0),
                     "connected": bool(getattr(entry, "connected", False)),
                     "aggregated": bool(getattr(entry, "aggregated", False)),
+                    # Carried so the round-trip stays faithful to
+                    # ``CatalogueEntry`` rather than silently defaulting a
+                    # field the reader knows about. ``getattr`` with a default
+                    # for the same reason every key above uses one: this takes
+                    # ``Any``, and a duck-typed entry from an embedding host
+                    # need not have the attribute.
+                    "routed": bool(getattr(entry, "routed", False)),
                 }
             )
         return self.mutate(model_catalogue=rows)

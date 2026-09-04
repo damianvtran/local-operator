@@ -15449,6 +15449,12 @@ class OperatorApp(App[None]):
                         output_price=float(row.get("output_price", 0.0) or 0.0),
                         connected=bool(row.get("connected", False)),
                         aggregated=bool(row.get("aggregated", False)),
+                        # Absent from an owner running an older build, which
+                        # reads as False — the same "not a router" default the
+                        # listing cache uses, and correct here for a further
+                        # reason: the publisher drops aggregated rows, so no
+                        # router reaches a follower through this path at all.
+                        routed=bool(row.get("routed", False)),
                     )
                     for row in owner_rows
                     if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
@@ -15470,6 +15476,7 @@ class OperatorApp(App[None]):
                 output_price=entry.output_price,
                 connected=entry.connected,
                 aggregated=entry.aggregated,
+                routed=entry.routed,
             )
             for entry in entries
             if usable is None or entry.provider in usable or entry.selector == current
@@ -15532,6 +15539,7 @@ class OperatorApp(App[None]):
                 output_price=entry.output_price,
                 connected=entry.connected,
                 aggregated=entry.aggregated,
+                routed=entry.routed,
             )
         ]
 

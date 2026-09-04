@@ -59,6 +59,7 @@ from local_operator.model.effort import EFFORT_ORDER
 from local_operator.model.ids import id_spellings, normalised_id
 from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
+    AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
     WireFormat,
     credential_provider_id,
@@ -250,11 +251,22 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: aggregators, since they are the only transports whose wire carries the field
 #: at all (the anthropic/zai/xai/kimi/alibaba/codex documents and models.dev do
 #: not, so ``anthropic`` stays at 2 and every default-1 transport stays at 1).
+#: Version 6 for ``openrouter`` and ``radient`` is ``_row_from_openai_entry``
+#: recording :attr:`DiscoveredModel.routed` — a MEANING the version-5 writer
+#: could not express, the same case as the version-3 ``free`` bump. A version-5
+#: document parses to rows with ``routed=False``, a valid shape in which
+#: ``radient/auto`` keeps rendering the word ``free`` (its listing quotes a
+#: symmetric zero) and ``openrouter/auto`` keeps rendering a blank cell. Both
+#: are the exact wrong labels this change exists to replace, so without the
+#: bump the fix would ship and change nothing on screen for up to a day on
+#: every install that already has a listing. Same one-time synchronous refetch
+#: the earlier bumps describe, paid by the same two aggregators, since they are
+#: the only transports that quote a price at all.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     "anthropic": 2,
-    "openrouter": 5,
-    "radient": 5,
-    "radient-key": 5,
+    "openrouter": 6,
+    "radient": 6,
+    "radient-key": 6,
 }
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
@@ -354,6 +366,20 @@ class DiscoveredModel:
     #: a row is only ``True`` here when a parser read an explicit zero off a wire
     #: or a document. A row that carries a positive price must never set it.
     free: bool = False
+    #: The SOURCE stated that this endpoint is a META-ROUTE whose price depends
+    #: on the model it dispatches to — a quoted NEGATIVE price, which is how
+    #: OpenRouter spells it on ``openrouter/auto`` and Radient on ``auto``.
+    #:
+    #: The fourth price state, and a sibling of ``free`` rather than a variant
+    #: of it: both exist because the wire said something a pair of floats
+    #: cannot record. Where ``free`` distinguishes a quoted zero from silence,
+    #: this distinguishes "unknowable by construction" from "nobody quoted it",
+    #: which the picker renders as ``usage-based`` and a blank cell.
+    #:
+    #: Never true beside a positive price and never true beside ``free``: a
+    #: route that quotes real money is priced, and a router cannot be free at
+    #: the point of use when its own listing declines to price it.
+    routed: bool = False
     supports_images: bool | None = None
     supports_prompt_cache: bool = False
     #: The effort ladder the LISTING stated, ASCENDING and normalised to
@@ -478,6 +504,44 @@ def _stated_zero_price(value: object) -> bool:
     else:
         return False
     return math.isfinite(number) and number == 0.0
+
+
+def _stated_routed_price(value: object) -> bool:
+    """Whether ``value`` is the META-ROUTE sentinel: a NEGATIVE quoted price.
+
+    The fourth thing this field can mean, beside the three
+    :func:`_stated_zero_price` enumerates. OpenRouter writes ``"-1"`` on
+    ``openrouter/auto`` and Radient writes it on ``auto``: the endpoint is a
+    router, so its cost is neither a number nor zero nor unknown — it is
+    whatever the model it dispatches to charges, which cannot be known until
+    the turn is routed.
+
+    Read off the WIRE for the same reason the stated zero is: only the parser
+    that saw the character ``-`` can tell this apart from a listing that
+    quoted nothing, since :func:`_positive_float` collapses both to ``0.0``.
+    Inferring it downstream by pattern-matching an id would put the label on
+    any future model whose name happens to end in ``auto`` and miss every
+    router that does not.
+
+    NOT merged with the stated zero into one "unpriced" answer. They render
+    differently on purpose — ``free`` is a promise the user can act on and
+    ``usage-based`` is a warning that they cannot — and a router quoted at
+    ``"0"`` by a server that has not been fixed yet is exactly the row that
+    must not read as free.
+    """
+    if isinstance(value, bool):
+        # bool is an int subclass, and ``False`` is not a quoted price.
+        return False
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return False
+    else:
+        return False
+    return math.isfinite(number) and number < 0.0
 
 
 def _per_million(value: object) -> float:
@@ -724,8 +788,105 @@ def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
     return True
 
 
-def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+#: Listing ids that ARE a router rather than a model, by aggregator spelling.
+#:
+#: Deliberately tiny and deliberately here rather than in the renderer. These
+#: are not "models we know about" — enumerating those is what the live listing
+#: is for — they are the two endpoints whose entire product is dispatching to
+#: another model, which is a structural property of the aggregator's API and
+#: changes only when the aggregator adds a router.
+_META_ROUTE_IDS = frozenset({"auto", "openrouter/auto"})
+
+
+def is_meta_route_id(model_id: str, provider_id: str) -> bool:
+    """Whether ``provider_id``/``model_id`` names a ROUTER rather than a model.
+
+    The id half of :func:`_is_meta_route`, exported for the one caller that
+    has no listing row to read a price from: the controller's rescue entry,
+    which describes the session's CURRENT model from the registry when a live
+    listing could not be had. That path is reached exactly when the router's
+    own pricing is unavailable, so the price signal it would prefer does not
+    exist there — and it is the path a user on ``radient/auto`` with a cold
+    cache actually hits.
+
+    Takes the provider for the same reason :func:`_is_meta_route` does, and it
+    is not hypothetical here either: ``ollama/auto`` reaches the rescue entry
+    by exactly the same route as ``radient/auto``, so an ungated id test would
+    mislabel a local model the user happened to name ``auto``.
+
+    Kept as one exported predicate over one module-private set so the two
+    layers cannot drift into disagreeing about what a router is.
+    """
+    return model_id in _META_ROUTE_IDS and provider_id in AGGREGATOR_PROVIDERS
+
+
+def _is_meta_route(model_id: str, provider_id: str, pricing: Mapping[str, object]) -> bool:
+    """Whether this entry is a ROUTER whose cost depends on where it dispatches.
+
+    Two signals, either of which is sufficient, and the second exists only
+    because of a bug the first cannot see through.
+
+    The PRICE is the principled signal: a quoted negative leg means exactly
+    this and nothing else (:func:`_stated_routed_price`), it is what OpenRouter
+    publishes for ``openrouter/auto``, and it keeps working for any router any
+    aggregator adds later without this module being told about it. It needs no
+    provider gate — a quoted negative is self-describing wherever it appears.
+
+    The ID is the fallback, and it is gated on the provider being an
+    AGGREGATOR. Radient's listing currently declares ``auto`` with
+    ``{"prompt": "0", "completion": "0"}``, and a symmetric quoted zero is
+    INDISTINGUISHABLE from a genuinely free route by price alone — that is the
+    whole reason ``_stated_zero_price`` exists. So for that one shape there is
+    no principled signal to read, and the honest options are to name the router
+    or to let it keep claiming to be free.
+
+    WHY the gate is load-bearing rather than defensive: this parser serves the
+    ``openai-compat`` wire GENERALLY, not just the two aggregators — ollama,
+    deepseek, mistral, kimi, xai, zai, alibaba and openai all reach it. On
+    Ollama the "listing" is the user's own filesystem, so the id space is
+    user-controlled and a local model named ``auto`` is a thing a user can
+    simply have. Ungated, that row rendered ``usage-based`` where it had
+    correctly read ``free`` — and ``ollama`` is the ONE provider with
+    ``allows_missing_api_key``, whose genuine zero is exactly what ``_price``
+    exists to preserve. So the mislabel landed on the honest-pricing axis this
+    module is most careful about.
+
+    The blast radius was the PRICE CELL ONLY, and the bound is worth stating so
+    nobody re-derives it: ``get_model_info`` dispatches the router's 1M row on
+    its own aggregator-scoped set, so no session ever ran on wrong metadata —
+    a local model kept its real window and its real image capability. A
+    cosmetic mislabel on the one column that must not lie, rather than a
+    correctness bug in the spec.
+
+    The set is checked against the LISTING id, which is the id as that
+    aggregator spells it (``auto`` on Radient, ``openrouter/auto`` on
+    OpenRouter). The fallback expires on its own: once the Radient server
+    quotes ``"-1"`` (radient-ml/agent-server #8) and cached listings have
+    rolled past the capture bump, the price leg carries the row and the id leg
+    can be deleted.
+    """
+    if model_id in _META_ROUTE_IDS and provider_id in AGGREGATOR_PROVIDERS:
+        return True
+    # BOTH legs, matching the stated-zero rule directly above it: a
+    # half-negative row is a listing bug, not a router, and reading one
+    # leg would let it suppress a real price on the other.
+    return _stated_routed_price(pricing.get("prompt")) and _stated_routed_price(
+        pricing.get("completion")
+    )
+
+
+def _row_from_openai_entry(
+    entry: Mapping[str, object], provider_id: str = ""
+) -> DiscoveredModel | None:
     """One OpenAI-compatible listing entry, or ``None`` when it has no id.
+
+    ``provider_id`` says whose wire this entry came off, which only
+    :func:`_is_meta_route`'s router-id fallback needs. It DEFAULTS TO EMPTY and
+    that direction is deliberate: ``""`` is not in ``AGGREGATOR_PROVIDERS``, so
+    a caller that omits it gets the price-only answer — the conservative one —
+    rather than a router label it did not ask for. The alternative, a required
+    argument, would fail closed too but at import time for every existing
+    caller; this fails closed at the only place the value changes an answer.
 
     Nothing beyond ``id`` is standardised: OpenRouter nests the real limits under
     ``top_provider`` and the modalities under ``architecture``, while leaner
@@ -773,11 +934,18 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
         # The modality gate is the same guard one level up: a zero per TOKEN is
         # only a whole price for a model that bills in tokens (see
         # :func:`_bills_in_tokens`).
+        # A router is never free, whichever way its listing spells the
+        # non-price. The ``routed`` test below claims the row first, so a
+        # meta-route quoting ``"0"`` — which is what Radient's listing does
+        # for ``auto`` today — drops out of this expression rather than
+        # advertising a frontier-model dispatch as costing nothing.
         free=(
-            _stated_zero_price(pricing.get("prompt"))
+            not _is_meta_route(model_id, provider_id, pricing)
+            and _stated_zero_price(pricing.get("prompt"))
             and _stated_zero_price(pricing.get("completion"))
             and _bills_in_tokens(architecture)
         ),
+        routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
         supports_images=_has_image_input(architecture),
         # A priced cache-read leg is the only machine-readable evidence of prompt
@@ -930,7 +1098,11 @@ def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     entries = _entry_list(body, "data", "models")
     if entries is None:
         return None
-    rows = (_row_from_openai_entry(entry) for entry in entries)
+    # The provider is threaded in because the ROUTER-id fallback in
+    # ``_is_meta_route`` is only valid for an aggregator: this same parser
+    # serves every ``openai-compat`` provider, and on Ollama the listing is the
+    # user's own filesystem (see R1).
+    rows = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
     return [row for row in rows if row is not None]
 
 
@@ -1390,6 +1562,15 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # "free", only "priced" or "unknown".
         free=row.free
         and not (_positive_float(info.input_price) or _positive_float(info.output_price)),
+        # Same shape and same reason as ``free`` above: only the LIVE listing
+        # can state it (no bundled row describes a router's pricing), and it
+        # does not survive a registry price. The aggregator templates carry no
+        # prices, so in practice this passes straight through — but a future
+        # priced row must not be able to quote $3/15 and claim to be
+        # unpriceable at the same time, which is the invariant, not the
+        # current data.
+        routed=row.routed
+        and not (_positive_float(info.input_price) or _positive_float(info.output_price)),
         cache_read_price=(
             _positive_float(row.cache_read_price) or _positive_float(info.cache_reads_price)
         ),
@@ -1535,6 +1716,12 @@ def _rows_from_payload(
                 # (not stated free), so a plain bool is enough — unlike
                 # ``supports_images`` below, this field has no third state.
                 free=bool(entry.get("free")),
+                # Stored as a computed boolean exactly like ``free``, and read
+                # back the same way: a stored ``false`` and an absent key both
+                # mean "not a router". A document written before this field
+                # existed therefore reads as ``false``, which is why the
+                # capture stamp is bumped rather than left to the TTL.
+                routed=bool(entry.get("routed")),
                 # ``null`` in the document is the listing's silence, faithfully
                 # stored by ``dataclasses.asdict``. Reading it as False would let
                 # a cache round-trip turn "unstated" into a denial, so the same

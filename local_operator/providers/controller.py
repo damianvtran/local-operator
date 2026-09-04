@@ -32,6 +32,7 @@ from local_operator.model.discovery import (
     available_models,
     cached_available_models,
     invalidate_listing,
+    is_meta_route_id,
 )
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
@@ -112,6 +113,26 @@ class CatalogueEntry:
     #: This provider RESELLS the model rather than serving it. The picker ranks
     #: the direct route first when the same model is reachable both ways.
     aggregated: bool = False
+    #: This entry is a META-ROUTE: its price depends on the model it dispatches
+    #: to, so there is no pair of numbers that describes it.
+    #:
+    #: WHY this travels when ``free`` deliberately does not. ``free`` stops at
+    #: the boundary below because the price pair can already carry it: ``0.0``
+    #: means stated-free and ``-1.0`` means unknown, so the flag would be a
+    #: second spelling of a fact the floats already hold, free to drift from
+    #: them. That argument does not extend here, and the reason is that the
+    #: float vocabulary is FULL. A router has no price, so it can only arrive
+    #: as ``-1.0``/``-1.0`` — which is already spoken for by "nobody quoted
+    #: this", a genuinely different answer that must keep rendering as a blank
+    #: cell. Encoding a fourth meaning would mean inventing a fourth sentinel
+    #: (``-2.0``) and teaching every reader of these two floats about it, which
+    #: is the "smuggle a new meaning into an existing channel" move that
+    #: ``format_price_pair`` and ``_price`` both warn against at length.
+    #:
+    #: So it is carried as its own bit, the way ``DiscoveredModel.routed`` is,
+    #: and the prices stay honestly unknown underneath it. Nothing but the
+    #: display reads it.
+    routed: bool = False
 
     @property
     def selector(self) -> str:
@@ -1054,6 +1075,7 @@ class ProviderController:
                             output_price=_price(model.output_price, definition, free=model.free),
                             connected=connected,
                             aggregated=True,
+                            routed=model.routed,
                         )
                     )
             else:
@@ -1129,6 +1151,13 @@ class ProviderController:
             output_price=output_price,
             connected=usable is None or definition.id in usable,
             aggregated=definition.id in AGGREGATOR_PROVIDERS,
+            # From the id alone, because this branch has no listing row to read
+            # a price off: it is the fallback for when the listing could not be
+            # had at all. That makes it the path a user running `radient/auto`
+            # on a cold cache actually takes, so leaving it False here would
+            # blank the label on exactly the surface that reported the bug.
+            # Provider-scoped: `ollama/auto` reaches this same branch (R1).
+            routed=is_meta_route_id(model_id, definition.id),
         )
 
     async def live_catalogue(
@@ -1215,6 +1244,7 @@ class ProviderController:
                         output_price=_price(model.output_price, definition, free=model.free),
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                        routed=model.routed,
                     )
                 )
         return entries, statuses

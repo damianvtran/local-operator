@@ -130,6 +130,13 @@ class ModelRow:
     #: provider. Set by the caller, which is the only layer that knows the
     #: registry; the picker only needs it as a sort rung.
     aggregated: bool = False
+    #: This row is a META-ROUTE — a router whose price is the price of whichever
+    #: model it dispatches to. Set by the caller from the listing that said so
+    #: (``CatalogueEntry.routed``), never inferred here: the renderer cannot
+    #: tell a router's unknown price from any other unknown one, and deciding it
+    #: from the id in this layer would be the second, divergent statement of the
+    #: rule that :func:`format_price_pair`'s docstring exists to warn against.
+    routed: bool = False
 
     @property
     def selector(self) -> str:
@@ -153,13 +160,43 @@ def format_window(tokens: int) -> str:
     return str(tokens)
 
 
-def format_price_pair(input_price: float, output_price: float) -> str:
-    """``$3/15`` per million, ``free`` when both legs are really zero, else ``""``.
+#: What a meta-route's price column reads. Lower-case to match ``free``, the
+#: only other word this column prints; hyphenated so it reads as one token
+#: beside the window it sits next to.
+#:
+#: Measured against the layout before it was chosen, because it is materially
+#: longer than ``free`` and this column is width-constrained. What the extra
+#: seven cells actually cost, swept across 120->56 columns for both router ids:
+#:
+#: * NOT id truncation. No router id truncates under ANY label length (0, 5, 6
+#:   or 11 cells) at any width in that range — the ids are short enough that
+#:   the budget never binds. An earlier version of this comment claimed a long
+#:   id truncated ~7 characters earlier; that was wrong, and it mattered
+#:   because this is where a future maintainer looks to judge whether a longer
+#:   label is affordable.
+#: * The DISPLAY-NAME PARENTHETICAL drops earlier, and that is the whole cost.
+#:   ``openrouter/openrouter/auto  (Auto Router)`` keeps its name down to 61
+#:   columns with ``usage-based`` against a 56-column floor with a 4-6 cell
+#:   label — a five-column band, inside which the row loses a secondary aid
+#:   and keeps everything it is chosen by.
+#:
+#: Below ``_NUMBERS_MIN_WIDTH`` (56) the whole numbers run is dropped anyway,
+#: so nothing here is reachable further down. The trade is deliberate: the
+#: spellings that fit in 4-6 cells (``usage``, ``routed``, ``varies``) all
+#: answer a different question than the one a user reading a price column is
+#: asking, and a shorter word that has to be decoded is not cheaper than a
+#: longer one that does not.
+ROUTED_PRICE_LABEL = "usage-based"
 
-    The three-way split matters. A provider that quotes no pricing is NOT free —
-    treating a missing price as zero would advertise a paid model as free, which
-    is the one error in this column a user would act on. So an absent price is
-    blank and only a genuine pair of zeroes says ``free``.
+
+def format_price_pair(input_price: float, output_price: float, *, routed: bool = False) -> str:
+    """``$3/15`` per million, ``free``, ``usage-based`` for a router, else ``""``.
+
+    FOUR states, and the split matters. A provider that quotes no pricing is NOT
+    free — treating a missing price as zero would advertise a paid model as
+    free, which is the one error in this column a user would act on. So an
+    absent price is blank, only a genuine pair of zeroes says ``free``, and a
+    router says :data:`ROUTED_PRICE_LABEL`.
 
     This function takes no "is it free" flag ON PURPOSE, even though that fact
     now travels as one (:attr:`DiscoveredModel.free`). ``0.0`` reaching here
@@ -169,7 +206,21 @@ def format_price_pair(input_price: float, output_price: float) -> str:
     divergent statement of the same rule — and the reason the ``free`` label was
     dead in the first place was that the two layers disagreed, not that this one
     was wrong.
+
+    ``routed`` IS a flag for the opposite reason, not in spite of it. The float
+    vocabulary is full: a router has no price, so it can only reach here as
+    ``-1.0``, which already means "nobody quoted this" — a different answer that
+    must keep rendering blank. There is no value the caller could pass that
+    would let this function work the state out, so the alternative to a flag is
+    not "derive it here", it is "invent a fifth sentinel and teach every reader
+    of these floats about it". The flag is decided once, by the parser that read
+    the wire (:attr:`DiscoveredModel.routed`), and travels; this layer only
+    prints it. It is checked FIRST because it is a statement about the endpoint
+    rather than about a number, so it cannot be outvoted by a zero a stale
+    listing happens to quote.
     """
+    if routed:
+        return ROUTED_PRICE_LABEL
     if input_price < 0 or output_price < 0:
         return ""
     if input_price == 0 and output_price == 0:
@@ -705,7 +756,7 @@ class ModelPicker(Static):
         return "  ".join(parts)
 
     def _price(self, row: ModelRow) -> str:
-        return format_price_pair(row.input_price, row.output_price)
+        return format_price_pair(row.input_price, row.output_price, routed=row.routed)
 
     def _footer_rows(self, width: int) -> list[Text]:
         """Count/status rows with the persistent-default instruction protected.

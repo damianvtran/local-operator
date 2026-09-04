@@ -105,7 +105,14 @@ def main() -> int:
         for thread in _revalidation_threads():
             thread.join(timeout=30.0)
         rendered = {
-            (e.provider, e.model_id): format_price_pair(e.input_price, e.output_price)
+            # ``routed`` threaded through for the same reason the picker does
+            # it: this probe's whole job is reporting what the picker prints,
+            # so a router rendering ``''`` here while the picker says
+            # ``usage-based`` would make the diagnostic lie about the surface
+            # it exists to observe.
+            (e.provider, e.model_id): format_price_pair(
+                e.input_price, e.output_price, routed=e.routed
+            )
             for e in entries
         }
         watched = {k: rendered.get(k, "<missing row>") for k in WATCHED}
