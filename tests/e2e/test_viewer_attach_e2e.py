@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -192,6 +192,102 @@ async def test_the_event_relay_reaches_an_attached_viewer(
                 break
             await asyncio.sleep(0.05)
         assert seen, "no AgentEvent reached the viewer; the v4 relay is dead"
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_runs_a_team_and_holds_a_credential(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The two capabilities a viewer silently lacked, over the real socket.
+
+    Both were reported by the operator as "nothing happens". They share one
+    mechanism — state that lives on ``Session`` and has no seam on
+    ``RemoteSession`` — and both are asserted here on the OWNER's state, which
+    is the half a viewer cannot fake.
+
+    ``/team``: the mutating form used to return an unconsumed
+    ``noop {"type": "team_mutate"}``, so the command evaporated. The property
+    is that the attach lands on the session that builds the next turn.
+
+    ``/credential``: the store is an in-memory per-process dict whose reader is
+    ``credential_env()`` inside the `bash` tool — which runs HERE. A viewer
+    holding its own store would satisfy a naive round-trip test and still leave
+    every tool unable to read the secret, so this asserts the value arrives in
+    a real child process's environment. Never by printing it: the length is
+    proof enough and the value must not enter a log or a transcript.
+    """
+    from local_operator.session.remote import RemoteSession
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(headless_tui_env)
+    registry.create_team(
+        TeamEditFields(
+            name="viewerteam",
+            description="d",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    directory = headless_tui_env / "sessions" / "capgapsess1"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, ["ack"])
+    session.team_registry = registry
+    await server.start_in_process()
+    viewer = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+
+        outcome = await viewer.route_shared_slash("team", "viewerteam do the thing", [])
+        assert outcome.get("kind") != "noop", (
+            "the mutating /team returned an unconsumed noop again; the command "
+            "renders nothing at all on a viewer"
+        )
+        assert (outcome.get("data") or {}).get("type") == "team_attached"
+        assert (outcome.get("data") or {}).get("request") == "do the thing"
+        assert session.active_team_name == "viewerteam", (
+            "the attach must land on the OWNER, which is where the roster and "
+            "briefs are stamped onto the turn"
+        )
+
+        secret = "abcd-1234-efgh"
+        stored = await viewer.credential_op("store", "E2E_TOKEN", secret)
+        assert stored.get("ok"), stored
+        assert secret not in str(stored), "the value must never travel back"
+        assert session.variables.credential_names() == ["E2E_TOKEN"], (
+            "the credential must land in the OWNER's store — that is the one "
+            "the bash tool reads through credential_env()"
+        )
+
+        from local_operator.tools.builtin import execute_bash
+
+        class _Ctx:
+            variables = session.variables
+            cwd = str(directory)
+
+        result = await execute_bash(
+            "e2e-cred-probe",
+            {"command": 'test -n "$E2E_TOKEN" && echo LEN=${#E2E_TOKEN}'},
+            None,
+            None,
+            cast("Any", _Ctx()),
+        )
+        rendered = str(getattr(result, "content", result))
+        assert (
+            f"LEN={len(secret)}" in rendered
+        ), f"the credential never reached the tool's environment: {rendered}"
+        assert secret not in rendered, "the value must not appear in tool output"
     finally:
         if viewer is not None:
             await viewer.dispose()

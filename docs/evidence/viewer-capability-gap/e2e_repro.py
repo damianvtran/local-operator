@@ -92,10 +92,41 @@ async def main() -> None:
         print(f"  outcome = {outcome}")
         kind = outcome.get("kind") if isinstance(outcome, dict) else None
         data = outcome.get("data") if isinstance(outcome, dict) else {}
-        print(f"  kind={kind!r} data.type={ (data or {}).get('type')!r}")
+        print(f"  kind={kind!r} data.type={(data or {}).get('type')!r}")
         if kind == "noop":
             print("  >>> RENDERER DROPS THIS: _render_authoritative_slash returns on noop")
             print("  >>> user sees NOTHING. This is the silent failure.")
+
+        print("\n--- every /team form through the routed path ---")
+        for label, a in (
+            ("bare (listing)", ""),
+            ("named, no request", "lopdev"),
+            ("named + request", "lopdev build the thing"),
+            ("chart", "chart lopdev"),
+            ("unknown name", "nosuchteam do x"),
+        ):
+            o = await viewer.route_shared_slash("team", a, [])
+            k = o.get("kind") if isinstance(o, dict) else None
+            d = (o.get("data") or {}) if isinstance(o, dict) else {}
+            t = o.get("text") if isinstance(o, dict) else ""
+            verdict = "SILENT" if k == "noop" else "renders"
+            print(
+                f"  /team {a!r:28} -> kind={k!r:8} "
+                f"type={d.get('type')!r:15} {verdict} {t[:40]!r}"
+            )
+
+        print("\n--- every /agent form through the routed path ---")
+        for label, a in (
+            ("bare (listing)", ""),
+            ("named", "reviewer"),
+            ("named + msg", "reviewer look at x"),
+            ("clear", "clear"),
+        ):
+            o = await viewer.route_shared_slash("agent", a, [])
+            k = o.get("kind") if isinstance(o, dict) else None
+            d = (o.get("data") or {}) if isinstance(o, dict) else {}
+            verdict = "SILENT" if k == "noop" else "renders"
+            print(f"  /agent {a!r:22} -> kind={k!r:8} type={d.get('type')!r:14} {verdict}")
 
         print("\n--- routed bare /team (listing works, for contrast) ---")
         listing = await viewer.route_shared_slash("team", "", [])

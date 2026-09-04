@@ -1,0 +1,26 @@
+session in app: RemoteSession
+
+--- transcript after /team lopdev ship the team fix ---
+ | sending to lopdev. manager is coordinating. | ship the team fix | 
+
+--- runtime transcript.jsonl ---
+  user turn reached the runtime: True
+  model answered:                True
+  team attached on the session:  'lopdev'
+
+--- /credential (listing) on the viewer ---
+  No credentials stored for this session. Usage: /credential <KEY>
+       /credential                # list
+       /credential --forget <KEY>
+       /credential --forget-all
+  says 'still starting': False
+
+--- store a credential from the viewer ---
+  viewer round trip: {'ok': True, 'key': 'DEMO_TOKEN', 'replaced': False}
+  owner holds it:    ['DEMO_TOKEN']
+  value never returned: True
+  viewer sees it:    ['DEMO_TOKEN']
+
+--- /team chart lopdev ---
+  no-such-team error: False
+  org chart opened:   TranscriptScreen
