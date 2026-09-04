@@ -592,3 +592,42 @@ def test_the_syntax_ramp_is_not_one_grey(theme_name: str) -> None:
         f"{theme_name}: the syntax ramp collapsed to {len(set(inks.values()))} "
         f"distinct inks — {inks}"
     )
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_heading_weight_descends_monotonically(theme_name: str) -> None:
+    """Weight may drop as the level rises, never come back.
+
+    An earlier ramp ran bold, bold, bold, PLAIN, BOLD, plain — h4 unbolded
+    while h5 was bold again — so weight said "h5 outranks h4" while position
+    said the opposite. A channel that reverses is not a rank cue, it is
+    noise; and h5/h6 shared an ink on top of it, leaving the tail with no
+    separation at all.
+    """
+    theme.set_theme(theme_name)
+    weights = [bool(bindings.style(f"markdown.h{n}").bold) for n in range(1, 7)]
+    assert weights == sorted(
+        weights, reverse=True
+    ), f"{theme_name}: heading weight is not monotonic — {weights}"
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_no_heading_is_confusable_with_body_text(theme_name: str) -> None:
+    """No heading level may share ink AND weight with prose or `strong`.
+
+    `fg` unbolded is body text and `fg` bold is `markdown.strong`; a heading
+    landing on either is invisible AS a heading. This rejected an otherwise
+    attractive ramp that put h5 on `fg`, which collided with the paragraph
+    ink in all 54 themes.
+    """
+    theme.set_theme(theme_name)
+    body = {
+        (theme.semantic_color("fg"), False),
+        (theme.semantic_color("fg"), True),
+    }
+    for n in range(1, 7):
+        style = bindings.style(f"markdown.h{n}")
+        ink = (style.color.get_truecolor().hex if style.color else None, bool(style.bold))
+        assert (
+            ink not in body
+        ), f"{theme_name}: markdown.h{n} is indistinguishable from body text ({ink})"
