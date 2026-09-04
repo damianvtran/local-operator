@@ -223,7 +223,10 @@ def test_diagnostic_strips_inputs_from_any_validation_error() -> None:
 
     with pytest.raises(ValidationError) as raised:
         ResolvedSecret(name="K", value=LONG_CANARY)
-    rendered = _diagnostic(raised.value)
+    # ``None``: this asserts the ValidationError stripping specifically, which
+    # holds with no redaction set at all -- that is what makes it a SECOND line
+    # of defence rather than a restatement of the canary scan.
+    rendered = _diagnostic(raised.value, None)
     assert rendered == "ValidationError: ResolvedSecret (value: string_too_long)"
     assert "SECRETVALUE" not in rendered and "zzz" not in rendered
 

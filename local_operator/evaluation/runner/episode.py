@@ -51,6 +51,7 @@ from local_operator.evaluation.adapters.api import (
     ScoreParams,
     SecretRef,
 )
+from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
@@ -243,7 +244,22 @@ class _Cancelled(Exception):
 
 
 class _EvidenceFailure(Exception):
-    """Raised when the writer itself failed and the bundle can only be abandoned."""
+    """Raised when the writer itself failed and the bundle can only be abandoned.
+
+    Its message is rendered with ``_diagnostic(error, None)`` at every raise
+    site, and that ``None`` is a claim worth checking rather than a default that
+    happened to be there: this text reaches ``_abandon_for_evidence``, which
+    passes a fixed ``"evidence-write-failed"`` literal (or ``_diagnostic_code``,
+    derived from the exception CLASS name) to ``writer.abandon``. The
+    ``AbandonmentRecord`` field is a ``StrictIdentifier``, so it is
+    structurally incapable of carrying a rendered message. The string itself
+    terminates in ``EpisodeOutcome.diagnostic``, an in-process return value
+    that is never sealed.
+
+    If that ever changes -- if this message becomes something the bundle
+    records -- it needs the episode's redaction set, for the reason spelled out
+    on ``_diagnostic``.
+    """
 
 
 class EpisodeRunner:
@@ -335,7 +351,7 @@ class EpisodeRunner:
                 episode_id=self._spec.episode_id,
                 bundle_root=None,
                 rescue_required=self._rescue_required,
-                diagnostic=_diagnostic(error),
+                diagnostic=_diagnostic(error, None),
             )
         # _run_with_bundle records its own abandonment terminal while the
         # writer is still open, so no _EvidenceFailure escapes it here.
@@ -477,7 +493,7 @@ class EpisodeRunner:
                 episode_id=self._spec.episode_id,
                 bundle_root=None,
                 rescue_required=self._rescue_required,
-                diagnostic=_diagnostic(error),
+                diagnostic=_diagnostic(error, None),
             )
         self._writer = writer
         try:
@@ -548,7 +564,7 @@ class EpisodeRunner:
             # A writer error is never an episode failure: the journal itself is
             # unusable, so finalizing would write into a poisoned bundle. Route
             # it to the abandonment path like any other evidence failure.
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
         except BaseException as error:
             return await self._finalize_failure(error)
         return await self._finalize_scored(handshake)
@@ -716,7 +732,12 @@ class EpisodeRunner:
             # one-step-per-batch rule forbids amending it.
             if isinstance(error, ContextUnrecoverableError):
                 raise
-            raise _ProviderFailure(_diagnostic(error)) from error
+            # Scanned HERE, not only where the message is published: this
+            # rendering is truncated on the way into ``_ProviderFailure``, and
+            # ``_finalize_failure`` later seals it. A cut applied before any
+            # scan severs the canary, so forwarding the redaction set only at
+            # the publish site arrives too late to matter.
+            raise _ProviderFailure(_diagnostic(error, self._redactions)) from error
         if decision.compaction is not None:
             # Declared BEFORE the request triple: the client rebuilt its
             # context on the way to this request, so the compaction belongs
@@ -1093,15 +1114,29 @@ class EpisodeRunner:
         # exactly this reason; a fatal error deserves it at least as much,
         # because there is no retry that will produce a second chance to look.
         #
-        # ``_diagnostic`` is the same renderer used for the outcome's own
-        # diagnostic field: it strips pydantic's ``input_value=`` echo (the one
-        # place a resolved secret could surface) and truncates to 500 chars, and
-        # ``publish_artifact`` independently scans every byte against the
-        # episode's RedactionSet, so a leaked credential fails the write rather
-        # than reaching the bundle.
+        # ``_failure_detail`` leads with that same ``_diagnostic`` line and
+        # then appends the adapter's structured cause when the failure crossed
+        # the RPC boundary carrying one -- without it, ep-e46c789ca818 recorded
+        # the whole of "adapter_error: adapter operation failed" after 19 billed
+        # steps. ``_diagnostic`` itself strips pydantic's ``input_value=`` echo
+        # (the one place a resolved secret could surface) and truncates to 500
+        # chars, and ``publish_artifact`` independently scans every byte
+        # against the episode's RedactionSet.
+        #
+        # That parent scan is NOT a backstop for a secret the harness itself
+        # truncated, and must not be read as one. ``assert_clear`` is a
+        # SUBSTRING check, so a value already cut by ``_diagnostic``'s 500-char
+        # bound (or by the worker's field bounds) no longer matches its canary
+        # and the scan returns clean on the surviving prefix. The defence that
+        # actually closes that case is ordering: the worker scans the UNBOUNDED
+        # string before truncating (``worker._redacted``), so a straddled
+        # secret is withheld whole before it ever reaches this side.
         detail: Any = None
         try:
-            detail = self._publish(_diagnostic(error).encode("utf-8"), media_type="text/plain")
+            detail = self._publish(
+                _failure_detail(error, self._redactions).encode("utf-8"),
+                media_type="text/plain",
+            )
         except (_EvidenceFailure, OSError):
             # Best-effort by design. This runs on the path that is already
             # handling a failure, and an unpublishable detail must never be the
@@ -1129,7 +1164,7 @@ class EpisodeRunner:
             score,
             failure_kind=failure_kind,
             cancelled=False,
-            diagnostic=_diagnostic(error),
+            diagnostic=_diagnostic(error, None),
         )
 
     async def _finalize_cancelled(self, reason: str) -> EpisodeOutcome:
@@ -1373,7 +1408,7 @@ class EpisodeRunner:
         try:
             writer.append(kind, payload)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     def _append_receipt(self, kind: str, payload: Any) -> None:
         writer = self._require_writer()
@@ -1385,7 +1420,7 @@ class EpisodeRunner:
             else:
                 writer.record_scoring_result(payload)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     def _publish(self, data: bytes, *, media_type: str, expected_sha256: str | None = None) -> Any:
         writer = self._require_writer()
@@ -1394,14 +1429,14 @@ class EpisodeRunner:
                 data, media_type=media_type, expected_sha256=expected_sha256
             )
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     def _begin_finalization(self, intent: FinalizationIntent, operation: str | None) -> None:
         writer = self._require_writer()
         try:
             writer.begin_finalization(self._finalization_id, operation, intent)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     def _append_lifecycle(self, lifecycle: EpisodeLifecycle, *, state: str) -> None:
         # This is the journal's FIRST lifecycle link, so it must declare no
@@ -1456,7 +1491,7 @@ class EpisodeRunner:
         try:
             writer.record_final_lifecycle(payload)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     def _seal(
         self,
@@ -1484,7 +1519,7 @@ class EpisodeRunner:
         try:
             return writer.seal(draft)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error)) from error
+            raise _EvidenceFailure(_diagnostic(error, None)) from error
 
     async def _abandon_after_scoring_failure(self, error: BaseException) -> EpisodeOutcome:
         writer = self._require_writer()
@@ -1524,7 +1559,7 @@ class EpisodeRunner:
                 # the reason. The bundle stays unsealed and recoverable, which
                 # is a real state an operator can act on.
                 status = "abandonment_failed"
-                detail = f"{detail}; abandonment refused: {_diagnostic(error)}"
+                detail = f"{detail}; abandonment refused: {_diagnostic(error, None)}"
         return EpisodeOutcome(
             status=status,
             episode_id=self._spec.episode_id,
@@ -1693,6 +1728,49 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
     )
 
 
+def _failure_detail(error: BaseException, redactions: RedactionSet | None = None) -> str:
+    """The fatal-error artifact: the diagnostic, plus the adapter's own cause.
+
+    ``_diagnostic`` is also the ``outcome.diagnostic`` field and is bounded at
+    500 characters for that reason. An adapter's structured cause -- type,
+    message, method, operation ID, cause chain and worker-side frames -- is
+    legitimately longer than that, and truncating it here would reintroduce
+    exactly the loss this artifact exists to prevent, one layer further out.
+    So the artifact carries both: the same first line a reader sees in the
+    outcome, then the full structured detail when the failure crossed the
+    adapter boundary carrying one.
+
+    The adapter-supplied fields below were bounded and canary-checked on the
+    WORKER side before they crossed (``worker._error_detail``). The SUMMARY
+    line is not: it renders a local exception -- including a provider error the
+    worker never saw -- so ``redactions`` is forwarded to ``_diagnostic``,
+    which scans before truncating. ``publish_artifact`` scans these bytes too,
+    but cannot be relied on for a value the harness itself already cut: its
+    substring check no longer matches a severed canary, which is precisely how
+    a truncate-then-scan ordering seals a partial credential.
+    """
+
+    summary = _diagnostic(error, redactions)
+    detail = getattr(error, "detail", None)
+    if detail is None or not hasattr(detail, "render"):
+        return summary
+    lines = [
+        summary,
+        "",
+        "--- adapter detail ---",
+        f"exception_type: {detail.exception_type}",
+        f"message: {detail.message}",
+        f"method: {detail.method}",
+    ]
+    if detail.operation_id is not None:
+        lines.append(f"operation_id: {detail.operation_id}")
+    for index, cause in enumerate(detail.causes, start=1):
+        lines.append(f"cause[{index}]: {cause.exception_type}: {cause.message}")
+    for frame in detail.frames:
+        lines.append(f"  at {frame.file}:{frame.line} in {frame.function}")
+    return "\n".join(lines)
+
+
 def _rejection_detail(rejected: Any) -> str:
     """The rejection artifact: why the reply was refused AND what it said.
 
@@ -1710,8 +1788,26 @@ def _rejection_detail(rejected: Any) -> str:
     return f"{rejected.diagnostic}\n\n--- rejected reply ---\n{reply}"
 
 
-def _diagnostic(error: BaseException) -> str:
+def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:
     """Render an error for ``EpisodeOutcome.diagnostic`` without its inputs.
+
+    ORDER IS THE SECURITY PROPERTY, exactly as in ``worker._redacted``: when
+    ``redactions`` is supplied the rendered string is scanned BEFORE the 500
+    character bound is applied. ``RedactionSet.assert_clear`` is a SUBSTRING
+    check, so truncating first severs the canary and the surviving prefix is
+    returned verbatim -- and ``publish_artifact``'s own scan then returns clean
+    on those bytes for the same reason, sealing them into the bundle. Measured
+    on a provider-style error echoing a request URL: 63 characters of an API
+    key survived, scan blind.
+
+    ``redactions`` is REQUIRED rather than defaulted, and that is deliberate
+    after three separate instances of this same inversion (R1 in the worker,
+    R2 here, R2-1 on the provider path) each slipped through because the
+    UNSAFE call was the shorter one to write. With no default, every call site
+    has to state which of the two cases it is: a set, or an explicit ``None``
+    meaning "this rendering is in-process only and never reaches evidence".
+    A fourth site cannot now be added by omission -- only by asserting
+    something a reviewer can see and challenge.
 
     A pydantic ``ValidationError``'s ``str()`` embeds ``input_value=<head>…<tail>``
     for every failing field. The one model on this boundary that carries
@@ -1730,8 +1826,20 @@ def _diagnostic(error: BaseException) -> str:
             f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
             for item in error.errors(include_input=False, include_url=False)
         )
-        return f"ValidationError: {error.title} ({details})"[:500]
-    return f"{type(error).__name__}: {error}"[:500]
+        rendered = f"ValidationError: {error.title} ({details})"
+    else:
+        rendered = f"{type(error).__name__}: {error}"
+    if redactions is not None:
+        try:
+            # The FULL rendering, before the bound is applied.
+            redactions.assert_clear(rendered)
+        except ValueError:
+            # Fails CLOSED and whole, never masked: a partial still narrows the
+            # secret. The exception TYPE is kept because it cannot carry
+            # adapter or provider data and is what makes the failure bucketable
+            # at all -- losing it would undo this PR's own purpose.
+            return f"{type(error).__name__}: {WITHHELD}"
+    return rendered[:500]
 
 
 def _diagnostic_code(error: BaseException) -> str:
