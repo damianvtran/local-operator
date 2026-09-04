@@ -402,3 +402,492 @@ async def test_a_viewer_defers_naming_to_the_runtime(tmp_path: Path, monkeypatch
             await pilot.pause()
 
     assert started == [], "the viewer started a naming errand it cannot complete"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The details are on the FIRST frame, not after a runtime starts.
+
+    The regression this guards shipped in the release that made the TUI a
+    viewer: the old in-process TUI restored the subagent roster and the todo
+    list at boot (``Session.__init__`` → ``_load_subagent_roster`` /
+    ``_load_todo_snapshot``), and the viewer path synthesised canonical state
+    from config and the wake index only. So a resumed session opened with an
+    empty subagent panel and no todos and stayed that way indefinitely — the
+    details were not slow to arrive, they were never going to arrive.
+
+    Asserted on the state the widgets read, and asserted BEFORE anything binds
+    a runtime, because "after the first message" is exactly the behaviour that
+    was wrong.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendModelSpec,
+        FrontendSessionState,
+        JobState,
+        TodoItemState,
+        TodoPhaseState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("run the audit"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        conversation_title="Article search rollout",
+        goal="ship the rollout",
+        jobs=[JobState(id="job1", type="task", label="auditor", status="succeeded")],
+        todos=[
+            TodoPhaseState(
+                name="Verification", items=[TodoItemState(text="run the gate", status="pending")]
+            )
+        ],
+        cumulative_parent_cost=12.5,
+        context_tokens=322_546,
+        context_window=1_000_000,
+        # The context reading is only restored when the checkpoint's model
+        # matches the one configured now — a token count measured against one
+        # window means nothing divided by another (design round 1, D1). The
+        # config this test writes names no model, so state the identity that
+        # makes the reading interpretable.
+        selected_model=FrontendModelSpec(provider="", model_id=""),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.is_cold is True, "restoring details must not start a runtime"
+        state = viewer.frontend_state
+        assert [job.id for job in state.jobs] == ["job1"]
+        # A restored row has no in-process trajectory; the panel needs to know
+        # that rather than rendering the child as an empty live job.
+        assert state.jobs[0].restored is True
+        assert [item.text for phase in state.todos for item in phase.items] == ["run the gate"]
+        assert state.conversation_title == "Article search rollout"
+        assert state.goal == "ship the rollout"
+        # Spend and occupancy are the conversation's, not this process's: a
+        # resumed session that already cost money must not open reading zero.
+        assert state.cumulative_parent_cost == 12.5
+        assert state.context_tokens == 322_546
+        # The model still comes from THIS process's config, not the stale copy
+        # in the checkpoint — the config may have changed since.
+        assert state.cwd == str(tmp_path)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_opens_when_the_checkpoint_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bad status row must never stop a conversation from opening."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("still here?"))
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": {"jobs": "not-a-list"}}
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert viewer.frontend_state.session_id == SESSION_ID
+        assert list(viewer.frontend_state.jobs) == []
+        assert [getattr(m, "text", "") for m in viewer.history()] == ["still here?"]
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_prefers_the_live_wake_index_over_the_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MCP servers come from the checkpoint; wakes deliberately do not.
+
+    Both are chrome the pre-0.46.0 path showed and the viewer dropped (review
+    round 1, C5) — but they have different sources of truth and restoring them
+    the same way would be wrong. There is no live MCP manager to ask while
+    cold, so the durable copy is the only thing that can populate that panel.
+    The wake INDEX, by contrast, is a derived file a supervisor rewrites
+    without opening the session, so it is fresher than any checkpoint:
+    overwriting it with the durable copy would re-show a wake that already
+    fired.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        McpServerState,
+        WakeState,
+    )
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import write_entry
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+
+    # The index holds the CURRENT truth: one wake, still scheduled.
+    write_entry(
+        tmp_path,
+        SESSION_ID,
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "w-live",
+                "message": "the wake that is still pending",
+                "next_due_at": 4_102_444_800_000,
+                "created_at": 1,
+            }
+        ],
+    )
+
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        mcp_servers=[McpServerState(name="linear", status="connected")],
+        # A stale wake the supervisor has since fired and removed from the index.
+        wakes=[WakeState(id="w-stale", message="already fired", next_due_at=1)],
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert [server.name for server in state.mcp_servers] == ["linear"]
+        assert [wake.id for wake in state.wakes] == ["w-live"], (
+            "the live wake index must win over the checkpoint, or a fired wake "
+            "reappears on every resume"
+        )
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_context_reading_keeps_the_window_it_was_measured_against(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The band must never paint a percentage over 100%.
+
+    The cold spec is built from ``config.yml``, which names a provider and a
+    model but carries no metadata — so ``ModelSpec``'s 128k DEFAULT window
+    applied, while the restored token count had been measured against the 1M
+    window the runtime really had. ``_context_window`` reads the effective
+    spec, so a resumed session painted ``268.2%/128k`` (design round 1, D1) on
+    the one surface whose job is to say how much room is left.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    config = ConfigManager(config_dir=tmp_path)
+    config.update_config({"hosting": "anthropic", "model_name": "claude-opus-5"})
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=322_546,
+        context_window=1_000_000,
+        selected_model=FrontendModelSpec(
+            provider="anthropic", model_id="claude-opus-5", context_window=1_000_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        spec = state.effective_model or state.selected_model
+        assert spec is not None
+        window = int(spec.context_window or 0)
+        assert window == 1_000_000, "the window the tokens were measured against must survive"
+        assert state.context_tokens is not None
+        assert state.context_tokens / window <= 1.0, (
+            f"the band would paint {state.context_tokens / window:.1%} — a context "
+            "percentage over 100% is not a real reading"
+        )
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_reading_is_dropped_when_the_model_changed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A count measured against another window is not convertible, so it goes.
+
+    The other direction of D1: if the user switched models since the
+    checkpoint, the stored numerator and the current denominator describe
+    different things. There is no honest conversion, so the reading is dropped
+    and the band renders an unknown context rather than a confident wrong
+    percentage. The next real turn supplies a live one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    config = ConfigManager(config_dir=tmp_path)
+    config.update_config({"hosting": "openai", "model_name": "gpt-5.6-sol"})
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=900_000,
+        context_window=1_000_000,
+        selected_model=FrontendModelSpec(
+            provider="anthropic", model_id="claude-opus-5", context_window=1_000_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens is None, (
+            "a reading measured against another model's window must be dropped, "
+            "not divided by the new one"
+        )
+        spec = state.effective_model or state.selected_model
+        assert spec is not None and spec.model_id == "gpt-5.6-sol"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_never_paints_a_job_as_running(tmp_path: Path, monkeypatch) -> None:
+    """With no runtime, nothing is running — and the roster must say so.
+
+    The persisted roster records what a job's state WAS when it was written,
+    and a session whose terminal closed mid-run persists ``running`` rows by
+    design (observed on 8 sessions on the reference machine). Restored
+    verbatim they paint a spinner for a child that cannot be working and the
+    band counts them as live activity (UX round 1, U1) — worse than the empty
+    panel this change replaces, because it is confidently wrong and invites a
+    cancel that finds nothing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        JobState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("go"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        jobs=[
+            JobState(id="was-running", type="task", label="cut off", status="running"),
+            JobState(
+                id="was-parked", type="task", label="never started", status="running", queued=True
+            ),
+            JobState(id="finished", type="task", label="done", status="completed"),
+        ],
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        jobs = {job.id: job for job in viewer.frontend_state.jobs}
+        assert not any(
+            job.status == "running" for job in jobs.values()
+        ), "no job can be running when no runtime is alive"
+        # Cut off mid-run: shown as interrupted so the panel can offer to
+        # resume the child from its own transcript.
+        assert jobs["was-running"].status == "interrupted"
+        assert jobs["was-running"].restored is True
+        # Parked and never started: it has no transcript to resume, so an
+        # `interrupted` row would invite a resume that finds nothing.
+        assert "was-parked" not in jobs
+        # A settled fact the last runtime recorded is not relitigated.
+        assert jobs["finished"].status == "completed"
+        # And the band's own count agrees.
+        running = sum(1 for job in jobs.values() if job.status == "running" and not job.queued)
+        assert running == 0
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_checkpoint_degrades_loudly(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A corrupt status row must not silently reproduce the pre-fix experience.
+
+    Falling back leaves exactly the empty roster this change exists to fix, so
+    at DEBUG it is indistinguishable from the original bug and the next report
+    gets re-diagnosed from scratch (UX round 1, U5). The open still succeeds.
+    """
+    import logging
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("still here?"))
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": {"jobs": "not-a-list"}}
+    )
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.remote"):
+        viewer = await RemoteSession.cold(
+            SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+    try:
+        assert any(
+            "checkpoint unreadable" in record.getMessage() for record in caplog.records
+        ), "an unreadable checkpoint must be reported at WARNING, not buried at DEBUG"
+        # And the user is told, not just the log.
+        assert viewer.degraded_reason
+        # The conversation still opens: a status row never costs the history.
+        assert [getattr(m, "text", "") for m in viewer.history()] == ["still here?"]
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_restored_roster_unions_the_sidecar_and_the_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Neither store alone is the full roster, so the restore reads both.
+
+    The sidecar is written on every roster move and the checkpoint at turn
+    end, so they disagree whenever a child settles after the last turn
+    boundary. On the reference session they differ in BOTH directions — 18
+    rows against 17, two children only the sidecar knows and one only the
+    checkpoint knows — so a resume that read either alone dropped a child that
+    really ran (UX round 1, U4).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    import json
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        JobState,
+    )
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("go"))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        jobs=[
+            JobState(id="shared", type="task", label="in both", status="completed"),
+            JobState(id="checkpoint-only", type="task", label="older store", status="completed"),
+        ],
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+    (directory / SUBAGENT_ROSTER_SIDECAR).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 4,
+                "records": [],
+                "jobs": [
+                    # The sidecar is fresher: its copy of the shared row wins.
+                    {"id": "shared", "type": "task", "label": "in both", "status": "failed"},
+                    {
+                        "id": "sidecar-only",
+                        "type": "task",
+                        "label": "settled after the turn",
+                        "status": "completed",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        jobs = {job.id: job for job in viewer.frontend_state.jobs}
+        assert set(jobs) == {
+            "shared",
+            "checkpoint-only",
+            "sidecar-only",
+        }, "a child recorded by only one store still ran; the roster is the union"
+        # Where both know a row, the fresher store wins.
+        assert jobs["shared"].status == "failed"
+    finally:
+        await viewer.dispose()

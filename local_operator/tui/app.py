@@ -3686,6 +3686,7 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._adopt_session(session)
+        self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
         await self._preflight_usage(session)
         # Warm the active provider's quota row in the shared cache so the first
@@ -3693,6 +3694,31 @@ class OperatorApp(App[None]):
         # already holds a fresh row (the age gate), so a fleet of terminals does
         # not each pay a startup fetch.
         self._warm_usage_background()
+
+    def _report_degraded_attach(self, session: Any) -> None:
+        """Say WHY a session opened without its live state, when it did.
+
+        A viewer that could not attach to a running runtime falls back to a
+        cold session, which is the right behaviour — the conversation still
+        opens and the next message starts a fresh runtime. But the fallback
+        used to be entirely silent, so the user saw a session come up without
+        its roster, its todos or its live turn and had nothing to distinguish
+        that from "nothing was running". The oversized-frame bug lived in that
+        gap for a release: precisely diagnosable in a log line nobody reads,
+        invisible on the screen (UX round 1, U2; design round 1, D5).
+
+        Only fires when the launcher recorded a reason, so the ordinary cold
+        open — by far the common case — stays quiet. A warning rather than an
+        error: nothing the user did is wrong and the session is usable.
+        """
+        reason = str(getattr(session, "degraded_reason", "") or "")
+        if not reason:
+            return
+        self._system_notice(
+            f"opened without live session state — {reason}. "
+            "The conversation is here; your next message starts a fresh runtime.",
+            "warning",
+        )
 
     def _restore_resumed_name(self, session: Any) -> None:
         """Give a resumed conversation a label even when none was stored.

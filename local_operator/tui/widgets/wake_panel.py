@@ -34,6 +34,14 @@ _MIN_BODY_ROWS = 2
 #: band. Ceiling/floor arithmetic lives in :meth:`WakePanel._body_rows`.
 _DOCK_ROWS = 8
 
+#: Transcript rows this panel may never take, the same floor
+#: ``todo_panel._COLLAPSED_TRANSCRIPT_FLOOR`` and
+#: ``subagent_panel._TRANSCRIPT_FLOOR_ROWS`` honour. The three panels share one
+#: column, so a floor observed by two of them is simply a floor the third
+#: spends — which is what left a resumed session on a short terminal with the
+#: conversation off screen (UX round 2, U7).
+_COLLAPSED_TRANSCRIPT_FLOOR = 2
+
 
 class WakePanel(Container):
     """The session's scheduled wakes, rendered in the dock band above todos.
@@ -170,7 +178,13 @@ class WakePanel(Container):
         if screen_height <= 0:
             return ceiling
         try:
-            spare = screen_height - _DOCK_ROWS - self._band_inset_rows() - self._band_sibling_rows()
+            spare = (
+                screen_height
+                - _DOCK_ROWS
+                - _COLLAPSED_TRANSCRIPT_FLOOR
+                - self._band_inset_rows()
+                - self._band_sibling_rows()
+            )
         except Exception:
             return ceiling
         return max(_MIN_BODY_ROWS, min(ceiling, spare))
