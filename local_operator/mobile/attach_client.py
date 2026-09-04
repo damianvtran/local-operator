@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -57,6 +58,20 @@ ACK_TIMEOUT_S = 15.0
 #: Disconnect reason marking a DELIBERATE stop, as opposed to owner death.
 #: Consumers compare against this exact string to decide whether to recover.
 STOPPED_REASON = "owner stopped the session"
+
+#: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
+#: the writer refuses to exceed it and the reader refuses to read past it, so
+#: two different numbers would mean a frame the owner considers sendable is one
+#: this client cannot read.
+_READ_LIMIT_BYTES = 1 << 20
+
+#: Disconnect reason for a frame too large to read. Distinct from owner death
+#: because the remedy is different in kind: the owner is alive and healthy, and
+#: what failed is our ability to parse what it sent. Kept a named constant so a
+#: host can tell the two apart rather than matching on prose.
+OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
+
+logger = logging.getLogger(__name__)
 
 
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
@@ -159,7 +174,7 @@ class AttachClient:
         self._session_id = session_id
         try:
             reader, writer = await asyncio.open_connection(
-                "127.0.0.1", record.control_port, limit=1 << 20
+                "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
             )
         except OSError as exc:
             raise ConnectionError(f"owner socket unreachable: {exc}") from exc
@@ -182,6 +197,13 @@ class AttachClient:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
             raise ConnectionError("owner did not send its state") from exc
+        except ValueError as exc:
+            # The same overrun the pump handles, on the WELCOME frame — the one
+            # read that happens before the pump exists. Named rather than left
+            # to surface as a bare ValueError from a connect() call, because
+            # every caller of connect() already collapses ConnectionError into
+            # its refusal copy.
+            raise ConnectionError(OVERSIZED_FRAME_REASON) from exc
         if not first:
             raise ConnectionError("owner closed the connection")
         try:
@@ -291,6 +313,26 @@ class AttachClient:
                         future.set_result(frame)
         except (ConnectionResetError, BrokenPipeError, OSError):
             reason = "owner connection reset"
+        except ValueError:
+            # ``StreamReader.readline`` raises ValueError (via LimitOverrunError)
+            # when one frame exceeds the connection's ``limit``. It is NOT a
+            # transport failure and it is not recoverable by reading on: the
+            # oversized line stays in the buffer, so every subsequent read
+            # raises the same way.
+            #
+            # Before this it fell through as an unhandled task exception that
+            # killed the pump silently, and the host — which only ever learns
+            # about a dead connection through ``on_disconnected`` — kept waiting
+            # for a sync that could never arrive, timed out after 15 s, and
+            # degraded to a runtime-less cold session. A hard bug that presented
+            # as a slow owner. Report it as its own reason so the host can say
+            # what actually happened instead of blaming the owner's liveness.
+            reason = OVERSIZED_FRAME_REASON
+            logger.error(
+                "attach client: owner sent a frame larger than the %d-byte line limit; "
+                "the connection cannot continue",
+                _READ_LIMIT_BYTES,
+            )
         finally:
             self._connected = False
             for future in self._pending.values():

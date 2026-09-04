@@ -9,6 +9,7 @@ session semantics from the phone's deliberately capped projection.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import time
 import uuid
@@ -56,6 +57,46 @@ from local_operator.tui.costs import job_cost, turn_cost
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
 FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: How many per-call billing receipts ``usage_components`` retains.
+#:
+#: The list grows by one receipt per model call for the LIFE of a conversation
+#: and is re-serialized in full on two paths that both have hard budgets: the
+#: attach frame (``server._MAX_LINE_BYTES``, 1 MiB) and the turn-end checkpoint
+#: appended to the transcript. Uncapped it broke both on the reference machine:
+#: a 2,685-receipt session serialized a 1,052,296-byte ``frontend_sync`` — over
+#: the socket's line limit, so `AttachClient` could not read it, every attach to
+#: that session timed out after 15 s and silently degraded to a runtime-less
+#: cold viewer. The same field was ALSO 48.2% of that session's 103 MB
+#: transcript (49.8 MB across 119 checkpoint rows, each re-writing the whole
+#: accumulated list) because the checkpoint stripped ``live_events`` and job
+#: trajectories for exactly this reason but not this list.
+#:
+#: Capped HERE, at accumulation, rather than only at the wire boundary where
+#: trajectories are stripped: a wire-only bound leaves the transcript growth in
+#: place, and the transcript is the more expensive of the two (it is durable,
+#: and it is re-parsed on every resume). The tail is what a mixed-provider
+#: aggregate needs — the receipts state which call was served by which model at
+#: which price — and the lifetime figures the UI actually paints
+#: (``cumulative_parent_cost``, ``child_costs``, ``last_usage``) are running
+#: totals maintained independently, so dropping an old receipt cannot move a
+#: number on screen. 200 covers several turns of a busy multi-provider session
+#: at roughly 55 KB, two orders of magnitude inside both budgets.
+USAGE_COMPONENT_CAP = 200
+
+
+def _capped_components(components: Sequence[Any]) -> list[Any]:
+    """The newest :data:`USAGE_COMPONENT_CAP` receipts, oldest evicted first.
+
+    Mirrors ``AsyncJob.trajectory``'s eviction discipline (newest-wins, drop
+    from the front) so the two unbounded-per-turn lists in this module behave
+    the same way. Returns a new list; callers rebuild rather than mutate,
+    because ``FrontendSessionState`` is replaced wholesale by ``mutate``.
+    """
+    values = list(components)
+    if len(values) <= USAGE_COMPONENT_CAP:
+        return values
+    return values[len(values) - USAGE_COMPONENT_CAP :]
 
 # Commands whose effect belongs to the process drawing the widgets. Every other
 # advertised slash is routed to the authoritative session owner; keeping this a
@@ -802,10 +843,28 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     through the ``job_trajectory`` op once a reader actually opens that child's
     page. ``trajectory_length`` survives so the viewer can say how many events
     it is about to load instead of rendering the child as empty.
+
+    Two more per-turn lists are bounded here for the same reason, because the
+    trajectory fix addressed one instance of the shape rather than the shape
+    itself and the next unbounded field grew past the same cap on its own:
+
+    * ``snapshot.usage_components`` — capped at accumulation
+      (:data:`USAGE_COMPONENT_CAP`), and capped AGAIN here because an owner
+      that restored a pre-cap checkpoint holds the uncapped list in memory for
+      the life of that process.
+    * each job's ``usage.cost_components`` — the per-job twin of the same list,
+      measured at 29 KB for ONE job on the reference machine, which is what
+      made 18 stripped-trajectory jobs still serialize to 196 KB.
+
+    :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
+    field appears.
     """
     payload = sync.model_dump(mode="json")
     snapshot = payload.get("snapshot")
     if isinstance(snapshot, dict):
+        components = snapshot.get("usage_components")
+        if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
+            snapshot["usage_components"] = _capped_components(components)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
             for job in jobs:
@@ -816,7 +875,56 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
                     # construction, see JobState), so dropping the rows here
                     # loses nothing the viewer needs to describe the job.
                     job["trajectory"] = []
+                usage = job.get("usage")
+                if isinstance(usage, dict):
+                    job_components = usage.get("cost_components")
+                    if isinstance(job_components, list) and (
+                        len(job_components) > USAGE_COMPONENT_CAP
+                    ):
+                        usage["cost_components"] = _capped_components(job_components)
     return payload
+
+
+def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
+    """Diagnose a frame that will not fit ``cap_bytes``, or ``None`` if it fits.
+
+    The failure this describes is silent by construction: an oversized line
+    makes the reader's ``readline`` raise ``LimitOverrunError``, which killed
+    the client's pump task, which left the viewer waiting out its full 15 s
+    sync timeout and then degrading to a runtime-less cold session. A hard bug
+    therefore wore the costume of a slow/absent owner, and diagnosing it took a
+    profiling session rather than a log line.
+
+    So the report names the size, the cap, and the biggest contributors by
+    field — because the actionable question is always "which unbounded list
+    grew this time", and that is exactly what a bare "frame too large" does not
+    answer. Cheap: it serializes only when the frame is already known not to
+    fit, so the common path pays one length check.
+    """
+    encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded <= cap_bytes:
+        return None
+    data = frame.get("data")
+    snapshot = data.get("snapshot") if isinstance(data, dict) else None
+    parts: list[str] = []
+    if isinstance(snapshot, dict):
+        sizes = sorted(
+            (
+                (len(json.dumps(value).encode()), key, value)
+                for key, value in snapshot.items()
+            ),
+            reverse=True,
+            key=lambda row: row[0],
+        )[:3]
+        for size, key, value in sizes:
+            count = f", n={len(value)}" if isinstance(value, (list, dict)) else ""
+            parts.append(f"{key}={size:,}B{count}")
+    detail = f" largest fields: {', '.join(parts)}" if parts else ""
+    return (
+        f"{frame.get('op', 'frame')} is {encoded:,} bytes, over the "
+        f"{cap_bytes:,}-byte socket line limit; it cannot be sent and the "
+        f"client cannot read it.{detail}"
+    )
 
 
 def filter_update_trajectories(
@@ -1223,7 +1331,20 @@ class FrontendStateStore:
         state = restored or FrontendSessionState(session_id=str(session.session_id), epoch=epoch)
         # A new owner epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
-        return state.model_copy(update={"epoch": epoch, "sequence": 0})
+        #
+        # The receipt cap is applied to the RESTORED value, not just to fresh
+        # accumulation: every transcript written before the cap carries the full
+        # uncapped list (958 KB in the largest observed row), so an owner that
+        # resumed one would emit an oversized attach frame and re-persist the fat
+        # list forever despite the cap above. Capping on the way in is what makes
+        # an existing session heal on its first resume rather than staying broken.
+        return state.model_copy(
+            update={
+                "epoch": epoch,
+                "sequence": 0,
+                "usage_components": _capped_components(state.usage_components),
+            }
+        )
 
     def refresh_from_session(self, session: Any, *, initial: bool = False) -> FrontendSessionState:
         current = self._state
@@ -1417,8 +1538,9 @@ class FrontendStateStore:
                     if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
                     else state.cost_knowledge
                 ),
-                usage_components=list(state.usage_components)
-                + list(usage.cost_components or [usage]),
+                usage_components=_capped_components(
+                    list(state.usage_components) + list(usage.cost_components or [usage])
+                ),
             )
         elif usage.input_tokens or usage.output_tokens:
             changes["cost_knowledge"] = CostKnowledge.PARTIAL
@@ -1513,7 +1635,7 @@ class FrontendStateStore:
                     changes.update(
                         cumulative_parent_cost=previous + remainder,
                         current_turn_accrued_cost=0.0,
-                        usage_components=(
+                        usage_components=_capped_components(
                             list(state.usage_components)
                             if state.current_turn_accrued_cost > 0
                             else list(state.usage_components) + list(aggregate.cost_components)
@@ -1564,8 +1686,9 @@ class FrontendStateStore:
                         if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
                         else state.cost_knowledge
                     ),
-                    usage_components=list(state.usage_components)
-                    + list(usage.cost_components or [usage]),
+                    usage_components=_capped_components(
+                        list(state.usage_components) + list(usage.cost_components or [usage])
+                    ),
                 )
             elif usage.input_tokens or usage.output_tokens:
                 changes["cost_knowledge"] = CostKnowledge.PARTIAL

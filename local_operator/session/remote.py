@@ -215,6 +215,11 @@ class RemoteSession:
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._history_ids: set[str] = set()
+        #: The parsed transcript, handed from the threaded history read to the
+        #: cold path's checkpoint restore so the roster/todo/title recovery
+        #: costs no second parse. Set inside ``_read_transcript`` and cleared
+        #: the moment ``cold()`` consumes it; ``None`` at every other time.
+        self._cold_transcript: Any | None = None
         # Message ids whose row the follower has ALREADY painted live. The sync
         # seed and relayed stream are filtered against this set as well as
         # ``_history_ids``, so a turn that became durable mid-join — or a
@@ -447,17 +452,101 @@ class RemoteSession:
         )
         self._cwd = cwd
         self._can_go_cold = True
-        self._install_frontend(await self._synthesise_cold_state(cwd))
+        state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
         if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
             await self._load_history(None)
+            # AFTER the history load, which is what parses the transcript: the
+            # checkpoint restore then reads an object that is already in memory
+            # instead of paying a second full parse. Ordered before
+            # ``_install_frontend`` so the roster, todos and title are present
+            # in the FIRST state the widgets ever see — installing twice would
+            # paint an empty panel and then repaint it, which is the visible
+            # flicker this whole change exists to remove.
+            state = self._restore_cold_details(state)
+            self._cold_transcript = None
+        self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
         # viewer is READY, and it is _ensure_bound that supplies the runtime
         # when one is actually needed.
         self._owner_ready.set()
         return self
+
+    def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Fold the durable turn-end checkpoint over synthesised cold state.
+
+        A cold viewer synthesises canonical state because there is no owner to
+        ask — but "no owner" is not "nothing is known". The session's last
+        runtime wrote a full ``FrontendSessionState`` to the transcript at every
+        turn end (``FrontendStateStore.checkpoint``), and that row already holds
+        the subagent roster, the todo list, the conversation title, the goal and
+        the accumulated spend.
+
+        Before this, none of it was read: a resumed session opened with an empty
+        subagent panel and no todos, and stayed that way until the user sent a
+        message and a runtime started. The old in-process TUI restored exactly
+        this state at boot (``Session.__init__`` calls ``_load_subagent_roster``
+        and ``_load_todo_snapshot``), so the viewer model regressed it — the
+        details were not slow to arrive, they were never going to arrive.
+
+        The checkpoint is authoritative for what it carries and the synthesised
+        state is authoritative for the rest, so the two are merged rather than
+        one replacing the other: ``cwd`` and the model come from THIS process
+        (the config may have changed since; the checkpoint's copy is history),
+        while the roster, todos, title and costs come from disk. ``jobs`` are
+        stamped ``restored`` for the same reason the session's own restore does
+        — a restored row has no in-process trajectory, and the panel says so
+        rather than rendering a busy child as empty.
+
+        Best-effort by construction: an unreadable, absent or malformed
+        checkpoint leaves the synthesised state untouched. Opening a
+        conversation must never fail because its last status row did.
+        """
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+        )
+
+        transcript = self._cold_transcript
+        if transcript is None:
+            return state
+        try:
+            checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
+            if not isinstance(raw, dict):
+                return state
+            durable = FrontendSessionState.model_validate(raw)
+        except Exception:  # noqa: BLE001 — a bad status row must not stop the open
+            logger.debug("cold state could not read the durable checkpoint", exc_info=True)
+            return state
+        return state.model_copy(
+            update={
+                # Everything the last runtime knew and this process cannot
+                # derive. The panel reads these directly, so restoring them is
+                # what puts the session's details on the FIRST frame.
+                "jobs": [job.model_copy(update={"restored": True}) for job in durable.jobs],
+                "todos": list(durable.todos),
+                "conversation_title": durable.conversation_title,
+                "conversation_title_user_set": durable.conversation_title_user_set,
+                "conversation_title_forked": durable.conversation_title_forked,
+                "goal": durable.goal,
+                "active_agent": durable.active_agent,
+                "active_team": durable.active_team,
+                # Spend and occupancy are the conversation's history, not this
+                # process's: a resumed session that already cost money must not
+                # open reading zero (the same argument as
+                # ``_restore_reported_usage`` on the old owner path).
+                "cumulative_parent_cost": durable.cumulative_parent_cost,
+                "child_costs": dict(durable.child_costs),
+                "cost_knowledge": durable.cost_knowledge,
+                "last_usage": durable.last_usage,
+                "context_tokens": durable.context_tokens,
+                "context_is_estimate": durable.context_is_estimate,
+                "context_window": durable.context_window,
+            }
+        )
 
     async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
@@ -638,6 +727,15 @@ class RemoteSession:
 
         def _replay() -> tuple[list[Any], list[Any]]:
             transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+            # Retained ONLY for the cold path's checkpoint restore, which needs
+            # a second read of the same already-parsed file (see
+            # ``_restore_cold_details``). Keeping the object rather than
+            # re-constructing one is what keeps that restore free: a second
+            # ``Transcript(...)`` re-reads and re-parses the whole file, which
+            # is 0.68 s on the largest observed session. Cleared as soon as the
+            # cold restore consumes it so a long-lived viewer does not pin the
+            # parsed entries of a 103 MB transcript for its whole life.
+            self._cold_transcript = transcript
             return transcript.entries(), transcript.build_llm_history()
 
         return await asyncio.to_thread(_replay)
