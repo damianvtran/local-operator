@@ -1743,3 +1743,88 @@ def test_a_marker_change_with_nothing_busy_still_repaints() -> None:
     state["live"] = "wedged"
     screen._tick()
     assert repaints["n"] == 1, "a marker transition must reach the screen"
+
+
+def test_a_pure_reorder_with_identical_content_still_repaints() -> None:
+    """The gate handoff: two rows SWAP marker state, so the multiset is equal.
+
+    This is the permutation the round-3 D10 fix did not catch. Its signature
+    read `session_id` — a field `SessionRow` does not have — so `getattr`'s
+    default made identity the empty string on every row, and a reorder that
+    preserves the multiset of `(live_state, pending, wakes)` tuples compared
+    EQUAL. `_tick` returned early and the screen kept the pre-reorder frame
+    while Enter resolved against the new order (round 4, D10).
+
+    Both existing D10 tests pass with that bug live, because each changes
+    tuple CONTENT (a pending appears, idle->wedged). Only a content-preserving
+    permutation needs identity in the comparison, which is why this test
+    exists alongside them.
+    """
+    import time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    now = time.time()
+    # alpha holds the gate; beta is idle.
+    rows = [
+        SessionRow(
+            id="aaaaaaaaaaa1", mtime=now, name="alpha", live_state="idle", pending="approval"
+        ),
+        SessionRow(id="bbbbbbbbbbb2", mtime=now, name="beta", live_state="idle"),
+    ]
+    handed_off = {"yes": False}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        if not handed_off["yes"]:
+            return list(current)
+        # alpha's gate is answered and beta parks one: the SAME multiset of
+        # marker tuples, in the opposite order, needs-you sorted first.
+        swapped = [
+            r._replace(pending="approval" if r.id == "bbbbbbbbbbb2" else None) for r in current
+        ]
+        swapped.sort(key=lambda r: (r.pending is None,))
+        return swapped
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+    screen._selected = 0
+    painted: dict[str, list[str]] = {}
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, text: object) -> None:
+            lines = text.split("\n")  # type: ignore[attr-defined]
+            painted["lines"] = [line.plain for line in lines]
+
+    screen._body = _Body()  # type: ignore[assignment]
+    screen._repaint()
+    assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+
+    handed_off["yes"] = True
+    screen._tick()
+
+    cursor_line = next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
+    would_resume = screen._all[screen._selected].id
+    assert would_resume == "bbbbbbbbbbb2"
+    assert "beta" in cursor_line, (
+        "a content-preserving reorder must still repaint — the cursor is an "
+        "index into the order Enter resolves against"
+    )
+
+
+def test_the_signature_names_only_real_row_fields() -> None:
+    """A misspelled field name silently drops a column from the comparison.
+
+    `getattr(row, "session_id", "")` returns the default forever rather than
+    raising, which is exactly how D10 survived its own fix. The import-time
+    assertion in the screen guards this; this test pins it so a rename in
+    `resume.SessionRow` cannot quietly re-open the hole.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    unknown = set(SessionPickerScreen._SIGNATURE_FIELDS) - set(SessionRow._fields)
+    assert not unknown, f"signature names fields SessionRow does not have: {sorted(unknown)}"
+    # Identity must be in it, or a pure reorder compares equal.
+    assert "id" in SessionPickerScreen._SIGNATURE_FIELDS

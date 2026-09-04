@@ -1208,21 +1208,40 @@ class SessionPickerScreen(ModalScreen[str | None]):
             return
         self._repaint()
 
-    def _marker_signature(self) -> tuple[tuple[str, str, str, bool], ...]:
+    #: The `SessionRow` fields a repaint can actually show differently.
+    #:
+    #: DERIVED FROM THE ROW'S OWN FIELD NAMES, and asserted against them at
+    #: import (below), because the round-3 version of this signature read
+    #: ``session_id`` — a field `SessionRow` does not have. `getattr` with a
+    #: default made that silent: identity was the empty string on EVERY row,
+    #: so a pure reorder compared equal, `_tick` returned early, and the
+    #: picker went on painting one session while Enter resumed another. That
+    #: is D10, unfixed by its own fix, through 83 green picker tests
+    #: (round 4, D10).
+    #:
+    #: `mtime` is deliberately absent: it changes constantly and is rendered
+    #: as a coarse "when", so including it would repaint ten times a second
+    #: for nothing.
+    _SIGNATURE_FIELDS = ("id", "name", "forked", "live_state", "pending", "wakes", "wakes_dormant")
+    # A NAME THAT IS NOT A FIELD READS AS A CONSTANT. That is how the D10 fix
+    # shipped broken, so the names are checked against the row type itself
+    # rather than trusted: a rename in `resume.SessionRow` fails here loudly
+    # instead of silently dropping a column out of the comparison.
+    assert not set(_SIGNATURE_FIELDS) - set(SessionRow._fields), (
+        f"picker signature names unknown SessionRow fields: "
+        f"{sorted(set(_SIGNATURE_FIELDS) - set(SessionRow._fields))}"
+    )
+
+    def _marker_signature(self) -> tuple[tuple[object, ...], ...]:
         """Everything about the rows a repaint would show differently.
 
         Identity AND order: a reorder with no content change still has to
         repaint, because the cursor is an index into the order (D10). Kept to
-        the marker-relevant fields so an unrelated churn (a heartbeat
+        the fields the renderer reads so an unrelated churn (a heartbeat
         timestamp) does not force a repaint ten times a second.
         """
         return tuple(
-            (
-                str(getattr(row, "session_id", "")),
-                str(getattr(row, "live_state", "")),
-                str(getattr(row, "pending", "") or ""),
-                bool(getattr(row, "wakes", 0)),
-            )
+            tuple(getattr(row, field, None) for field in self._SIGNATURE_FIELDS)
             for row in self._all
         )
 

@@ -1183,11 +1183,24 @@ async def test_watching_surfaces_is_derived_from_real_connections() -> None:
             runtime.watching_surfaces() == frozenset()
         ), "a daemon adoption dial is a transport connection, not a person watching"
 
-        # A phone with the session actually open says so, and it EXPIRES.
-        runtime.note_viewer_active()
+        # A PHONE ACTUALLY OPENING THE SESSION — the real `watch` op the
+        # daemon pushes on the SSE 0->N transition, sent over the same wire
+        # rather than by poking an attribute. Round 3 asserted against a
+        # `note_viewer_active()` helper instead, which is why a fix with NO
+        # production caller passed this test while the phone was never
+        # counted as watching (round 4, R1/Q1).
+        daemon_writer.write(json.dumps({"op": "watch", "req": "w1"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(_daemon_reader, "ack", "w1")
         assert runtime.watching_surfaces() == frozenset({"viewer"})
-        runtime.note_viewer_active(ttl_s=0.0)
-        assert runtime.watching_surfaces() == frozenset(), "the signal must lapse on its own"
+
+        # And closing it again: the same op in reverse, not a TTL expiry.
+        daemon_writer.write(json.dumps({"op": "unwatch", "req": "w2"}).encode() + b"\n")
+        await daemon_writer.drain()
+        await _until(_daemon_reader, "ack", "w2")
+        assert (
+            runtime.watching_surfaces() == frozenset()
+        ), "closing the session on the phone must stop counting as watching"
 
         # A real terminal.
         _attach_reader, attach_writer = await _dial(record, client="attach")

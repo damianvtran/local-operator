@@ -117,14 +117,6 @@ _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
 
-#: How long a phone's "I am looking at this session" signal counts for.
-#: EXPIRING by design: the relay's transport connection is permanent and says
-#: nothing about attention, so live viewing has to be refreshed to stay true
-#: and lapses on its own when the phone is pocketed. Sized well above the
-#: relay's own refresh cadence so ordinary jitter never blinks a watching
-#: phone off, and far below a gate's park window so a forgotten phone cannot
-#: suppress a notification for a whole day.
-VIEWER_ACTIVE_TTL_S = 90.0
 
 #: Rows one ``job_trajectory`` reply may carry. The whole retained window is
 #: 500 events with no size bound per event, which is what overflows the frame
@@ -359,9 +351,6 @@ class RuntimeServer:
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
         # the phone bridge and a follower terminal at once.
         self._clients: dict[int, _ClientConn] = {}
-        #: Monotonic deadline for a relay-side viewer being actively watched.
-        #: Zero means "never signalled", which reads as not watching.
-        self._viewer_active_until: float = 0.0
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -967,33 +956,34 @@ class RuntimeServer:
         watching (round 3, B1). ``process.py::_viewer_attached`` reads this
         same table and counts only ``"attach"`` for exactly this reason.
 
-        A phone that is genuinely being looked at registers interest through
-        :meth:`note_viewer_active` below — an explicit signal with a lifetime,
-        not the presence of a transport connection.
+        **A PHONE THAT IS BEING LOOKED AT REGISTERS THROUGH ``watch``.**
+        ``phone_watchers`` is incremented by the ``watch`` control op, which
+        the daemon pushes when a session's SSE subscriber count crosses 0↔N
+        (`mobile/daemon.py::notify_watch_transition`) — i.e. exactly when a
+        person opens or closes the session on their phone. That is the signal
+        production already produces, and reading anything else is how round 3
+        traded B1's false positive for a false negative: the fix introduced a
+        parallel `note_viewer_active` mechanism that NOTHING called, so a user
+        reading the session on their phone got a desktop toast for a card
+        already on their screen, and the model was told nobody could answer
+        (round 4, R1/Q1).
+
+        ``watch_supported`` guards the mixed-version case for us: it latches
+        on the first ``watch``/``unwatch`` ever seen, so a daemon too old to
+        send the op leaves it False and this reports no phone rather than
+        inventing one. That matches the reaper's reading of the same pair.
 
         Deliberately the live connection table rather than a cached flag:
         surfaces come and go constantly, and a stale answer here means a
         notification delivered to a surface that has gone away.
         """
         watching = {c.kind for c in self._clients.values() if c.kind == "attach"}
-        if self._viewer_active_until > time.monotonic():
-            # A phone with the session actually open. Reported as ``viewer``
-            # rather than ``daemon`` so a reader cannot confuse "a relay is
-            # connected" with "a person is looking".
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon`` so a reader cannot
+            # confuse "a relay is connected" (true of every session on a
+            # machine running `lop mobile`) with "a person is looking".
             watching.add("viewer")
         return frozenset(watching)
-
-    def note_viewer_active(self, ttl_s: float = VIEWER_ACTIVE_TTL_S) -> None:
-        """Record that a human is actively viewing through the relay.
-
-        The mobile relay's transport connection says nothing about whether
-        anyone is looking, so live viewing is an explicit, EXPIRING signal:
-        the phone refreshes it while a session is open on screen, and it
-        lapses on its own when the phone is pocketed or the app is closed. A
-        flag with no lifetime would fail the same way the daemon connection
-        did — stuck true forever, suppressing every notification.
-        """
-        self._viewer_active_until = time.monotonic() + max(0.0, ttl_s)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         op = str(frame.get("op") or "")
