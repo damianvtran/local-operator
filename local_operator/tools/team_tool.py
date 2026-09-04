@@ -105,7 +105,12 @@ def _registry(context: ToolContext | None) -> TeamRegistry | None:
 
 
 def _row(team: Any) -> str:
-    slots = len(team.members) + 1
+    # ``member_count()`` for the same reason every other listing uses it (D2):
+    # `len(members) + 1` assumes the manager is not on the roster, which is
+    # false for real teams, and collapses a multi-count slot to one. This row
+    # is what the MODEL reads when it lists teams, so a wrong count here is a
+    # wrong count in the agent's own reasoning about a roster it may staff.
+    slots = team.member_count()
     summary = (team.description or "").strip() or "(no description)"
     role_word = "role" if slots == 1 else "roles"
     row = f"- {team.name} [{slots} {role_word}, led by {team.manager}]: {summary}"

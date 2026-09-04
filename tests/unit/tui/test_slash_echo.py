@@ -346,7 +346,9 @@ async def test_bare_team_lists_without_a_user_row() -> None:
         painted = _painted(app)
     assert rows == [], rows
     assert "feature-release" in painted, painted
-    assert "Led by manager · 2 roles" in painted, painted
+    # D2: `member_count()` — one member is one role. The old assertion pinned
+    # `len(members) + 1`, which counted a manager that is not on this roster.
+    assert "Led by manager · 1 role" in painted, painted
     assert "Ship a change" in painted, painted
     assert "Send: /team <name> <message>" in painted, painted
     assert "manager=" not in painted, painted
@@ -1871,6 +1873,261 @@ async def test_team_launch_refuses_instead_of_sending_without_the_briefs(tmp_pat
         rendered = " ".join(
             str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
         )
-        assert "teams cannot be attached in this session" in rendered, rendered
+        assert "but not run one" in rendered, rendered
         # The old wording would now be a lie: `/team` lists them one line up.
         assert "teams are unavailable" not in rendered, rendered
+        # It names a capability this session HAS rather than one it lacks (D3).
+        assert "/team chart" in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_agent_clear_refuses_instead_of_reporting_a_detach_that_did_not_happen() -> None:
+    """The symmetric half of the anti-asymmetry fix, pinned (R2).
+
+    ``/agent clear`` had the same shape the team guard was fixed for:
+    ``if callable(detach): detach()`` with no else, then the notice below it
+    announced "no agent active; this session uses its base instructions" —
+    on a session where nothing had cleared. A user shedding a role kept
+    talking to it while being told they had not.
+
+    This PR's own argument is that the team/agent asymmetry is what let the
+    silent path ship, so the agent half must be pinned or the same refactor
+    can reintroduce it with nothing objecting.
+    """
+
+    class NoDetachSession(FakeSession):
+        # The viewer's shape: no local detach seam.
+        clear_agent_profile = None  # type: ignore[assignment]
+
+    session = NoDetachSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is session
+        assert not callable(getattr(app._session, "clear_agent_profile", None))
+
+        app._cmd_agent("clear", app._notice, None)
+        await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        # D3: states the SITUATION rather than refusing an action — a viewer
+        # never attached a profile, so there is genuinely nothing to detach.
+        assert "nothing to detach" in rendered, rendered
+        # The lie the unguarded path told must not appear.
+        assert "no agent active" not in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_neither_refusal_promises_a_retry_that_answers_with_silence() -> None:
+    """R1: the guards must not send the user somewhere worse than here.
+
+    "Send a message first, then run /team again" was false. Sending a message
+    BINDS the viewer, and a bound viewer adopts the owner's
+    ``slash_capabilities`` where `team`/`agent` are scoped
+    ``authoritative_session`` — so the retry never reaches these guards. It
+    routes to the owner, which answers the mutating form with
+    ``noop {"type": "team_mutate"}``, and ``_render_authoritative_slash``
+    returns without printing on a noop: zero prompts, zero transcript rows,
+    no notice at all.
+
+    A guard whose purpose is to stop the app claiming something happened must
+    not itself promise a remedy that does nothing, so it makes no promise.
+    """
+    from local_operator.session.frontend_state import _slash_capabilities
+
+    # The states the old advice named are BOTH authoritative, which is the
+    # mechanism that made the retry silent. Pin it so the wording cannot drift
+    # back to promising one.
+    scopes = {
+        capability.command: getattr(capability.scope, "value", capability.scope)
+        for capability in _slash_capabilities()
+    }
+    assert scopes["team"] == "authoritative_session"
+    assert scopes["agent"] == "authoritative_session"
+
+    class NoAttachSession(FakeSession):
+        attach_team = None  # type: ignore[assignment]
+        clear_agent_profile = None  # type: ignore[assignment]
+
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    with tempfile.TemporaryDirectory() as directory:
+        registry = TeamRegistry(Path(directory))
+        registry.create_team(TeamEditFields(name="alpha", description="d", manager="manager"))
+
+        session = NoAttachSession()
+        session.team_registry = registry
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+
+            app._cmd_team("alpha do the thing", app._notice, None)
+            app._cmd_agent("clear", app._notice, None)
+            await pilot.pause()
+
+            rendered = " ".join(
+                str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+            )
+            # No retry instruction of any shape.
+            assert "run /team again" not in rendered, rendered
+            assert "run /agent clear again" not in rendered, rendered
+            assert "Send a message first" not in rendered, rendered
+            # No open-ended "yet" either: `attach_team` exists only on the
+            # `Session` `lop` no longer builds, so a wait would never end (D3).
+            assert "yet" not in rendered, rendered
+            # It still says what IS true.
+            assert "but not run one" in rendered, rendered
+            assert "nothing to detach" in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_no_notice_calls_a_registry_unavailable_while_its_rows_are_listed(tmp_path) -> None:
+    """Q2: restoring the registries made the old attach copy false.
+
+    `/agent <name> <message>` answered "agents are unavailable in this
+    session" on a session whose `/agent ` list had just rendered 13 profiles.
+    That wording was true only while the REGISTRY was also missing; once the
+    registry resolves, the sentence contradicts the rows the user is looking
+    at — the same defect this PR fixes for `/team`, introduced by this PR's
+    own fix and closed in the same commit.
+
+    The distinction the copy must keep: the agents are fine and listable; the
+    ATTACH SEAM is what a viewer lacks.
+    """
+    from local_operator.agents import AgentRegistry
+
+    class NoAttachSession(FakeSession):
+        # A viewer's shape: registries resolve, attach seams do not.
+        attach_agent_profile = None  # type: ignore[assignment]
+
+    session = NoAttachSession()
+    session.agent_registry = AgentRegistry(tmp_path)
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        # The listing resolves — that is what makes "unavailable" a lie.
+        assert app._agent_profile_rows(), "the fixture must offer rows for this to be a lie"
+
+        app._cmd_agent("reviewer hello", app._notice, None)
+        await pilot.pause()
+
+        rendered = " ".join(
+            str(getattr(block, "_text", "") or "") for block in app._transcript_view().children
+        )
+        assert "but not attach one" in rendered, rendered
+        assert "agents are unavailable" not in rendered, rendered
+        # Points at the surface that DOES work in this session (D3).
+        assert "/agent shows the roster" in rendered, rendered
+        # And no retry promise, for the R1 reason.
+        assert "Send a message first" not in rendered, rendered
+
+
+@pytest.mark.asyncio
+async def test_the_roster_count_matches_the_chart_it_opens(tmp_path) -> None:
+    """D2: `len(members) + 1` overcounts every team whose manager is a member.
+
+    The old arithmetic assumed the manager sits OUTSIDE the roster. On real
+    teams it often does not — two of the three on the reference machine list
+    their manager as a member — so the picker advertised 8 roles for a 7-role
+    team. The org chart is TWO KEYSTROKES from that row and counts with
+    ``member_count()``, so the picker contradicted the boxes it opens.
+
+    ``member_count()`` also sums slot counts, so a ``reviewer x2`` slot stops
+    being reported as one member.
+    """
+    from local_operator.org_chart import _team_detail
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    # The shape that broke: the manager is ALSO on the roster.
+    registry.create_team(
+        TeamEditFields(
+            name="onroster",
+            manager="manager",
+            members=[TeamMember(role="manager"), TeamMember(role="coder")],
+        )
+    )
+    # And a multi-count slot, which the old count collapsed to one.
+    registry.create_team(
+        TeamEditFields(
+            name="doubled",
+            manager="boss",
+            members=[TeamMember(role="reviewer", count=2)],
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        details = {choice.name: choice.detail for choice in app._team_choices()}
+
+    for name, expected in (("onroster", 2), ("doubled", 2)):
+        team = registry.get_team_by_name(name)
+        assert team is not None
+        assert team.member_count() == expected
+        # The picker's number and the chart's number are the SAME number.
+        assert details[name] == f"{expected} roles", details[name]
+        assert f"{expected} members" in _team_detail(team), _team_detail(team)
+
+
+@pytest.mark.asyncio
+async def test_the_detail_column_leaves_room_for_the_description(tmp_path) -> None:
+    """D1: a wide detail silences the description at ordinary widths.
+
+    The picker reserves the detail column BEFORE the description and drops the
+    description first, so a 44-cell ``<n> roles · led by <manager>`` blanked
+    the description outright between roughly 76 and 123 columns — the band an
+    ordinary terminal sits in, including the 100-column frame this PR's own
+    first evidence was captured at. The manager is one keystroke away in the
+    listing and the chart; the description is the only thing telling the user
+    which team a row IS.
+    """
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="data-investigations",
+            manager="data-investigations-manager",
+            description="Investigates global-public subjects and turns them into records",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        choices = app._team_choices()
+
+    detail = choices[0].detail
+    # The manager's name is what made this column wide, and it is not a fact
+    # the row needs to carry.
+    assert "led by" not in detail, detail
+    assert detail == "1 role", detail
+    # Comfortably inside `/agent`'s 15-cell detail, which never had this bug.
+    assert len(detail) <= 15, detail

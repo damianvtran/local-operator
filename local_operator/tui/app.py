@@ -6332,14 +6332,37 @@ class OperatorApp(App[None]):
             return []
         choices: list[ArgumentChoice] = []
         for team in teams:
-            slots = len(getattr(team, "members", ()) or ()) + 1
-            manager = getattr(team, "manager", "manager")
+            # ``member_count()``, never ``len(members) + 1`` (D2). The old
+            # arithmetic assumed the manager is not itself on the roster, which
+            # is false for real teams — two of the three on the reference
+            # machine list their manager as a member, so the picker reported 8
+            # roles for a 7-role team. It also collapsed a ``reviewer x2`` slot
+            # to one, understating the roster the user assembled.
+            #
+            # This is the count `org_chart.py` and `lop teams` already use, and
+            # the chart is TWO KEYSTROKES from this row — a picker that
+            # disagrees with the boxes it opens is worse than one that says
+            # nothing.
+            # Defensive access kept from the original: this list is built from
+            # whatever the session's registry yields, and a reduced double
+            # without the method must degrade to a row rather than break the
+            # picker mid-keystroke.
+            counter = getattr(team, "member_count", None)
+            slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
             description = (getattr(team, "description", "") or "").strip() or "no description"
             choices.append(
                 ArgumentChoice(
                     team.name,
                     description,
-                    detail=f"{slots} roles · led by {manager}",
+                    # ROLES ONLY, no manager (D1). The picker reserves the
+                    # detail column BEFORE the description and drops the
+                    # description first, so a 44-cell
+                    # "<n> roles · led by <manager>" silenced the description
+                    # outright between 76 and 123 columns — the band an
+                    # ordinary terminal sits in. The manager is one keystroke
+                    # away in the listing and the chart; the description is the
+                    # only thing telling the user which team this IS.
+                    detail=f"{slots} {'role' if slots == 1 else 'roles'}",
                 )
             )
         return choices
@@ -6604,7 +6627,11 @@ class OperatorApp(App[None]):
         body = Style(color=theme_mod.semantic_color("dim"))
         rows: list[Any] = [Text("teams", style=section)]
         for team in teams:
-            slots = len(team.members) + 1
+            # ``member_count()`` for the D2 reason the picker documents: the
+            # manager is often ON the roster, so `len(members) + 1` overcounts,
+            # and a multi-count slot was collapsed to one. The listing, the
+            # picker and the org chart must agree.
+            slots = team.member_count()
             rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
             role_word = "role" if slots == 1 else "roles"
             rows.append(
@@ -6617,8 +6644,24 @@ class OperatorApp(App[None]):
             if summary:
                 rows.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
         rows.append(Text())
-        rows.append(Text("Send: /team <name> <message>", style=body))
+        rows.append(Text(self._team_listing_footer(), style=body))
         return RichBlock(Group(*rows))
+
+    def _team_listing_footer(self) -> str:
+        """The next-step line under a `/team` listing, true for THIS session.
+
+        D6: the footer read ``Send: /team <name> <message>`` unconditionally,
+        which on a viewer walks the user straight into the refusal the listing
+        sits above — the listing invites the one action this session cannot
+        perform. Keyed to the same seam the guard checks (``attach_team``), so
+        the invitation and the refusal can never disagree: where running a team
+        works the footer offers it, and where it does not the footer offers
+        charting, which does work.
+        """
+        session = self._session
+        if callable(getattr(session, "attach_team", None)):
+            return "Send: /team <name> <message>"
+        return "Chart: /team chart <name>"
 
     def _submit_command_prompt(
         self, request: str, attachments: Mapping[int, Marked] | None
@@ -6756,9 +6799,28 @@ class OperatorApp(App[None]):
             # Mirrors the `/agent` guard's shape and voice deliberately: the
             # asymmetry between the two (that one returned and this one did
             # not) is what let the silent path ship.
+            #
+            # NO RETRY ADVICE, and NO "yet" (R1, D3). The obvious next step —
+            # "send a message first, then run /team again" — is FALSE and lands
+            # the user somewhere worse than here. Sending a message BINDS the
+            # viewer, and a bound viewer adopts the owner's
+            # `slash_capabilities`, where `team` is scoped
+            # `authoritative_session`. The retry therefore never reaches this
+            # method: it routes to the owner's `_team_slash_result`, which
+            # returns `noop {"type": "team_mutate"}` for the mutating form, and
+            # `_render_authoritative_slash` returns without printing on a noop.
+            # Measured on a bound viewer: routed to owner, 0 prompts sent, 0
+            # transcript rows, no notice — total silence.
+            #
+            # "Run it in the session's own terminal" is false too, and "yet"
+            # promises a wait that never ends: `attach_team` exists only on
+            # `Session`, which `lop` no longer builds at all, so this is
+            # unfollowable BY CONSTRUCTION rather than merely unavailable
+            # today. So the notice names what this session CAN do — list and
+            # chart — instead of gesturing at a capability that is not coming.
             self._system_notice(
-                "teams cannot be attached in this session yet. "
-                "Send a message first, then run /team again.",
+                "this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 "warning",
             )
             return
@@ -6946,10 +7008,17 @@ class OperatorApp(App[None]):
             if summary:
                 out.append(Padding(Text(summary, style=body), (0, 0, 0, 4)))
         out.append(Text())
-        out.append(Text("Send: /agent <name> <message>", style=body))
-        # The detach verb belongs in the listing so a user who attached a
-        # profile can find their way back to base instructions without guessing.
-        out.append(Text("Detach: /agent clear", style=body))
+        # D6, same rule as the team listing: only offer what THIS session can
+        # do. Both of these lines name the attach seam, so on a viewer they
+        # invited the user into the refusal the listing sits above. The detach
+        # verb goes with them — there is nothing to detach where nothing can
+        # attach.
+        if callable(getattr(self._session, "attach_agent_profile", None)):
+            out.append(Text("Send: /agent <name> <message>", style=body))
+            # The detach verb belongs in the listing so a user who attached a
+            # profile can find their way back to base instructions without
+            # guessing.
+            out.append(Text("Detach: /agent clear", style=body))
         return RichBlock(Group(*out))
 
     def _sync_agent_band(self) -> None:
@@ -7035,9 +7104,15 @@ class OperatorApp(App[None]):
                 # detached ("this session uses its base instructions") on a
                 # session that never cleared anything, so a user trying to shed
                 # a role kept talking to it while being told they had not.
+                # Same no-retry rule as the team guard above (R1), but a
+                # different SHAPE (D3): this states the situation rather than
+                # refusing an action. A viewer never attached a profile in the
+                # first place, so "cannot detach" answers a question the user
+                # did not ask; "nothing to detach" is both true and the end of
+                # the matter, and it kills the old lie ("no agent active…")
+                # without inventing a capability.
                 self._system_notice(
-                    "agents cannot be detached in this session yet. "
-                    "Send a message first, then run /agent clear again.",
+                    "no agent is attached in this session, so there is nothing to detach",
                     "warning",
                 )
                 return
@@ -7054,9 +7129,22 @@ class OperatorApp(App[None]):
             return
         attach = getattr(session, "attach_agent_profile", None)
         if not callable(attach):
+            # STALE AFTER THE REGISTRY FIX (Q2). This said "agents are
+            # unavailable in this session" — true when the registry was also
+            # missing, and false now: `/agent` lists this machine's profiles
+            # one line earlier, so the old wording contradicts the rows the
+            # user is looking at. That is precisely the defect this PR fixes
+            # for `/team`, and the registry fix is what made this copy wrong.
+            #
+            # What is missing is the attach seam, not the agents, so the notice
+            # names what this session CAN do — and, per R1/D3, promises no
+            # retry and says no "yet": `agent` is scoped
+            # `authoritative_session`, so a retry after binding routes to the
+            # owner and answers with `agent_mutate` silence, and
+            # `attach_agent_profile` exists only on the `Session` that `lop`
+            # no longer builds.
             self._system_notice(
-                # D4: "agents", matching /team's "teams are unavailable".
-                "agents are unavailable in this session.",
+                "this session can list agents, but not attach one. /agent shows the roster",
                 "warning",
             )
             return
@@ -13855,7 +13943,10 @@ class OperatorApp(App[None]):
             if summary:
                 rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
         rows.append(Text())
-        rows.append(Text("Send: /team <name> <message>", style=body))
+        # Same session-aware footer as the local listing (D6): this renders a
+        # FOLLOWER's routed listing, which is exactly the case that cannot run
+        # a team, so the unconditional "Send:" line was wrong most often here.
+        rows.append(Text(self._team_listing_footer(), style=body))
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
@@ -19612,11 +19703,16 @@ class OperatorApp(App[None]):
                 return SlashResult(
                     kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
                 )
+            # ``member_count()`` here too (D2): this producer feeds a FOLLOWER's
+            # listing over the wire, so a different count here would make one
+            # terminal disagree with another about the same team. The plural
+            # is keyed to the number actually shown, which `len(members) == 0`
+            # was not.
             items = [
                 (
                     team.name,
-                    f"Led by {team.manager} · {len(team.members) + 1} "
-                    f"{'role' if len(team.members) == 0 else 'roles'}",
+                    f"Led by {team.manager} · {team.member_count()} "
+                    f"{'role' if team.member_count() == 1 else 'roles'}",
                     (team.description or "").strip(),
                 )
                 for team in teams

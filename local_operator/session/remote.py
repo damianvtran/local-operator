@@ -284,6 +284,17 @@ class RemoteSession:
         # session that never types `/team` must not pay at boot.
         self._team_registry_cache: Any | None = None
         self._agent_registry_cache: Any | None = None
+        # FAILURE is latched as well as success (R3). Returning None out of the
+        # `except` without recording it left the cache empty, so the next read
+        # re-entered the whole constructor: 25 property reads against a raising
+        # constructor measured 25 constructions. The picker re-derives its rows
+        # on EVERY keystroke, so an unreadable registry would put a directory
+        # walk plus a recovery probe on the typing path — the exact cost
+        # `teams.py` keeps off that loop ("a reader that waited turned an
+        # ordinary keystroke into a multi-second freeze"). Construct at most
+        # once per session, whichever way it goes.
+        self._team_registry_failed = False
+        self._agent_registry_failed = False
 
     @property
     def team_registry(self) -> Any | None:
@@ -301,11 +312,14 @@ class RemoteSession:
         half-truth (see ``TeamRegistry._raise_if_recovery_failed``).
         """
         if self._team_registry_cache is None:
+            if self._team_registry_failed:
+                return None
             from local_operator.teams import TeamRegistry
 
             try:
                 self._team_registry_cache = TeamRegistry(self._config_dir)
             except Exception:  # noqa: BLE001 — one feature must not break the session
+                self._team_registry_failed = True
                 return None
         return self._team_registry_cache
 
@@ -316,14 +330,34 @@ class RemoteSession:
         The sibling of :attr:`team_registry`, and broken by the same
         mechanism: ``/agent``'s listing and launch both read this off the
         session (``_agent_profile_rows``, ``_cmd_agent``). Same lazy
-        construction and same degrade-one-feature guard.
+        construction, same degrade-one-feature guard, same failure latch.
+
+        NOT symmetric with :attr:`team_registry` in one respect, which is
+        recorded here rather than silently inherited (R4):
+        ``AgentRegistry.__init__`` creates ``<config_dir>`` and
+        ``<config_dir>/agents`` and runs its two migrations, so READING this
+        property writes to disk. ``TeamRegistry`` deliberately does the
+        opposite ("No mkdir here: every interactive session constructs a
+        registry, and an unused feature must not litter the config dir").
+
+        The asymmetry is pre-existing and left alone on purpose: every other
+        host that offers `/agent` — the CLI, `exec`, the server, the mobile
+        daemon — constructs the same registry the same way, so the directory a
+        viewer creates is one every other entry point would have created
+        anyway. Changing the constructor to match ``TeamRegistry`` is a change
+        to shared behaviour with its own blast radius, not a fix belonging to
+        this regression. What is new here is only that the construction now
+        also happens on a viewer.
         """
         if self._agent_registry_cache is None:
+            if self._agent_registry_failed:
+                return None
             from local_operator.agents import AgentRegistry
 
             try:
                 self._agent_registry_cache = AgentRegistry(self._config_dir)
             except Exception:  # noqa: BLE001 — one feature must not break the session
+                self._agent_registry_failed = True
                 return None
         return self._agent_registry_cache
 
