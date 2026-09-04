@@ -2263,12 +2263,28 @@ class SubagentView(Vertical):
         screen says so.
 
         And deliberately NOT fixed by admitting ``recheck`` past the error
-        guard in ``_maybe_load_history``: that would also clear the latch, but
-        a persistently failing read would then issue one disk read per refresh,
-        which is the retry storm those guards exist to prevent (QA measured 0
-        extra reads over 60 refreshes on the reachable permission-denied path,
-        Q13). Failing quietly costs one ``stat`` per refresh and no read, the
-        same as the absence it is re-looking for.
+        guard in ``_maybe_load_history``: that would clear the latch on the
+        reader's behalf and hand a background peek the one gate that is
+        supposed to be theirs alone.
+
+        What abandoning quietly COSTS, measured rather than assumed (review
+        round 2, R4 / QA Q22): the ``stat`` says "there is a file, go look"
+        and the read is the only way to learn it still fails, so a file that
+        is present but persistently unreadable is re-read — about 1.1-1.4
+        reads per refresh in the narrow window where ``stat`` succeeds and
+        ``open`` fails. That is the price of self-healing, not a free ride,
+        and it is bounded in the two ways that matter: ``_history_loading``
+        serialises the probes, so it is one retry at a time rather than a
+        herd, and the cost is pinned to the REFRESH rate, not the event rate.
+        Measured across a 20x growth in relayed events the reads stay flat
+        (20 shows -> 28 reads, 400 shows -> 27), i.e. 1.4 reads/show falls to
+        0.068. The unbounded storm the guards exist to prevent is one that
+        rises with the event stream; this does not.
+
+        The reachable failure modes stay cheap regardless: a missing file
+        routes to ``FileNotFoundError`` and the re-looking branch, and a
+        permission-denied directory fails the ``stat`` itself, costing no
+        read at all.
         """
         if generation != self._history_generation:
             return

@@ -4398,6 +4398,24 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         # The storm this excludes is the one an error-guard fix would create:
         # unbounded growth with the EVENT rate rather than the refresh rate.
         assert reads <= 2 * 20, f"probe storm: {reads} reads over 20 refreshes"
+
+        # The bound above is necessary but NOT sufficient: the rejected
+        # error-guard fix also satisfies it at this refresh count (review
+        # round 2, R5). What actually separates the two is the SHAPE of the
+        # growth — the storm rises with the event stream, this does not — so
+        # assert on that directly. `show()` is what a relayed event drives;
+        # driving it 100x more must not buy 100x the reads, because the
+        # in-flight guard serialises probes and only a settled one re-arms.
+        reads_after_refresh_phase = reads
+        for _ in range(200):
+            app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+        burst_reads = reads - reads_after_refresh_phase
+        assert burst_reads <= 20, (
+            f"probe cost tracks the EVENT rate, not the refresh rate: "
+            f"{burst_reads} reads from 200 back-to-back shows"
+        )
+
         # And the reader sees one stable, truthful note throughout — no blink
         # between the absence and an error nobody asked to hear about.
         assert footers == {f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"}, footers
