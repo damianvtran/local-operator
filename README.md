@@ -621,6 +621,31 @@ Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 summarized), and `tui.theme` (any registered theme name — easier to set with
 `/theme`, which previews live).
 
+### Standing instructions
+
+Your machine-wide preferences — output style, commit conventions, safety
+rules — live in `~/.local-operator/system_prompt.md`, editable from
+Settings → Instructions, `PATCH /v1/config/system-prompt`, or your editor.
+They ride every session and every subagent.
+
+If you also run Claude Code, Codex, opencode or droid, Local Operator reads
+`~/.agents/AGENTS.md` too — the tool-neutral file those ecosystems have
+converged on, in the directory Local Operator already scans for skills. It is
+**read-only** (`system_prompt.md` stays the only file Local Operator writes),
+it is placed *before* your own instructions so those win on conflict, and
+content identical to `system_prompt.md` is dropped rather than sent twice.
+
+```bash
+# read a different set of shared files instead (colon-separated)
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=~/.config/AGENTS.md:~/team/AGENTS.md
+# or turn the import off entirely
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=
+```
+
+Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
+walking up from your working directory, and can be disabled with
+`LOCAL_OPERATOR_CONTEXT_FILES=0`.
+
 Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
 

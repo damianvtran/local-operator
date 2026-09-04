@@ -554,7 +554,11 @@ def test_the_committed_release_pin_carries_the_known_hashes() -> None:
 
 @pytest.fixture
 def stubbed_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    for name in ("AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION"):
+    # ``AWS_DEFAULT_PROFILE`` too: botocore reads it alongside ``AWS_PROFILE``,
+    # so omitting it leaves the fixture non-hermetic for any developer who
+    # exports that spelling instead (see ``_hermetic_aws`` in
+    # ``test_aws_provider.py``).
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
     ec2 = boto3.client(

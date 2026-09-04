@@ -55,9 +55,15 @@ def _hermetic_aws(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     and dropping the profile makes the tests hermetic AND pins the property
     the provider relies on: it is built from explicit values, not the
     environment.
+
+    ``AWS_DEFAULT_PROFILE`` is in the list because botocore reads it as well
+    as ``AWS_PROFILE``, and a docstring promising "no ambient AWS
+    configuration" is simply wrong until it covers every variable the client
+    reads: a developer with only that one exported got 24 ``ProfileNotFound``
+    failures on a tree that is green on CI.
     """
 
-    for name in ("AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION"):
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
