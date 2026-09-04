@@ -1,1 +1,0 @@
-size=Size(width=88, height=26) virtual=Size(width=88, height=26) scrollbar=False body=Size(width=85, height=8) body_virtual=Size(width=84, height=22) scroll_y=0
