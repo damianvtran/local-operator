@@ -1,0 +1,28 @@
+# Subagent page: the "history unavailable" latch
+
+Frames behind the fix for a footer that claimed `history unavailable` while the
+child's history was on screen.
+
+Both shot scripts drive the real `OperatorApp` through `run_test`, so
+`local_operator.tcss` is applied and the footer is the one a user reads. Neither
+patches a clock or pokes a flag: the refreshes are the same `show()` the 1 Hz
+job poll issues, so what the footer says here is what it says in the product.
+
+Run them (renamed `.py.txt` so the repo's linters skip one-off tooling):
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+    docs/evidence/subagent-history-latch/shot.py.txt <repo-root> out.svg
+```
+
+| frame | what it shows |
+|---|---|
+| `before.svg` / `.png` | `origin/main`. The child's transcript appeared on disk while the page was open; the footer still says `history unavailable` and the durable row is missing. |
+| `after.svg` / `.png` | This branch. The same sequence loads the durable row and the footer settles on `transcript start`. |
+| `after-no-directory.svg` / `.png` | The honest negative: a child that never started a durable session keeps `history unavailable`, unchanged across 12 polls. |
+
+`shot.py.txt` reproduces the launch race — `SubagentComms.attach` binds
+`session_dir` before the child's first append lands, so the page's opening read
+finds a directory with no `transcript.jsonl` in it. `shot_no_directory.py.txt`
+covers the case that must NOT self-correct, and prints the distinct footer texts
+it observed so a reader can see the note does not flap.
