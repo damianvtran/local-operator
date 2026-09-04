@@ -1074,7 +1074,18 @@ class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
     ``response_id`` is the provider's native turn identity, or ``None`` when
     the provider exposes none (Google). A consumer that requires no-replay
     proof must treat ``None`` as indeterminate and fail closed rather than
-    substituting an id of its own.
+    substituting an id of its own. It is always emitted, even with a null id:
+    a MISSING boundary cannot be distinguished from "the request never went
+    out", so a consumer would wait forever instead of failing closed.
+
+    **One turn may emit SEVERAL of these, and the LATEST supersedes.** A
+    credential rotation or a provider fallback retries the request, and each
+    attempt that reaches a provider announces its own boundary with its own
+    id. This is not a duplicate to be deduplicated: the earlier attempt failed
+    before rendering anything, so its id names a turn that produced no output,
+    while the last one names the turn actually being served. A consumer
+    committing no-replay proof must therefore key on the most recent id rather
+    than the first, or it will hold proof for an attempt that was abandoned.
     """
 
     type: Literal["provider_turn_start"] = "provider_turn_start"
