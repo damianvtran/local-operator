@@ -79,6 +79,18 @@ class RenderedStreamError(Exception):
     not import the provider layer — the dependency only runs the other way.
     """
 
+    #: The MACHINE was offline (DNS/route/socket failed before any HTTP), as
+    #: opposed to a provider that answered badly. Declared here, on the base
+    #: class, precisely BECAUSE the harness must not import ``providers``: the
+    #: loop has to tell "the laptop moved between wifi networks" apart from "the
+    #: provider 500ed" to decide whether an interrupted turn may be continued,
+    #: and this attribute is the only channel that does not invert the layering.
+    #: ``providers.failover.ProviderError`` sets it from ``is_connectivity_loss``
+    #: (the single classifier — this is a carrier, never a second definition);
+    #: every other stream error keeps the ``False`` default, so a client that
+    #: knows nothing about it behaves exactly as before.
+    connectivity_loss: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Content blocks

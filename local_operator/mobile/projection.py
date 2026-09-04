@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_message
+from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -627,6 +628,13 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                     TranscriptEntry(id=message.id, kind="parent_message", text=parent_message.body)
                 )
                 continue
+            if message.text == CONNECTIVITY_CONTINUATION_PROMPT:
+                # Harness chrome, not the user's words: the loop persists this
+                # so the TRANSCRIPT records why one answer arrived in two
+                # pieces, but no front end paints it as a user bubble — the
+                # live run showed a notice instead. Same rule as the TUI's
+                # replay suppression; the surfaces must not diverge.
+                continue
             # Carry image attachments as references so an image-only prompt
             # (the composer allows "" text + images) renders its thumbnails on
             # replay instead of round-tripping as an empty bubble — the same
@@ -761,6 +769,11 @@ class ProjectionFold:
                     )
                 continue
             if message.role == "user":
+                if message.text == CONNECTIVITY_CONTINUATION_PROMPT:
+                    # Harness chrome — see ``fold_messages_to_entries``, whose
+                    # rule this mirrors so the attaching phone and the
+                    # lazy-loaded page agree about the same row.
+                    continue
                 parent_message = extract_parent_message(message.text)
                 if parent_message is not None:
                     # A persisted hub steer renders as the parent's own words,
