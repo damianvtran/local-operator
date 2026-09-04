@@ -1,36 +1,88 @@
 # Harness efficiency: changes and evidence
 
-This release addresses the September 2026 harness audit against committed
-baseline `5cbea141`. Both measured checkouts own an editable virtual environment;
-probes verify imported source paths. Local timings are observations on macOS,
-not promises about provider latency or fleet completion time.
+This release addresses the September 2026 harness audit, originally measured
+against `5cbea141`. The final measurements below compare committed baseline
+`765c619b` with candidate `1a7bd26b`, after integrating concurrent upstream work.
+Both checkouts own an editable virtual environment; probes verify imported
+source paths. Local timings are observations on macOS, not promises about
+provider latency or fleet completion time. Earlier artifacts remain retained.
 
 ## Measured improvements
 
 | Workload | Baseline | Changed | Scope |
 | --- | ---: | ---: | --- |
-| Short foreground bash, median of 12 | 275.61 ms | 15.49 ms | Real subprocess, cancellation enabled |
+| Short foreground bash, median of 12 | 275.62 ms | 36.96 ms | Real subprocess, cancellation enabled |
 | Capture 32 MiB stdout, peak Python allocations | 140.05 MiB | 28.14 MiB | Same head and final diagnostic retained |
 | Capture 1 MiB stdout | 4.04 MiB | 4.09 MiB | Small-output memory effectively unchanged |
 | Fetch 12 distinct local pages | 12 TCP connections | 1 | All response bodies verified |
-| Durable 48-message paired flush, median of 7 | 4.55 ms | 1.35 ms | fsync count 48 → 1; loop-thread fsync 48 → 0 |
-| 100 prompt builds over 5,000 rows, median thread CPU of 7 | 109.78 ms | 0.256 ms | Indexed state and unchanged-block reuse |
+| Durable 48-message paired flush, median of 7 | 3.52 ms | 1.21 ms | fsync count 48 → 1; loop-thread fsync 48 → 0 |
+| 100 prompt builds over 5,000 rows, median thread CPU of 7 | 72.63 ms | 0.254 ms | Indexed state and unchanged-block reuse |
 | Matching Anthropic wire prefix after a goal change | 11.46% | 99.984% | Structural cache eligibility, not a cache hit rate |
 | Prescribed three-read pipeline, model requests | 4 | 2 | Scripted plan; both execute three reads and return 6 |
 | Same pipeline, retained tool-result bytes | 150,078 | 55 | Intermediate data stays in Python |
 
-Tool/network JSON: [before](benchmarks/harness-efficiency/tool-io-before.json),
-[after](benchmarks/harness-efficiency/tool-io-after.json).
+Tool/network JSON: [before](benchmarks/harness-efficiency/final-tool-before.json),
+[after](benchmarks/harness-efficiency/final-tool-after.json).
 Reproduce using `scripts/bench_tool_io.py --repo <checkout>` with each checkout's
-own interpreter. Session JSON, reproduction commands and persistence contracts
-are in [the session validation report](harness-session-efficiency.md).
+own interpreter. Final session JSON: [before](benchmarks/harness-efficiency/final-session-before.json),
+[after](benchmarks/harness-efficiency/final-session-after.json). Reproduction
+commands and persistence contracts are in
+[the session validation report](harness-session-efficiency.md).
 
-Composition JSON: [before](benchmarks/harness-efficiency/composition-before.json),
-[after](benchmarks/harness-efficiency/composition-after.json). Reproduce with
+Composition JSON: [before](benchmarks/harness-efficiency/final-composition-before.json),
+[after](benchmarks/harness-efficiency/final-composition-after.json). Reproduce with
 `scripts/bench_tool_composition.py --repo <checkout> --output <json>`, again using
 that checkout's interpreter. This compares explicitly selected valid plans,
 not model sampling: it proves the shorter execution path works and preserves
 the answer, not that a live model always discovers or chooses it.
+
+## Actual provider cache reuse
+
+One three-request synthetic sequence per arm used native Anthropic Sonnet 4.6,
+low effort, an output cap of 1,024 tokens, and roughly 43,000 input tokens.
+Each sequence seeded a conversation, repeated a request with an unchanged goal,
+then changed the goal. All six requests completed with five output tokens each.
+
+| Phase | Baseline cache reuse | Candidate cache reuse |
+| --- | ---: | ---: |
+| Unchanged-goal control | 99.9631% | 99.9632% |
+| Changed goal | 18.2914% | 99.8575% |
+
+After the goal change, new cache writes fell from **35,434 tokens to 59**.
+The denominator is Anthropic's disjoint input + cache-read + cache-write buckets,
+which matches its reported context count in every call. Credentials stayed
+stable within each arm. The arms used different credential scopes, UUIDs and
+temporary directories, so the unchanged control is the within-arm comparison;
+this is not a claim of identical cross-arm wire bytes. The native home catalogue
+cache was shared and outside the measured provider calls.
+
+This verifies the goal-change caching mechanism, not general task latency,
+quality, or a fleet-wide cache rate. Standing instruction changes deliberately
+start a new persisted prefix, since current repository and user instructions
+take priority over reuse.
+
+Data: [baseline](benchmarks/harness-efficiency/cache-live-before.json),
+[candidate](benchmarks/harness-efficiency/cache-live-after.json). Reproduce with
+`scripts/bench_live_cache.py --repo <checkout> --arm <label> --output <json>`
+using that checkout's interpreter from outside the repository. This command
+makes three live requests using the native login and therefore incurs usage.
+
+## Accepted live tasks
+
+Twenty fixed-source native OpenAI sessions passed independent artifact checks:
+five repeats of two tasks on each arm. Total elapsed time was 381.17 seconds
+before and 379.78 seconds after; model requests were 52 and 51. This does not
+establish a general task-time improvement. Repair's mean decreased 2.4%, while
+aggregation's increased 1.9%. OpenAI cache results were mixed and are reported
+without a universal cache-rate claim.
+
+Continuation input-estimate median absolute error fell from 455 to 29 tokens
+for repair and from 568 to 28 for aggregation. The full paired measurements,
+including slower runs and cache-state confounds, are retained in
+[the live results](benchmarks/harness-efficiency/live-results.md) and
+[sanitized run data](benchmarks/harness-efficiency/live-final.json).
+The [method](benchmarks/harness-efficiency/live-method.md) documents acceptance
+checks, source verification, isolation and limits of the sample.
 
 ## Audit disposition
 
@@ -48,7 +100,7 @@ the answer, not that a live model always discovers or chooses it.
 | 10 | Repeated prompt/history scans | Indexed durable entry IDs/latest user/compaction state and unchanged prompt reuse. Context preparation is off-loop. |
 | 11 | Slow presentation subscribers | Production TUI/SSE/headless handlers already enqueue cheaply. Added opt-in bounded ordered presentation subscriptions for async SDK consumers; no existing production speedup claimed. |
 | 12 | Invisible eval eviction | Explicit reset receipt before executing stale-namespace code, generation metadata and idle retention that accounts for busy kernels. |
-| 13 | Coarse tool serialization/unbounded fan-out | Independent canonical-path/inode writes overlap; conflicts and legacy read/write barriers stay ordered. Each batch is capped at eight shared calls. This is not a global cross-session quota. |
+| 13 | Coarse tool serialization/unbounded fan-out | Independent canonical-path/inode writes overlap; conflicts and legacy read/write barriers stay ordered. At most eight workers refill immediately as calls finish. This is not a global cross-session quota. |
 | 14 | Stale or missing task knowledge | Refresh selected knowledge at new user boundaries; children inherit repository guidance and bounded selected knowledge. |
 | 15 | Unnecessary post-compaction turns | Continue only for unfinished/interrupted output; a completed answer remains completed. |
 | 16 | Generate then truncate summaries | Set summary-specific output budget and effort before generation; preserve explicit short cache policy on standalone helpers. |

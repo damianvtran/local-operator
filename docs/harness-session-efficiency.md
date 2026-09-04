@@ -8,6 +8,15 @@ injection and parent/child communication receipts.
 
 ## Measurements
 
+The table in this section preserves the initial implementation measurement.
+After review fixes and integration onto baseline `765c619b`, frozen candidate
+`1a7bd26b` was measured again: paired flush **3.52 → 1.21 ms**, prompt CPU
+**72.63 → 0.254 ms**, with the same structural fsync and prefix improvements.
+Final data: [baseline](benchmarks/harness-efficiency/final-session-before.json),
+[candidate](benchmarks/harness-efficiency/final-session-after.json).
+The [consolidated report](harness-efficiency.md) also carries an actual native
+Anthropic cache test and clearly distinguishes it from serialized-prefix matching.
+
 Baseline is committed `5cbea141cca4dde7f6c31cc209aa4ea7d08889f9`, using its own
 editable virtual environment. The changed tree uses its own editable environment.
 Each JSON artifact records SHA-256 hashes of the six sources used by the probes;
