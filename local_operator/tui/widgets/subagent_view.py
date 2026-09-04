@@ -186,10 +186,43 @@ TRAJECTORY_LOADING_NOTE = "loading trajectory…"
 #: The owner could not serve the window (an older runtime, or the socket
 #: dropped mid-fetch). Distinct from the empty state for the same reason.
 TRAJECTORY_UNAVAILABLE_NOTE = "trajectory unavailable"
+#: In-flight. The ellipsis is this app's convention for a state that is still
+#: running (``loading trajectory…`` above, ``loading teams…``, ``fetching…``,
+#: ``thinking…`` elsewhere in the TUI), so it stays despite being the only
+#: punctuation in this set of four (design round 1, D5).
 HISTORY_LOADING_NOTE = "loading earlier…"
-HISTORY_START_NOTE = "transcript start"
-HISTORY_UNAVAILABLE_NOTE = "history unavailable"
-HISTORY_ERROR_NOTE = "load failed · Home retry"
+#: A BOUNDARY, not a progress state. Locative order on purpose: sitting one
+#: rung from ``loading earlier…`` in the same ladder, "transcript start" was
+#: read as "the transcript is starting" — something underway — at exactly the
+#: moment rows stop arriving, which is when that misreading is most plausible
+#: (design round 1, D2).
+HISTORY_START_NOTE = "start of transcript"
+#: NO DURABLE TRANSCRIPT — said of all three ways of getting there: never
+#: started a durable session, not written yet, or swept. Deliberately NOT the
+#: word "history": the reader maps "history" onto the rows directly above the
+#: note, which are painted from the live in-memory trajectory and plainly
+#: exist, so ``history unavailable`` under them was the same contradiction
+#: this module was fixed to remove, arriving by a different cause (design
+#: round 1, D1).
+#:
+#: ONE string for the permanent and the transient absence on purpose. The
+#: distinction is about the page's own bookkeeping (whether it will look
+#: again), not about anything the reader can act on — all three cases mean
+#: "nothing saved to read" — and a second string would risk a footer that
+#: changes text while nothing the reader cares about changed.
+HISTORY_UNAVAILABLE_NOTE = "no saved transcript"
+#: The only note naming an ACTION, so it is deliberately the shortest of the
+#: set: the footer sheds whole hints as the row narrows, and this one used to
+#: be the longest and therefore the first to go — a reader whose load failed
+#: lost both the notice and the key that fixes it while purely informational
+#: notes still fitted (design round 1, D4).
+#:
+#: The em dash rather than ``·`` binds the remedy to the failure AND stops the
+#: note borrowing the row's own structural delimiter: the hint paints as one
+#: bright run, so an internal ``·`` renders brighter than the seams dividing
+#: real hints and the row read as three siblings (design round 1, D3). The key
+#: alone is the affordance — "retry" is already carried by "failed".
+HISTORY_ERROR_NOTE = "load failed — Home"
 
 
 def _as_dict(event: Any) -> Mapping[str, Any]:
@@ -2014,10 +2047,20 @@ class SubagentView(Vertical):
         per refresh while nothing about the page had actually changed. A peek
         is not news until it lands; until then the last conclusion stands.
 
-        The three notes are mutually exclusive by construction — each
-        completion path writes the conclusion it reached and clears the
-        others — so this ladder reports a state rather than picking a winner
-        among several simultaneously-true ones.
+        The ORDER IS LOAD-BEARING; do not sort this ladder into the obvious
+        loading-first form. The flags are not mutually exclusive:
+        ``_history_unavailable`` and ``_history_loading`` are BOTH true for
+        the whole duration of every re-look, because that overlap is exactly
+        what admits the re-look past the unavailable guard. Ranking loading
+        first would therefore blink the footer once per refresh for as long as
+        a transcript stays missing — the flapping this order removes (review
+        round 1, R1).
+
+        Error outranks loading for the same reason and unavailable for a
+        different one: ``_finish_history_error`` clears
+        ``_history_unavailable`` as it sets ``_history_error``, so a real read
+        failure always reaches the reader with the key that fixes it rather
+        than hiding behind a stale absence.
         """
         if self._history_unavailable:
             return f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"
@@ -2174,7 +2217,18 @@ class SubagentView(Vertical):
             except FileNotFoundError:
                 self._finish_history_unavailable(generation)
             except Exception:  # noqa: BLE001 — an observability surface degrades
-                self._finish_history_error(generation)
+                # A read the READER asked for latches the error: they are owed
+                # the outcome of their own gesture. A speculative probe must
+                # not, because the error latch is also the gate on ever
+                # looking again (``_maybe_load_history`` admits only ``retry``
+                # past it), so one transient OSError on a background peek would
+                # permanently disable the self-healing this re-look exists to
+                # provide — silently, since the reader never asked for that
+                # read (review round 1, R2 / QA Q10).
+                if recheck:
+                    self._abandon_history_probe(generation)
+                else:
+                    self._finish_history_error(generation)
             else:
                 self._apply_history_page(generation, page, anchor=anchor, initial=initial)
 
@@ -2191,6 +2245,39 @@ class SubagentView(Vertical):
         # The initial open still owes a first glance, even when there is
         # no durable page to prepend. Without this the one-shot waits
         # forever on `_initial_tail_pending` and the wrap fragment stays.
+        self._settle_initial_landing()
+
+    def _abandon_history_probe(self, generation: int) -> None:
+        """A speculative re-look failed. Restore the previous conclusion.
+
+        The fourth completion path, and the only one that concludes nothing:
+        it drops the in-flight flag and leaves ``_history_unavailable`` exactly
+        as the last COMPLETED look left it, so the footer keeps saying what it
+        already said and the next refresh probes again.
+
+        Not folded into ``_finish_history_error``: that method clears
+        ``_history_unavailable`` to let the error note outrank a stale absence,
+        and ``_history_error`` is a one-way gate that only an explicit ``Home``
+        reopens. A background peek taking that latch on the reader's behalf is
+        the failure R2 reports — the page stops self-healing and nothing on
+        screen says so.
+
+        And deliberately NOT fixed by admitting ``recheck`` past the error
+        guard in ``_maybe_load_history``: that would also clear the latch, but
+        a persistently failing read would then issue one disk read per refresh,
+        which is the retry storm those guards exist to prevent (QA measured 0
+        extra reads over 60 refreshes on the reachable permission-denied path,
+        Q13). Failing quietly costs one ``stat`` per refresh and no read, the
+        same as the absence it is re-looking for.
+        """
+        if generation != self._history_generation:
+            return
+        self._history_loading = False
+        self._paint_history_state()
+        self._reconcile_current_body()
+        # The probe never runs before the initial load has settled, so it owes
+        # no first glance — but a retarget mid-flight can leave one pending,
+        # and dropping it would strand the wrap fragment forever.
         self._settle_initial_landing()
 
     def _finish_history_error(self, generation: int) -> None:
@@ -2455,7 +2542,7 @@ class SubagentView(Vertical):
 
         The repaint matters as much as the clear: the reconcile that follows
         a prepend drives `show()`, which repaints the hint from the flag and
-        painted "loading earlier…" OVER the settled "transcript start" text —
+        painted "loading earlier…" OVER the settled "start of transcript" text —
         the state was correct while the visible chrome said a read was still
         in flight, so a reader (and a test asserting the rendered page) saw a
         walk that never finished. Painting here makes the settled text the

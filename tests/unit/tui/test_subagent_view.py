@@ -66,6 +66,7 @@ from local_operator.tui.widgets.subagent_view import (
     HISTORY_UNAVAILABLE_NOTE,
     INSTRUCTION_ROWS,
     LEDGER_GONE_NOTE,
+    READ_ONLY_NOTE,
     TRAJECTORY_MAX_EVENTS,
     TRUNCATION_NOTE,
     InstructionBlock,
@@ -1164,16 +1165,17 @@ async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) ->
         # recomputed on a later refresh, so a slow runner reads the previous
         # "loading earlier…" caption (CI shard 3, 3.12). Poll for the settled
         # caption rather than asserting on whichever frame arrives first.
+        settled = f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
         for _ in range(50):
-            if view._state_hint.rendered().endswith("transcript start · read-only"):
+            if view._state_hint.rendered().endswith(settled):
                 break
             await pilot.pause()
         page = " ".join(view.rendered_rows())
         assert "durable 0" in page
         assert HISTORY_START_NOTE in page
         assert len(view._history_ids) == 230
-        assert view._state_hint.rendered().endswith("transcript start · read-only")
-        assert view._state_hint.region.width >= len("transcript start · read-only")
+        assert view._state_hint.rendered().endswith(settled)
+        assert view._state_hint.region.width >= len(settled)
 
 
 @pytest.mark.asyncio
@@ -4271,3 +4273,131 @@ async def test_a_swept_child_with_a_deleted_transcript_reads_honestly(tmp_path) 
             await pilot.pause()
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
         assert LEDGER_GONE_NOTE in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, monkeypatch) -> None:
+    """A background peek that fails must not spend the reader's error latch.
+
+    ``_history_error`` is a one-way gate: ``_maybe_load_history`` admits only
+    an explicit ``Home`` past it. That is right for a read the reader ASKED
+    for — they are owed the outcome of their gesture — but the re-look added
+    for the launch race issues reads nobody requested, so one transient
+    ``OSError`` on a speculative probe used to latch the gate on the reader's
+    behalf and permanently downgrade a self-correcting page to a manual one,
+    silently (review round 1, R2 / QA Q10).
+
+    Pins the whole property, not just the flag: after the failed probe the
+    footer still says what it said before, later refreshes still issue reads
+    (the page is still looking), and the durable row lands on its own without
+    anyone pressing anything.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        reads = 0
+        real_read = subagent_view.read_transcript_page
+
+        def flaky(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            # Transient, and on the FIRST probe only — a network home
+            # directory hiccuping once is the reachable production shape.
+            if reads == 1:
+                raise OSError("transient NFS hiccup")
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", flaky)
+
+        # The file appearing is what triggers the probe, and that probe fails.
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert reads == 1, "the probe must actually have run and failed"
+        # The failed peek concluded nothing, so the previous conclusion stands
+        # rather than being replaced by an error the reader never provoked.
+        assert HISTORY_ERROR_NOTE not in view._history_state_text()
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert not view._history_error
+
+        # The point of the fix: the page is STILL looking. No Home, no keypress.
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert reads == 2, "a transient probe failure must not stop the re-look"
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
+    tmp_path, monkeypatch
+) -> None:
+    """Recovering from a failed probe must not become the retry storm.
+
+    The tempting fix for R2 — admitting ``recheck`` past the error guard —
+    also clears the latch, but a read that keeps failing would then cost one
+    disk read per refresh forever. Restoring the previous conclusion instead
+    keeps the cheap ``stat`` as the gate, so a persistent failure costs one
+    read per refresh at most and the note never flaps (QA Q13 measured 0 extra
+    reads over 60 refreshes on the reachable permission-denied path).
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+
+        reads = 0
+
+        def always_fails(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", always_fails)
+
+        footers = set()
+        for _ in range(20):
+            app._refresh_subagent_view(view.job_id)
+            await _wait_history(pilot, view)
+            footers.add(view._history_state_text())
+
+        # One read per REFRESH is the floor the stat gate cannot lower here:
+        # the file genuinely is there, so the cheap probe says "go look" every
+        # time and the read is the only way to learn it still fails. Measured
+        # at ~1.1 per refresh — the settle that follows an abandoned probe can
+        # re-enter the refresh path once — which matches the rate QA measured
+        # on the analogous stat/read disagreement and did not file.
+        #
+        # The storm this excludes is the one an error-guard fix would create:
+        # unbounded growth with the EVENT rate rather than the refresh rate.
+        assert reads <= 2 * 20, f"probe storm: {reads} reads over 20 refreshes"
+        # And the reader sees one stable, truthful note throughout — no blink
+        # between the absence and an error nobody asked to hear about.
+        assert footers == {f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"}, footers
