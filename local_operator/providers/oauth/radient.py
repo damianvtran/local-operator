@@ -21,6 +21,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
     OAuthCallbackFlow,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.pkce import create_pkce_pair
 
@@ -165,7 +166,15 @@ async def refresh_radient_token(
             resp = await _call(client)
 
     if resp.status_code != 200:
-        raise LoginError(f"Radient refresh failed: HTTP {resp.status_code} {resp.text}")
+        # Radient's wording predates the shared helper and is preserved
+        # verbatim: an error string is what a user greps for and quotes, so
+        # classification must not restyle it.
+        raise_for_refresh_failure(
+            "Radient",
+            resp.status_code,
+            resp.text,
+            message=f"Radient refresh failed: HTTP {resp.status_code} {resp.text}",
+        )
 
     data = resp.json()
     access_token = data.get("access_token")

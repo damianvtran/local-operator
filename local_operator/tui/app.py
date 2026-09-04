@@ -17511,6 +17511,15 @@ class OperatorApp(App[None]):
             return int(getattr(report, "fetched_at", 0) or 0)
 
         def _confirmed(report: Any) -> bool:
+            # A dead grant carries neither a streak nor the unavailable flag —
+            # it never enters the retry path that sets them — so it would pass
+            # both tests below while being the least confirmed state there is.
+            # A never-successful one is stamped with the moment of the failed
+            # verdict, which is precisely the `just now` sourced from an
+            # account that has never reported a number this predicate exists
+            # to exclude.
+            if getattr(report, "credential_invalid", False):
+                return False
             return int(getattr(report, "consecutive_failures", 0) or 0) <= 0 and not getattr(
                 report, "usage_unavailable", False
             )

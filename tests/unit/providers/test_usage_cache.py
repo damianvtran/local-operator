@@ -112,6 +112,47 @@ def test_report_round_trip_keeps_per_account_failure_state() -> None:
     assert restored.next_probe_at_ms == 1_700_000_000_000
 
 
+def test_report_round_trip_keeps_the_dead_grant_verdict() -> None:
+    """The panel reads cached rows, so a flag that did not survive the round
+    trip would show the re-login note only in the session that first saw the
+    refusal — and `usage unavailable` in every session after it."""
+    report = _report()
+    report.credential_invalid = True
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.credential_invalid is True
+
+
+def test_a_row_written_before_the_flag_existed_reads_as_valid() -> None:
+    """The cache outlives the version that wrote it: an older row must be a
+    plain report, never a spurious "sign in again"."""
+    data = report_to_dict(_report())
+    data.pop("credential_invalid", None)
+    restored = report_from_dict(data)
+    assert restored is not None
+    assert restored.credential_invalid is False
+
+
+def test_invalidate_drops_the_row_so_the_next_read_refetches(tmp_path) -> None:
+    """A re-login is the one event the account fingerprint cannot observe.
+
+    Logging in again to an ALREADY-stored account leaves the account set (and
+    so the cache key) identical, so without an explicit drop the row carrying
+    a `credential_invalid` verdict outlives the login that disproved it.
+    """
+    store = UsageCacheStore(tmp_path / "usage.db")
+    report = _report()
+    report.credential_invalid = True
+    store.set("kimi:fp", "kimi", [report], expires_at_ms=store._now_ms() + 300_000)
+    assert store.get("kimi:fp") is not None
+
+    store.invalidate("kimi:fp")
+    assert store.get("kimi:fp", include_expired=True) is None
+    # Idempotent: dropping an absent row is not an error.
+    store.invalidate("kimi:fp")
+    store.close()
+
+
 def test_secret_fingerprint_never_contains_the_secret() -> None:
     fp = fingerprint_secret("sk-or-very-secret")
     assert "sk-or-very-secret" not in fp

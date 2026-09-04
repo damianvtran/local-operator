@@ -19,15 +19,19 @@ from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     CallbackFlowOptions,
     ConfigurationError,
+    InvalidGrantError,
     LoginCallbacks,
     LoginCancelledError,
     LoginError,
     OAuthCallbackFlow,
+    is_terminal_grant_response,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
     poll_device_code_flow,
 )
+from local_operator.providers.oauth.kimi import refresh_kimi_token
 from local_operator.providers.oauth.openai import (
     decode_jwt_claims,
     identity_from_id_token,
@@ -343,6 +347,189 @@ def test_validate_xai_endpoint_rejects_other_hosts_and_http() -> None:
         validate_xai_endpoint("https://evil.example/oauth2/token")  # wrong host
     with pytest.raises(LoginError):
         validate_xai_endpoint("https://notx.ai/token")  # suffix trick
+
+
+# ---------------------------------------------------------------------------
+# Terminal grant classification (RFC 6749 §5.2)
+# ---------------------------------------------------------------------------
+
+
+class TestATerminalGrantIsToldFromAnOutage:
+    """A refresh that can never succeed vs one that might on the next try.
+
+    The distinction is the whole point: a transient failure keeps the existing
+    retry/backoff behaviour, while a dead grant has to stop retrying and tell
+    the user to sign in again. Observed against auth.kimi.com, which answered
+    a stored refresh token with `400 {"error":"invalid_grant"}` for two days
+    while `/usage` reported `usage unavailable — last known 2d ago`.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        ["invalid_grant", "invalid_client", "unauthorized_client"],
+    )
+    def test_terminal_error_codes_are_terminal(self, code: str) -> None:
+        body = f'{{"error":"{code}","error_description":"nope"}}'
+        assert is_terminal_grant_response(400, body) is True
+
+    def test_unsupported_grant_type_is_a_config_error_not_a_dead_grant(self) -> None:
+        """Review R4. The endpoint is refusing the `grant_type` PARAMETER, which
+        says nothing about the stored grant — and a token-endpoint config change
+        would otherwise darken every account on the provider at once, telling
+        each of them to run a `/login` that cannot fix it."""
+        assert is_terminal_grant_response(400, '{"error":"unsupported_grant_type"}') is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # Review R3: the excluded code is the VERDICT; the terminal codes
+            # appear only in prose or in an RFC-permitted `error_uri` anchor.
+            '{"error":"invalid_request","error_description":'
+            '"invalid_grant_type: expected refresh_token"}',
+            '{"error":"invalid_request","error_description":'
+            '"the invalid_client_id parameter is unknown"}',
+            '{"error":"invalid_request",'
+            '"error_uri":"https://docs.example.com/errors#invalid_grant"}',
+            '{"error":"invalid_request","error_description":'
+            '"the invalid_grant parameter was malformed"}',
+        ],
+    )
+    def test_a_mentioned_terminal_code_does_not_override_the_error_field(self, body: str) -> None:
+        """`invalid_client` is a substring of `invalid_client_id`, so a raw scan
+        matched the EXCLUDED code through an INCLUDED one and told the user to
+        re-authenticate over a malformed request of ours."""
+        assert is_terminal_grant_response(400, body) is False
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "error=invalid_grant&error_description=dead",  # form-encoded
+            "<html><body>error: invalid_grant</body></html>",  # unparseable
+            '{"error":{"code":"invalid_grant"}}',  # wrapped envelope
+        ],
+    )
+    def test_non_json_and_wrapped_bodies_still_classify(self, body: str) -> None:
+        """Parsing must not silently downgrade a real dead grant to a retry loop
+        that can never end, so the substring scan stays as the fallback."""
+        assert is_terminal_grant_response(400, body) is True
+
+    def test_the_live_kimi_body_is_terminal(self) -> None:
+        """The exact response the defect was root-caused from."""
+        body = (
+            '{"error":"invalid_grant","error_description":'
+            '"The provided authorization grant is invalid"}'
+        )
+        assert is_terminal_grant_response(400, body) is True
+
+    @pytest.mark.parametrize(
+        "status, body",
+        [
+            (500, '{"error":"internal_error"}'),
+            (502, "<html>bad gateway</html>"),
+            (503, "temporarily unavailable"),
+            (429, '{"error":"rate_limited"}'),
+        ],
+    )
+    def test_server_side_failures_stay_transient(self, status: int, body: str) -> None:
+        """A 5xx/429 is the provider being unwell; the grant is not implicated."""
+        assert is_terminal_grant_response(status, body) is False
+
+    def test_a_5xx_carrying_the_word_invalid_grant_is_still_transient(self) -> None:
+        """Status gates which bodies are read at all.
+
+        A 500 whose stack trace happens to mention the code must not retire a
+        live credential — the verdict only means something on a 4xx.
+        """
+        assert is_terminal_grant_response(500, '{"error":"invalid_grant"}') is False
+
+    @pytest.mark.parametrize(
+        "body",
+        ['{"error":"invalid_request"}', '{"error":"invalid_scope"}', "", "Bad Request"],
+    )
+    def test_other_4xx_bodies_are_not_dead_grants(self, body: str) -> None:
+        """`invalid_request` is our bug, not the user's login: it must not be
+        turned into "your sign-in expired"."""
+        assert is_terminal_grant_response(400, body) is False
+
+    def test_the_raiser_picks_the_error_class(self) -> None:
+        with pytest.raises(InvalidGrantError) as terminal:
+            raise_for_refresh_failure("Kimi", 400, '{"error":"invalid_grant"}')
+        # The message shape is unchanged: it is what a user searches for.
+        assert "Kimi refresh failed (400)" in str(terminal.value)
+
+        with pytest.raises(LoginError) as transient:
+            raise_for_refresh_failure("Kimi", 503, "unavailable")
+        assert not isinstance(transient.value, InvalidGrantError)
+
+    def test_invalid_grant_error_is_still_a_login_error(self) -> None:
+        """Every existing `except LoginError` handler must keep working."""
+        assert issubclass(InvalidGrantError, LoginError)
+
+    async def test_kimi_refresh_raises_the_terminal_type(self) -> None:
+        """The provider path end to end, against the real 400 body."""
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "error": "invalid_grant",
+                    "error_description": "The provided authorization grant is invalid",
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(InvalidGrantError):
+                await refresh_kimi_token({"refresh": "dead"}, http_client=client)
+
+    async def test_kimi_refresh_keeps_a_5xx_transient(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="upstream unavailable")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(LoginError) as caught:
+                await refresh_kimi_token({"refresh": "r"}, http_client=client)
+            assert not isinstance(caught.value, InvalidGrantError)
+
+    async def test_a_network_error_is_never_a_dead_grant(self) -> None:
+        """A dropped connection never reaches the classifier at all: there is
+        no response to read a verdict out of."""
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(httpx.ConnectError):
+                await refresh_kimi_token({"refresh": "r"}, http_client=client)
+
+    @pytest.mark.parametrize(
+        "module_name, refresh_fn",
+        [
+            ("openai", "refresh_openai_token"),
+            ("anthropic", "refresh_anthropic_token"),
+            ("xai", "refresh_xai_token"),
+        ],
+    )
+    async def test_every_provider_classifies_the_same_way(
+        self, module_name: str, refresh_fn: str
+    ) -> None:
+        """A dead grant is a property of OAuth2, not of one vendor.
+
+        kimi is covered above; this pins that the others were converted too,
+        so the panel's re-login note is reachable for every OAuth provider
+        rather than only the one the defect was reported against.
+        """
+        import importlib
+
+        module = importlib.import_module(f"local_operator.providers.oauth.{module_name}")
+        fn = getattr(module, refresh_fn)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+
+        creds = {"refresh": "dead", "token_endpoint": "https://accounts.x.ai/oauth2/token"}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(InvalidGrantError):
+                await fn(creds, http_client=client)
 
 
 # ---------------------------------------------------------------------------

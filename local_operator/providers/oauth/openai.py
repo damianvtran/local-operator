@@ -29,6 +29,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginError,
     OAuthCallbackFlow,
     maybe_await,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -332,7 +333,7 @@ async def refresh_openai_token(
         if owns_client:
             await http.aclose()
     if response.status_code != 200:
-        raise LoginError(f"OpenAI refresh failed ({response.status_code}): {response.text}")
+        raise_for_refresh_failure("OpenAI", response.status_code, response.text)
     token = response.json()
     if not token.get("access_token"):
         raise LoginError("OpenAI refresh response is missing access_token")

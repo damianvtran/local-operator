@@ -309,6 +309,14 @@ class UsageReport:
     #: success. ``None`` once unavailable (only ``r`` retries) or on a report
     #: that has never been through the cache merge.
     next_probe_at_ms: int | None = None
+    #: True when this account's stored OAuth grant was refused as permanently
+    #: dead (RFC 6749 SS5.2 ``invalid_grant`` and friends). Distinct from
+    #: ``usage_unavailable``, which means "probes keep failing" and implies the
+    #: numbers may return: this one cannot resolve itself, so the panel names
+    #: the remedy (``/login <provider>``) and the account never enters the
+    #: retry backoff. Last-known limits are preserved either way -- the login
+    #: is still real and its final numbers are still the truth about it.
+    credential_invalid: bool = False
 
 
 @dataclass(frozen=True)

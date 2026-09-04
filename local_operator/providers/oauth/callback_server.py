@@ -20,12 +20,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import logging
 import secrets
 import urllib.parse
 import webbrowser
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, Awaitable, Callable, NoReturn, TypeVar
 
 from local_operator.callback_page import Tone, render_callback_page
 from local_operator.harness.types import AbortSignal
@@ -117,6 +118,167 @@ class LoginTimeoutError(LoginError):
 
 class ConfigurationError(LoginError):
     """Local misconfiguration detected before any browser was opened."""
+
+
+class InvalidGrantError(LoginError):
+    """The stored grant is PERMANENTLY dead — only a fresh login can fix it.
+
+    A refresh can fail two ways that look identical at the call site and are
+    opposite in what the operator should do about them. A 5xx, a timeout, a
+    429 or a dropped connection is the provider or the network being
+    temporarily unwell: retrying is exactly right, and the existing
+    per-account backoff exists for it. ``invalid_grant`` is the IdP stating
+    that this refresh token will never be accepted again (revoked, superseded
+    by a rotation we lost, or expired past its absolute lifetime), and no
+    amount of retrying changes that answer.
+
+    Conflating them is the defect this class exists to end: a dead kimi grant
+    spent its retry budget, tripped ``usage_unavailable`` and then rendered as
+    ``usage unavailable - last known 2d ago`` forever, a message that implies
+    the numbers will come back on their own when the only remedy is
+    ``/login <provider>``.
+
+    Subclasses :class:`LoginError` deliberately: every existing ``except
+    LoginError`` handler keeps working unchanged, and only callers that want
+    the distinction test for this type.
+    """
+
+
+#: OAuth2 token-endpoint error codes that are terminal for a STORED grant
+#: (RFC 6749 SS5.2). Terminal here means "re-presenting the same refresh token
+#: to the same client can never succeed", which is a narrower question than
+#: "was this request rejected".
+#:
+#: - ``invalid_grant``: the grant itself is revoked/expired/already-rotated.
+#:   The direct signal, and the one observed against auth.kimi.com.
+#: - ``invalid_client`` / ``unauthorized_client``: the CLIENT is rejected, so
+#:   every grant held under it is unusable by us. A re-login is still the only
+#:   move available to the operator, and burning a retry loop is still wrong.
+#:
+#: Deliberately EXCLUDED, all for one reason -- they describe a malformed or
+#: unsupported REQUEST rather than a dead grant, so they would blame the user's
+#: login for a bug or a config change of ours, and print a ``/login`` remedy
+#: that cannot possibly work:
+#:
+#: - ``invalid_request`` and ``invalid_scope``.
+#: - ``unsupported_grant_type``: the endpoint is refusing the
+#:   ``grant_type=refresh_token`` PARAMETER, which says nothing about the
+#:   stored grant. It was briefly listed here on the reasoning that retrying
+#:   re-sends the same unsupported request -- true, but not-worth-retrying and
+#:   dead are different questions, and only the second is this set's subject.
+#:   The blast radius is what settles it: a token-endpoint config change would
+#:   darken EVERY account on the provider at once with a remedy that cannot
+#:   fix it, which is this defect's own failure mode restated.
+#: - ``slow_down`` / ``authorization_pending``, which are device-flow polling
+#:   states, not failures.
+TERMINAL_GRANT_ERRORS = frozenset(
+    {
+        "invalid_grant",
+        "invalid_client",
+        "unauthorized_client",
+    }
+)
+
+
+def _oauth_error_code(body: str) -> str | None:
+    """The value of the OAuth2 ``error`` FIELD, or None if the body has none.
+
+    Reading the field rather than scanning the body is what keeps the exclusion
+    list above meaningful. A substring scan cannot express "this code, in the
+    role of the verdict": ``invalid_client`` is a substring of
+    ``invalid_client_id`` and ``invalid_grant`` of ``invalid_grant_type``, so
+    the EXCLUDED ``invalid_request`` was being matched through the INCLUDED
+    codes whenever a provider's prose mentioned one. All three of these are
+    real 400 ``invalid_request`` shapes that a scan calls terminal:
+
+        {"error":"invalid_request","error_description":"invalid_grant_type: ..."}
+        {"error":"invalid_request","error_description":"the invalid_client_id ..."}
+        {"error":"invalid_request","error_uri":"https://.../errors#invalid_grant"}
+
+    The third is not even prose: RFC 6749 SS5.2 permits ``error_uri``, and a doc
+    anchor naturally ends in the error's name.
+
+    Two shapes are parsed because both are real: JSON (what the RFC specifies
+    and what every provider here returns) and form-encoded (seen from proxies
+    and older endpoints). Anything else returns None and the caller falls back
+    to a scan -- degrading an unparseable body to "transient" outright is the
+    failure this classification exists to remove, so the fallback stays.
+    """
+    stripped = body.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        # Some providers wrap the RFC object one level down (`{"error": {...}}`
+        # with the code inside); read that shape too rather than mistaking the
+        # envelope for a missing verdict.
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            error = error.get("code") or error.get("type") or error.get("error")
+        return error.strip().lower() if isinstance(error, str) else None
+    if "=" in stripped and "\n" not in stripped:
+        for key, value in urllib.parse.parse_qsl(stripped):
+            if key.strip().lower() == "error":
+                return value.strip().lower()
+    return None
+
+
+def is_terminal_grant_response(status_code: int, body: str) -> bool:
+    """Whether a non-200 token-endpoint response means the grant is dead.
+
+    **The status code alone is not the signal, and must not be used as one.**
+    RFC 6749 SS5.2 puts the machine-readable verdict in the BODY: the same 400
+    carries ``invalid_grant`` (terminal) and ``invalid_request`` (our bug,
+    retryable). Meanwhile a 401 is routinely a gateway or an auth proxy having
+    a bad minute. So the code only gates which bodies are worth reading -- 5xx
+    is the provider failing and its body is a stack trace or an HTML error
+    page, never a verdict about the operator's grant.
+
+    The verdict is taken from the parsed ``error`` field when the body yields
+    one, and only from a substring scan when it does not. Parsing is what makes
+    the exclusion list real (see :func:`_oauth_error_code`); the scan is what
+    keeps an HTML-wrapped or otherwise unparseable ``invalid_grant`` from being
+    silently downgraded to a retry loop that can never end.
+    """
+    # 5xx and 429 are the provider's problem, whatever the body says: keep
+    # today's retry/backoff behaviour for them.
+    if status_code >= 500 or status_code == 429:
+        return False
+    code = _oauth_error_code(body)
+    if code is not None:
+        # The body named its verdict: honour it exactly, including when the
+        # verdict is an excluded code that merely MENTIONS a terminal one.
+        return code in TERMINAL_GRANT_ERRORS
+    lowered = body.lower()
+    return any(candidate in lowered for candidate in TERMINAL_GRANT_ERRORS)
+
+
+def raise_for_refresh_failure(
+    provider_label: str, status_code: int, body: str, *, message: str | None = None
+) -> NoReturn:
+    """Raise the right error class for a failed token-endpoint refresh.
+
+    One helper so every provider's refresh classifies identically. A dead
+    grant is a property of OAuth2, not of a vendor, so anthropic/openai/xai/
+    kimi/radient must not each decide it for themselves.
+
+    ``NoReturn`` because it always raises: without it every call site reads to
+    a type checker as though it falls through into the code that assumes a 200.
+
+    ``message`` overrides the default wording for the one provider whose
+    historical text differs (Radient's ``: HTTP {status} {body}``). The message
+    is what a user searches for and quotes in a bug report, so this helper
+    classifies the failure without restyling anyone's error string.
+    """
+    message = message or f"{provider_label} refresh failed ({status_code}): {body}"
+    if is_terminal_grant_response(status_code, body):
+        raise InvalidGrantError(message)
+    raise LoginError(message)
 
 
 # Callbacks the host (CLI/TUI) implements to drive the interactive flow.
