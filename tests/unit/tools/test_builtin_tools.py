@@ -596,9 +596,11 @@ async def test_read_stays_inside_the_byte_budget_on_incompressible_input(
     # The PNG-wins-over-budget rung (an image PNG compresses better than JPEG
     # AND that still blows IMAGE_MAX_BYTES) is no longer reachable through
     # `read`: bounding to IMAGE_INGEST_MAX_EDGE caps the delivered area at
-    # 1024x1024, where the worst palette noise measured 0.87 MiB of PNG —
-    # under the 1 MiB budget. It is still live on the REPAIR path at 1568 and
-    # is covered there by
+    # 1024x1024, and at that area JPEG is always the smaller encode (48-colour
+    # palette noise: 1.71 MiB PNG against 0.74 MiB JPEG), so the lossy rung
+    # fires and WINS instead of declining itself. The rung closes because PNG
+    # stops winning at this area, not because PNG fits the budget — it does
+    # not. It is still live on the REPAIR path at 1568 and is covered there by
     # tests/unit/test_imaging.py::test_a_repair_keeps_png_when_jpeg_would_be_bigger.
     #
     # What `read` must still guarantee is this: the hardest-to-compress input

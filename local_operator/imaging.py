@@ -119,13 +119,24 @@ from local_operator.optional import missing_extra_error
 #: where pixels cost tokens without buying legibility: a real 4-up document
 #: collage from this machine's own traffic measured 3,184 tokens at 1568
 #: against 1,359 at 1024 (57% cheaper), and a vision model reading the 1024
-#: render recovered appendix titles, a 5-column score matrix, page numbers,
-#: and 7pt header fine print identically to the 1568 render. Below 1024 the
-#: margin thins — dense 6-7pt table body text is at the edge at 768 — so 1024
-#: is the floor that keeps document work legible. Photographic content, which
-#: has no strokes to lose, could go further; it shares the bound because one
-#: number the ingest sites, the tests, and the marker captions agree on beats
-#: a content-sniffing ladder whose mistakes land in the billed prefix.
+#: render recovered appendix titles, a 5-column score matrix, page numbers and
+#: 7pt header prose. Below 1024 the margin thins — dense 6-7pt table body text
+#: is at the edge at 768 — so 1024 is the floor that keeps document work
+#: legible.
+#:
+#: ONE MEASURED LOSS, so nobody re-derives it: on a 4-up COLLAGE the footer's
+#: 24-character hex report id degrades from a 4-row ink span to 1 and stops
+#: being transcribable (design round 1, D1). Prose survives; a long opaque
+#: identifier does not. It is specific to multi-page collages — a page captured
+#: alone measures ~784x1006 and is not resized at all — and the escape hatch is
+#: to crop the region and re-read it, which passes through unresized.
+#:
+#: LINE ART IS EXEMPT and keeps :data:`IMAGE_MAX_EDGE`. The measurement above
+#: is photographic content, which has no one-pixel strokes to lose; bilevel
+#: renderings of a small pixel font do, and shrinking them to 1024 destroys the
+#: legibility the font was chosen for. That is not hypothetical — a snapcompact
+#: archive frame is exactly such a rendering (PR #603 review round 1, F1). The
+#: exemption uses the same ``_is_line_art`` predicate the repair path does.
 IMAGE_MAX_EDGE = 1568
 #: Long-edge ceiling for images ENTERING the context (``read`` tool, pasted
 #: screenshots). Tighter than :data:`IMAGE_MAX_EDGE`, which stays the
@@ -534,7 +545,28 @@ def bound_image_for_model(
         width, height = image.size
 
         long_edge = max(width, height)
+        # LINE ART KEEPS THE CORRECTNESS BOUND, and this carve-out is the same
+        # argument the repair path already makes (review round 2, F8): every
+        # pixel removed from a one-pixel stroke is a stroke that may vanish.
+        #
+        # The ingest bound below it is a BILLING argument measured on
+        # photographic content, which has no strokes to lose. Applying it to
+        # bilevel content took the sharper reduction with none of the
+        # protection, and it is reachable in ordinary use rather than
+        # hypothetical: a snapcompact archive frame is a 1568px bilevel
+        # rendering of a 5x7 pixel font, it is passed through
+        # ``bound_image_for_model`` whenever such a frame is re-read from disk,
+        # and at 1024 its glyphs lose their strokes — measured on a real
+        # ``render_frame`` output, the text "The session was compacted" is
+        # legible at 1568 and is not at 1024 (PR #603 review round 1, F1).
+        #
+        # ``_is_line_art`` is deliberately narrower than "two distinct values"
+        # (a dithered halftone is bilevel and must NOT take this path), so the
+        # predicate here is the same one the repair uses rather than a second
+        # opinion about what line art is.
         edge_cap = IMAGE_INGEST_MAX_EDGE if max_edge is None else max_edge
+        if max_edge is None and _is_line_art(image):
+            edge_cap = IMAGE_MAX_EDGE
         if (
             info.sendable
             and frames == 1

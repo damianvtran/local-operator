@@ -647,6 +647,59 @@ def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
     assert max(repaired.size) == IMAGE_MAX_EDGE, "a photo was not taken to the cheap bound"
 
 
+def test_line_art_keeps_the_correctness_bound_on_ingest() -> None:
+    """PR #603 review round 1, F1.
+
+    The ingest bound is a BILLING argument measured on photographic content,
+    which has no one-pixel strokes to lose. Bilevel renderings of a small pixel
+    font do, and the repair path has carried a carve-out for exactly this since
+    review round 2, F8 — ingest took the sharper reduction with none of the
+    protection.
+
+    Not hypothetical: a snapcompact archive frame is a 1568px bilevel rendering
+    of a 5x7 pixel font, and it reaches this function whenever such a frame is
+    re-read. At 1024 its glyphs lose strokes; measured on a real
+    ``render_frame`` output, "The session was compacted" is legible at 1568 and
+    is not at 1024.
+    """
+    from local_operator.compaction import snapcompact
+
+    text = "\n".join(
+        [
+            "The session was compacted at 2026-09-04T01:12Z after the context",
+            "reached 412,336 tokens against a 600,000 ceiling. Below is the",
+            "archived middle of the conversation, rendered as pixel-font frames.",
+        ]
+        * 6
+    )
+    frame = snapcompact.render_frame(text, snapcompact.resolve_shape("anthropic", "claude-opus-5"))
+    info = _sniffed(frame)
+    assert (
+        max(info.width or 0, info.height or 0) > IMAGE_INGEST_MAX_EDGE
+    ), "the fixture must be over the ingest bound or it proves nothing"
+
+    payload, _mime, _summary = bound_image_for_model(frame, info)
+
+    # Byte-identical passthrough, not merely "not shrunk to 1024": a frame this
+    # function rewrites is also a frame a prompt cache has to re-write.
+    assert payload == frame
+    width, height = Image.open(io.BytesIO(payload)).size
+    assert max(width, height) <= IMAGE_MAX_EDGE
+
+
+def test_photographic_content_still_takes_the_cheaper_ingest_bound() -> None:
+    """The mirror of the carve-out above: it must not swallow the saving.
+
+    A photographic image has no strokes to lose, so it takes
+    :data:`IMAGE_INGEST_MAX_EDGE` and the billed-area reduction the bound
+    exists for.
+    """
+    source = _noise_png((2560, 1440))
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    width, height = Image.open(io.BytesIO(payload)).size
+    assert max(width, height) == IMAGE_INGEST_MAX_EDGE
+
+
 def test_a_repair_keeps_png_when_jpeg_would_be_bigger() -> None:
     """The lossy rung must MEASURE rather than assume it wins.
 
@@ -656,11 +709,14 @@ def test_a_repair_keeps_png_when_jpeg_would_be_bigger() -> None:
     BOTH axes, bigger and lossy, so the rung declines itself.
 
     Exercised at the REPAIR bound rather than through ``read``: bounding ingest
-    to :data:`IMAGE_INGEST_MAX_EDGE` caps the delivered area at 1024x1024, where
-    the worst palette noise measured 0.87 MiB — under the budget, so the rung
-    cannot fire there any more. It is still reachable whenever a caller passes
-    an explicit ``max_edge`` (``rebound_oversize_image`` does), which is where
-    the branch now needs its cover.
+    to :data:`IMAGE_INGEST_MAX_EDGE` caps the delivered area at 1024x1024, and
+    at that area JPEG is always the smaller encode — 48-colour palette noise
+    measures 1.71 MiB of PNG against 0.74 MiB of JPEG, so the lossy rung fires
+    and WINS rather than declining itself. The rung closes for `read` because
+    PNG stops winning at this area, NOT because PNG stays inside the budget
+    (it does not). It is still reachable whenever a caller passes an explicit
+    ``max_edge`` (``rebound_oversize_image`` does), which is where the branch
+    now needs its cover.
     """
     rng = random.Random(1234)
     palette = [
