@@ -1,14 +1,19 @@
 """The cold viewer: a session you are looking at but not running.
 
-``lop`` boots into this state. There is no runtime, deliberately none is
-started, and the first message is what brings one into existence. These tests
-pin the three properties that makes safe:
+``lop`` boots into this state, and the TUI engages a runtime from it as soon
+as the session is adopted (``OperatorApp._engage_runtime_eagerly``) so the
+band is complete before anything is typed. The viewer FACADE itself still
+starts nothing: these tests pin the three properties that keep the cold state
+safe for every caller that is not the TUI, and for the TUI between mount and
+the engage landing:
 
-1. Opening a session creates NOTHING — no process, no directory, no lease.
+1. Constructing a cold viewer creates NOTHING — no process, no directory, no
+   lease. Only an engage does, and an unused one is handed back
+   (``tests/unit/session/runtime/test_eager_runtime.py``).
 2. A cold viewer still renders: durable history, the configured model, and any
    scheduled wakes come from disk rather than from an owner.
-3. The first mutating call engages a runtime and attaches to it, once, even
-   when several arrive together.
+3. A mutating call engages a runtime and attaches to it, once, even when
+   several arrive together — and again after a failed engage.
 """
 
 from __future__ import annotations
@@ -235,7 +240,7 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
 async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The speculative engage, driven through the REAL composer.
+    """The draft engage RETRIES after a failed mount engage.
 
     The seam is ``Editor.edit`` — the documented funnel every buffer mutation
     passes through — and NOT a key handler on the App. An earlier attempt
@@ -243,6 +248,12 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
     key handling in 190 tests across settings, todo, analytics and selection,
     because intercepting there stops the widgets that bind their own keys from
     ever seeing them.
+
+    The app now also engages at MOUNT (see the eager-start test below), so this
+    no longer asserts that an idle viewer stays cold — it asserts the property
+    the keystroke path still owns: ``engage_runtime`` here always raises, which
+    clears the latch, and the first keystroke must then try AGAIN rather than
+    leaving the viewer stranded on a failed start.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_transcript(tmp_path, "s1")
@@ -273,7 +284,18 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
             for _ in range(30):
                 await pilot.pause()
             assert app._session is viewer, "the app never adopted the cold viewer"
-            assert app._warm_engage_started is False, "an idle viewer must not engage"
+            # The MOUNT engage already ran and failed (the stub always raises),
+            # which is what leaves the latch clear for the keystroke below to
+            # retry. Waiting for that failure to land first is what makes the
+            # retry assertion mean something rather than passing on the mount
+            # attempt's own event.
+            for _ in range(100):
+                await pilot.pause()
+                if engaged.is_set():
+                    break
+            assert engaged.is_set(), "the mount engage never ran"
+            assert app._warm_engage_started is False, "a failed engage must clear the latch"
+            engaged.clear()
 
             editor = app.query_one(Editor)
             editor.focus()

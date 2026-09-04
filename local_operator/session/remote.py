@@ -2136,6 +2136,37 @@ class RemoteSession:
 
         return unsubscribe
 
+    async def retire_if_unused(self) -> str:
+        """Offer this viewer's runtime back if the session was never used.
+
+        Called when a viewer LEAVES a session it engaged eagerly — the TUI is
+        quitting, or `/resume` is moving to a different conversation. Without
+        it, eager engagement would leak one idle runtime per terminal opened
+        and closed without a message.
+
+        This method only ASKS. Whether the runtime actually goes is decided by
+        the runtime itself, which alone can see the things that make stopping
+        unsafe — a wake that just fired, a peer's message arriving, a second
+        terminal attached to the same session. See
+        ``RuntimeServer._retire_if_pristine``.
+
+        Never raises. Every failure means "the runtime stays up", which is the
+        same outcome as before this existed: the residency drain reaps it once
+        nobody is attached. A shutdown path is the wrong place to surface an
+        error nobody can act on.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            return "no runtime attached"
+        ask = getattr(client, "retire_if_pristine", None)
+        if not callable(ask):
+            return "client cannot ask for retirement"
+        try:
+            return await ask()
+        except Exception as exc:  # noqa: BLE001 — the drain is the fallback
+            logger.debug("retire-if-pristine request failed", exc_info=True)
+            return f"request failed: {exc}"
+
     async def dispose(self) -> None:
         self._disposed = True
         if self._gate_task is not None:

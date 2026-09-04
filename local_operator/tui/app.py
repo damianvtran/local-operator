@@ -3064,6 +3064,14 @@ class OperatorApp(App[None]):
         """
         self._invalidate_pending_frontend_state()
         self._session = session
+        # The latch belongs to the BINDING, not to the app: a swapped-in
+        # session is cold again and owes its own engage. Its declaration has
+        # always said a swap resets it, but nothing did — harmless while the
+        # only trigger was a keystroke on a viewer that was almost never
+        # swapped, and wrong the moment mount engages: `/resume` would adopt a
+        # cold session that never started a runtime, leaving exactly the
+        # half-empty band this change exists to remove.
+        self._warm_engage_started = False
         # The user can type `/team lop` while the boot worker is still building
         # the session. Its one opening fill then sees no registry, so adoption is
         # the second authoritative edge that must refill the CURRENT query and
@@ -3688,6 +3696,18 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        # Bring the runtime up NOW rather than on the first keystroke. A cold
+        # viewer can only paint what it reads off disk — the cwd and the
+        # configured model name — so the band opened without the MCP roster,
+        # the context/token reading or the live model until the user typed a
+        # character and the speculative warm-up ran. That read as a broken
+        # status bar rather than as a deliberate lazy start.
+        #
+        # Placed after `_adopt_session` because the engage needs the adopted
+        # session, and before `_preflight_usage` so the runtime is coming up
+        # while the usage preflight does its own I/O. It does not block boot:
+        # `_engage_runtime_eagerly` hands the work to a worker.
+        self._engage_runtime_eagerly()
         await self._preflight_usage(session)
         # Warm the active provider's quota row in the shared cache so the first
         # `/usage` after launch answers from disk. No-op when another session
@@ -4938,6 +4958,19 @@ class OperatorApp(App[None]):
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
+            if not keep_context:
+                # `/resume` and `/new` LEAVE this conversation, so a runtime
+                # engaged at mount and never used goes back now rather than
+                # lingering until the drain notices. Skipped when the caller
+                # means to continue the same conversation (`keep_context`),
+                # where the runtime is not being abandoned at all.
+                #
+                # Ordered before dispose because it travels over the socket
+                # dispose closes, and it is safe to ask this early: the
+                # runtime refuses unless the session is genuinely untouched
+                # and no other viewer is attached, so a `/resume` away from
+                # real work leaves that work running.
+                await self._retire_unused_runtime(self._session)
             try:
                 await self._session.dispose()
             except Exception:
@@ -5056,6 +5089,10 @@ class OperatorApp(App[None]):
                 # `fork.consume_boot_prompt` promises to keep by construction.
                 # Consuming it here makes both modes read it exactly once.
                 self._submit_boot_prompt(session)
+                # The replacement gets a runtime on the same terms the boot
+                # path gives one, so `/resume` and `/new` land on a complete
+                # band rather than on the half-filled one a cold viewer paints.
+                self._engage_runtime_eagerly()
                 await self._preflight_usage(session)
         finally:
             self._swapping_session = False
@@ -5896,6 +5933,11 @@ class OperatorApp(App[None]):
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
+            # `/resume` onto a LIVE session, which reaches here instead of
+            # `_reload_session`. Same abandonment, same offer: the runtime this
+            # viewer engaged at mount and never used goes back before the
+            # socket closes.
+            await self._retire_unused_runtime(self._session)
             try:
                 await self._session.dispose()
             except Exception:
@@ -8430,7 +8472,48 @@ class OperatorApp(App[None]):
         dock.styles.padding = (0, 0, lift, 0)
 
     # -- input --------------------------------------------------------------
+    def _engage_runtime_eagerly(self) -> None:
+        """Start this viewer's runtime as soon as the session is adopted.
+
+        A cold viewer reads its opening frame off disk, which covers the cwd
+        and the configured model NAME and nothing else. The MCP roster, the
+        context/token reading, the effective model and the live usage all come
+        from the runtime, so before this the band stayed half-empty until the
+        first keystroke triggered the speculative warm-up — indistinguishable,
+        from the user's side, from a status bar that had failed to load.
+
+        The cost this pays is a real one and is why the lazy start existed:
+        opening a terminal now starts a process. Two things make that
+        affordable, and both must hold.
+
+        * The runtime still DEFERS materialising the session directory
+          (``WarmErrand`` → ``LOP_RUNTIME_DEFER_MATERIALISE``), so a session
+          nobody uses leaves nothing on disk when the runtime exits.
+        * A viewer that leaves without using the session offers the runtime
+          back (``_retire_unused_runtime``), and anything that offer does not
+          catch is reaped by the ordinary residency drain within ~3 s of the
+          viewer detaching.
+
+        Shares one implementation with the draft warm-up because they differ
+        only in WHEN they fire — engaging twice must be, and is, a no-op
+        (``_ensure_bound`` is idempotent behind its own lock, and the
+        ``_warm_engage_started`` latch means the second caller does not even
+        get that far).
+        """
+        self._start_runtime_engage(reason="mount")
+
     def _warm_runtime_for_draft(self) -> None:
+        """Engage a runtime for a cold viewer, at most once per binding.
+
+        Retained as a SECOND trigger rather than deleted now that mount
+        engages: the mount attempt can fail (no runtime could be started, the
+        socket was refused) and it clears the latch when it does, so the first
+        keystroke is still the moment a failed start is retried — quietly,
+        before the user commits to a message.
+        """
+        self._start_runtime_engage(reason="draft")
+
+    def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
         if self._warm_engage_started:
             return
@@ -8447,13 +8530,48 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent: the user
                 # has not asked for anything yet, and the message they send
-                # next engages again and surfaces any error properly.
-                logger.debug("speculative runtime engage failed", exc_info=True)
+                # next engages again and surfaces any error properly. The same
+                # holds for the mount engage, which the user did not ask for
+                # at all — clearing the latch leaves the first keystroke free
+                # to retry.
+                logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
             finally:
                 self._set_starting(False)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    async def _retire_unused_runtime(self, session: Any) -> None:
+        """Hand back a runtime this viewer started but never used.
+
+        Called on the two paths that ABANDON a session: quitting the TUI, and
+        `/resume`ing onto a different one. Both exist because engaging at mount
+        means opening a terminal starts a process, and a user who opens one,
+        reads the band and leaves must not strand it.
+
+        THE VIEWER DOES NOT DECIDE. It asks, and the runtime answers by
+        inspecting state only it can see — see ``RuntimeServer``'s handler for
+        the two refusals (another viewer attached; anything durable in the
+        session). The long-forgotten-TUI case the user called out is exactly
+        the first refusal: a session held open for hours is still pristine, so
+        emptiness alone would happily retire a runtime a second terminal is
+        watching or a peer is about to message.
+
+        Never raises and never paints. It runs while the app is coming down or
+        mid-swap, where an exception would be noise the user cannot act on and
+        a notice would land on a surface that is going away. A failure leaves
+        the runtime up, which the residency drain resolves seconds later.
+        """
+        if session is None:
+            return
+        retire = getattr(session, "retire_if_unused", None)
+        if not callable(retire):
+            return
+        try:
+            detail = await retire()
+            logger.debug("unused runtime offer: %s", detail)
+        except Exception:  # noqa: BLE001 — teardown must not fail over this
+            logger.debug("could not offer the unused runtime back", exc_info=True)
 
     def _set_starting(self, starting: bool) -> None:
         """Show or clear the band's "starting…" state.
@@ -11352,6 +11470,12 @@ class OperatorApp(App[None]):
             unsubscribe_frontend()
             self._unsubscribe_frontend = None
         if self._session is not None:
+            # BEFORE dispose, which closes the socket this has to travel over.
+            # Quitting a terminal that engaged a runtime at mount and never
+            # used it is the main way eager engagement would otherwise leak a
+            # process; the runtime refuses if another viewer is attached or
+            # anything durable happened, so a real conversation is unaffected.
+            await self._retire_unused_runtime(self._session)
             await self._session.dispose()
 
     def _run_shell_command(self, text: str) -> None:

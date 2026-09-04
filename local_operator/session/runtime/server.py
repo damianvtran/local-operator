@@ -1172,6 +1172,57 @@ class RuntimeServer:
                 else:
                     self.phone_watchers = max(0, self.phone_watchers - 1)
                 detail = f"watchers: {self.phone_watchers}"
+            elif op == "retire_if_pristine":
+                # The counterpart to the eager engage: a viewer starts a
+                # runtime at MOUNT now (so the band can show the model, the
+                # MCP roster and the context reading immediately), and this is
+                # how that runtime is handed back when the viewer leaves
+                # without ever using it — the user quit the TUI, or `/resume`d
+                # onto a different session.
+                #
+                # Handled HERE rather than in ``_dispatch`` for the same reason
+                # ``watch`` is: the decision reads this connection's identity,
+                # and the dispatcher deliberately has no ``conn``.
+                #
+                # CONDITIONAL AT THE RUNTIME, never at the caller, and that is
+                # the whole design. The viewer cannot safely decide this:
+                # between its own "looks empty" read and the stop arriving, a
+                # wake can fire, a peer's `lop send` can open a turn, or a
+                # second terminal can attach and start typing. Asking the
+                # runtime to judge ITSELF closes that window, because the
+                # decision and the stop happen in the same step on the
+                # runtime's own event loop with no await in between for
+                # anything to change underneath.
+                #
+                # Two independent reasons to refuse, and both matter:
+                #
+                # * STILL OBSERVED — another attach client is connected. This
+                #   is the long-forgotten-TUI case: a session left open for
+                #   hours stays pristine, and if a second terminal is watching
+                #   it (or a peer is about to send it an instruction) the
+                #   runtime behind that terminal must not vanish because THIS
+                #   viewer quit. The leaving viewer is excluded from the count
+                #   — its own connection is still registered while this op is
+                #   dispatched, so counting it would make every retirement
+                #   refuse itself.
+                # * NOT PRISTINE — something durable exists (a transcript row,
+                #   an armed wake, live work). ``is_busy`` is not enough here;
+                #   see ``OwnedSessionHandle.is_pristine`` for why a finished
+                #   conversation is idle but emphatically not disposable.
+                #
+                # Refusing is always safe: the runtime stays up and the
+                # ordinary residency drain (``process._should_exit``) reaps it
+                # seconds later once nobody is attached. This op only makes
+                # that immediate for the one case where waiting is pointless.
+                observers = sum(
+                    1
+                    for other in self._clients.values()
+                    if other.kind == "attach" and other is not conn
+                )
+                if observers > 0:
+                    detail = f"kept: {observers} viewer(s) still attached"
+                else:
+                    detail = await self._retire_if_pristine()
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -1209,12 +1260,63 @@ class RuntimeServer:
             # mid-dispose (the TUI's handle raises "session is still
             # starting" the moment its session reference drops) — the ack is
             # the reply and the ladder's exit-wait is the confirmation.
-            if op not in ("watch", "unwatch", "watch_job", "unwatch_job", "stop"):
+            #
+            # ``retire_if_pristine`` is exempt for the same reason WHEN it
+            # retired. It is listed unconditionally rather than by outcome
+            # because the refuse path has nothing to push either: a refusal
+            # changed no state at all, so the skipped refresh costs nothing
+            # and the retire path is spared the mid-dispose read.
+            if op not in (
+                "watch",
+                "unwatch",
+                "watch_job",
+                "unwatch_job",
+                "stop",
+                "retire_if_pristine",
+            ):
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
+
+    async def _retire_if_pristine(self) -> str:
+        """Stop this runtime iff nothing has ever happened in its session.
+
+        The caller (``_on_request``) has already established that no OTHER
+        viewer is attached; this half answers "is there anything here worth
+        keeping". Split out so the observer check reads next to the connection
+        it inspects while the disposal ordering stays beside the ``stop`` op it
+        mirrors.
+
+        Every failure path RETURNS rather than raises, and every one of them
+        keeps the runtime alive. A wrong "retire" ends a session the user may
+        still want; a wrong "keep" costs one idle process for the few seconds
+        the residency drain needs to notice nobody is attached. Those are not
+        symmetric, so the uncertain answer is always "keep".
+        """
+        h = self._handle
+        pristine = getattr(h, "is_pristine", None)
+        if not callable(pristine):
+            # An older runtime, or a reduced test handle, that never grew the
+            # probe. Unknown state is not an invitation to stop it.
+            return "kept: this runtime cannot judge itself pristine"
+        try:
+            if not pristine():
+                return "kept: session has work or history"
+        except Exception as exc:  # noqa: BLE001 — uncertainty keeps the runtime
+            logger.debug("pristine probe failed; keeping runtime", exc_info=True)
+            return f"kept: pristine probe failed ({exc})"
+        request_stop = getattr(h, "request_stop", None)
+        if not callable(request_stop):
+            return "kept: this runtime cannot stop itself gracefully"
+        # The same announcement the ``stop`` op makes, for the same reason: a
+        # follower must be able to tell a deliberate stop from owner death.
+        await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
+        result = request_stop()
+        if inspect.isawaitable(result):
+            await result
+        return "retired"
 
     def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
         """Is this a retry of a turn the transcript already carries?
