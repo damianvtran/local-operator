@@ -117,6 +117,33 @@ _BODY_RAIL_CELLS = 2
 #: rows, so ``Screen { overflow: hidden }`` can never clip the input away.
 _EXPANDED_TRANSCRIPT_FLOOR = 3
 
+#: Transcript rows the COLLAPSED panel keeps back WHEN IT SHARES THE BAND.
+#:
+#: Conditional on a sibling for a reason: alone, this panel's budget is already
+#: calibrated against the dock (see :data:`_DOCK_ROWS`, swept at 100x12-20) and
+#: its short-screen behaviour is pinned byte-for-byte by
+#: ``test_band_panels``/``test_todo_panel_phases`` — a floor applied there would
+#: change a contract those goldens exist to hold, for a case that was never the
+#: complaint. With a roster docked beside it the arithmetic is different: each
+#: panel sizes against the other's CURRENT height, so rows one gives up the
+#: other takes, and on a resumed session that painted a restored roster AND a
+#: restored plan on the first frame the two filled the column between them
+#: (UX round 2, U7). The floor is what stops the trade at the conversation's
+#: edge; the ``… N more`` counter still carries every row it costs.
+#:
+#: Six, swept on the reference session (19 children, 4 phases, 1 wake) across
+#: screen heights 22-50, reading the SETTLED transcript height at two pump
+#: depths so a value still in motion shows as a reflow rather than averaging
+#: away. Kept equal to ``subagent_panel._TRANSCRIPT_FLOOR_ROWS``: an uneven pair
+#: is simply a floor the lower panel spends, which is what the 2-vs-6 attempt
+#: measured — 2 rows of conversation at 100x24 against 5.
+#:
+#:   height          22  24  26  28  30  32  34  36  40  50
+#:   shared floor 2   2   2   4   5   5   5   6   8  12  22
+#:   shared floor 4   3   4   4   5   5   5   6   8  12  22
+#:   shared floor 6   3   5   5   5   5   6   6   8  12  22
+_COLLAPSED_SHARED_TRANSCRIPT_FLOOR = 6
+
 #: Hard ceiling on the expanded body's own painted rows, above which the body
 #: SCROLLS instead of growing further (``#todo-body`` gains ``overflow-y: auto``
 #: in expanded mode — see :meth:`TodoPanel._body_rows`). A list longer than the
@@ -1529,10 +1556,15 @@ class TodoPanel(Container):
             return _MAX_EXPANDED_ROWS if self._expanded else collapsed_ceiling
         if screen_height <= 0:
             return _MAX_EXPANDED_ROWS if self._expanded else collapsed_ceiling
-        dock = _DOCK_ROWS + self._band_inset_rows() + self._band_sibling_rows()
+        sibling_rows = self._band_sibling_rows()
+        dock = _DOCK_ROWS + self._band_inset_rows() + sibling_rows
         # The collapsed budget is the floor for BOTH states (see the
         # expanded-floor rule above): expanded may only ever GROW the panel.
-        collapsed_budget = max(_MIN_BODY_ROWS, min(collapsed_ceiling, screen_height - dock))
+        # Only charged when a sibling is actually docked — see the constant.
+        shared_floor = _COLLAPSED_SHARED_TRANSCRIPT_FLOOR if sibling_rows else 0
+        collapsed_budget = max(
+            _MIN_BODY_ROWS, min(collapsed_ceiling, screen_height - dock - shared_floor)
+        )
         if self._expanded:
             grown = screen_height - dock - _EXPANDED_TRANSCRIPT_FLOOR
             grown = max(_MIN_BODY_ROWS, min(_MAX_EXPANDED_ROWS, grown))

@@ -863,6 +863,7 @@ class RuntimeServer:
 
             from local_operator.session.frontend_state import (
                 FrontendSubscription,
+                oversized_frame_report,
                 sync_wire_payload,
             )
 
@@ -879,7 +880,18 @@ class RuntimeServer:
             # Registration and snapshot capture happened synchronously on the
             # authoritative loop. Mark ready only after queuing that snapshot;
             # later updates therefore cannot overtake it.
-            await self._send_to(conn, {"op": "frontend_sync", "data": sync_payload})
+            sync_frame = {"op": "frontend_sync", "data": sync_payload}
+            # An oversized sync is unreadable, not merely large: the client's
+            # readline raises and its pump dies, so the viewer waits out its
+            # full sync timeout and then degrades to a cold session with no
+            # roster and no todos. That looked exactly like a slow owner for
+            # one release. Say so loudly and name the field responsible, so
+            # the next unbounded list is one log line to find rather than a
+            # profiling session.
+            oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None:
+                logger.error("session runtime: frontend_sync will not fit — %s", oversize)
+            await self._send_to(conn, sync_frame)
             conn.frontend_ready = True
             for pending in conn.frontend_pending:
                 self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})

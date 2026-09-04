@@ -87,6 +87,68 @@ _HEADER_ROWS = 1
 MAX_SUBAGENT_ROWS = 8
 _PREVIEW_JOB_ROWS = MAX_SUBAGENT_ROWS - _HEADER_ROWS - 1
 
+#: Screen rows the column spends around this panel, subtracted from the screen
+#: height to get the rows the collapsed preview may paint. The mirror of
+#: ``todo_panel._DOCK_ROWS`` and of ``app._SUBAGENT_DOCK_ROWS``, which gates the
+#: band inset against the same arithmetic: five for ``#input-shell``, two for
+#: the transcript's padding, one for this panel's caption, one for its slot
+#: rhythm row, and one row of conversation left over.
+#:
+#: ``_PREVIEW_JOB_ROWS`` used to be ABSOLUTE, which was invisible while a
+#: resumed session opened with an EMPTY dock: the six-row preview only ever
+#: appeared once children were running, by which time the user had chosen to
+#: start them. Restoring the roster on the first frame (this PR) makes a cold
+#: resume paint the full preview immediately, and on a short terminal the dock
+#: then took the whole column — measured on the reference session at 100x24,
+#: the operator's own height: ZERO conversation rows, with ``ctrl+g`` unable to
+#: recover them because the COLLAPSED dock alone was already eight rows
+#: (UX round 2, U7).
+#:
+#: Counts CHROME only, so the conversation floor below can be reasoned about
+#: separately: five for ``#input-shell``, two for the transcript's padding, and
+#: three for the panel itself (caption, pinned affordance, slot rhythm row).
+#: ``app._SUBAGENT_DOCK_ROWS`` is the same sum with one conversation row folded
+#: in, which is why that gate reads 10 against this 10 plus a floor.
+_COLLAPSED_DOCK_ROWS = 10
+
+#: Conversation rows the collapsed dock may never take. The dock is chrome
+#: around a transcript, so the transcript keeps enough rows to read a reply in
+#: place. Applies to the COLLAPSED state only: expanding is an explicit
+#: ``ctrl+g`` request to see the roster, and that state has always been allowed
+#: to borrow from the transcript (which is ``1fr`` and scrolls, so it can yield
+#: rows — the composer cannot).
+#:
+#: Six, swept rather than guessed. Measured on the reference session (19
+#: children, 4 todo phases, 1 wake) across screen heights 22-50 at floors 4/5/6,
+#: reading the SETTLED transcript height at two pump depths so a value that
+#: still moved would show as a reflow rather than average away:
+#:
+#:   height   22  24  26  28  30  32  34  36  40  50
+#:   floor 4   3   3   3   3   4   4   6   8  12  22
+#:   floor 5   3   4   4   4   4   4   6   8  12  22
+#:   floor 6   3   4   4   5   5   5   6   8  12  22
+#:
+#: Six dominates: it is never worse, and it is the only value that lifts the
+#: 28-32 band — where the collapsed dock alone used to exceed the screen, so
+#: ``ctrl+g`` could not recover the conversation. Above 34 rows every floor
+#: converges because the panels reach their content ceilings and stop asking.
+#: Below 24 the band's irreducible chrome binds instead (see the module note on
+#: ``_MIN_PREVIEW_JOB_ROWS``), so a larger floor buys nothing there.
+_TRANSCRIPT_FLOOR_ROWS = 6
+
+#: Floor for the collapsed preview, in JOB rows. Zero is deliberate and is the
+#: COMPACT state: on a terminal too short to afford both the roster and a
+#: readable conversation, the panel drops to its caption plus the affordance
+#: and lets the header carry the count ("Subagents · 19"), so the session still
+#: says what it has and ``ctrl+g`` still reaches it.
+#:
+#: A one-row floor was the obvious choice and is worse. Three panels share this
+#: column; each holding one row back costs three rows plus three lots of chrome,
+#: which at the operator's 100x24 left the conversation at two rows — the dock
+#: still owning the screen, only less honestly, because a single arbitrary child
+#: beside a silent "+18" says less than the total does.
+_MIN_PREVIEW_JOB_ROWS = 0
+
 #: Rows outside an expanded roster that may never be taken from the terminal:
 #: transcript breathing room plus the composer/status shell and slot rhythm.
 #: Expanded means every child is reachable, not that the dock may push the
@@ -1184,6 +1246,11 @@ class SubagentPanel(Container):
         #: the running-count that would once have changed it moved to the
         #: status band — so a second paint can only ever redraw the same row.
         self._header_shown: bool = False
+        #: Whether the caption is currently carrying the roster count, which it
+        #: does only in the compact state. Tracked so `_paint_header`'s
+        #: paint-once guard can still repaint when the state flips (a resize
+        #: across the threshold), without repainting on every unrelated tick.
+        self._header_compact: bool = False
         #: The ledger moved since the last paint. Set by `sync`, cleared by
         #: the tick that acts on it — the coalescing buffer, one bit wide,
         #: because "something changed" is all a full repaint needs to know.
@@ -1219,7 +1286,12 @@ class SubagentPanel(Container):
 
     def toggle_expanded(self, *, enter_navigation: bool = False) -> None:
         """Flip the roster, optionally entering its explicit keyboard mode."""
-        if len(self._rows) <= _PREVIEW_JOB_ROWS:
+        # Gated on the BUDGET, not the flat ceiling: on a short terminal the
+        # preview shows fewer rows than `_PREVIEW_JOB_ROWS`, so a roster of
+        # four children can already have rows hidden. Keying the refusal on the
+        # constant would make `ctrl+g` a silent no-op on exactly the screens
+        # where it is the only way to reach them (UX round 2, U7).
+        if len(self._rows) <= self._preview_job_rows():
             return
         self._expanded = not self._expanded
         self._apply_visibility()
@@ -1284,6 +1356,10 @@ class SubagentPanel(Container):
     def _apply_visibility(self) -> None:
         """Show the newest preview slice, or make every start-ordered row reachable."""
         job_ids = list(self._rows)
+        # The COLLAPSED budget is computed in both states: the expanded branch
+        # sizes its own viewport, but the affordance below is keyed on this one
+        # so the way back stays on screen (see `has_overflow`).
+        preview_budget = self._preview_job_rows()
         if self._expanded:
             try:
                 budget = max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
@@ -1293,22 +1369,91 @@ class SubagentPanel(Container):
             start = max(0, min(self._navigation_index, len(job_ids) - budget))
             visible_ids = set(job_ids[start : start + budget])
         else:
-            budget = _PREVIEW_JOB_ROWS
-            visible_ids = set(job_ids[-_PREVIEW_JOB_ROWS:])
+            budget = preview_budget
+            # A zero budget is the COMPACT state, and the slice has to be
+            # written as a guard rather than `job_ids[-0:]` — which is the whole
+            # list, the exact inversion of what a zero budget asks for.
+            visible_ids = set(job_ids[-budget:]) if budget > 0 else set()
         for job_id, row in self._rows.items():
             row.display = job_id in visible_ids
         visible_count = len(visible_ids)
-        has_overflow = len(job_ids) > _PREVIEW_JOB_ROWS
+        # Overflow is measured against the COLLAPSED budget in both states, so
+        # an expanded roster showing every child still carries the row that says
+        # `ctrl+g to collapse`. Keying it on what is hidden RIGHT NOW would hide
+        # the affordance exactly when the user needs it to get back.
+        has_overflow = len(job_ids) > preview_budget
         self._affordance.display = has_overflow
-        if self._expanded:
-            list_rows = visible_count
-            self._list.styles.max_height = budget
-        else:
-            list_rows = visible_count
-            self._list.styles.max_height = _PREVIEW_JOB_ROWS
+        list_rows = visible_count
+        self._list.styles.max_height = budget
         self._painted_rows = _HEADER_ROWS + list_rows + int(has_overflow)
         if has_overflow:
             self._paint_affordance(len(job_ids) - visible_count)
+        # The caption changes shape with the compact state, and that flips on a
+        # RESIZE — which moves no row content, so `_paint_all` does not run.
+        # Repainting here keeps the count truthful across a resize; the guard
+        # inside makes the call free when the state has not moved.
+        self._paint_header()
+
+    def _preview_job_rows(self) -> int:
+        """Job rows the COLLAPSED preview may paint at the current height.
+
+        A budget rather than the flat ``_PREVIEW_JOB_ROWS`` because the dock is
+        chrome ABOVE the composer: it may shorten itself, but it may never take
+        the conversation. On a short terminal the fixed six-row preview did
+        exactly that once the roster was restored on the first frame — the
+        transcript went to zero rows at 100x24 (UX round 2, U7).
+
+        Ceiling stays ``_PREVIEW_JOB_ROWS`` so nothing changes on a normal
+        terminal, and the floor is :data:`_MIN_PREVIEW_JOB_ROWS` so the panel
+        keeps saying that children exist even where it cannot list them. What is
+        cut is never lost: the affordance's ``+N earlier`` counts every hidden
+        row and ``ctrl+g`` still reaches them, which is the same
+        bounded-preview-plus-counter contract the panel already had — this only
+        makes the bound depend on the screen instead of assuming one.
+
+        Subtracts the band's other slots for the reason
+        ``TodoPanel._band_sibling_rows`` does: a budget blind to a docked todo
+        list re-opens the clip the moment both panels are up on a short screen.
+        """
+        try:
+            screen_height = int(self.screen.size.height)
+        except Exception:
+            # No screen yet (compose-time sync): the flat ceiling is the honest
+            # answer, and the first real paint re-runs this with a height.
+            return _PREVIEW_JOB_ROWS
+        if screen_height <= 0:
+            return _PREVIEW_JOB_ROWS
+        available = (
+            screen_height
+            - _COLLAPSED_DOCK_ROWS
+            - _TRANSCRIPT_FLOOR_ROWS
+            - self._band_sibling_rows()
+        )
+        return max(_MIN_PREVIEW_JOB_ROWS, min(_PREVIEW_JOB_ROWS, available))
+
+    def _band_sibling_rows(self) -> int:
+        """Rows the band's OTHER visible slots occupy, outer size included.
+
+        Predicted through ``app.slot_rows`` rather than measured, the same call
+        ``TodoPanel._band_sibling_rows`` and the band's own inset check use — one
+        answer to "how tall is that slot", so the three cannot disagree about the
+        same frame. A sibling that has just been un-hidden measures zero until
+        Textual re-arranges, which is precisely when this runs.
+
+        Imported lazily: the app imports this module, so a module-level import
+        would close the cycle.
+        """
+        parent = self.parent
+        if parent is None:
+            return 0
+        try:
+            from local_operator.tui.app import slot_rows
+
+            return sum(
+                slot_rows(slot) for slot in parent.children if slot is not self and slot.display
+            )
+        except Exception:
+            return 0
 
     def _paint_affordance(self, hidden: int) -> None:
         dim = Style(color=theme_mod.semantic_color("dim"))
@@ -1625,13 +1770,28 @@ class SubagentPanel(Container):
         distinguish the two independent panels that share the band — the user
         needs to know which list they are reading.
         """
-        if self._header_shown:
+        # In the COMPACT state the caption is the only thing left, so it has to
+        # carry the total the hidden rows would otherwise have shown. That is
+        # not a second copy of the band's RUNNING tally (the D-04 objection):
+        # this counts every child the session HAS, which on a resumed session
+        # with nothing running is precisely the number the band cannot show.
+        compact = self._painted_rows > 0 and not self._list_shows_any_row()
+        if self._header_shown and compact == self._header_compact:
             return
         self._header_shown = True
+        self._header_compact = compact
         muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Subagents", style=muted)
+        if compact:
+            header.append(" · ", style=dim)
+            header.append(str(len(self._rows)), style=muted)
         self._header.update(header)
+
+    def _list_shows_any_row(self) -> bool:
+        """Whether the roster is painting a job row right now."""
+        return any(row.display for row in self._rows.values())
 
     def on_resize(self) -> None:
         """A narrower panel is a different row layout, for every row at once.

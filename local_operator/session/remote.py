@@ -75,10 +75,12 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
+    FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
     FrontendUpdate,
+    JobState,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotSubagentComms,
@@ -156,6 +158,45 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     return cls.model_validate(data)
 
 
+def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
+    """Roster rows as they must appear with NO runtime alive.
+
+    The persisted roster records what each job's state WAS when it was
+    written. With no runtime there is by definition nothing running, so a row
+    restored verbatim paints a spinner for a child that cannot be working and
+    the band counts it as live activity (UX review round 1, U1). That is worse
+    than the empty panel this change replaces: an empty panel is obviously
+    incomplete, while phantom activity is confidently wrong, and it invites a
+    cancel that finds nothing. Non-terminal rows are common on disk — a
+    session whose terminal was closed mid-run persists them by design.
+
+    The rule is the one ``AsyncJobManager.restore`` already applies on the
+    owner path, reproduced here because the cold viewer never builds a
+    manager:
+
+    * a ``running`` row that was PARKED (``queued``) never started, so it has
+      no transcript to show or resume and is DROPPED — an ``interrupted`` row
+      would invite a resume that finds nothing;
+    * any other non-terminal row becomes ``interrupted``, the restore-only
+      status that means "was cut off mid-run"; live readers already treat it
+      as terminal, and it is what lets the panel offer to resume the child.
+
+    Anything already terminal is untouched: ``completed``/``failed``/
+    ``cancelled`` are facts the last runtime settled and this process must not
+    relitigate.
+    """
+    rows: list[Any] = []
+    for job in jobs:
+        status = str(getattr(job, "status", "") or "")
+        if status == "running":
+            if bool(getattr(job, "queued", False)):
+                continue
+            rows.append(job.model_copy(update={"status": "interrupted", "restored": True}))
+            continue
+        rows.append(job.model_copy(update={"restored": True}))
+    return rows
+
+
 class RemoteSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket."""
 
@@ -185,6 +226,12 @@ class RemoteSession:
         #: whose contract is still "recover the conversation into this
         #: process" and whose tests assert exactly that.
         self._can_go_cold = False
+        #: Why this viewer opened WITHOUT live state, when that was not the
+        #: ordinary "no runtime was running" case. Set by the launcher when an
+        #: attach to a live runtime failed and it fell back to cold; the TUI
+        #: prints it once on adoption so the user is told why the session came
+        #: up bare instead of being left to guess (UX round 1, U2).
+        self.degraded_reason: str = ""
         #: Told when the runtime vanished for good; see ``_go_cold``.
         self._went_cold_callback: Callable[[], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
@@ -215,6 +262,14 @@ class RemoteSession:
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._history_ids: set[str] = set()
+        #: The durable frontend checkpoint, handed from the threaded history
+        #: read to the cold path's restore so the roster/todo/title recovery
+        #: costs no second parse. A small dict rather than the parsed
+        #: ``Transcript`` deliberately: retaining the transcript pinned every
+        #: entry (1.23x file size) for the life of a warm attach that never
+        #: wanted it (review round 1, C2). Only ``cold()`` asks for it, and it
+        #: is cleared the moment that consumes it.
+        self._cold_checkpoint: dict[str, Any] | None = None
         # Message ids whose row the follower has ALREADY painted live. The sync
         # seed and relayed stream are filtered against this set as well as
         # ``_history_ids``, so a turn that became durable mid-join — or a
@@ -447,17 +502,248 @@ class RemoteSession:
         )
         self._cwd = cwd
         self._can_go_cold = True
-        self._install_frontend(await self._synthesise_cold_state(cwd))
+        state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
         if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
-            await self._load_history(None)
+            # ``want_checkpoint`` extracts the durable status row during the
+            # SAME threaded parse the history comes from, so the restore below
+            # costs no second read of a file that is 103 MB at the top end.
+            await self._load_history(None, want_checkpoint=True)
+            # Ordered before ``_install_frontend`` so the roster, todos and
+            # title are present in the FIRST state the widgets ever see —
+            # installing twice would paint an empty panel and then repaint it,
+            # which is the visible flicker this whole change exists to remove.
+            state = self._restore_cold_details(state)
+            self._cold_checkpoint = None
+        self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
         # viewer is READY, and it is _ensure_bound that supplies the runtime
         # when one is actually needed.
         self._owner_ready.set()
         return self
+
+    def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Fold the durable turn-end checkpoint over synthesised cold state.
+
+        A cold viewer synthesises canonical state because there is no owner to
+        ask — but "no owner" is not "nothing is known". The session's last
+        runtime wrote a full ``FrontendSessionState`` to the transcript at every
+        turn end (``FrontendStateStore.checkpoint``), and that row already holds
+        the subagent roster, the todo list, the conversation title, the goal and
+        the accumulated spend.
+
+        Before this, none of it was read: a resumed session opened with an empty
+        subagent panel and no todos, and stayed that way until the user sent a
+        message and a runtime started. The old in-process TUI restored exactly
+        this state at boot (``Session.__init__`` calls ``_load_subagent_roster``
+        and ``_load_todo_snapshot``), so the viewer model regressed it — the
+        details were not slow to arrive, they were never going to arrive.
+
+        The checkpoint is authoritative for what it carries and the synthesised
+        state is authoritative for the rest, so the two are merged rather than
+        one replacing the other: ``cwd`` and the model come from THIS process
+        (the config may have changed since; the checkpoint's copy is history),
+        while the roster, todos, title and costs come from disk. ``jobs`` are
+        stamped ``restored`` for the same reason the session's own restore does
+        — a restored row has no in-process trajectory, and the panel says so
+        rather than rendering a busy child as empty.
+
+        Best-effort by construction: an unreadable, absent or malformed
+        checkpoint leaves the synthesised state untouched. Opening a
+        conversation must never fail because its last status row did.
+        """
+        checkpoint = self._cold_checkpoint
+        if checkpoint is None:
+            return state
+        try:
+            raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
+            if not isinstance(raw, dict):
+                raise ValueError(f"checkpoint 'state' is {type(raw).__name__}, not a mapping")
+            durable = FrontendSessionState.model_validate(raw)
+        except Exception as error:  # noqa: BLE001 — a bad row must not stop the open
+            # LOUDLY. Falling back leaves exactly the pre-fix experience — an
+            # empty roster and no todos — and at DEBUG that is indistinguishable
+            # from the bug this change fixes, so the next report of it would be
+            # re-diagnosed from scratch (UX round 1, U5). The open still
+            # succeeds: a status row must never cost the user their
+            # conversation.
+            logger.warning(
+                "session %s: durable checkpoint unreadable (%s); opening without the "
+                "restored roster, todos and title",
+                self._session_id,
+                error,
+            )
+            self.degraded_reason = (
+                "the saved session details could not be read, so the subagent and "
+                "todo panels start empty"
+            )
+            return state
+        return state.model_copy(
+            update={
+                # Everything the last runtime knew and this process cannot
+                # derive. The panel reads these directly, so restoring them is
+                # what puts the session's details on the FIRST frame.
+                "jobs": _restored_job_rows(self._durable_roster(durable)),
+                "todos": list(durable.todos),
+                "conversation_title": durable.conversation_title,
+                "conversation_title_user_set": durable.conversation_title_user_set,
+                "conversation_title_forked": durable.conversation_title_forked,
+                "goal": durable.goal,
+                "active_agent": durable.active_agent,
+                "active_team": durable.active_team,
+                # Spend and occupancy are the conversation's history, not this
+                # process's: a resumed session that already cost money must not
+                # open reading zero (the same argument as
+                # ``_restore_reported_usage`` on the old owner path).
+                "cumulative_parent_cost": durable.cumulative_parent_cost,
+                "child_costs": dict(durable.child_costs),
+                "cost_knowledge": durable.cost_knowledge,
+                "last_usage": durable.last_usage,
+                **self._consistent_context(state, durable),
+                # MCP servers are the last runtime's connection report and
+                # there is no live manager to ask while cold, so the durable
+                # copy is the only thing that can populate this chrome
+                # (review round 1, C5). Restored as HISTORY: the panel shows
+                # what the session was connected to, and the runtime's own
+                # state replaces it wholesale on first engage.
+                "mcp_servers": list(durable.mcp_servers),
+                # Wakes are deliberately NOT taken from the checkpoint. The
+                # synthesised state already read them from the wake index
+                # (``_synthesise_cold_state``), which is the live derived file
+                # a supervisor rewrites without opening the session — so the
+                # index is fresher than any checkpoint and overwriting it with
+                # a stale copy would re-show a wake that already fired. Only
+                # fall back to the durable rows when the index gave nothing,
+                # which is the corrupt/deleted-index case its own self-healing
+                # rebuild is designed around.
+                "wakes": list(state.wakes) if state.wakes else list(durable.wakes),
+                **self._restored_model_specs(state, durable),
+            }
+        )
+
+    def _durable_roster(self, durable: FrontendSessionState) -> Sequence[Any]:
+        """The roster to restore: the SIDECAR's rows, falling back to the
+        checkpoint's.
+
+        The two stores are written on different triggers — the sidecar on every
+        roster move (``_persist_subagent_roster``), the checkpoint at turn end
+        (``FrontendStateStore.checkpoint``) — so they disagree whenever a child
+        settles after the last turn boundary. On the reference session they
+        differ in BOTH directions: 18 rows against 17, with two children only
+        the sidecar knows and one only the checkpoint knows (UX round 1, U4).
+
+        The sidecar wins because it is the roster's own store and the fresher
+        of the two, which is the same reason ``_load_subagent_roster`` reads it
+        first on the owner path. Its rows are merged OVER the checkpoint's
+        rather than replacing them, so a child the sidecar has since dropped
+        but the checkpoint still records is not silently lost — a resumed
+        session should show every child it ever had, and neither store alone is
+        a complete list.
+
+        Best-effort: an unreadable or absent sidecar leaves the checkpoint's
+        rows exactly as they were.
+        """
+        from local_operator.session.session import (
+            SUBAGENT_ROSTER_SIDECAR,
+            _read_roster_sidecar,
+        )
+
+        rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
+        try:
+            payload = _read_roster_sidecar(
+                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+            )
+            for raw in (payload or {}).get("jobs") or []:
+                job = JobState.model_validate(raw)
+                rows[str(job.id)] = job
+        except Exception:  # noqa: BLE001 — a bad sidecar must not stop the open
+            logger.debug("cold state could not read the roster sidecar", exc_info=True)
+        return list(rows.values())
+
+    @staticmethod
+    def _consistent_context(
+        state: FrontendSessionState, durable: FrontendSessionState
+    ) -> dict[str, Any]:
+        """The restored context reading, but only where it still means something.
+
+        A token count is only interpretable against the window it was measured
+        against. When the user has switched models since the checkpoint was
+        written, the stored numerator and the current denominator describe
+        different things, and dividing one by the other produces a confident
+        wrong percentage — the D1 failure in its other direction.
+
+        There is no honest way to convert the reading, so it is DROPPED rather
+        than converted: the band renders ``—`` for an unknown context, which is
+        the same honest degradation it already shows for a model it cannot
+        price. The first real turn replaces it with a live reading anyway.
+        """
+        configured = state.selected_model
+        stored = durable.selected_model
+        same_model = bool(
+            configured is not None
+            and stored is not None
+            and configured.provider == stored.provider
+            and configured.model_id == stored.model_id
+        )
+        if not same_model:
+            return {}
+        return {
+            "context_tokens": durable.context_tokens,
+            "context_is_estimate": durable.context_is_estimate,
+            "context_window": durable.context_window,
+        }
+
+    @staticmethod
+    def _restored_model_specs(
+        state: FrontendSessionState, durable: FrontendSessionState
+    ) -> dict[str, Any]:
+        """Model specs for the restored state, keeping the window and the
+        measured context consistent with each other.
+
+        The synthesised cold spec is built from ``config.yml``, which names the
+        provider and model but carries no metadata — so ``ModelSpec`` supplies
+        its **128k default** for ``context_window``. The restored
+        ``context_tokens`` were measured against the window the runtime
+        actually had (1M on the reference session), and the band divides the
+        restored tokens by the SPEC's window (``_context_window`` in
+        ``tui/app.py`` reads the effective spec, deliberately, because the
+        percentage predicts when the next request overflows). Dividing 322,546
+        by a defaulted 128,000 is how a resumed session painted **268.2%**
+        (design review round 1, D1) — a number that cannot be true, on the one
+        surface that exists to tell the user how much room is left.
+
+        The checkpoint's own spec is the one those tokens were measured
+        against, so it is the honest denominator. Taken ONLY when the config
+        names the same model: if the user switched models since, the
+        configured spec is right and the stale window would be the wrong
+        answer in the other direction. In that case the numerator is dropped
+        instead (see ``_consistent_context``) rather than divided by a window
+        it was never measured against.
+        """
+        configured = state.selected_model
+        stored = durable.selected_model
+        if configured is None or stored is None:
+            return {}
+        same_model = (
+            configured.provider == stored.provider and configured.model_id == stored.model_id
+        )
+        if not same_model:
+            return {}
+        # Only the window is adopted. Everything else on the configured spec
+        # reflects THIS process's config, which is current by definition.
+        window = int(getattr(stored, "context_window", 0) or 0)
+        if window <= 0:
+            return {}
+        return {
+            "selected_model": configured.model_copy(update={"context_window": window}),
+            "effective_model": (
+                state.effective_model.model_copy(update={"context_window": window})
+                if state.effective_model is not None
+                else None
+            ),
+        }
 
     async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
@@ -579,9 +865,25 @@ class RemoteSession:
         self._ready_for_events = False
         loop = asyncio.get_running_loop()
         self._frontend_future = loop.create_future()
+
+        def on_disconnected(reason: str) -> None:
+            # A connection that dies while we are still waiting for the sync
+            # must fail the wait NOW rather than let it run out the 15 s
+            # timeout. The oversized-frame case is exactly this: the client
+            # knows within milliseconds that the frame is unreadable, but the
+            # user still sat through a silent quarter-minute and then got a
+            # degraded session with no explanation (UX round 1, U2; design
+            # round 1, D5 is the same finding from the other side). The
+            # reason string is carried into the error so the copy the pump
+            # produced actually reaches a surface instead of only a log line.
+            future = self._frontend_future
+            if future is not None and not future.done():
+                future.set_exception(ConnectionError(reason))
+            self._on_disconnected(reason)
+
         client = AttachClient(
             lambda _projection: None,
-            self._on_disconnected,
+            on_disconnected,
             events=True,
             on_event=self._on_wire_event,
             frontend_state=True,
@@ -601,7 +903,11 @@ class RemoteSession:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
     async def _load_history(
-        self, live_cursor: str | None = None, *, drop_history_duplicates: bool = True
+        self,
+        live_cursor: str | None = None,
+        *,
+        drop_history_duplicates: bool = True,
+        want_checkpoint: bool = False,
     ) -> None:
         """Read durable history exactly up to the sync's advertised boundary.
 
@@ -619,12 +925,14 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
-        entries, history = await self._read_transcript()
+        entries, history = await self._read_transcript(want_checkpoint=want_checkpoint)
         self._bind_history(
             entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
         )
 
-    async def _read_transcript(self) -> tuple[list[Any], list[Any]]:
+    async def _read_transcript(
+        self, *, want_checkpoint: bool = False
+    ) -> tuple[list[Any], list[Any]]:
         """Parse the durable transcript off-loop, once per sync.
 
         The single threaded read shared by initial connect AND reconnect:
@@ -634,10 +942,27 @@ class RemoteSession:
         for the connect path. Both callers now consume ONE threaded result
         (gap projection and ``_history`` reconciliation), so the file is
         parsed once per sync and never on the loop.
+
+        ``want_checkpoint`` is the COLD path's opt-in to also extracting the
+        durable frontend checkpoint from this same parse
+        (``_restore_cold_details``), and it is opt-in rather than
+        unconditional for a memory reason: the parsed ``Transcript`` pins
+        every entry, measured at 1.23x file size (~127 MB on the reference
+        session). Stashing it on the instance for every caller leaked that for
+        the life of a WARM attach, which neither needs it nor ever cleared it
+        (review round 1, C2). The checkpoint is a small dict, so extracting it
+        INSIDE the worker lets the transcript die with the thread — nothing
+        long-lived holds a reference on any path.
         """
 
         def _replay() -> tuple[list[Any], list[Any]]:
             transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+            if want_checkpoint:
+                # Read here, on the worker, while the object is alive and
+                # already parsed: a second ``Transcript(...)`` on the loop
+                # would re-read and re-parse the whole file (0.68 s on the
+                # largest observed session).
+                self._cold_checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             return transcript.entries(), transcript.build_llm_history()
 
         return await asyncio.to_thread(_replay)

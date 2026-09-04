@@ -1157,3 +1157,126 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
         f"that the same frame without it does not have "
         f"(inset granted here: {granted})"
     )
+
+
+#: Conversation rows a resumed session must still have on the shortest terminal
+#: the operator actually uses (24 rows). Deliberately smaller than the panels'
+#: own transcript floors: this is the USER-FACING guarantee — enough rows to
+#: read a reply in place — where those constants are the mechanism, swept per
+#: panel and free to move as long as this holds (UX round 2, U7).
+_MIN_READABLE_TRANSCRIPT_ROWS = 3
+
+
+@pytest.mark.asyncio
+async def test_a_restored_dock_leaves_the_conversation_readable_on_a_short_terminal() -> None:
+    """The dock is chrome: it may shorten itself, but it may not take the screen.
+
+    Before the roster was restored on the first frame, a resumed session opened
+    with an EMPTY dock, so the panels' absolute row budgets were only ever
+    reached once children were running — by which point the user had asked for
+    them. Restoring the roster (this PR) makes a cold resume paint a full
+    roster, plan and wake list immediately, and on a short terminal the three
+    panels filled the column between them: measured at 100x24, the operator's
+    own height, ZERO conversation rows (UX round 2, U7).
+
+    Asserted as the STRUCTURAL property rather than a row count, which would
+    re-pin the swept constants every time they move: the transcript keeps rows,
+    every child stays reachable, and the way back is on screen. A count would
+    also be the wrong assertion for the reason the module notes give — the
+    budgets answer to the screen, so the number is a function of the size.
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    # A resumed session's shape: more children than any preview shows, plus a
+    # plan, which is what puts three panels in the band at once.
+    session.jobs = _fake_jobs(
+        *(_Job(f"sub-{n}", f"child number {n}", status="completed") for n in range(1, 20))
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
+        ]
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+
+        transcript = app.query_one("#transcript")
+        panel = app.query_one(SubagentPanel)
+
+        # The FLOOR, not merely "not zero". A `> 0` assertion passes on the
+        # unfixed panel — this fixture leaves it two rows where the operator's
+        # real session, which also docks a wake list, had none — so it would
+        # pin nothing. The panels' budgets are what guarantee the floor, and
+        # asserting it is what keeps their swept constants answerable to a test.
+        assert transcript.size.height >= _MIN_READABLE_TRANSCRIPT_ROWS, (
+            f"the restored dock left {transcript.size.height} conversation rows; "
+            "the dock is chrome and may not take the screen"
+        )
+        # Nothing is clipped upward and the dock fits the screen it is drawn in.
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+        # Every child stays REACHABLE even where none is listed: the caption
+        # carries the total and the affordance carries the way to them.
+        assert panel._affordance.display, "no escape route from a truncated roster"
+        assert len(panel._rows) == 19, "restored children were dropped, not folded"
+        if not any(row.display for row in panel._rows.values()):
+            assert "19" in str(
+                panel._header.content
+            ), "the compact caption must carry the count it is standing in for"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_g_still_reaches_every_child_from_the_compact_roster() -> None:
+    """The escape route has to work at the size that needs it.
+
+    U7's severity was not that the roster was large but that ``ctrl+g`` could
+    not recover the conversation: the COLLAPSED dock alone already exceeded the
+    short screen, so the affordance existed in principle and was unreachable in
+    practice. The toggle's own refusal was part of it — it was gated on the flat
+    ``_PREVIEW_JOB_ROWS`` constant, so on a screen whose budget hid rows below
+    that number the key was a silent no-op.
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    # FEWER children than the flat `_PREVIEW_JOB_ROWS` ceiling, which is the
+    # case the old gate got wrong: with a height-aware budget the preview hides
+    # rows well before six, so a refusal keyed on the constant made `ctrl+g` a
+    # silent no-op on exactly the screens where it is the only way to them.
+    # A docked plan beside it is what shrinks the budget that far — a roster
+    # alone keeps its full preview and would not exercise the gate at all.
+    session.jobs = _fake_jobs(
+        *(_Job(f"sub-{n}", f"child number {n}", status="completed") for n in range(1, 5))
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
+        ]
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        collapsed_visible = sum(1 for row in panel._rows.values() if row.display)
+
+        await pilot.press("ctrl+g")
+        for _ in range(8):
+            await pilot.pause()
+        expanded_visible = sum(1 for row in panel._rows.values() if row.display)
+        assert (
+            expanded_visible > collapsed_visible
+        ), "ctrl+g did not reveal any child; the escape route is a no-op"
+        # Expanding is an explicit request for the roster, so it MAY borrow from
+        # the transcript — but it must still leave the composer on screen.
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+
+        await pilot.press("ctrl+g")
+        for _ in range(8):
+            await pilot.pause()
+        assert sum(1 for row in panel._rows.values() if row.display) == collapsed_visible
+        assert (
+            app.query_one("#transcript").size.height > 0
+        ), "collapsing did not give the conversation its rows back"

@@ -9,6 +9,7 @@ session semantics from the phone's deliberately capped projection.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import time
 import uuid
@@ -56,6 +57,228 @@ from local_operator.tui.costs import job_cost, turn_cost
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
 FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: How many per-call billing receipts ``usage_components`` retains.
+#:
+#: The list grows by one receipt per model call for the LIFE of a conversation
+#: and is re-serialized in full on two paths that both have hard budgets: the
+#: attach frame (``server._MAX_LINE_BYTES``, 1 MiB) and the turn-end checkpoint
+#: appended to the transcript. Uncapped it broke both on the reference machine:
+#: a 2,685-receipt session serialized a 1,052,296-byte ``frontend_sync`` — over
+#: the socket's line limit, so `AttachClient` could not read it, every attach to
+#: that session timed out after 15 s and silently degraded to a runtime-less
+#: cold viewer. The same field was ALSO 48.2% of that session's 103 MB
+#: transcript (49.8 MB across 119 checkpoint rows, each re-writing the whole
+#: accumulated list) because the checkpoint stripped ``live_events`` and job
+#: trajectories for exactly this reason but not this list.
+#:
+#: Capped HERE, at accumulation, rather than only at the wire boundary where
+#: trajectories are stripped: a wire-only bound leaves the transcript growth in
+#: place, and the transcript is the more expensive of the two (it is durable,
+#: and it is re-parsed on every resume). The tail is what a mixed-provider
+#: aggregate needs — the receipts state which call was served by which model at
+#: which price — and the lifetime figures the UI actually paints
+#: (``cumulative_parent_cost``, ``child_costs``, ``last_usage``) are running
+#: totals maintained independently, so dropping an old receipt cannot move a
+#: number on screen. 200 covers several turns of a busy multi-provider session
+#: at roughly 55 KB, two orders of magnitude inside both budgets.
+USAGE_COMPONENT_CAP = 200
+
+#: Per-job free-text bounds for the ATTACH FRAME (not for the in-process store).
+#:
+#: ``jobs`` is the third instance of the same shape and the next one that would
+#: have overflowed: the rows are unbounded in BYTES even once trajectories and
+#: receipts are handled, because ``result_text`` and ``prompt`` are whole child
+#: outputs. Measured on the post-fix wire path, a roster of settled children
+#: carrying 4 KB in each field crosses the 1 MiB line limit at ~130 rows with no
+#: receipt involved (review round 1, C4).
+#:
+#: Truncating on the wire loses nothing a reader cannot recover: both fields
+#: live verbatim in the CHILD's own transcript, which the subagent page pages in
+#: lazily — the same argument ``_load_subagent_roster``'s docstring already makes
+#: for dropping them from the roster sidecar, and the same one the mobile
+#: projection makes for ``SUBAGENT_OUTCOME_CHARS`` / ``SUBAGENT_PROMPT_PREVIEW_CHARS``.
+#: The bounds mirror that surface so two frontends do not disagree about how much
+#: of a child's output is "the preview".
+#:
+#: ``error_text`` is deliberately far more generous and matches
+#: ``session._ROSTER_ERROR_CAP``: it is NOT in the child transcript (it is
+#: ``str(exc)`` from the parent's runner), so the wire value is the only copy the
+#: reader will ever see of why a child failed.
+JOB_RESULT_WIRE_CHARS = 2_000
+JOB_PROMPT_WIRE_CHARS = 1_000
+JOB_ERROR_WIRE_CHARS = 2_000
+
+#: Aggregate budget for all per-job free text in one frame, and the floor a
+#: single row's share may not go below.
+#:
+#: A PER-ROW cap alone does not close the class, it only moves the threshold: the
+#: frame still grows linearly with roster depth, so "bounded per row, unbounded
+#: in total" is the same defect one level up. The budget is therefore shared —
+#: each row gets ``BUDGET // len(jobs)``, clamped to the per-field caps above —
+#: so a deep roster spends the same total bytes on text as a shallow one, with
+#: each child described more briefly.
+#:
+#: Rows are never DROPPED to make space, at any depth. A missing child reads as
+#: "this never ran", which is a lie the reader cannot detect; a short preview is
+#: visibly short and the full text is one page-open away in the child's own
+#: transcript. The floor keeps every row's preview legible for that reason.
+#:
+#: This does not make the frame unconditionally bounded — each row still carries
+#: irreducible identity (id, label, status, folded usage: ~600 B), so the frame
+#: is bounded by roster COUNT alone at roughly 1,400 children. That is stated
+#: rather than engineered away: the deepest roster observed across every session
+#: on the reference machine is 19.
+JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
+JOB_TEXT_FLOOR_CHARS = 200
+
+
+def _folded_components(components: Sequence[Any]) -> list[Any]:
+    """Collapse receipts that share a serving identity, without moving money.
+
+    The per-JOB twin of :data:`USAGE_COMPONENT_CAP`, and it may not use the
+    same mechanism. A tail cap is safe for the session-level list because the
+    figures it feeds are running totals maintained elsewhere — but a job's
+    ``usage.cost_components`` IS the input to :func:`job_cost`, so dropping a
+    receipt there would silently undercount a child's spend. Money must not be
+    truncated to fit a socket.
+
+    Folding is the alternative, and it only holds if summing before pricing
+    equals pricing before summing. ``cost_for_usage`` prices each receipt
+    independently and the caller sums, so the fold has to reproduce that
+    exactly. Two things in the pricing path do NOT commute with summation and
+    both are handled here rather than assumed away (review round 1, C1):
+
+    * **The reported/estimated split.** ``cost_for_usage`` returns
+      ``usd_cost`` verbatim when ``_usage_cost`` ACCEPTS it, and falls back to
+      the token estimate when it does not — and ``_usage_cost`` rejects
+      negative and non-finite values. Keying the bucket on
+      ``usd_cost is not None`` therefore put a rejected receipt in the
+      reported bucket, where its poison value was summed into a total that
+      ``_usage_cost`` then accepted: two independently-estimated receipts
+      became one wrongly-reported one. The key is the ACCEPTED price, so a
+      receipt lands in the bucket matching the branch it would really take.
+    * **The per-receipt floors.** ``_usage_field`` floors each count at zero
+      (a provider spelling "unknown" as ``-1``), and for OpenAI-shaped wires
+      ``cost_for_usage`` computes ``max(0, input - read - write)`` per receipt.
+      ``max(0, a) + max(0, b) != max(0, a + b)``, so the counts are normalised
+      through the same floors BEFORE they are summed. The folded receipt then
+      carries counts the pricing path will not floor again, and the two orders
+      of operation agree.
+
+    The result is bounded by the number of distinct serving identities a child
+    actually used (one or two in practice) rather than by how many calls it
+    made, which is what makes it scale with a deep roster.
+
+    Ordering is preserved by first appearance so the newest identity does not
+    jump the list, and a component that carries no identity is passed through
+    untouched rather than folded into a bucket it may not belong in — pricing
+    would resolve it against the caller's default label, which differs per
+    call site, so it is not foldable in the first place.
+    """
+    from local_operator.model.configure import (
+        _cache_tokens_are_inside_input,
+        _usage_cost,
+        _usage_field,
+    )
+
+    folded: dict[tuple[str, str, bool], Any] = {}
+    order: list[tuple[str, str, bool]] = []
+    passthrough: list[Any] = []
+    for raw_component in components:
+        provider = str(getattr(raw_component, "provider", "") or "")
+        model_id = str(getattr(raw_component, "model_id", "") or "")
+        if not provider and not model_id:
+            # No identity to fold on: pricing would resolve it against the
+            # caller's default label, which differs per call site.
+            passthrough.append(raw_component)
+            continue
+        # The price this receipt would ACTUALLY be billed at, which is the
+        # branch ``cost_for_usage`` takes — not merely whether a field is set.
+        accepted = _usage_cost(raw_component)
+        # Normalise the counts through the same floors the pricing path
+        # applies, so summing them afterwards cannot disagree with pricing
+        # them individually. ``input_tokens`` absorbs the OpenAI-shaped
+        # subtraction here; the folded receipt is then already disjoint and
+        # the second application is a no-op.
+        plain = _usage_field(raw_component, "input_tokens")
+        read = _usage_field(raw_component, "cache_read_tokens")
+        written = _usage_field(raw_component, "cache_write_tokens")
+        if _cache_tokens_are_inside_input(provider):
+            # Floor the subtraction HERE, per receipt, then re-add the cache
+            # buckets so the stored count keeps this wire's "cached tokens are
+            # a SUBSET of input" convention. Pricing the folded receipt runs
+            # the same subtraction a second time and recovers exactly
+            # ``sum(max(0, input_i - read_i - write_i))`` — the per-receipt
+            # floors are already baked in, so the second pass cannot floor a
+            # sum that a single malformed row drove negative.
+            plain = max(0, plain - read - written) + read + written
+        component = raw_component.model_copy(
+            update={
+                "input_tokens": plain,
+                "cache_read_tokens": read,
+                "cache_write_tokens": written,
+                "cache_write_5m_tokens": _usage_field(raw_component, "cache_write_5m_tokens"),
+                "cache_write_1h_tokens": _usage_field(raw_component, "cache_write_1h_tokens"),
+                "output_tokens": _usage_field(raw_component, "output_tokens"),
+                "reasoning_tokens": _usage_field(raw_component, "reasoning_tokens"),
+                # A rejected price must not survive into the folded receipt:
+                # it would be re-summed and could become acceptable.
+                "usd_cost": accepted,
+            }
+        )
+        key = (provider, model_id, accepted is not None)
+        existing = folded.get(key)
+        if existing is None:
+            folded[key] = component.model_copy(deep=True)
+            order.append(key)
+            continue
+        folded[key] = existing.model_copy(
+            update={
+                "input_tokens": existing.input_tokens + component.input_tokens,
+                "output_tokens": existing.output_tokens + component.output_tokens,
+                "cache_read_tokens": existing.cache_read_tokens + component.cache_read_tokens,
+                "cache_write_tokens": existing.cache_write_tokens + component.cache_write_tokens,
+                "cache_write_5m_tokens": (
+                    existing.cache_write_5m_tokens + component.cache_write_5m_tokens
+                ),
+                "cache_write_1h_tokens": (
+                    existing.cache_write_1h_tokens + component.cache_write_1h_tokens
+                ),
+                "reasoning_tokens": existing.reasoning_tokens + component.reasoning_tokens,
+                "usd_cost": (
+                    None
+                    if existing.usd_cost is None
+                    else existing.usd_cost + (component.usd_cost or 0.0)
+                ),
+                # Occupancy is a level, not a sum: the newest reading wins, the
+                # same rule ``_aggregate_usage`` applies.
+                "context_tokens": (
+                    component.context_tokens
+                    if component.context_tokens is not None
+                    else existing.context_tokens
+                ),
+                # Nested components are already folded into the buckets above;
+                # keeping them would double-count on the next fold.
+                "cost_components": [],
+            }
+        )
+    return [folded[key] for key in order] + passthrough
+
+
+def _capped_components(components: Sequence[Any]) -> list[Any]:
+    """The newest :data:`USAGE_COMPONENT_CAP` receipts, oldest evicted first.
+
+    Mirrors ``AsyncJob.trajectory``'s eviction discipline (newest-wins, drop
+    from the front) so the two unbounded-per-turn lists in this module behave
+    the same way. Returns a new list; callers rebuild rather than mutate,
+    because ``FrontendSessionState`` is replaced wholesale by ``mutate``.
+    """
+    values = list(components)
+    if len(values) <= USAGE_COMPONENT_CAP:
+        return values
+    return values[len(values) - USAGE_COMPONENT_CAP :]
+
 
 # Commands whose effect belongs to the process drawing the widgets. Every other
 # advertised slash is routed to the authoritative session owner; keeping this a
@@ -802,12 +1025,38 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     through the ``job_trajectory`` op once a reader actually opens that child's
     page. ``trajectory_length`` survives so the viewer can say how many events
     it is about to load instead of rendering the child as empty.
+
+    Two more per-turn lists are bounded here for the same reason, because the
+    trajectory fix addressed one instance of the shape rather than the shape
+    itself and the next unbounded field grew past the same cap on its own:
+
+    * ``snapshot.usage_components`` — capped at accumulation
+      (:data:`USAGE_COMPONENT_CAP`), and capped AGAIN here because an owner
+      that restored a pre-cap checkpoint holds the uncapped list in memory for
+      the life of that process.
+    * each job's ``usage.cost_components`` and ``descendant_usage`` — the
+      per-job twins of the same list, measured at 29 KB for ONE job on the
+      reference machine, which is what made 18 stripped-trajectory jobs still
+      serialize to 196 KB. FOLDED by serving identity rather than capped:
+      these price the child's spend (``job_cost``), so dropping rows would
+      undercount money, while folding is lossless. See
+      :func:`_folded_components`.
+
+    :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
+    field appears.
     """
     payload = sync.model_dump(mode="json")
     snapshot = payload.get("snapshot")
     if isinstance(snapshot, dict):
+        components = snapshot.get("usage_components")
+        if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
+            snapshot["usage_components"] = _capped_components(components)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
+            # Share one text budget across the roster so the frame does not grow
+            # linearly with depth (see JOB_TEXT_FRAME_BUDGET_CHARS). Floored so
+            # every child keeps a legible preview however deep the roster is.
+            text_share = max(JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, len(jobs)))
             for job in jobs:
                 if not isinstance(job, dict):
                     continue
@@ -816,7 +1065,99 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
                     # construction, see JobState), so dropping the rows here
                     # loses nothing the viewer needs to describe the job.
                     job["trajectory"] = []
+                _fold_job_usage_in_place(job)
+                _bound_job_text_in_place(job, share=text_share)
     return payload
+
+
+def _bound_job_text_in_place(job: dict[str, Any], *, share: int) -> None:
+    """Clip one serialized job row's free text to its wire bounds.
+
+    See :data:`JOB_RESULT_WIRE_CHARS` for why these are safe to truncate and
+    why ``error_text`` is treated differently, and
+    :data:`JOB_TEXT_FRAME_BUDGET_CHARS` for why ``share`` exists: the per-field
+    caps bound one ROW, and the share is this row's slice of the whole frame's
+    text budget, so a deep roster cannot spend linearly more than a shallow one.
+    The effective cap is the tighter of the two.
+
+    Truncation is marked with an ellipsis so a reader can tell a clipped preview
+    from a child that really did return that little — an unmarked cut reads as
+    the whole answer.
+    """
+    for key, cap in (
+        ("result_text", JOB_RESULT_WIRE_CHARS),
+        ("prompt", JOB_PROMPT_WIRE_CHARS),
+        ("error_text", JOB_ERROR_WIRE_CHARS),
+    ):
+        value = job.get(key)
+        limit = min(cap, share)
+        if isinstance(value, str) and len(value) > limit:
+            job[key] = value[:limit] + "…"
+
+
+def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
+    """Fold one serialized job row's receipt lists, losslessly (see above).
+
+    Operates on the already-serialized dict rather than on the model, because
+    this runs at the wire boundary where the payload is plain JSON. The rows
+    are revalidated as ``Usage`` to fold them and dumped straight back, so a
+    malformed row simply stays as it is rather than failing the whole frame —
+    an attach must not be refused because one job's accounting is odd.
+    """
+    # ``usage`` may be absent (a bash job, a child that has not reported a turn)
+    # — the two lists live on different objects, so each is checked in turn.
+    for container, key in ((job.get("usage"), "cost_components"), (job, "descendant_usage")):
+        if not isinstance(container, dict):
+            continue
+        rows = container.get(key)
+        # One row cannot fold into anything, so the common case costs a length
+        # check and no validation.
+        if not isinstance(rows, list) or len(rows) <= 1:
+            continue
+        try:
+            folded = _folded_components([Usage.model_validate(row) for row in rows])
+        except Exception:  # noqa: BLE001 — odd accounting must not refuse an attach
+            continue
+        container[key] = [item.model_dump(mode="json") for item in folded]
+
+
+def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
+    """Diagnose a frame that will not fit ``cap_bytes``, or ``None`` if it fits.
+
+    The failure this describes is silent by construction: an oversized line
+    makes the reader's ``readline`` raise ``LimitOverrunError``, which killed
+    the client's pump task, which left the viewer waiting out its full 15 s
+    sync timeout and then degrading to a runtime-less cold session. A hard bug
+    therefore wore the costume of a slow/absent owner, and diagnosing it took a
+    profiling session rather than a log line.
+
+    So the report names the size, the cap, and the biggest contributors by
+    field — because the actionable question is always "which unbounded list
+    grew this time", and that is exactly what a bare "frame too large" does not
+    answer. Cheap: it serializes only when the frame is already known not to
+    fit, so the common path pays one length check.
+    """
+    encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded <= cap_bytes:
+        return None
+    data = frame.get("data")
+    snapshot = data.get("snapshot") if isinstance(data, dict) else None
+    parts: list[str] = []
+    if isinstance(snapshot, dict):
+        sizes = sorted(
+            ((len(json.dumps(value).encode()), key, value) for key, value in snapshot.items()),
+            reverse=True,
+            key=lambda row: row[0],
+        )[:3]
+        for size, key, value in sizes:
+            count = f", n={len(value)}" if isinstance(value, (list, dict)) else ""
+            parts.append(f"{key}={size:,}B{count}")
+    detail = f" largest fields: {', '.join(parts)}" if parts else ""
+    return (
+        f"{frame.get('op', 'frame')} is {encoded:,} bytes, over the "
+        f"{cap_bytes:,}-byte socket line limit; it cannot be sent and the "
+        f"client cannot read it.{detail}"
+    )
 
 
 def filter_update_trajectories(
@@ -1223,7 +1564,20 @@ class FrontendStateStore:
         state = restored or FrontendSessionState(session_id=str(session.session_id), epoch=epoch)
         # A new owner epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
-        return state.model_copy(update={"epoch": epoch, "sequence": 0})
+        #
+        # The receipt cap is applied to the RESTORED value, not just to fresh
+        # accumulation: every transcript written before the cap carries the full
+        # uncapped list (958 KB in the largest observed row), so an owner that
+        # resumed one would emit an oversized attach frame and re-persist the fat
+        # list forever despite the cap above. Capping on the way in is what makes
+        # an existing session heal on its first resume rather than staying broken.
+        return state.model_copy(
+            update={
+                "epoch": epoch,
+                "sequence": 0,
+                "usage_components": _capped_components(state.usage_components),
+            }
+        )
 
     def refresh_from_session(self, session: Any, *, initial: bool = False) -> FrontendSessionState:
         current = self._state
@@ -1417,8 +1771,9 @@ class FrontendStateStore:
                     if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
                     else state.cost_knowledge
                 ),
-                usage_components=list(state.usage_components)
-                + list(usage.cost_components or [usage]),
+                usage_components=_capped_components(
+                    list(state.usage_components) + list(usage.cost_components or [usage])
+                ),
             )
         elif usage.input_tokens or usage.output_tokens:
             changes["cost_knowledge"] = CostKnowledge.PARTIAL
@@ -1513,7 +1868,7 @@ class FrontendStateStore:
                     changes.update(
                         cumulative_parent_cost=previous + remainder,
                         current_turn_accrued_cost=0.0,
-                        usage_components=(
+                        usage_components=_capped_components(
                             list(state.usage_components)
                             if state.current_turn_accrued_cost > 0
                             else list(state.usage_components) + list(aggregate.cost_components)
@@ -1564,8 +1919,9 @@ class FrontendStateStore:
                         if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
                         else state.cost_knowledge
                     ),
-                    usage_components=list(state.usage_components)
-                    + list(usage.cost_components or [usage]),
+                    usage_components=_capped_components(
+                        list(state.usage_components) + list(usage.cost_components or [usage])
+                    ),
                 )
             elif usage.input_tokens or usage.output_tokens:
                 changes["cost_knowledge"] = CostKnowledge.PARTIAL
@@ -1644,10 +2000,37 @@ class FrontendStateStore:
         # Trajectories are reconstructable from durable child transcripts and
         # live_events are transient by definition; persisting them appended
         # ~71 KiB per busy child to the transcript at EVERY turn end.
+        #
+        # The per-job receipt lists are folded for the same reason and by the
+        # same measurement: this row is rewritten IN FULL on every turn end, so
+        # anything that grows with the conversation is paid for once per turn
+        # forever. On the reference machine the checkpoint rows were 64.3% of a
+        # 103 MB transcript. The fold is lossless for cost (see
+        # ``_folded_components``), so the restored spend is unchanged — which
+        # is the only property the durable copy owes anyone.
         durable = state.model_copy(
             update={
                 "live_events": [],
-                "jobs": [job.model_copy(update={"trajectory": []}) for job in state.jobs],
+                "jobs": [
+                    job.model_copy(
+                        update={
+                            "trajectory": [],
+                            "usage": (
+                                job.usage.model_copy(
+                                    update={
+                                        "cost_components": _folded_components(
+                                            job.usage.cost_components
+                                        )
+                                    }
+                                )
+                                if job.usage is not None
+                                else None
+                            ),
+                            "descendant_usage": _folded_components(job.descendant_usage),
+                        }
+                    )
+                    for job in state.jobs
+                ],
             }
         )
         await transcript.append_custom(

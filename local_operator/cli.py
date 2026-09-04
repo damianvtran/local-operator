@@ -4073,6 +4073,7 @@ def main() -> int:
                     record, _owner = await asyncio.to_thread(
                         find_owner_record, config_directory, session_id
                     )
+                degraded_reason = ""
                 if record is not None:
                     try:
                         return await RemoteSession.connect(
@@ -4081,18 +4082,40 @@ def main() -> int:
                             config_dir=config_directory,
                             takeover_factory=take_over,
                         )
-                    except (ConnectionError, OSError, TimeoutError):
+                    except (ConnectionError, OSError, TimeoutError) as error:
                         # The runtime died between the scan and the dial, or is
                         # too old to attach to. Cold is the honest fallback:
                         # the conversation still opens and the next message
                         # starts a fresh runtime.
-                        pass
-                return await RemoteSession.cold(
+                        #
+                        # But the fallback must not be SILENT. A live runtime
+                        # we failed to attach to is a different situation from
+                        # one that was never there, and the user cannot tell
+                        # them apart from the screen: they see a session that
+                        # opened without its state and no reason why. The
+                        # oversized-frame case made that concrete — the failure
+                        # was diagnosable in a log line nobody reads while the
+                        # terminal said nothing (UX round 1, U2 / design round
+                        # 1, D5). Carried onto the viewer so the TUI can put it
+                        # on screen once there is a screen to put it on.
+                        import logging as _logging
+
+                        degraded_reason = str(error)
+                        _logging.getLogger(__name__).warning(
+                            "could not attach to the runtime for session %s (%s); "
+                            "opening the conversation without live state",
+                            session_id,
+                            degraded_reason,
+                        )
+                viewer = await RemoteSession.cold(
                     session_id,
                     config_dir=config_directory,
                     cwd=os.getcwd(),
                     takeover_factory=take_over,
                 )
+                if degraded_reason:
+                    viewer.degraded_reason = degraded_reason
+                return viewer
 
             async def session_factory():
                 return await viewer_factory(getattr(args, "resume", None))
