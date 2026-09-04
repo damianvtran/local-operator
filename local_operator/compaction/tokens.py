@@ -462,6 +462,303 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_tokens(m) for m in messages)
 
 
+def estimate_wire_bytes(messages: Sequence[Message]) -> int:
+    """Serialized request size in BYTES — deliberately NOT a token count.
+
+    A third ruler, answering the one question neither token estimator asks:
+    "will this HTTP request fit?". Keeping it separate is the whole point.
+    :data:`IMAGE_TOKEN_ESTIMATE` is a flat per-image charge because vision
+    providers bill by pixel area, so it is *correct* for billing and useless
+    as a size proxy — the session this function was written for carried 42
+    screenshots worth 50,400 accounted tokens against **33.9 MB** actually
+    sent, read as 15.5% of a 1M window while the wire was over Anthropic's
+    32 MB cap. Making ``IMAGE_TOKEN_ESTIMATE`` size-aware instead would
+    corrupt the billing ruler to fix a transport problem and silently
+    re-scale every calibrated threshold in this package.
+
+    So: a number from THIS function may only be compared against a byte
+    budget, never against a token figure. That is the same one-ruler-per-
+    comparison discipline this module's header establishes, and the mixing
+    bug it describes has already shipped twice.
+
+    Unlike the token estimators this is **exact and cheap**: no tokenizer to
+    load, no slope to calibrate, ``len(block.data)`` *is* the answer. It is
+    cheap enough that the render seam runs it unconditionally and the trigger
+    passes an exact figure where the token path needs an upper bound first —
+    but "free" would overstate it, and the first revision of this docstring
+    did. An image-heavy history scans in ~0.06 ms; a long TOOL-heavy one costs
+    a few milliseconds, dominated entirely by sizing tool-call arguments, and
+    that is why :func:`_argument_bytes` measures them structurally instead of
+    re-serializing (agent review round 1, R3, which measured the naive form at
+    6.5-7.9 ms per scan on real transcripts).
+
+    Counts base64 payloads, text, and tool-call name+arguments — the three
+    things that carry real length.
+
+    **Accuracy, stated with its sign and its SCOPE.** The never-under property
+    holds for TOOL-CALL ARGUMENTS specifically, not for this function's total,
+    and the difference matters enough to state plainly rather than let a reader
+    generalise it:
+
+    - **Arguments** (:func:`_argument_bytes`, and ``raw_arguments`` beside it)
+      are sized exactly for the encoding the provider clients actually use,
+      with a small POSITIVE bias — +0.189% measured over 488,138 real tool
+      calls, zero under-counts.
+    - **The total this function returns UNDER-counts a real history**, by a
+      measured mean of -2.42% and a worst case of -17.39% across 4,686 real
+      sessions. Two known causes, both deliberate: message text is counted as
+      characters rather than UTF-8 bytes, and the request's own JSON envelope
+      (roles, keys, block wrappers) is not modelled at all.
+
+    That residual is absorbed by the budget's headroom rather than modelled —
+    24 MB against a 32 MB cap is a ~28% margin, several times the worst
+    observed shortfall plus the envelope — because a per-provider
+    serialization model is a constant that rots. It is a DISCLOSED gap, not a
+    claim of exactness: anyone tightening the budget toward the cap has to
+    close it first, and the fast path for it already exists (the
+    ``isascii()`` shape :func:`_string_bytes` uses).
+
+    The one property that must not regress: the ARGUMENT sizing must never
+    come in under the wire. An under-count means believing an oversize request
+    fits and sending it, which is the failure this guard exists to prevent —
+    and it is exactly what the first remediation of :func:`_argument_bytes`
+    introduced (-1.9% aggregate, -75% on CJK) before this revision corrected
+    it (agent review round 2 R7 / QA Q5).
+    """
+    total = 0
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, TextContent):
+                total += len(block.text)
+            else:
+                total += len(block.data)
+        for call in message.tool_calls or ():
+            # Prefer the provider's own rendering when we kept it: that string
+            # is literally what goes on the wire. Otherwise MEASURE the
+            # arguments structurally rather than re-serializing them — see
+            # :func:`_argument_bytes` for why that distinction is load-bearing.
+            total += _utf8_len(call.name)
+            total += (
+                # ``raw_arguments`` is ALREADY serialized JSON, so it needs the
+                # UTF-8 length and NOT the escape expansion ``_argument_bytes``
+                # applies — its quotes and backslashes are the escaping, not
+                # content to be escaped again. ``len`` was wrong here for the
+                # same reason it was wrong inside the walk: it counts
+                # characters, and this is the branch carrying essentially all
+                # LIVE traffic (``harness/loop.py`` always populates it), where
+                # 6.42% of real calls under-counted, worst -29.79% (agent
+                # review round 3, R7 residual).
+                _utf8_len(call.raw_arguments)
+                if call.raw_arguments
+                else _argument_bytes(call.arguments)
+            )
+    return total
+
+
+def _utf8_len(text: str) -> int:
+    """UTF-8 byte length of ``text``, for a string that is already wire-shaped.
+
+    Shares the surrogate tolerance :func:`_string_bytes` documents at length:
+    a lone surrogate is legal in a Python ``str`` and reaches here from a
+    transcript, so a plain ``encode`` would raise and kill the render rather
+    than return a number.
+    """
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def _argument_bytes(arguments: object) -> int:
+    """Serialized size of tool-call arguments, WITHOUT serializing them.
+
+    A ``json.dumps`` here would be the same 60x trap
+    :func:`messages_tokens_upper_bound` documents, and it would bite far
+    harder than it looks: ``raw_arguments`` is deliberately dropped on the way
+    to disk (``session/transcript.py`` pops it for a documented space win), so
+    **every resumed session has none** — measured at 0 of 39,250 tool calls
+    across 400 real sessions. The fallback is the steady state, not the edge
+    case.
+
+    That matters because :func:`estimate_wire_bytes` runs at the render seam,
+    which is synchronous and on the event loop shared by the parent session,
+    every subagent and the TUI repaint. Re-serializing measured 6.5-7.9 ms per
+    scan on real transcripts at roughly 3 scans per turn — about 20 ms of
+    event-loop stall per turn, the same class of shared-loop cost
+    ``Session._offloaded`` exists to prevent (agent review round 1, R3).
+
+    So this walks the structure and adds up what each node will occupy in
+    :data:`_WIRE_JSON_ENCODING` — the encoding the provider clients actually
+    use, not ``json.dumps``'s defaults. That distinction is the whole point of
+    the second revision of this function: sizing strings with ``len(s)``
+    UNDER-counts the wire in every direction that matters, and under-counting
+    is the one error this guard must never make, because it means believing an
+    oversize request fits and sending it. Measured across 487,652 tool calls
+    in 4,774 real transcripts, the character walk came out at **-1.9%** (under)
+    where the ``json.dumps`` it replaced was **+1.2%** (over); worst real cases
+    were ordinary ASCII ``write`` calls at -3% to -12%, and CJK/emoji reached
+    -75% (agent review round 1 R7 / QA Q5).
+
+    The three corrections that make it exact rather than approximate:
+
+    - **UTF-8 length, not character count.** ``ensure_ascii=False`` means a
+      CJK codepoint rides as 3 bytes and an emoji as 4, where ``len`` said 1.
+    - **Short escapes.** ``"``, ``\\`` and the C0 characters JSON has
+      two-character forms for each cost one byte MORE than their source.
+    - **Long escapes.** The remaining C0 controls render as ``\\uXXXX`` — six
+      bytes for one.
+
+    Numbers are sized with ``repr``, which matches ``json.dumps`` exactly for
+    every value CPython's encoder emits (it uses ``float.__repr__`` too), so
+    the old flat charge of 8 — which under-counted every float and long int —
+    is gone.
+
+    The result never under-counts the real wire, and the R3 performance win is
+    kept rather than traded back for it. Measured against the honest baseline —
+    ``json.dumps`` in the SAME encoding the provider uses, which is what being
+    exact the naive way would cost:
+
+    ======================  =========  ===============  =======
+    shape                   this       exact-by-dumps   speedup
+    ======================  =========  ===============  =======
+    200 calls x 4 KB          1.0 ms          6.0 ms     5.8x
+    400 calls x 8 KB         11.9 ms         15.1 ms     1.3x
+    600 calls x 64 KB        91.5 ms        230.1 ms     2.5x
+    ======================  =========  ===============  =======
+
+    The 400x8 KB row is the weakest case and is stated rather than hidden: many
+    small strings amortise the per-string overhead worst. It is still faster
+    AND correct, where the character walk it replaces was faster and wrong.
+
+    Residual error is a small POSITIVE bias — a trailing separator is charged
+    for the last element of every container — measured at **+0.189%** across
+    488,138 tool calls in the real session store. The sign is the point: the
+    guard may shed marginally early, never send an oversize request believing
+    it fits.
+
+    Iterative rather than recursive: arguments come from a model and their
+    nesting depth is not bounded by anything we control, so recursion could
+    hit the interpreter's stack limit on a pathological payload. A cycle is
+    not reachable (these are freshly parsed JSON) but the flat walk would
+    terminate on the size accumulator anyway.
+
+    The "sized for the wire" contract holds for WIRE-LEGAL input, which is
+    what ``arguments`` can hold: it is always the output of a JSON parse. This
+    returns a number for ``NaN``/``inf``, ``bytes``, ``set`` and arbitrary
+    objects where the real encoder would raise (``allow_nan=False``, or
+    ``TypeError``) — deliberately, because a sizer that raises is the R10
+    failure, and by the time such a value could appear the request is already
+    unsendable for reasons this function does not exist to detect (agent
+    review round 3, R11).
+    """
+    total = 0
+    stack: list[object] = [arguments]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            total += _string_bytes(node) + 2  # the quotes
+        elif isinstance(node, dict):
+            total += 2  # the braces
+            for key, value in node.items():
+                # A non-string key is coerced to a string by the encoder, so
+                # size what will actually be written rather than the object.
+                total += _string_bytes(key if isinstance(key, str) else str(key))
+                total += 4  # its quotes, the colon and the separating comma
+                stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            total += 2  # the brackets
+            stack.extend(node)
+            total += max(0, len(node) - 1)  # the separating commas
+        elif node is None or isinstance(node, bool):
+            # "null" / "true" / "false" — sized exactly rather than averaged,
+            # since the difference is free to compute.
+            total += 4 if node is None or node is True else 5
+        else:
+            # ``repr`` and the JSON encoder agree on every int and float the
+            # encoder will emit; a flat charge here under-counted both.
+            total += len(repr(node))
+    return total
+
+
+#: What ``httpx`` puts on the wire for a ``json=`` body, which is how every
+#: provider client sends a request (``providers/clients.py``): UTF-8 with
+#: ``ensure_ascii=False``. Recorded as prose rather than as parameters we pass
+#: anywhere, because nothing here serializes — it is the specification
+#: :func:`_string_bytes` is written against, and the reason character counts
+#: are wrong for this job.
+_WIRE_JSON_ENCODING = "utf-8, ensure_ascii=False"
+
+#: The characters JSON renders as a two-character escape (``\\n``, ``\\"``,
+#: ``\\\\``, …): one byte MORE than the source character.
+_JSON_SHORT_ESCAPES = '"\\\n\t\r\b\f'
+
+#: The C0 controls with no two-character form, which JSON renders as the
+#: six-byte ``\\uXXXX`` — five bytes more than the source character. Rare in
+#: real arguments, which is why they are counted only when the cheap
+#: whole-string check below says at least one is present.
+_JSON_LONG_ESCAPES = tuple(
+    chr(code) for code in range(0x20) if chr(code) not in _JSON_SHORT_ESCAPES
+)
+
+#: Every character that expands at all, as one string, for a single membership
+#: sweep before any per-character counting happens.
+_JSON_ESCAPED_CHARS = _JSON_SHORT_ESCAPES + "".join(_JSON_LONG_ESCAPES)
+
+
+def _string_bytes(text: str) -> int:
+    """Bytes ``text`` occupies inside a JSON string, excluding its quotes.
+
+    Exact for :data:`_WIRE_JSON_ENCODING`, and shaped so the common case pays
+    almost nothing. Two fast paths carry that:
+
+    - ``str.isascii`` is a cached flag rather than a scan, so an ASCII payload
+      never pays for the UTF-8 encode.
+    - Escapes are counted with ``str.count`` per escape character: each is a
+      C-level scan, and the seven short escapes cover essentially all real
+      occurrences.
+    - The twenty-five ``\\uXXXX`` controls are gated behind ``str.isprintable``,
+      which is C-level and never reports a C0 control as printable — so a
+      printable string provably contains none and skips all twenty-five scans.
+      That gate is what keeps the common case cheap. Two tempting alternatives
+      are both far worse and should not be re-introduced: a generator testing
+      each control in turn ran 896,000 times on a 400-call history and
+      dominated the function, and ``min(text)`` iterates the string in Python
+      at ~9 us per KB against ~0.3 us for the whole short-escape loop.
+
+    ``str.translate`` over the same characters reads more neatly than the
+    counts but is ~7x slower — it does a dict lookup per character, where
+    ``count`` stays in C.
+
+    **``surrogatepass`` is load-bearing, not defensive.** A lone surrogate
+    (``\\ud800``) is legal in a Python ``str`` AND legal JSON, so a model that
+    emits one round-trips it through ``json.dumps``/``json.loads`` and it
+    lands in ``transcript.jsonl`` verbatim. A plain ``encode("utf-8")`` raises
+    ``UnicodeEncodeError`` on it — and this function runs at the render seam,
+    inside ``_render_history``, which every wire path and ``/compact`` go
+    through. So a bare encode turns one stray codepoint into a session that
+    raises on every turn forever, including the escape hatch: the exact
+    wedge this whole change exists to delete, reintroduced through the
+    sizer meant to prevent it (agent review round 3, R10).
+
+    Sizing with ``surrogatepass`` is also the RIGHT number, not merely a
+    non-raising one: it is what a lenient encoder puts on the wire for that
+    codepoint, so the estimate stays honest instead of being a fallback guess.
+    This function must always return a number for any legal Python ``str`` —
+    it is a size estimate, and there is no input for which failing to size is
+    better than sizing.
+    """
+    total = len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))
+    for char in _JSON_SHORT_ESCAPES:
+        if char in text:
+            total += text.count(char)
+    # The short escapes above (\n, \t, …) also make a string non-printable, so
+    # this gate is checked AFTER them and only filters the rare remainder.
+    if not text.isprintable():
+        for char in _JSON_LONG_ESCAPES:
+            if char in text:
+                total += 5 * text.count(char)
+    return total
+
+
 def history_chars(messages: Sequence[object]) -> int:
     """Rough size of a history in characters, for the offload decision.
 

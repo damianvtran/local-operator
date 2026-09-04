@@ -524,6 +524,78 @@ def is_image_rejection(error: BaseException | str) -> bool:
     return any(marker in haystack for marker in _IMAGE_REJECTION_MARKERS)
 
 
+#: Wordings for "the REQUEST BODY was too big", which is a size problem, not
+#: an image problem — deliberately a separate tuple from
+#: :data:`_IMAGE_REJECTION_MARKERS` rather than four more entries in it.
+#:
+#: That list's contract is "did the provider refuse because of an image
+#: BLOCK", and it drives a STICKY whole-session degrade that drops every image
+#: forever. A 413 does not warrant it: the session that motivated this carried
+#: 42 screenshots at 34 MB against a 32 MB cap, where shedding the 14 oldest
+#: frames restores it and keeps 28 — against the degrade's zero. And the
+#: degrade's own justification ("not a preventable condition on our side… the
+#: only defence is to notice and stop") does not extend here, because a 413 IS
+#: preventable on our side, mechanically, by sending fewer bytes.
+#:
+#: Anthropic's actual wording is "Request exceeds the maximum size", which
+#: matched nothing anywhere in the harness; the rest cover the proxy edge
+#: (Cloudflare in front of a direct API answers before the provider does) and
+#: the ``request_too_large`` code the client already maps to 413.
+#:
+#: NO bare ``"413"`` marker, deliberately: it is a substring of ordinary token
+#: counts, byte counts and timestamps, and ``"used 413000 tokens"`` would
+#: misclassify. Match on wording, like every other rule here.
+_REQUEST_TOO_LARGE_MARKERS = (
+    "request exceeds the maximum size",
+    "request_too_large",
+    "request too large",
+    "request was too large",
+    "request entity too large",
+    "payload too large",
+)
+
+
+def is_request_too_large(error: BaseException | str) -> bool:
+    """Did the provider refuse because the REQUEST BODY exceeded its cap?
+
+    Accepts the exception or its rendered form for the same reason
+    :func:`is_image_rejection` does: the client layer holds a
+    :class:`ProviderError` while ``AgentEndEvent.error`` holds the already
+    rendered ``"<kind> (HTTP <status>): <words>"`` string.
+
+    Gated on status/kind as well as wording, and on the SAME both-ways-round
+    principle: a 5xx mentioning size is the provider failing, not a body we
+    can shrink. Status 413 alone is sufficient — it means exactly this and
+    nothing else — while other 4xx must also carry a marker, because a 400 is
+    the provider's catch-all.
+
+    This is NOT wired to the sticky image degrade; it drives the graduated
+    recovery (shed frames → compact → only then degrade), which is the whole
+    reason it is a separate predicate.
+    """
+    if isinstance(error, ProviderError):
+        if error.status == 413:
+            return True
+        # Gate on the KIND, not on a duplicated status range, so the two entry
+        # points agree by construction rather than by two hand-kept rules. The
+        # rendered form below can only check the kind's label, and an earlier
+        # revision gated the exception on ``400 <= status < 500`` instead:
+        # that made ``ProviderError(429, "...too large")`` answer True from
+        # the exception and False from its own rendered string, and a
+        # status-less error True from one and False from the other (agent
+        # review round 1, R5). A 429 is the provider metering us and a 5xx is
+        # weather; neither is a body we can shrink.
+        if error.kind != "request":
+            return False
+        haystack = error.message.lower()
+    else:
+        text = error if isinstance(error, str) else str(error)
+        haystack = text.lower()
+        if not haystack.startswith(_KIND_LABELS["request"]):
+            return False
+    return any(marker in haystack for marker in _REQUEST_TOO_LARGE_MARKERS)
+
+
 def classify_provider_error(error: BaseException) -> ProviderErrorKind:
     """The failure kind for anything the harness can catch.
 

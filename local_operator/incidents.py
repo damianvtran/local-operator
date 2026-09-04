@@ -66,6 +66,20 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
             "request was too large",
             "input too large",
             "input was too large",
+            # The SIZE-of-body wordings, which none of the above matched.
+            # "Request exceeds the maximum size" is Anthropic's literal 413
+            # text, and a session that hit it was classified ``unknown`` with
+            # an empty hint — so the model was told nothing actionable and
+            # retried the identical 34 MB request, forever. The rest cover the
+            # proxy edge and the provider's own error code.
+            #
+            # Matched on wording, NOT on a bare "413": that substring occurs
+            # in ordinary token and byte counts ("used 413000 tokens" already
+            # classifies correctly as rate-limit) and would misfire.
+            "exceeds the maximum size",
+            "request_too_large",
+            "request entity too large",
+            "payload too large",
         ),
     ),
     (
@@ -142,8 +156,14 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
 #: when the honest answer is "report and ask".
 _HINTS: dict[str, str] = {
     "context-limit": "",
-    "context-length": "The context is over the model's window: ask the user to "
-    "/compact, or compact at the next boundary if compaction is on.",
+    # Widened for the byte case: the harness now sheds the oldest screenshots
+    # from the RENDERED history on its own when a request is too large, so
+    # "ask the user to /compact" is only half the advice — the next turn is
+    # often already sendable, and the model needs to know retrying is
+    # reasonable rather than assuming the session is finished.
+    "context-length": "The request was too large for the model: the harness compacts "
+    "and drops the oldest screenshots automatically, so retry once; if it repeats, "
+    "ask the user to /compact or send fewer and smaller images.",
     "rate-limit": "Back off and retry later; if it persists, tell the user which "
     "provider hit the limit — they may need to switch model or top up quota.",
     "auth": "Credentials were rejected: tell the user which provider and suggest "

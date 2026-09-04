@@ -40,7 +40,7 @@ from typing import Any, Sequence
 from local_operator.harness.types import Content, ImageContent, Message, TextContent
 
 from .marker import marker_exists
-from .tokens import estimate_tokens, invalidate_message_cache
+from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
 
 __all__ = [
     "MIN_PRUNE_TOKENS",
@@ -52,6 +52,7 @@ __all__ = [
     "count_stale_observations",
     "prune_stale_frames",
     "prune_tool_outputs",
+    "shed_frames_to_wire_budget",
     "shed_stale_frames",
 ]
 
@@ -155,6 +156,62 @@ def prune_stale_frames(
         out.append(replaced)
     out.reverse()
     return out, dropped
+
+
+def shed_frames_to_wire_budget(
+    messages: Sequence[Message], *, budget: int
+) -> tuple[list[Message], int]:
+    """Replace the OLDEST frames with notices until the request fits ``budget``
+    bytes, keeping as many recent frames as possible.
+
+    The last-resort transport guard. Ordinary compaction decides what to keep
+    by *context* value; this decides by whether the provider will accept the
+    request at all, which is a different and strictly narrower question — so
+    it engages only when the payload is already over a ceiling set below the
+    provider's cap, and does nothing at all below it. The early return is not
+    an optimisation detail: it is the guarantee that every session under
+    budget behaves byte-identically to one without this function.
+
+    Built on :func:`prune_stale_frames` rather than as a second
+    frame-dropping primitive, so there is ONE definition of "which frames are
+    recent" and one set of copy/identity semantics. That also means no message
+    is ever removed — user/assistant alternation and tool pairings survive
+    untouched, which a transport guard running on arbitrary history must
+    guarantee, since it cannot know what is mid-tool-call.
+
+    The loop mirrors ``_shed_stale_turns`` in the evaluation runner's provider
+    client: walk the keep count DOWN and stop when a step frees nothing.
+    Termination is structural — ``keep`` strictly decreases toward 0, and
+    ``keep=0`` drops every image there is — so a payload still over budget
+    with no images left exits rather than spinning. That residual case is
+    real: a text-only history cannot be shed here, and the caller must be
+    prepared for "still over" rather than assuming success (this is what the
+    byte-side auto-continue band checks).
+
+    Sheds the FEWEST frames that fit, not a fixed count, because every frame
+    dropped is evidence the user may still need. Returns ``(messages,
+    frames_dropped)``; ``frames_dropped`` is 0 and the input list is returned
+    unchanged when nothing was over budget.
+    """
+    if budget <= 0:
+        return list(messages), 0
+    if estimate_wire_bytes(messages) <= budget:
+        return list(messages), 0
+
+    keep = count_frame_messages(messages)
+    working = list(messages)
+    dropped = 0
+    while keep > 0:
+        keep -= 1
+        candidate, candidate_dropped = prune_stale_frames(messages, keep_recent_frames=keep)
+        if candidate_dropped <= dropped:
+            # This step freed nothing new; another turn of the loop cannot
+            # either, since the keep count only shrinks.
+            break
+        working, dropped = candidate, candidate_dropped
+        if estimate_wire_bytes(working) <= budget:
+            break
+    return working, dropped
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

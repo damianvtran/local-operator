@@ -185,6 +185,19 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     "compaction.auto_continue": (False, lambda s, w: compaction_of(s).auto_continue),
     "compaction.mid_turn_enabled": (False, lambda s, w: compaction_of(s).mid_turn_enabled),
+    # The two BYTE knobs. LIVE for the same reason as their neighbours — the
+    # session re-coerces CompactionSettings on every config change — and it
+    # matters more here: an operator raising the budget is usually reacting to
+    # a session that is shedding right now, and a NEW_SESSIONS scope would make
+    # them restart to get the frames back.
+    "compaction.wire_bytes_budget": (
+        12_345_678,
+        lambda s, w: compaction_of(s).wire_bytes_budget,
+    ),
+    "compaction.wire_bytes_trigger": (
+        8_765_432,
+        lambda s, w: compaction_of(s).wire_bytes_trigger,
+    ),
     # -- providers: read off the rebound mapping at the NEXT client build ------
     "providers.anthropic.cache_ttl_1h_min_context_tokens": (
         999_999,
