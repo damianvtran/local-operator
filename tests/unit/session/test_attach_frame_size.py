@@ -769,3 +769,52 @@ def test_folding_malformed_receipts_still_prices_identically(
     after = _price(list(_folded_components(components)))
     assert before is not None and after is not None
     assert after == pytest.approx(before, abs=1e-9), case
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The user must not sit through 15 s of silence for a frame we cannot read.
+
+    Making the pump honest internally was only half the fix: `_await_frontend`
+    still waited out its full 15 s timeout, because nothing failed the pending
+    future when the connection died (UX round 1, U2). The oversized frame is
+    known unreadable within milliseconds, so the wait must end then — and the
+    reason must be the one the pump produced, not a generic timeout, or the
+    copy that explains what happened never reaches a surface (design round 1,
+    D5).
+
+    Driven against the REAL server over a REAL socket with a genuinely
+    oversized frame, because the bug is in how the two halves interact.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    # Defeat the wire bounds deliberately: an extra field the stripper does not
+    # know about, carrying more than the line limit. This is the shape of the
+    # NEXT unbounded field, which is exactly what must not hang.
+    handle._frontend.mutate(cwd="x" * (_MAX_LINE_BYTES + 1024))
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    try:
+        record = await _record(tmp_path)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(ConnectionError) as caught:
+            await RemoteSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        # The 15 s sync timeout is the backstop for a silent owner, not the
+        # budget for a failure we already detected. Generous bound: the claim
+        # is "does not wait out the timeout", not a performance figure.
+        assert elapsed < 5.0, (
+            f"an unreadable frame took {elapsed:.1f}s to report; the connection died "
+            "immediately and the wait should have ended with it"
+        )
+        # And the reason names what actually happened.
+        assert "too large" in str(caught.value), (
+            f"the failure reported {caught.value!r}, which does not tell the user "
+            "the frame could not be read"
+        )
+    finally:
+        registrant.close()
