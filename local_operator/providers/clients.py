@@ -51,6 +51,7 @@ from local_operator.harness.types import (
     ToolCall,
     Usage,
 )
+from local_operator.incidents import CONTEXT_LENGTH_MARKERS
 from local_operator.providers.failover import ProviderError
 
 if TYPE_CHECKING:
@@ -210,6 +211,14 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
 #: the transcript on it.
 MAX_ERROR_MESSAGE_CHARS = 500
 
+#: Longest ``metadata.provider_name`` that will be rendered into a frame as an
+#: attribution. Real names are short ("Meta", "OpenAI", "Azure", "Stealth");
+#: the ceiling exists because the value is provider-controlled text sharing a
+#: 500-char budget with the upstream diagnostics, and an attribution long
+#: enough to evict the actual error message would make the frame strictly less
+#: useful than the generic wording it replaced.
+_MAX_PROVIDER_NAME_CHARS = 60
+
 
 def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> str:
     """The provider's OWN words about the failure, from whichever slot it used.
@@ -280,14 +289,25 @@ def _attributed_relay_message(message: str, error: Mapping[str, Any]) -> str:
     says something specific is left alone, and a body with no
     ``provider_name`` keeps the original wording rather than inventing an
     attribution the wire did not supply.
+
+    The value is provider-controlled text landing in a user-facing frame, so it
+    is bounded on two axes before use. Length: the composed message is capped
+    at :data:`MAX_ERROR_MESSAGE_CHARS`, so an absurdly long name would push the
+    upstream diagnostics — the part that says what actually went wrong — off
+    the end. Shape: a name carrying a newline would render as a forged second
+    line, so whitespace is collapsed. A name that is implausible after
+    normalisation is dropped rather than trusted; the original wording is
+    strictly better than a mangled attribution.
     """
     if message.strip().lower() != _OPAQUE_AGGREGATOR_MESSAGE:
         return message
     metadata = error.get("metadata")
     if not isinstance(metadata, Mapping):
         return message
-    provider = _first_text(metadata.get("provider_name"))
-    return f"{provider} returned error" if provider else message
+    provider = " ".join(_first_text(metadata.get("provider_name")).split())
+    if not provider or len(provider) > _MAX_PROVIDER_NAME_CHARS:
+        return message
+    return f"{provider} returned error"
 
 
 def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
@@ -315,6 +335,35 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
     return raw.strip()[:500]
 
 
+def _openrouter_upstream_error(error: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The origin provider's STRUCTURED error object out of ``metadata.raw``.
+
+    :func:`_openrouter_upstream_text` returns only the human sentence, which is
+    all the message cascade needs. Classification needs the sibling fields too
+    — chiefly ``param``, the field name that proves the origin was complaining
+    about our request rather than about itself — so the same JSON is parsed
+    once more here into its object form.
+
+    Returns ``None`` whenever ``raw`` is absent, unparseable, or not an error
+    object, so every caller treats "no structured detail" as the absence of a
+    signal rather than as evidence either way.
+    """
+    metadata = error.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    raw = metadata.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        inner = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(inner, Mapping):
+        return None
+    nested = inner.get("error")
+    return nested if isinstance(nested, Mapping) else inner
+
+
 #: Aggregators answer an UPSTREAM provider failure with an HTTP 400 whose body
 #: names nothing: the outer message is exactly "Provider returned error" and
 #: ``metadata.raw`` holds a bare sentinel instead of the origin provider's
@@ -324,11 +373,6 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
 #: on the wire ("Provider returned error", raw "ERROR") is the aggregator's,
 #: not part of the signal.
 _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
-
-#: Raw bodies short enough to prove nobody tried to say anything. A real
-#: upstream body — "context length exceeded", a JSON error object — is
-#: actionable and must keep its ``request`` classification.
-_OPAQUE_RAW_SENTINELS = frozenset({"error"})
 
 #: Statuses an aggregator will RELAY from an origin provider that are otherwise
 #: read as "the request itself was refused". 401/403 stay out: those describe
@@ -348,24 +392,29 @@ _OPAQUE_RAW_SENTINELS = frozenset({"error"})
 #: single-endpoint model is a transient failure to resolve its own snapshot.
 _RELAYED_UPSTREAM_STATUSES = frozenset({400, 404})
 
-#: Upstream wordings that stay ``request`` even when relayed, because they
-#: describe the BYTES we sent: they will fail identically on a retry and on
-#: every fallback target, so retrying them buys minutes of backoff and the
-#: same answer. Deliberately NARROW and matched as phrases rather than single
-#: words — a loose marker ("invalid", "error") would drag genuine upstream
-#: weather back into ``request`` and re-create the dead turn this predicate
-#: exists to prevent. When a wording is ambiguous the tie is broken toward
-#: transient, because the cost of that mistake is bounded retries while the
-#: cost of the opposite is a killed turn.
-_DETERMINISTIC_UPSTREAM_MARKERS = (
-    "context length",
-    "context_length",
-    "maximum context",
-    "too many tokens",
-    "is not a valid model",
-    "max_tokens",
-    "max_output_tokens",
-)
+#: The upstream field name that proves a relayed error is about OUR BYTES.
+#:
+#: This is the load-bearing discriminator, and it replaces an earlier attempt
+#: that keyed on the mere PRESENCE of the relay envelope. That attempt was
+#: wrong, and the way it was wrong is worth recording: the envelope is a
+#: PROVENANCE signal (this failure came from an origin provider) and says
+#: nothing about RETRYABILITY. Live probes on 2026-09-04 confirmed it —
+#: a malformed tool name and an invalid response_format schema both came back
+#: fully wrapped, ``provider_name`` "OpenAI"/"Azure", and would have been
+#: retried for ~35s across 12 requests apiece for a defect no wait can fix.
+#:
+#: What actually separates the two, measured across seven malformed-request
+#: shapes against the live API: an origin provider refusing our REQUEST names
+#: the offending field in ``param`` ("tools[0].function.name",
+#: "messages[0].role", "response_format"). The recorded incident
+#: ("The requested model was not found.", relayed under a 404 from Meta for a
+#: model id that worked six times in the surrounding 75 seconds) carries NO
+#: ``param`` — there is no field of ours to point at, because nothing about
+#: our request was the problem.
+#:
+#: ``type`` deliberately does NOT feature: all three bodies above are
+#: ``invalid_request_error``, so it cannot tell them apart.
+_UPSTREAM_REQUEST_FIELD_KEY = "param"
 
 #: How many matched quote pairs :func:`_strip_quote_pair` will peel. Real
 #: bodies use at most one or two layers; the cap exists so a body made of
@@ -377,16 +426,20 @@ _MAX_QUOTE_PEELS = 4
 def _strip_quote_pair(text: str) -> str:
     """Peel MATCHED surrounding quote pairs off ``text``.
 
-    ``str.strip('"\'')`` would take any leading/trailing run of either
-    character, so unbalanced junk like ``\'\'\'ERROR""`` would reduce to the
-    sentinel and be treated as no-information. That only ever widens the match,
-    but the widening should be a decision rather than an accident of the API —
-    so pairs are peeled one at a time and an unbalanced body keeps its quotes
-    and stays ``request``.
+    Its caller is the overflow-marker check in
+    :func:`_relayed_upstream_failure`: a quoted ``"context length exceeded"``
+    must match the same markers as the bare sentence, or a deterministic
+    overflow would be retried as weather purely because the aggregator quoted
+    it. Normalising the quoting is what makes that comparison honest.
+
+    ``str.strip('"\'')`` would take any leading/trailing RUN of either
+    character, silently reshaping unbalanced junk like ``\'\'\'ERROR""``. Pairs
+    are peeled one at a time instead, so what reaches the markers differs from
+    the wire only by quoting the wire actually applied.
 
     The peel LOOPS rather than running once to cover a value that arrives
-    already wrapped more than once — e.g. ``'"ERROR"'`` — which costs nothing
-    to absorb and keeps the predicate insensitive to how many layers of
+    already wrapped more than once — e.g. ``'"context length"'`` — which costs
+    nothing to absorb and keeps the check insensitive to how many layers of
     quoting an aggregator applied.
 
     A JSON-encoded ``raw`` whose inner value is itself a string (the
@@ -439,40 +492,53 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
       classifying it ``request`` killed the turn with no retry and no
       failover.
 
-    :data:`_DETERMINISTIC_UPSTREAM_MARKERS` carves back out the relayed
-    wordings that genuinely describe our bytes (context length, a malformed
-    parameter): those fail identically on every retry and every fallback, so
-    they keep ``request`` and surface immediately.
+    The envelope alone is NOT enough, and an earlier draft of this function
+    that stopped there was wrong. ``metadata.raw`` establishes provenance —
+    the failure happened at the origin — but says nothing about whether a
+    retry could help. Live probes on 2026-09-04 settled it: a malformed tool
+    name and an invalid ``response_format`` schema both arrive fully wrapped,
+    and treating the envelope as sufficient retried each of them 12 times over
+    ~35s for a defect no wait can fix.
 
-    Two deliberate widenings, both toward "treat no-information as transient":
+    So provenance is narrowed by two carve-outs, both meaning "this describes
+    our bytes, not the provider's state":
+
+    - :data:`_UPSTREAM_REQUEST_FIELD_KEY` — the origin named the offending
+      field of our request in ``param``. Measured across seven malformed-request
+      shapes, every one names a field; the recorded incident names none.
+    - :data:`~local_operator.incidents.CONTEXT_LENGTH_MARKERS` — an overflow
+      complaint is deterministic even when ``param`` is absent, and the
+      canonical list is shared with the harness so the two cannot drift.
+
+    Two deliberate widenings remain, both toward "treat no-information as
+    transient":
 
     - The outer message is matched after trimming and case-folding, so
       ``"Provider returned error "`` matches too. The casing and padding on the
       wire are the aggregator's formatting, not part of the signal.
-    - :func:`_openrouter_upstream_text` unwraps a nested ``error`` object, so
-      ``{"error": {"message": "ERROR"}}`` resolves to the same bare sentinel and
-      also matches. A body that structurally tried to say something but whose
-      content is still the word "error" carries no more actionable information
-      than the flat sentinel. This is the case most likely to shadow a real
-      upstream error whose message happens to be that single word; the cost of
-      that collision is bounded retries, and the cost of the opposite mistake
-      is a dead turn.
+    - A body whose ``raw`` is a bare sentinel (observed: ``"ERROR"``, provider
+      "Stealth") carries no ``param`` and no overflow wording, so it lands here
+      naturally rather than needing a rule of its own. This is the case most
+      likely to shadow a real upstream error whose message happens to be one
+      word; the cost of that collision is bounded retries, and the cost of the
+      opposite mistake is a dead turn.
 
     The price is latency, not correctness, and it is not small: a genuinely
-    broken request now saturates the driver's server-fault budget (12 requests
-    per target) before surfacing. Measured against the default 500ms base delay
-    and the 8s backoff cap, that is 64-76s of sleep on a single target and
-    roughly 4-5 minutes across a 3-target fallback chain. A user hitting a
-    PERSISTENT relayed 4xx therefore waits minutes for a failure that
-    previously surfaced immediately. That is the accepted trade: this shape is
-    by construction unattributable, so the alternative is killing a turn that
-    rotation or a fallback could have served — but it is a real cost, not the
-    rounding error an earlier draft of this docstring implied.
+    broken request that gets past both carve-outs saturates the driver's
+    server-fault budget (12 requests per target) before surfacing. MEASURED at
+    the production defaults (``maxRetries`` 10, 500ms base, 8s cap): **33.5s on
+    a single target and 100.1s across a 3-target chain**, at 12 requests per
+    target and 36 across three. An earlier draft of this docstring estimated
+    64-76s and 4-5 minutes from the backoff ladder alone; the real figures are
+    roughly half that, because credential rotation resets the ladder and jitter
+    shaves ~12.5% more. The request counts were right and the wall-clock was
+    not — recorded precisely because this paragraph is the written record of an
+    accepted trade-off, and an unverified number in it is the same defect it
+    criticises an earlier draft for.
 
-    The marker carve-out is what keeps that cost bounded to the cases that
-    deserve it: the failures a user can actually fix by changing the request
-    still fail fast, and only the ones no retry could have prevented pay for
-    the cascade.
+    That is the accepted trade: a shape that survives both carve-outs is by
+    construction unattributable, so the alternative is killing a turn that
+    rotation or a fallback could have served.
     """
     if status is not None and status not in _RELAYED_UPSTREAM_STATUSES:
         return False
@@ -481,15 +547,25 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
         return False
     metadata = error.get("metadata")
     if not isinstance(metadata, Mapping) or not _first_text(metadata.get("raw")):
-        # The relay envelope is the whole signal. "Provider returned error"
-        # with nothing wrapped inside it is not evidence of an upstream hop,
-        # so it keeps whatever its status already meant.
+        # The relay envelope establishes PROVENANCE: without it there is no
+        # evidence of an upstream hop at all, so the body keeps whatever its
+        # status already meant. It is necessary but NOT sufficient — see below.
         return False
-    upstream = _openrouter_upstream_text(error)
-    stripped = _strip_quote_pair(upstream.strip()).lower()
-    if stripped in _OPAQUE_RAW_SENTINELS:
-        return True
-    return not any(marker in stripped for marker in _DETERMINISTIC_UPSTREAM_MARKERS)
+    upstream = _openrouter_upstream_error(error)
+    if upstream is not None and _first_text(upstream.get(_UPSTREAM_REQUEST_FIELD_KEY)):
+        # The origin named a field of OUR request. That is a defect in the
+        # bytes we sent: it will fail identically on a retry and on every
+        # fallback target, so it stays `request` and surfaces immediately.
+        return False
+    text = _strip_quote_pair(_openrouter_upstream_text(error).strip()).lower()
+    if any(marker in text for marker in CONTEXT_LENGTH_MARKERS):
+        # An overflow complaint is deterministic in the same way even when the
+        # provider omits `param`: the request is too big and will stay too big.
+        # Sourced from the harness's canonical list so this file and
+        # `incidents.py` cannot drift into disagreeing about what an overflow
+        # looks like.
+        return False
+    return True
 
 
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:

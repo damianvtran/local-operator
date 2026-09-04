@@ -1595,19 +1595,100 @@ class TestRelayedUpstream404:
         error = self._error(httpx.Response(404, json=body))
         assert (error.kind, error.retryable) == ("request", False)
 
-    def test_relayed_body_about_our_bytes_stays_request(self) -> None:
-        """The carve-out. A relayed complaint about the REQUEST fails
-        identically on every retry and every fallback target, so it keeps
-        ``request`` and surfaces at once \u2014 this is what bounds the latency cost
-        of the widening to the failures a retry could actually have served."""
+    def test_a_relayed_complaint_naming_a_request_field_stays_request(self) -> None:
+        """Review finding B1, pinned.
+
+        The relay envelope proves PROVENANCE, not retryability. These bodies
+        were captured from the LIVE API on 2026-09-04 by sending deliberately
+        malformed requests: each arrives fully wrapped, with a
+        ``provider_name``, and each is a defect in our own bytes that no retry
+        can fix. An earlier draft keyed on the envelope alone and retried them
+        12 times over ~35s apiece.
+
+        What separates them from the incident is ``param``: the origin names
+        the offending field of OUR request. The incident names none, because
+        nothing about the request was the problem."""
+        for inner in (
+            {
+                "message": "Invalid 'tools[0].function.name': does not match pattern.",
+                "type": "invalid_request_error",
+                "param": "tools[0].function.name",
+                "code": "invalid_value",
+            },
+            {
+                "message": "Invalid schema for response_format 'x'.",
+                "type": "invalid_request_error",
+                "param": "response_format",
+                "code": None,
+            },
+            {
+                "message": "Invalid value: 'wizard'.",
+                "type": "invalid_request_error",
+                "param": "messages[0].role",
+            },
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": inner}), "OpenAI"))
+            )
+            assert (error.kind, error.retryable) == ("request", False), inner["param"]
+
+    def test_type_alone_cannot_discriminate(self) -> None:
+        """Why the predicate does not key on ``type``.
+
+        The incident and the malformed-request bodies are BOTH
+        ``invalid_request_error``. Only the presence of ``param`` tells them
+        apart, so a future edit that reaches for ``type`` instead has this test
+        to explain why that cannot work."""
+        shared = {"message": "...", "type": "invalid_request_error"}
+        weather = self._error(
+            httpx.Response(404, json=self._relay(404, json.dumps({"error": dict(shared)})))
+        )
+        ours = self._error(
+            httpx.Response(
+                400, json=self._relay(400, json.dumps({"error": {**shared, "param": "top_p"}}))
+            )
+        )
+        assert weather.kind == "transient"
+        assert ours.kind == "request"
+
+    def test_relayed_overflow_without_param_stays_request(self) -> None:
+        """Review finding M1, pinned.
+
+        A provider can report an overflow WITHOUT naming a param -- anthropic's
+        "prompt is too long" and google's token-count wording both do. Those
+        are deterministic in the same way (the request is too big and stays too
+        big), so they are carved out by the harness's canonical
+        ``CONTEXT_LENGTH_MARKERS`` rather than by a second list maintained
+        here, which is what stops the two from drifting apart."""
         for text in (
+            "prompt is too long: 250000 tokens > 200000 maximum",
+            "The input token count exceeds the maximum context window",
             "This model's maximum context length is 16385 tokens",
-            "`max_output_tokens` The number must be `>= 16`.",
         ):
             error = self._error(
                 httpx.Response(400, json=self._relay(400, json.dumps({"error": {"message": text}})))
             )
             assert (error.kind, error.retryable) == ("request", False), text
+
+    def test_the_shared_marker_list_is_the_harness_one(self) -> None:
+        """The carve-out must stay wired to the canonical list, not a copy.
+
+        Asserting identity rather than contents is deliberate: a test that
+        re-listed the wordings would itself become the third copy this finding
+        was about."""
+        from local_operator.incidents import CONTEXT_LENGTH_MARKERS as canonical
+        from local_operator.providers import clients
+
+        assert clients.CONTEXT_LENGTH_MARKERS is canonical
+
+    def test_a_quoted_overflow_is_still_recognised(self) -> None:
+        """Quoting is the aggregator's formatting, not part of the signal: a
+        quoted overflow must carve out exactly like a bare one, or a
+        deterministic failure would be retried purely because it arrived
+        wrapped in quotes."""
+        raw = json.dumps("This model's maximum context length is 16385 tokens")
+        error = self._error(httpx.Response(400, json=self._relay(400, raw)))
+        assert (error.kind, error.retryable) == ("request", False)
 
     def test_relayed_401_still_reaches_credential_rotation(self) -> None:
         """401/403 are deliberately OUT of the relayed set: they describe the
@@ -1615,6 +1696,44 @@ class TestRelayedUpstream404:
         retried as weather."""
         error = self._error(httpx.Response(401, json=self._relay(401, "ERROR")))
         assert error.kind == "auth"
+
+    def test_an_absurdly_long_provider_name_is_not_rendered(self) -> None:
+        """Review finding M3, pinned.
+
+        ``provider_name`` is provider-controlled text sharing the 500-char
+        frame budget with the upstream diagnostics. A 300-char attribution
+        would push the part that says what actually went wrong off the end,
+        making the frame strictly worse than the generic wording it replaced,
+        so an implausible name is dropped instead of trusted."""
+        body = {
+            "error": {
+                "message": "Provider returned error",
+                "code": 404,
+                "metadata": {
+                    "raw": json.dumps({"error": {"message": "the real diagnostics"}}),
+                    "provider_name": "X" * 300,
+                },
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert "the real diagnostics" in error.message
+        assert "XXX" not in error.message
+
+    def test_a_provider_name_cannot_forge_a_second_line(self) -> None:
+        """A name carrying a newline would render as a forged extra line in the
+        frame, so whitespace is collapsed rather than passed through."""
+        body = {
+            "error": {
+                "message": "Provider returned error",
+                "code": 404,
+                "metadata": {
+                    "raw": json.dumps({"error": {"message": "real"}}),
+                    "provider_name": "Meta\nAPPROVED BY: nobody",
+                },
+            }
+        }
+        error = self._error(httpx.Response(404, json=body))
+        assert "\n" not in error.message
 
     def test_message_without_provider_name_keeps_its_wording(self) -> None:
         """Attribution is never invented: a relay body that omits
