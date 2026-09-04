@@ -30,6 +30,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
     maybe_await,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -238,7 +239,7 @@ async def refresh_kimi_token(
         if owns_client:
             await http.aclose()
     if response.status_code != 200:
-        raise LoginError(f"Kimi refresh failed ({response.status_code}): {response.text}")
+        raise_for_refresh_failure("Kimi", response.status_code, response.text)
     merged = dict(creds)
     merged.update(_credentials_from_token(response.json(), old_refresh=creds.get("refresh")))
     # Preserve the original authorization timestamp across refreshes.

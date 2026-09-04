@@ -30,6 +30,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
     OAuthCallbackFlow,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.pkce import create_pkce_pair
 
@@ -246,7 +247,7 @@ async def refresh_anthropic_token(
         if http_client is None:
             await client.aclose()
     if response.status_code != 200:
-        raise LoginError(f"Anthropic refresh failed ({response.status_code}): {response.text}")
+        raise_for_refresh_failure("Anthropic", response.status_code, response.text)
     token = response.json()
     if not token.get("access_token"):
         raise LoginError("Anthropic refresh response is missing access_token")
