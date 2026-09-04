@@ -182,3 +182,111 @@ def test_tags_carry_the_episode_and_adapter() -> None:
 def test_proxy_flag_comes_from_the_task() -> None:
     assert _resolve(fixtures.PROXY).enable_proxy is True
     assert _resolve(fixtures.PLAIN).enable_proxy is False
+
+
+# ---------------------------------------------------------------------------
+# AWS_ROOT_VOLUME_SIZE: the disk-exhaustion escape hatch
+# ---------------------------------------------------------------------------
+#
+# The failure this knob answers is a CLOCK, not a workload: the guest's x11grab
+# recorder fills the root filesystem at ~6.8 MB/s against ~2.2 GB free, so the
+# disk reaches 0 bytes at ~t+383s and the next screenshot request fails. 7 of 8
+# runs first failed in a 424-466s window regardless of agent activity (16-32
+# steps) and on both t3.xlarge and m5.xlarge -- the volume is identical either
+# way, which is why the instance-type knob changed nothing.
+
+
+def _with_volume_size(value: str) -> tuple[ScopedInfraValue, ...]:
+    return _INFRA + (
+        ScopedInfraValue(name="AWS_ROOT_VOLUME_SIZE", purpose="benchmark_compute", value=value),
+    )
+
+
+def test_a_root_volume_override_replaces_the_launch_time_default() -> None:
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    plan = provisioning.resolve(
+        descriptor, episode_id="ep-1", infra_values=_with_volume_size("120")
+    )
+    assert plan.volume_gb == 120
+
+
+def test_a_root_volume_override_beats_a_task_pinned_volume_size() -> None:
+    # The precedence decision, asserted rather than assumed, and deliberately
+    # the same rule AWS_INSTANCE_TYPE uses: an override a task pin could veto
+    # would fail on exactly the tasks that run long enough to hit the wall.
+    descriptor = taskfile.load_static(fixtures.CUSTOM_INSTANCE.encode(), module_name="tasks/t.py")
+    assert descriptor.volume_size == 100
+    plan = provisioning.resolve(
+        descriptor, episode_id="ep-1", infra_values=_with_volume_size("250")
+    )
+    assert plan.volume_gb == 250
+
+
+def test_a_task_pinned_volume_size_still_wins_without_an_override() -> None:
+    # The override is opt-in: absent it, the task's own pin is untouched.
+    assert _resolve(fixtures.CUSTOM_INSTANCE).volume_gb == 100
+
+
+def test_volume_stays_none_without_an_override_or_a_task_pin() -> None:
+    # Omitting the knob must reproduce today's behaviour EXACTLY -- None, so
+    # OSWorld's own launch-time resolution from the AMI's BDM still runs.
+    assert _resolve(fixtures.PLAIN).volume_gb is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        # No empty-string case: ``ScopedInfraValue`` rejects it upstream with a
+        # min_length constraint, so it cannot reach ``resolve`` at all.
+        "eighty",  # not a number at all
+        "40.5",  # fractional GiB do not exist
+        "1e3",  # scientific notation
+        "0x28",  # hex
+        " 40",  # leading whitespace int() would silently accept
+        "40 ",  # trailing whitespace
+        "+40",  # signed, which int() would also accept
+        "4_0",  # PEP 515 underscore int() would read as 40
+        "\uff14\uff10",  # full-width digits str.isdigit() alone accepts
+        "40; rm -rf /",  # anything outside the closed shape
+    ],
+)
+def test_a_malformed_root_volume_override_is_rejected_at_prepare_time(bad: str) -> None:
+    # Rejected, not ignored: silently discarding it would launch the 2.2 GB-free
+    # default the operator was escaping and lose another paid episode at t+424s.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    with pytest.raises(ProvisioningError) as excinfo:
+        provisioning.resolve(descriptor, episode_id="ep-1", infra_values=_with_volume_size(bad))
+    assert "AWS_ROOT_VOLUME_SIZE" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "-100", "16385", "999999"])
+def test_an_out_of_range_root_volume_override_is_rejected(bad: str) -> None:
+    # Zero and negatives are meaningless; above 16384 GiB is refused by AWS
+    # itself because the provider pins gp3. Catching them here costs nothing
+    # and beats an opaque botocore error midway through a paid launch.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    with pytest.raises(ProvisioningError) as excinfo:
+        provisioning.resolve(descriptor, episode_id="ep-1", infra_values=_with_volume_size(bad))
+    assert "AWS_ROOT_VOLUME_SIZE" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("good", ["1", "40", "80", "120", "16384"])
+def test_root_volume_sizes_at_and_inside_the_bounds_are_accepted(good: str) -> None:
+    # The bounds are INCLUSIVE; an off-by-one here would reject the largest
+    # gp3 volume AWS sells, and 1 is the smallest the API accepts.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    plan = provisioning.resolve(descriptor, episode_id="ep-1", infra_values=_with_volume_size(good))
+    assert plan.volume_gb == int(good)
+
+
+def test_the_two_infra_overrides_apply_independently() -> None:
+    # Both knobs answer the same symptom (a frameless observation) from
+    # different causes, so an operator hitting both applies both at once.
+    descriptor = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/t.py")
+    infra = _INFRA + (
+        ScopedInfraValue(name="AWS_INSTANCE_TYPE", purpose="benchmark_compute", value="m5.2xlarge"),
+        ScopedInfraValue(name="AWS_ROOT_VOLUME_SIZE", purpose="benchmark_compute", value="150"),
+    )
+    plan = provisioning.resolve(descriptor, episode_id="ep-1", infra_values=infra)
+    assert plan.instance_type == "m5.2xlarge"
+    assert plan.volume_gb == 150

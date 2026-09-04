@@ -195,11 +195,24 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    burstable `t3.xlarge` runs out of CPU credits — see "Burstable credit
    exhaustion" in `docs/benchmarks/osworld_2/README.md`.
 
-   **This value requires a workspace built from adapter source that supports
-   it.** The source here gained it without a version bump (the bump would
+   Optional `AWS_ROOT_VOLUME_SIZE` (purpose `benchmark_compute`, a whole
+   number of GiB) replaces the root volume size for the benchmark VM. It
+   follows `AWS_INSTANCE_TYPE` exactly: it **overrides a task's own
+   `volume_size`**, for the same content-hash reason, and omitting it
+   reproduces the previous behaviour exactly (the task's pin, else the AMI's
+   own size resolved at launch). A non-integer, zero, negative, or
+   out-of-range value is refused at `prepare` before anything is allocated;
+   a size smaller than the AMI's own snapshot is refused at launch, with both
+   numbers named, because establishing that floor needs a `describe_images`
+   call `prepare` may not make. Reach for it when episodes die at a
+   consistent wall-clock time — see "Disk exhaustion" in
+   `docs/benchmarks/osworld_2/README.md`.
+
+   **Both values require a workspace built from adapter source that supports
+   them.** The source here gained them without a version bump (the bump would
    falsify the pilot's pinned attestation), so the shipped source and the
    digest-pinned `0.1.1` wheel are different code under one version string.
-   Supplying it to a build that does not declare it is refused by the runner
+   Supplying one to a build that does not declare it is refused by the runner
    before `prepare` rather than silently ignored — an ignored override would
    put a false hardware claim into a sealed bundle.
 6. **Judged tasks only** → secret `OSWORLD_EVAL_MODEL_API_KEY` plus infra

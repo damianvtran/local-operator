@@ -229,6 +229,75 @@ Seeing that error means the workspace and selector need rebuilding against the
 current adapter source (§ the build recipe in
 `benchmarks/osworld_v2_adapter/README.md`), not that the flag is wrong.
 
+### Disk exhaustion by the screen recorder, and `AWS_ROOT_VOLUME_SIZE`
+
+`AWS_INSTANCE_TYPE` fixed a *starved* guest. A second failure presents
+**identically** — `ObservationPhaseError: environment returned no screenshot
+frame` — and has nothing to do with CPU. Episodes died at roughly the same
+**wall-clock time** regardless of how much work the agent had done: 7 of 8 runs
+first failed in a **424–466s window**, at 16–32 steps, on both `t3.xlarge`
+*and* `m5.xlarge`. That the instance-type fix changed nothing was the clue.
+
+Instrumenting the guest's own control server showed the root filesystem
+filling on a clock rather than on workload:
+
+| time | root filesystem |
+|------|-----------------|
+| t+54s … t+342s | 93% used, 2.2 GB free (stable) |
+| t+363s | 95% |
+| t+383s | **100% used, 0 bytes free** |
+| t+424s | first `ObservationPhaseError` |
+
+OSWorld starts an `x11grab` **ffmpeg screen recorder** in the guest on reset.
+Its measured fill rate is **~6.8 MB/s (~410 MB/min)** against only ~2.2 GB free
+at launch, so the disk exhausts in **~330s on every run**. A disk at 0 bytes
+cannot write a screenshot, which is exactly the observed failure — and the rate
+is constant regardless of agent activity, which is why the wall is a clock
+rather than a workload. The volume is identical on either instance type, which
+is why changing the hardware family did not move it.
+
+The escape hatch is the optional infra value `AWS_ROOT_VOLUME_SIZE`, a whole
+number of GiB:
+
+```sh
+--infra AWS_ROOT_VOLUME_SIZE=120
+```
+
+At ~410 MB/min, each extra GiB buys roughly 2.5 minutes of recording, so size
+it against the wall budget rather than against disk cost.
+
+It is infra rather than a task field for the same reason as the instance type:
+task files are **content-hash verified**, so editing `volume_size` invalidates
+the digest that makes a score reproducible. For the same reason it **beats a
+task's own pinned `volume_size`** — the task author sized a volume against the
+workload they could see, not against a recorder filling the disk on a clock.
+
+Validation runs in two places, deliberately:
+
+- **At `prepare`, before anything is allocated** — non-integers (`40.5`,
+  `1e3`, `+40`, `4_0`, whitespace), zero, negatives, and anything outside
+  1–16384 GiB (the gp3 maximum, since the provider pins gp3).
+- **At launch, before `run_instances`** — a size smaller than the AMI's own
+  snapshot. EBS cannot restore a snapshot into a smaller volume, and AWS
+  refuses it with an `InvalidBlockDeviceMapping` naming neither size; the
+  adapter's message names both plus the knob to change. This check cannot move
+  to `prepare`, which by contract issues no I/O at all — not even a read-only
+  `describe_images` — because that is what lets it run before allocation.
+
+Omitting the value reproduces the previous behaviour exactly: the task's pin,
+else the AMI's own root size resolved at launch (OSWorld's 40 GiB floor). When
+it **is** set, `scripts/run_episode.py` stamps `aws_root_volume_size_override`
+into the evidence manifest's metadata, so a run that survived past the
+exhaustion wall is not silently compared against truncated ones.
+
+Like `AWS_INSTANCE_TYPE`, this value is **gated**: supplying it to an adapter
+build that does not declare it fails the episode before `prepare` with
+`UndeclaredDisclosedInfra`, because a silently dropped override plus a stamped
+disclosure is a false statement sealed in a `verify_bundle`-valid bundle. Both
+the gate and the stamp derive from a single table
+(`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
+so a future third value cannot be gated without being disclosed or vice versa.
+
 ### Upstream is sealed after the first reset
 
 One `reset` per episode is the contract. Upstream's own allocation paths — a
