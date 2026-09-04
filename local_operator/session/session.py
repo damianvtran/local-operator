@@ -2611,7 +2611,16 @@ class Session:
         # (and, done at the top of this file, cyclic).
         from local_operator.providers.failover import is_image_rejection
 
-        if self._images_rejected or not is_image_rejection(error):
+        if not is_image_rejection(error):
+            return
+        if self._images_rejected:
+            # Already stripping, so there is nothing more to do to the render —
+            # but a GENUINE refusal permanently downgrades the strip's scope.
+            # Without this, a size strip that a real refusal later supersedes
+            # stays marked provider-scoped, and the next `/model` switch lifts
+            # it and re-admits a block the provider actually refused (QA round
+            # 3, Q6). Idempotent: clearing a flag that is already clear is free.
+            self._images_rejected_for_size = False
             return
         self._images_rejected = True
         logger.warning(

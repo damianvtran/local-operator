@@ -30,6 +30,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
     TextContent,
+    ToolCall,
 )
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import FRAMES_SHED_NOTICE, Session
@@ -693,4 +694,108 @@ async def test_the_terminal_notice_does_not_claim_screenshots_on_a_text_history(
     assert terminal, "no terminal notice was emitted"
     assert "screenshot" not in terminal[0].lower(), terminal[0]
     assert "images have been removed" not in terminal[0].lower(), terminal[0]
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# A surrogate on disk must not wedge the session (agent review round 3, R10)
+# ---------------------------------------------------------------------------
+
+#: Legal in a Python ``str`` and legal JSON, so it round-trips into the
+#: transcript and is replayed verbatim on every resume.
+LONE_SURROGATE = "bad \ud800 here"
+
+
+@pytest.mark.asyncio
+async def test_a_surrogate_in_history_does_not_kill_the_render(tmp_path):
+    """R10: the sizer runs inside ``_render_history``, so raising there takes
+    out every wire path including ``/compact`` — the escape hatch.
+
+    Fails on 2b15c340 with UnicodeEncodeError.
+    """
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    call = Message.assistant("x")
+    call.tool_calls = [ToolCall(id="1", name="write", arguments={"t": LONE_SURROGATE})]
+    await session.seed_history([Message.user(f"look {LONE_SURROGATE}"), call])
+
+    rendered = session._render_history(list(session._context.messages))
+
+    assert len(rendered) == 2
+    await session.prompt("hello")
+    assert stream.requests, "the turn never reached the provider"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_surrogate_persisted_to_disk_survives_a_resume(tmp_path):
+    """The wedge shape specifically: the codepoint is IN the transcript, so a
+    resumed session replays it on every turn forever.
+
+    This is the case that made R10 a blocker rather than a crash — recovery
+    from inside was impossible, exactly like the 413 this PR exists to fix.
+    """
+    directory = tmp_path / "sess"
+    first = ScriptedOk()
+    session = make_session(tmp_path, first)
+    call = Message.assistant("x")
+    call.tool_calls = [ToolCall(id="1", name="write", arguments={"t": LONE_SURROGATE})]
+    await session.seed_history([Message.user("hi"), call])
+    await session.prompt("one")
+    await session.dispose()
+
+    # The surrogate really is on disk, unescaped by the JSON round trip.
+    assert "ud800" in (directory / "transcript.jsonl").read_text(encoding="utf-8")
+
+    # A cold relaunch from that directory — what `--resume` does.
+    second = ScriptedOk()
+    resumed = Session(
+        model=MODEL,
+        stream_fn=second,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    assert resumed._render_history(list(resumed._context.messages))
+    await resumed.prompt("after resume")
+    assert second.requests, "the resumed session could not send"
+    await resumed.dispose()
+
+
+# ---------------------------------------------------------------------------
+# A genuine refusal downgrades the strip's scope (QA round 3, Q6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_after_a_size_strip_makes_the_strip_permanent(tmp_path):
+    """Q6: the size strip is provider-scoped, a refused BLOCK is not.
+
+    When a real refusal arrives while a size strip is already in force, the
+    strip stops being provider-scoped — otherwise the next ``/model`` switch
+    lifts it and re-admits a block the provider actually refused, which is the
+    one thing R8's own comment says must never happen.
+    """
+    stream = RefusesOversizeRequests(cap=1_000)
+    session = make_session(tmp_path, stream)
+    await session.seed_history(_frames(6))
+
+    for turn in range(12):
+        await session.prompt(f"t{turn}")
+        if session._images_rejected:
+            break
+    assert session._images_rejected_for_size, "the size strip never fired"
+
+    # A genuine image refusal now supersedes it.
+    await session._degrade_if_image_rejected(ProviderError(400, "Could not process image"))
+    assert session._images_rejected
+    assert not session._images_rejected_for_size, "the strip is still marked provider-scoped"
+
+    session.set_model(ModelSpec(provider="other", model_id="lax", context_window=1_000_000))
+
+    assert session._images_rejected, "a refused block was re-admitted by a model switch"
+    rendered = session._render_history(list(session._context.messages))
+    assert not any(
+        isinstance(block, ImageContent) for message in rendered for block in message.content
+    )
     await session.dispose()

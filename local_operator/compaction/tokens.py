@@ -495,16 +495,28 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
     Counts base64 payloads, text, and tool-call name+arguments — the three
     things that carry real length.
 
-    **Accuracy, stated with its sign.** Tool-call arguments are sized exactly
-    for the encoding the provider clients actually use (UTF-8,
-    ``ensure_ascii=False`` — see :func:`_argument_bytes`), with a small
-    POSITIVE bias measured at +0.189% over 488,138 real tool calls. Message
-    text and base64 are counted as characters, which is exact for base64 and a
-    slight under-count for non-ASCII prose; the request's own JSON envelope
-    (roles, keys, block wrappers) is not modelled at all and adds a few percent
-    more. Those remainders are absorbed by the budget's 25% headroom below the
-    provider cap rather than modelled, because a per-provider serialization
-    model is a constant that rots.
+    **Accuracy, stated with its sign and its SCOPE.** The never-under property
+    holds for TOOL-CALL ARGUMENTS specifically, not for this function's total,
+    and the difference matters enough to state plainly rather than let a reader
+    generalise it:
+
+    - **Arguments** (:func:`_argument_bytes`, and ``raw_arguments`` beside it)
+      are sized exactly for the encoding the provider clients actually use,
+      with a small POSITIVE bias — +0.189% measured over 488,138 real tool
+      calls, zero under-counts.
+    - **The total this function returns UNDER-counts a real history**, by a
+      measured mean of -2.42% and a worst case of -17.39% across 4,686 real
+      sessions. Two known causes, both deliberate: message text is counted as
+      characters rather than UTF-8 bytes, and the request's own JSON envelope
+      (roles, keys, block wrappers) is not modelled at all.
+
+    That residual is absorbed by the budget's headroom rather than modelled —
+    24 MB against a 32 MB cap is a ~28% margin, several times the worst
+    observed shortfall plus the envelope — because a per-provider
+    serialization model is a constant that rots. It is a DISCLOSED gap, not a
+    claim of exactness: anyone tightening the budget toward the cap has to
+    close it first, and the fast path for it already exists (the
+    ``isascii()`` shape :func:`_string_bytes` uses).
 
     The one property that must not regress: the ARGUMENT sizing must never
     come in under the wire. An under-count means believing an oversize request
@@ -525,11 +537,35 @@ def estimate_wire_bytes(messages: Sequence[Message]) -> int:
             # is literally what goes on the wire. Otherwise MEASURE the
             # arguments structurally rather than re-serializing them — see
             # :func:`_argument_bytes` for why that distinction is load-bearing.
-            total += len(call.name)
+            total += _utf8_len(call.name)
             total += (
-                len(call.raw_arguments) if call.raw_arguments else _argument_bytes(call.arguments)
+                # ``raw_arguments`` is ALREADY serialized JSON, so it needs the
+                # UTF-8 length and NOT the escape expansion ``_argument_bytes``
+                # applies — its quotes and backslashes are the escaping, not
+                # content to be escaped again. ``len`` was wrong here for the
+                # same reason it was wrong inside the walk: it counts
+                # characters, and this is the branch carrying essentially all
+                # LIVE traffic (``harness/loop.py`` always populates it), where
+                # 6.42% of real calls under-counted, worst -29.79% (agent
+                # review round 3, R7 residual).
+                _utf8_len(call.raw_arguments)
+                if call.raw_arguments
+                else _argument_bytes(call.arguments)
             )
     return total
+
+
+def _utf8_len(text: str) -> int:
+    """UTF-8 byte length of ``text``, for a string that is already wire-shaped.
+
+    Shares the surrogate tolerance :func:`_string_bytes` documents at length:
+    a lone surrogate is legal in a Python ``str`` and reaches here from a
+    transcript, so a plain ``encode`` would raise and kill the render rather
+    than return a number.
+    """
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-8", "surrogatepass"))
 
 
 def _argument_bytes(arguments: object) -> int:
@@ -604,6 +640,15 @@ def _argument_bytes(arguments: object) -> int:
     hit the interpreter's stack limit on a pathological payload. A cycle is
     not reachable (these are freshly parsed JSON) but the flat walk would
     terminate on the size accumulator anyway.
+
+    The "sized for the wire" contract holds for WIRE-LEGAL input, which is
+    what ``arguments`` can hold: it is always the output of a JSON parse. This
+    returns a number for ``NaN``/``inf``, ``bytes``, ``set`` and arbitrary
+    objects where the real encoder would raise (``allow_nan=False``, or
+    ``TypeError``) — deliberately, because a sizer that raises is the R10
+    failure, and by the time such a value could appear the request is already
+    unsendable for reasons this function does not exist to detect (agent
+    review round 3, R11).
     """
     total = 0
     stack: list[object] = [arguments]
@@ -682,8 +727,26 @@ def _string_bytes(text: str) -> int:
     ``str.translate`` over the same characters reads more neatly than the
     counts but is ~7x slower — it does a dict lookup per character, where
     ``count`` stays in C.
+
+    **``surrogatepass`` is load-bearing, not defensive.** A lone surrogate
+    (``\\ud800``) is legal in a Python ``str`` AND legal JSON, so a model that
+    emits one round-trips it through ``json.dumps``/``json.loads`` and it
+    lands in ``transcript.jsonl`` verbatim. A plain ``encode("utf-8")`` raises
+    ``UnicodeEncodeError`` on it — and this function runs at the render seam,
+    inside ``_render_history``, which every wire path and ``/compact`` go
+    through. So a bare encode turns one stray codepoint into a session that
+    raises on every turn forever, including the escape hatch: the exact
+    wedge this whole change exists to delete, reintroduced through the
+    sizer meant to prevent it (agent review round 3, R10).
+
+    Sizing with ``surrogatepass`` is also the RIGHT number, not merely a
+    non-raising one: it is what a lenient encoder puts on the wire for that
+    codepoint, so the estimate stays honest instead of being a fallback guess.
+    This function must always return a number for any legal Python ``str`` —
+    it is a size estimate, and there is no input for which failing to size is
+    better than sizing.
     """
-    total = len(text) if text.isascii() else len(text.encode("utf-8"))
+    total = len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))
     for char in _JSON_SHORT_ESCAPES:
         if char in text:
             total += text.count(char)

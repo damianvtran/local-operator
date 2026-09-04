@@ -458,3 +458,122 @@ def test_raw_arguments_are_still_preferred_when_present() -> None:
     # The raw string verbatim, NOT the structural estimate of the parsed dict —
     # which for this payload would be one byte larger.
     assert estimate_wire_bytes([message]) == len("bash") + len('{"command":"ls"}')
+
+
+# ---------------------------------------------------------------------------
+# A lone surrogate must never break sizing (agent review round 3, R10)
+# ---------------------------------------------------------------------------
+#
+# ``\ud800`` is legal in a Python ``str`` AND legal JSON, so a model that emits
+# one round-trips it through ``json.dumps``/``json.loads`` and it lands in
+# ``transcript.jsonl`` verbatim. A plain ``encode("utf-8")`` raises on it — and
+# this sizer runs inside ``_render_history``, which every wire path and
+# ``/compact`` go through, so one stray codepoint made every later turn raise
+# forever. That is the wedge this whole change exists to delete, reintroduced
+# through the sizer meant to prevent it.
+
+#: A lone high surrogate, the shape that reaches a transcript unescaped.
+LONE_SURROGATE = "hello \ud800 world"
+
+
+def test_a_lone_surrogate_is_legal_json_and_survives_a_transcript_round_trip() -> None:
+    """The premise, pinned: this is reachable input, not a malformed edge case.
+
+    If this ever stops holding the regression below is moot — but it holds,
+    and it is why the sizer must tolerate the codepoint.
+    """
+    encoded = json.dumps({"text": LONE_SURROGATE})
+    assert json.loads(encoded)["text"] == LONE_SURROGATE
+    # And the strict encoder — the one the sizer used to call — refuses it.
+    with pytest.raises(UnicodeEncodeError):
+        json.dumps(LONE_SURROGATE, ensure_ascii=False).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        LONE_SURROGATE,
+        "\ud800",  # bare, nothing around it
+        "\udfff",  # the other end of the surrogate range
+        "\ud83d\ude00",  # an unpaired pair, which is NOT the emoji
+        "ok \ud800 \u6587 \U0001f600 mixed",  # beside legal non-ASCII
+    ],
+)
+def test_sizing_never_raises_on_a_lone_surrogate(payload: str) -> None:
+    """THE R10 regression: a size estimate must always return a number.
+
+    Fails on 2b15c340 with UnicodeEncodeError.
+    """
+    from local_operator.compaction.tokens import _argument_bytes, _string_bytes, _utf8_len
+
+    assert _string_bytes(payload) > 0
+    assert _utf8_len(payload) > 0
+    assert _argument_bytes({"text": payload}) > 0
+
+    message = Message(role="user", content=[TextContent(text=payload)])
+    assert estimate_wire_bytes([message]) > 0
+
+
+def test_a_surrogate_is_sized_as_a_lenient_encoder_would_emit_it() -> None:
+    """``surrogatepass`` is the right NUMBER, not just a non-raising one."""
+    from local_operator.compaction.tokens import _string_bytes
+
+    # Three bytes for the surrogate itself, plus the surrounding ASCII.
+    expected = len(LONE_SURROGATE.encode("utf-8", "surrogatepass"))
+    assert _string_bytes(LONE_SURROGATE) == expected
+
+
+def test_a_tool_call_carrying_a_surrogate_is_sized_on_both_branches() -> None:
+    """Both argument branches must tolerate it — the parsed dict AND the
+    pre-serialized ``raw_arguments`` string that live traffic carries."""
+    parsed = Message.assistant("")
+    parsed.tool_calls = [ToolCall(id="1", name="write", arguments={"t": LONE_SURROGATE})]
+    assert estimate_wire_bytes([parsed]) > 0
+
+    raw = Message.assistant("")
+    raw.tool_calls = [
+        ToolCall(id="1", name="write", raw_arguments=json.dumps({"t": LONE_SURROGATE}))
+    ]
+    assert estimate_wire_bytes([raw]) > 0
+
+
+# ---------------------------------------------------------------------------
+# raw_arguments is sized in BYTES (agent review round 3, R7 residual)
+# ---------------------------------------------------------------------------
+#
+# ``raw_arguments`` is the branch carrying essentially all LIVE traffic
+# (``harness/loop.py`` always populates it), and it kept the character count
+# that R7 named: 6.42% of real calls under-counted, worst -29.79%.
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"text": "plain ascii"},
+        {"text": "\u6587\u5b57" * 100},
+        {"text": "\U0001f600" * 80},
+        {"text": "\u00e9\u00e8" * 100},
+        {"path": "/src/\u6a21\u5757.py", "content": 'x = "\u00e9"\n' * 50},
+    ],
+)
+def test_raw_arguments_are_sized_in_bytes_not_characters(arguments: dict) -> None:
+    """Fails on 2b15c340 for every non-ASCII payload."""
+    raw = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    message = Message.assistant("")
+    message.tool_calls = [ToolCall(id="1", name="w", raw_arguments=raw)]
+
+    estimated = estimate_wire_bytes([message])
+    actual = len("w".encode("utf-8")) + len(raw.encode("utf-8"))
+
+    assert estimated >= actual, (
+        f"raw_arguments under-counted by {(estimated - actual) / actual * 100:+.2f}% — "
+        "this is the branch live traffic uses"
+    )
+
+
+def test_a_non_ascii_tool_name_is_sized_in_bytes() -> None:
+    """The name rides the same wire as its arguments; an MCP server is free to
+    use a non-ASCII tool name."""
+    message = Message.assistant("")
+    message.tool_calls = [ToolCall(id="1", name="\u6587\u5b57", raw_arguments="{}")]
+    assert estimate_wire_bytes([message]) >= len("\u6587\u5b57".encode("utf-8")) + 2
