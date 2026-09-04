@@ -59,6 +59,49 @@ def test_bindings_table_has_no_duplicate_elements() -> None:
 
 
 @pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_markdown_heading_levels_are_mutually_distinct(theme_name: str) -> None:
+    """h1-h6 must resolve to six different (ink, weight) pairs in EVERY theme.
+
+    Two collisions have shipped here, and neither was visible to the existing
+    gates. h3 and h4 were both `muted` AND both bold — byte-identical in all
+    54 themes by construction, a defect in the BINDING table that no palette
+    could fix. `radient` then bound `label` to the same hex as `muted`, so its
+    h2 and h3 collided too — a defect in the PALETTE that no binding could
+    fix. The per-token contrast and distinctness checks miss both, because
+    each tests tokens in isolation and a heading level is the PAIRING of a
+    token with a weight.
+
+    Parametrized over every registered theme on purpose: run on a three-theme
+    sample this assertion passes while `radient` ships two identical heading
+    levels.
+    """
+    theme.set_theme(theme_name)
+    levels = [
+        (
+            (lambda s: (s.color.triplet.hex if s.color else None, bool(s.bold)))(
+                bindings.style(f"markdown.h{n}")
+            )
+        )
+        for n in range(1, 7)
+    ]
+    duplicates = {level for level in levels if levels.count(level) > 1}
+    assert not duplicates, (
+        f"{theme_name}: heading levels are not mutually distinct — "
+        f"{sorted(map(str, duplicates))} is used more than once in {levels}"
+    )
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
+def test_markdown_heading_marker_is_dim(theme_name: str) -> None:
+    """The `#` markers rich strips at parse time, restored by
+    ``markdown_theme._flat_heading`` as structural metadata about the content
+    rather than content — the same argument as `markdown.item.bullet`, one
+    rung quieter because the heading text beside it carries hue and weight."""
+    theme.set_theme(theme_name)
+    assert bindings.style("markdown.heading_marker") == Style(color=theme.semantic_color("dim"))
+
+
+@pytest.mark.parametrize("theme_name", theme.available_themes())
 def test_every_binding_resolves_to_a_real_token(theme_name: str) -> None:
     """Every ``token`` and ``ground`` is a live semantic token, for EVERY
     registered theme (not just the two brand ramps `theme.py`'s own totality
