@@ -710,14 +710,18 @@ def test_a_repair_keeps_png_when_jpeg_would_be_bigger() -> None:
 
     Exercised at the REPAIR bound rather than through ``read``: bounding ingest
     to :data:`IMAGE_INGEST_MAX_EDGE` caps the delivered area at 1024x1024, and
-    the rung needs BOTH conditions at once and 1024x1024 never
-    supplies them together: below ~32 palette colours PNG is the smaller encode
-    but stays inside the budget (0.96 MiB at its worst, 48 colours), and above
-    that PNG exceeds the budget but JPEG has already become smaller (1.06 MiB
-    against 0.80 MiB at 64 colours). The two conditions pass each other without
-    ever overlapping. Swept 2-256 colours to
-    confirm the branch is unreachable there rather than merely rare. It is
-    still reachable whenever a caller passes an explicit ``max_edge``
+    at that area the rung's two conditions never hold together. A palette-noise
+    sweep walks three regimes in order — PNG smaller and under budget, then
+    JPEG smaller and still under budget, then JPEG smaller with PNG over
+    budget — and the rung would need a fourth between the first and the last.
+
+    Figures are deliberately NOT restated here: this comment carried three
+    different wrong mechanisms across three review rounds before the generator
+    was checked in. Run ``scripts/measure_ingest_lossy_rung.py`` for the table;
+    the crossover colour counts are fixture-specific, the regime ORDERING is
+    not, and the ordering is the whole argument.
+
+    Still reachable whenever a caller passes an explicit ``max_edge``
     (``rebound_oversize_image`` does), which is where the branch needs cover.
     """
     rng = random.Random(1234)

@@ -471,9 +471,11 @@ def bound_image_for_model(
        at its original size, and PNG round-tripping routinely makes files
        BIGGER (a 2560x1600 UI screenshot measured 550 KB on disk against 335 KB
        re-encoded only because the resize came with it).
-    2. Resize to the ingest bound (:data:`IMAGE_INGEST_MAX_EDGE` by default;
-       :data:`IMAGE_MAX_EDGE` when a caller passes it explicitly) and re-encode
-       as PNG. Lossless, which is what a screenshot of small text needs.
+    2. Resize and re-encode as PNG. Lossless, which is what a screenshot of
+       small text needs. The bound is :data:`IMAGE_INGEST_MAX_EDGE`, except for
+       LINE ART, which keeps :data:`IMAGE_MAX_EDGE` because one-pixel strokes
+       do not survive the tighter bound (see that constant); an explicit
+       ``max_edge`` overrides both.
     3. JPEG when that PNG blows :data:`IMAGE_MAX_BYTES`, and only when it
        actually comes out smaller. PNG is a bad photographic codec and that is
        the usual case here — the sampled 1672x941 photographic PNG re-encoded
