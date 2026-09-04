@@ -26,7 +26,7 @@ from local_operator.tui.widgets import editor as editor_module
 from local_operator.tui.widgets.editor import Editor, EditorCopied, InterruptRequested
 
 
-def _png_bytes(width: int = 1568, height: int = 200) -> bytes:
+def _png_bytes(width: int = 1000, height: int = 200) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), (30, 30, 40)).save(buffer, "PNG")
     return buffer.getvalue()
@@ -112,7 +112,7 @@ async def test_super_v_attaches_the_image_on_the_system_clipboard(monkeypatch) -
 
         await _press(pilot, "super+v")
 
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
         assert counts["reads"] == 1, "super+v must read the SYSTEM clipboard"
 
 

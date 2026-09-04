@@ -50,7 +50,7 @@ from local_operator.tui.widgets.editor import (
 )
 
 
-def _png_bytes(width: int = 1568, height: int = 200) -> bytes:
+def _png_bytes(width: int = 1000, height: int = 200) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), (30, 30, 40)).save(buffer, "PNG")
     return buffer.getvalue()
@@ -140,7 +140,7 @@ async def test_an_empty_paste_attaches_the_image_on_the_clipboard(monkeypatch) -
         await pilot.pause()
         await _paste(app, pilot, "")
 
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
         assert len(editor.referenced_images()) == 1
         image = editor.referenced_images()[0]
         assert image.mime_type == "image/png"
@@ -197,7 +197,7 @@ async def test_copied_whitespace_wins_over_an_image_on_the_clipboard(
 
     Round 2 (D9): the D1 fix keyed on the payload but still let a successful
     clipboard read override it, so pasting a four-space indent with a PNG on
-    the pasteboard replaced the indent with `[Image #1, 1568x200]` — an image
+    the pasteboard replaced the indent with `[Image #1, 1000x200]` — an image
     the user did not ask for on that keypress, silently, with the indent gone.
     Same defect as D1 at one tenth the reach.
 
@@ -501,7 +501,7 @@ async def test_a_slow_clipboard_read_does_not_stall_the_loop(monkeypatch) -> Non
             await pilot.pause()
             if editor.referenced_images():
                 break
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
 
 
 # -- what the notice is allowed to claim --------------------------------------
@@ -1004,7 +1004,7 @@ async def test_ctrl_v_attaches_the_image_on_the_system_clipboard(monkeypatch) ->
         await pilot.pause()
         await _ctrl_v(app, pilot)
 
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
         assert counts["reads"] == 1, "ctrl+v must read the SYSTEM clipboard"
         images = editor.referenced_images()
         assert len(images) == 1 and images[0].mime_type == "image/png"
@@ -1045,7 +1045,7 @@ async def test_ctrl_v_overrides_textareas_own_paste_binding(monkeypatch) -> None
 
         await _ctrl_v(app, pilot)
         assert base_paste_calls == [], "TextArea.action_paste must not run"
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
 
 
 @pytest.mark.asyncio
@@ -1202,7 +1202,7 @@ async def test_ctrl_v_replaces_a_live_selection_with_an_image_marker(monkeypatch
         await pilot.pause()
         await _ctrl_v(app, pilot)
 
-        assert editor.text == "keep [Image #1, 1568x200]  keep"
+        assert editor.text == "keep [Image #1, 1000x200]  keep"
         assert len(editor.referenced_images()) == 1
 
 
@@ -1227,12 +1227,12 @@ async def test_a_path_paste_replaces_a_live_selection_like_ctrl_v(tmp_path) -> N
         await pilot.pause()
         await _paste(app, pilot, str(path))
 
-        assert editor.text == "keep [Image #1, 1568x200]  keep"
+        assert editor.text == "keep [Image #1, 1000x200]  keep"
         assert len(editor.referenced_images()) == 1
         # The caret lands AFTER the marker, so the next keystroke continues
         # past it rather than typing in front of it — same as ctrl+v.
         editor.insert("!")
-        assert editor.text == "keep [Image #1, 1568x200] ! keep"
+        assert editor.text == "keep [Image #1, 1000x200] ! keep"
 
 
 @pytest.mark.asyncio
@@ -1494,7 +1494,7 @@ async def test_ctrl_v_reads_the_clipboard_off_the_event_loop(monkeypatch) -> Non
         assert (
             reader_threads and loop_thread not in reader_threads
         ), "the clipboard read must not run on the event loop"
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
 
 
 @pytest.mark.asyncio

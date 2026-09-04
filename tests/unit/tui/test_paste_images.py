@@ -48,7 +48,7 @@ from local_operator.tui.widgets.editor import (
 )
 
 
-def _png(path, width: int = 1568, height: int = 200) -> str:
+def _png(path, width: int = 1000, height: int = 200) -> str:
     Image.new("RGB", (width, height), (30, 30, 40)).save(path)
     return str(path)
 
@@ -185,13 +185,13 @@ async def test_a_pasted_image_becomes_an_attachment_and_a_marker(tmp_path) -> No
         await pilot.pause()
         await _paste(app, pilot, path)
 
-        assert editor.text == "[Image #1, 1568x200] "
+        assert editor.text == "[Image #1, 1000x200] "
         assert len(editor.referenced_images()) == 1
         image = editor.referenced_images()[0]
         assert image.mime_type == "image/png"
         # The real bytes, not the path: this is what reaches the provider.
         assert base64.b64decode(image.data)[:8] == b"\x89PNG\r\n\x1a\n"
-        assert Image.open(io.BytesIO(base64.b64decode(image.data))).size == (1568, 200)
+        assert Image.open(io.BytesIO(base64.b64decode(image.data))).size == (1000, 200)
 
 
 @pytest.mark.asyncio
@@ -345,7 +345,7 @@ async def test_the_marker_reports_what_was_attached_not_what_is_on_disk(tmp_path
     """The marker's dimensions are the user's only receipt for an attachment.
 
     Once the paste path started resizing, carrying the SOURCE dimensions into
-    the marker would print ``[Image #1, 2560x1440]`` beside a 1568x882
+    the marker would print ``[Image #1, 2560x1440]`` beside a 1024x576
     attachment — a receipt for something that was never sent.
     """
     path = _png(tmp_path / "retina.png", 2560, 1440)
@@ -365,7 +365,7 @@ async def test_the_marker_reports_what_was_attached_not_what_is_on_disk(tmp_path
 async def test_a_resized_marker_says_so_and_stays_one_atomic_token(tmp_path) -> None:
     """Design round 1, D1.
 
-    Every 16:9 screenshot bounds to the same 1568x882, so three different
+    Every 16:9 screenshot bounds to the same 1024x576, so three different
     captures pasted together would read as three identical markers and the label
     would stop doing the job it exists for — telling one paste from another. The
     mark restores that and explains why the number is not the size pasted.
@@ -389,8 +389,8 @@ async def test_a_resized_marker_says_so_and_stays_one_atomic_token(tmp_path) -> 
         # Resized ones are marked; the in-bounds one is not, because nothing
         # about it changed and the mark would be a lie.
         assert editor.text == (
-            f"[Image #1, 1568x882{RESIZED_MARK}] "
-            f"[Image #2, 882x1568{RESIZED_MARK}] "
+            f"[Image #1, 1024x576{RESIZED_MARK}] "
+            f"[Image #2, 576x1024{RESIZED_MARK}] "
             "[Image #3, 800x600] "
         )
         # The grammar still holds: three whole markers, numbered in order.
@@ -473,12 +473,16 @@ async def test_a_rotation_alone_is_not_marked_as_a_downscale(tmp_path) -> None:
     """Review round 2, F8.
 
     A portrait phone photo inside the bounds is EXIF-rotated on the way in, so
-    its dimensions change (900x1200 from 1200x900) while not one pixel is lost.
+    its dimensions change (700x900 from 900x700) while not one pixel is lost.
     The mark is a claim about FIDELITY, so comparing the ``WxH`` strings made
     every such photo assert a shrink that never happened.
+
+    The fixture sits inside IMAGE_INGEST_MAX_EDGE on both edges deliberately: a
+    photo the ingest bound would also RESIZE earns the mark legitimately, and
+    the test would then pass for the wrong reason.
     """
     path = str(tmp_path / "portrait.jpg")
-    image = Image.new("RGB", (1200, 900), (30, 30, 40))
+    image = Image.new("RGB", (900, 700), (30, 30, 40))
     exif = Image.Exif()
     exif[274] = 6
     image.save(path, format="JPEG", exif=exif)
@@ -494,7 +498,7 @@ async def test_a_rotation_alone_is_not_marked_as_a_downscale(tmp_path) -> None:
         assert RESIZED_MARK not in editor.text
         # The rotated dimensions are still reported, because that IS what was
         # attached — only the shrink claim was wrong.
-        assert editor.text == "[Image #1, 900x1200] "
+        assert editor.text == "[Image #1, 700x900] "
 
 
 @pytest.mark.asyncio
@@ -761,7 +765,7 @@ async def test_clearing_the_buffer_clears_the_attachments(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_backspace_at_the_end_of_a_marker_removes_the_whole_marker(tmp_path) -> None:
     """The reported bug: it removed the closing bracket and left
-    ``[Image #1, 1568x20`` hanging — neither prose the user meant nor a
+    ``[Image #1, 1000x20`` hanging — neither prose the user meant nor a
     reference anything can resolve, and the attachment silently orphaned."""
     path = _png(tmp_path / "a.png", 10, 20)
     app = Host()
@@ -1440,17 +1444,17 @@ async def test_text_pasted_above_the_marker_cannot_steal_its_chip(tmp_path) -> N
         await _paste(app, pilot, path)
         mine = editor.text.strip()
         editor.selection = Selection.cursor((0, 0))
-        await _paste(app, pilot, "[Image #1, 1568x200] rerun this")
+        await _paste(app, pilot, "[Image #1, 1000x200] rerun this")
         await pilot.pause()
 
-        assert editor.text.startswith("[Image #1, 1568x200]"), "the fixture did not paste above"
+        assert editor.text.startswith("[Image #1, 1000x200]"), "the fixture did not paste above"
         painted = {
             column
             for y in range(3)
             for start, end, _ in editor._marker_cells(y)
             for column in range(start - editor.gutter_width, end - editor.gutter_width)
         }
-        impostor = set(range(0, len("[Image #1, 1568x200]")))
+        impostor = set(range(0, len("[Image #1, 1000x200]")))
         real = editor.text.index(mine)
         assert painted & set(range(real, real + len(mine))), "the app's own marker lost its chip"
         assert not painted & impostor, "the pasted text stole the chip"
@@ -1474,7 +1478,7 @@ async def test_the_app_s_own_marker_stays_the_atomic_token(tmp_path) -> None:
         await _paste(app, pilot, path)
         mine = editor.text.strip()
         editor.selection = Selection.cursor((0, 0))
-        await _paste(app, pilot, "[Image #1, 1568x200] ")
+        await _paste(app, pilot, "[Image #1, 1000x200] ")
         await pilot.pause()
 
         end = editor.text.index(mine) + len(mine)
@@ -1514,7 +1518,7 @@ async def test_deleting_a_foreign_citation_leaves_the_live_image_alone(tmp_path)
         await pilot.pause()
         await _paste(app, pilot, path)
         editor.selection = Selection.cursor((0, 0))
-        await _paste(app, pilot, "look at [Image #1, 1568x200] ")
+        await _paste(app, pilot, "look at [Image #1, 1000x200] ")
         await pilot.pause()
 
         # Edit the tail of the app's OWN marker, so cite() falls back and the
@@ -1528,7 +1532,7 @@ async def test_deleting_a_foreign_citation_leaves_the_live_image_alone(tmp_path)
         await pilot.press("backspace")
         await pilot.pause()
 
-        assert "1568x200" not in editor.text, "the stale reference was not deleted"
+        assert "1000x200" not in editor.text, "the stale reference was not deleted"
         assert len(editor.referenced_images()) == 1, "deleting stale text dropped the live image"
 
 
@@ -1538,7 +1542,7 @@ async def test_a_half_deleted_stale_marker_cannot_swallow_a_live_one(tmp_path) -
 
     The stale copy is prose, so backspace takes one character - and the first
     character is its closing bracket. With `[` allowed in the tail, the
-    unterminated `[Image #1, 1568x200` then matched all the way through the
+    unterminated `[Image #1, 1000x200` then matched all the way through the
     LIVE marker's bracket as one token, whose start is nowhere `cite()` points:
     the chip vanished for ten keystrokes of an ordinary cleanup while the image
     stayed attached and on the wire, and the live marker left the atomic set.
@@ -1551,12 +1555,12 @@ async def test_a_half_deleted_stale_marker_cannot_swallow_a_live_one(tmp_path) -
         await pilot.pause()
         await _paste(app, pilot, path)
         editor.selection = Selection.cursor((0, 0))
-        await _paste(app, pilot, "look at [Image #1, 1568x200] ")
+        await _paste(app, pilot, "look at [Image #1, 1000x200] ")
         await pilot.pause()
 
         # Sweep the whole cleanup. The chip must never disappear while the
         # image is still being sent - that is the commit's headline invariant.
-        stale = "[Image #1, 1568x200]"
+        stale = "[Image #1, 1000x200]"
         editor.selection = Selection.cursor((0, editor.text.index(stale) + len(stale)))
         await pilot.pause()
         for keystroke in range(1, len(stale) + 1):

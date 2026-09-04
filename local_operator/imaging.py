@@ -69,6 +69,18 @@ the invariant is total:
   the refusal ceiling demands.
 - ``_forward_undecoded`` cannot resize at all, because on that host there is no
   decoder. See its own docstring for what it does enforce.
+
+TWO BOUNDS, and the split is deliberate. :data:`IMAGE_MAX_EDGE` is the
+CORRECTNESS ceiling: it is what the many-image refusal argument above is
+measured against, and what a repair is judged by. :data:`IMAGE_INGEST_MAX_EDGE`
+is what images ENTERING the context are actually resized to, and it is lower
+because the argument there is billing rather than refusal — a provider bills an
+image by pixel area, so pixels that buy no legibility are pure cost. Ingest is
+the only site free to move: a REPAIR must not chase it, because repairing a
+block that the provider would have accepted rewrites history that a prompt
+cache is holding, turning a saving into a full-prefix rewrite. That is why
+:func:`rebound_oversize_image` still triggers at :data:`IMAGE_REFUSAL_MAX_EDGE`
+and why lowering the ingest bound leaves every existing 1568px block untouched.
 """
 
 from __future__ import annotations
@@ -100,7 +112,30 @@ from local_operator.optional import missing_extra_error
 #: 2,049 at 1568 (2.7x), and a 4032x3024 phone photo — 1.5 MB as JPEG, so it
 #: passes any byte cap easily — costs 16,257 tokens untouched against 2,459
 #: resized (6.6x).
+#:
+#: PASTE/READ INGEST uses a tighter bound (:data:`IMAGE_INGEST_MAX_EDGE`).
+#: Anthropic bills an image by pixel AREA (~w*h/750 tokens), so after the 1568
+#: server-side downsample there is still a billed region between 1024 and 1568
+#: where pixels cost tokens without buying legibility: a real 4-up document
+#: collage from this machine's own traffic measured 3,184 tokens at 1568
+#: against 1,359 at 1024 (57% cheaper), and a vision model reading the 1024
+#: render recovered appendix titles, a 5-column score matrix, page numbers,
+#: and 7pt header fine print identically to the 1568 render. Below 1024 the
+#: margin thins — dense 6-7pt table body text is at the edge at 768 — so 1024
+#: is the floor that keeps document work legible. Photographic content, which
+#: has no strokes to lose, could go further; it shares the bound because one
+#: number the ingest sites, the tests, and the marker captions agree on beats
+#: a content-sniffing ladder whose mistakes land in the billed prefix.
 IMAGE_MAX_EDGE = 1568
+#: Long-edge ceiling for images ENTERING the context (``read`` tool, pasted
+#: screenshots). Tighter than :data:`IMAGE_MAX_EDGE`, which stays the
+#: correctness ceiling — the many-image refusal line and the snapcompact
+#: billing geometry both answer to it and are deliberately not re-decided
+#: here. Ingest is the one site that may move independently: 1024 sits below
+#: every provider refusal line (2000px many-image, 5 MB base64 wall) with
+#: wide margin, and the legibility evidence above says the pixels between
+#: 1024 and 1568 cost tokens without buying readability on document content.
+IMAGE_INGEST_MAX_EDGE = 1024
 #: The provider ceiling a REPAIR is measured against, which is deliberately not
 #: :data:`IMAGE_MAX_EDGE`. Anything this module CREATES is bounded to 1568 for
 #: the cost reasons above; but a block that already exists is only worth
@@ -420,21 +455,22 @@ def bound_image_for_model(
        at its original size, and PNG round-tripping routinely makes files
        BIGGER (a 2560x1600 UI screenshot measured 550 KB on disk against 335 KB
        re-encoded only because the resize came with it).
-    2. Resize to :data:`IMAGE_MAX_EDGE` and re-encode as PNG. Lossless, which
-       is what a screenshot of 9-pixel text needs.
+    2. Resize to the ingest bound (:data:`IMAGE_INGEST_MAX_EDGE` by default;
+       :data:`IMAGE_MAX_EDGE` when a caller passes it explicitly) and re-encode
+       as PNG. Lossless, which is what a screenshot of small text needs.
     3. JPEG when that PNG blows :data:`IMAGE_MAX_BYTES`, and only when it
        actually comes out smaller. PNG is a bad photographic codec and that is
        the usual case here — the sampled 1672x941 photographic PNG re-encoded
        to 1.9 MB of PNG against 271 KB of quality-85 JPEG — but it is not the
        only one, so the choice is measured rather than assumed.
 
-    ``max_edge`` overrides :data:`IMAGE_MAX_EDGE` for callers that are REPAIRING
-    rather than ingesting. The default exists to make an image cheap, and it is
-    the right default for anything arriving from a paste or a file read; but a
-    caller shrinking an image that already exists is trading fidelity it did not
-    choose, and for line art the smallest possible reduction is worth real
-    money. See :func:`rebound_oversize_image`, which passes the refusal ceiling
-    for bilevel sources so a pixel font is shrunk by 2% instead of 23%.
+    ``max_edge`` overrides :data:`IMAGE_INGEST_MAX_EDGE` for callers that are
+    REPAIRING rather than ingesting. The default is the ingest bound, and it
+    is the right default for anything arriving from a paste or a file read;
+    but a caller shrinking an image that already exists is trading fidelity it
+    did not choose, and for line art the smallest possible reduction is worth
+    real money. See :func:`rebound_oversize_image`, which passes the refusal
+    ceiling for bilevel sources so a pixel font is shrunk by 2% instead of 23%.
 
     With no decoder available the whole ladder collapses to
     :func:`_forward_undecoded`.
@@ -498,7 +534,7 @@ def bound_image_for_model(
         width, height = image.size
 
         long_edge = max(width, height)
-        edge_cap = IMAGE_MAX_EDGE if max_edge is None else max_edge
+        edge_cap = IMAGE_INGEST_MAX_EDGE if max_edge is None else max_edge
         if (
             info.sendable
             and frames == 1
