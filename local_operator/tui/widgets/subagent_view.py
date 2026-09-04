@@ -2270,16 +2270,27 @@ class SubagentView(Vertical):
         What abandoning quietly COSTS, measured rather than assumed (review
         round 2, R4 / QA Q22): the ``stat`` says "there is a file, go look"
         and the read is the only way to learn it still fails, so a file that
-        is present but persistently unreadable is re-read — about 1.1-1.4
-        reads per refresh in the narrow window where ``stat`` succeeds and
-        ``open`` fails. That is the price of self-healing, not a free ride,
-        and it is bounded in the two ways that matter: ``_history_loading``
-        serialises the probes, so it is one retry at a time rather than a
-        herd, and the cost is pinned to the REFRESH rate, not the event rate.
-        Measured across a 20x growth in relayed events the reads stay flat
-        (20 shows -> 28 reads, 400 shows -> 27), i.e. 1.4 reads/show falls to
-        0.068. The unbounded storm the guards exist to prevent is one that
-        rises with the event stream; this does not.
+        is present but persistently unreadable is re-read — of the order of
+        one read per SETTLED refresh in the narrow window where ``stat``
+        succeeds and ``open`` fails. That is the price of self-healing, not a
+        free ride, and it is bounded in the two ways that matter.
+
+        First, ``_history_loading`` serialises the probes: one retry in
+        flight at a time, never a herd. Second, and the load-bearing half,
+        the cost is pinned to the REFRESH rate rather than the EVENT rate —
+        back-to-back ``show()`` calls collapse onto the single in-flight
+        probe, so relayed events do not each buy a read. The unbounded storm
+        the guards exist to prevent is the one that rises with the event
+        stream; this does not.
+
+        Deliberately no exact read counts here. The absolute numbers move
+        with the harness, and a precise-looking integer that a later reader
+        cannot reproduce is what R4 was raised about in the first place; the
+        SHAPE is the durable claim, and
+        ``test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh``
+        is where it is pinned — 200 back-to-back shows must not buy 200
+        reads, which fails at 201 if the serialisation guard above is
+        removed.
 
         The reachable failure modes stay cheap regardless: a missing file
         routes to ``FileNotFoundError`` and the re-looking branch, and a
