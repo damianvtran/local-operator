@@ -30,6 +30,9 @@ from local_operator.session.frontend_state import (
     FrontendStateStore,
     FrontendUsage,
     JobState,
+    McpServerState,
+    TodoItemState,
+    TodoPhaseState,
     _folded_components,
     filter_update_trajectories,
     oversized_frame_report,
@@ -284,13 +287,82 @@ def test_a_restored_fat_checkpoint_is_capped_on_the_way_in() -> None:
     assert _line_bytes(frame) < _MAX_LINE_BYTES
 
 
-def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
-    """The class guard: everything unbounded, at once, still under the cap.
+#: Every collection-typed field on ``FrontendSessionState``, with the reason it
+#: cannot blow the frame. A field NOT in here fails
+#: ``test_every_collection_field_is_classified`` the moment it is added, which is
+#: what makes the guard cover fields nobody thought to write a fixture for.
+#:
+#: "bounded" fields are bounded by something that is not conversation length or
+#: child count — config, the code, the user's own hand, or an explicit fold.
+_BOUNDED_COLLECTION_FIELDS = {
+    "context_breakdown": "one entry per tool; bounded by the tool inventory",
+    "child_costs": "one float per job; O(1) bytes each",
+    "queued_steering": "drains every turn",
+    "live_events": "explicitly bounded by _fold_live_event",
+    "todos": "the user's own list, written by hand",
+    "wakes": "the user's own schedules",
+    "mcp_servers": "one row per configured server",
+    "slash_capabilities": "one row per SLASH_COMMANDS entry",
+    "model_catalogue": "one row per catalogue model; bounded by the provider",
+    # One startup report from the MCP wiring pass, not an accumulator: it is
+    # REPLACED on each wiring round rather than appended to, and its size is a
+    # function of how many servers are configured.
+    "mcp_startup": "one MCP wiring report; replaced, never appended",
+}
 
-    A long conversation (receipts), a deep roster (jobs, each with retained
-    events and its own per-call receipts), a full model catalogue, many todos
-    and long names — the union of every field that grows with use. The
-    reference machine's real session serialized 1,052,296 bytes here.
+#: Fields that grow with use and are therefore bounded HERE, by this module.
+#: Each must be exercised by the class guard below.
+_CAPPED_COLLECTION_FIELDS = {
+    "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
+    "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
+}
+
+
+def _collection_fields() -> set[str]:
+    """Collection-typed fields on the state model, read from the model itself."""
+    fields: set[str] = set()
+    for name, field in FrontendSessionState.model_fields.items():
+        annotation = str(field.annotation)
+        if "list[" in annotation or "dict[" in annotation:
+            fields.add(name)
+    return fields
+
+
+def test_every_collection_field_is_classified() -> None:
+    """A NEW unbounded field must not be able to slip past the class guard.
+
+    The previous version of the guard was a hand-built fixture that populated
+    ten fields by name, so a field added later defaulted to empty, contributed
+    zero bytes, and passed blind — it re-caught the two fields already known
+    rather than closing the shape (review round 1, C3).
+
+    Driving the classification off ``model_fields`` inverts that: adding a
+    collection field to ``FrontendSessionState`` fails HERE until someone
+    states which side of the line it is on, and if it is capped it must also
+    be exercised by the frame guard below.
+    """
+    classified = set(_BOUNDED_COLLECTION_FIELDS) | set(_CAPPED_COLLECTION_FIELDS)
+    unclassified = _collection_fields() - classified
+    assert not unclassified, (
+        f"unclassified collection field(s) on FrontendSessionState: {sorted(unclassified)}. "
+        "Every collection field must be listed in _BOUNDED_COLLECTION_FIELDS (with the "
+        "reason it cannot grow with conversation length or child count) or in "
+        "_CAPPED_COLLECTION_FIELDS (and exercised by the frame guard). This is the "
+        "check that stops the next unbounded field reaching a user's terminal."
+    )
+    # The reverse direction: a field removed from the model must not leave a
+    # stale entry here implying coverage that no longer exists.
+    stale = classified - _collection_fields()
+    assert not stale, f"stale entries for fields that no longer exist: {sorted(stale)}"
+
+
+def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
+    """The class guard: EVERY collection field maxed at once, still under the cap.
+
+    Populated from ``_collection_fields()`` rather than by hand, so a field
+    added to the model is filled here automatically and this assertion is what
+    catches it. The reference machine's real session serialized 1,052,296
+    bytes through this path.
     """
     jobs = [
         job.model_copy(
@@ -302,29 +374,56 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
                     input_tokens=1_000,
                     cost_components=[_receipt(index) for index in range(400)],
                 ),
-                "result_text": "r" * 4_000,
-                "prompt": "p" * 4_000,
+                # Unbounded in BYTES: whole child outputs. This is what pushed
+                # the roster over the limit at ~130 rows (C4).
+                "result_text": "r" * 40_000,
+                "prompt": "p" * 40_000,
+                "error_text": "e" * 40_000,
             }
         )
-        for job in _jobs(20, 500)
+        for job in _jobs(200, 500)
     ]
-    state = FrontendSessionState(
-        session_id="s1",
-        epoch="e1",
-        jobs=jobs,
-        usage_components=[
+    # Every collection field, filled past anything a real session reaches.
+    populated: dict[str, Any] = {
+        "jobs": jobs,
+        "usage_components": [
             FrontendUsage.model_validate(_receipt(index).model_dump(mode="json"))
             for index in range(5_000)
         ],
-        child_costs={f"job{index}": 1.25 for index in range(500)},
-        todos=[],
+        "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
+        "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
+        "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
+        "live_events": [{"type": "message_update", "text": "e" * 200} for index in range(200)],
+        "todos": [
+            TodoPhaseState(
+                name=f"phase {index}",
+                items=[TodoItemState(text="t" * 200, status="pending")],
+            )
+            for index in range(200)
+        ],
+        "wakes": [],
+        "mcp_servers": [
+            McpServerState(name=f"server-{index}", status="connected") for index in range(200)
+        ],
+        "mcp_startup": {f"server-{index}": {"error": "e" * 200} for index in range(200)},
+        "slash_capabilities": [],
+        "model_catalogue": [
+            {"provider": "p", "model_id": f"model-{index}", "context_window": 200_000}
+            for index in range(1_000)
+        ],
+    }
+    missing = _collection_fields() - set(populated)
+    assert not missing, (
+        f"collection field(s) not exercised by the class guard: {sorted(missing)}. "
+        "Add them to `populated` so this assertion actually covers them."
+    )
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
         conversation_title="a" * 500,
         goal="g" * 2_000,
         cwd="/" + "d" * 500,
-        model_catalogue=[
-            {"provider": "p", "model_id": f"model-{index}", "context_window": 200_000}
-            for index in range(300)
-        ],
+        **populated,
     )
     store = FrontendStateStore(state)
     frame = {
@@ -341,36 +440,56 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
     )
 
 
-def test_folding_a_jobs_receipts_does_not_change_what_it_cost() -> None:
+@pytest.mark.parametrize(
+    "provider,model_id",
+    [
+        # BOTH wire shapes, deliberately. The first version of this test used
+        # only Anthropic — the one wire where `_cache_tokens_are_inside_input`
+        # is False and the `max(0, input - read - write)` subtraction never
+        # runs — so it could not fail on any of the four divergences review
+        # round 1 found (C1). OpenAI-shaped is where that subtraction is live.
+        ("anthropic", "claude-opus-4-8-20260101"),
+        ("openai", "gpt-5.6-sol"),
+    ],
+)
+def test_folding_a_jobs_receipts_does_not_change_what_it_cost(provider: str, model_id: str) -> None:
     """The per-job list is priced, so it is folded rather than capped.
 
     ``job_cost`` sums ``usage.cost_components``: dropping a row there would
     undercount a child's spend, which is a wrong number on screen rather than
-    a large frame. Folding by serving identity is lossless because each
-    component is priced independently and then summed — verified here against
-    the mixed reported/estimated case, which is the one that could drift.
+    a large frame. Folding must therefore reproduce per-receipt pricing
+    exactly — see `_folded_components` for the two operations that do not
+    commute with summation and how each is handled.
 
-    Measured against the reference machine's real roster while writing this:
-    14 jobs, 104 components folding to 1, worst cost difference $0.00.
+    Measured against the reference machine's real roster: 14 jobs, 104
+    components folding to 1, worst cost difference $0.00.
     """
     reported = [
         Usage(
             input_tokens=1_000,
             output_tokens=100,
+            cache_read_tokens=400,
             usd_cost=0.25,
-            provider=_PROVIDER,
-            model_id=_MODEL_ID,
+            provider=provider,
+            model_id=model_id,
         )
         for _ in range(40)
     ]
     # No usd_cost: priced from tokens at the model's rate, which only folds
     # correctly if the tokens are summed rather than the prices.
     estimated = [
-        Usage(input_tokens=2_000, output_tokens=300, provider=_PROVIDER, model_id=_MODEL_ID)
+        Usage(
+            input_tokens=2_000,
+            output_tokens=300,
+            cache_read_tokens=800,
+            cache_write_tokens=100,
+            provider=provider,
+            model_id=model_id,
+        )
         for _ in range(40)
     ]
     usage = Usage(input_tokens=1, cost_components=[*reported, *estimated])
-    label = f"{_PROVIDER}/{_MODEL_ID}"
+    label = f"{provider}/{model_id}"
 
     before = job_cost(SimpleNamespace(usage=usage, model_label=label), default_model_label=label)
     folded = usage.model_copy(update={"cost_components": _folded_components(usage.cost_components)})
@@ -534,3 +653,119 @@ async def test_the_turn_end_checkpoint_does_not_grow_with_the_conversation() -> 
         "and turn 40; something in the durable state accumulates with "
         "conversation length and is re-written in full on every turn"
     )
+
+
+def test_the_roster_text_budget_is_shared_rather_than_per_row() -> None:
+    """A per-row cap alone moves the threshold; a shared budget closes it.
+
+    The defect this guards (review round 1, C4) is that ``jobs`` grew the frame
+    linearly with roster depth — ~130 settled children with 4 KB of text each
+    overflowed the limit with no receipt involved. Capping each row's text is
+    not sufficient on its own: it lowers the constant and leaves the growth.
+
+    Asserted as the STRUCTURAL property rather than a byte count: doubling the
+    roster must not double the text on the wire. Rows are never dropped, so
+    every child is still described.
+    """
+
+    def _text_bytes(count: int) -> tuple[int, int]:
+        jobs = [
+            job.model_copy(update={"result_text": "r" * 8_000, "prompt": "p" * 8_000})
+            for job in _jobs(count, 0)
+        ]
+        store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1", jobs=jobs))
+        rows = sync_wire_payload(store.subscribe(lambda _u: None).sync)["snapshot"]["jobs"]
+        text = sum(len(row.get("result_text") or "") + len(row.get("prompt") or "") for row in rows)
+        return len(rows), text
+
+    shallow_rows, shallow_text = _text_bytes(20)
+    deep_rows, deep_text = _text_bytes(200)
+
+    # Every child is present at both depths: a dropped row would read as a
+    # child that never ran, which the reader cannot tell from the truth.
+    assert shallow_rows == 20
+    assert deep_rows == 200
+
+    # PER-ROW text must SHRINK as the roster deepens — that is the shared
+    # budget working. Without it each row keeps its full per-field cap and the
+    # per-row figure is flat while the total climbs linearly.
+    assert deep_text / deep_rows < shallow_text / shallow_rows / 2, (
+        f"per-row text was {shallow_text / shallow_rows:,.0f} chars at 20 rows and "
+        f"{deep_text / deep_rows:,.0f} at 200; the budget is not being shared"
+    )
+
+    # The residual is stated rather than hidden: because rows are never dropped
+    # and each keeps a legible floor, total text still rises with depth, just
+    # far below linear. 10x the roster costs well under 10x the text.
+    assert deep_text < shallow_text * 10 * 0.5, (
+        f"text grew from {shallow_text:,} to {deep_text:,} chars over a 10x deeper "
+        "roster; that is close enough to linear that the budget is not binding"
+    )
+
+
+@pytest.mark.parametrize(
+    "case,provider,rows",
+    [
+        # The four divergences review round 1 reproduced (C1). Each one made
+        # the folded total differ from the per-receipt total, and none could
+        # be caught by a single-identity Anthropic fixture.
+        (
+            "negative usd_cost is rejected by _usage_cost, so it must not fold "
+            "into the reported bucket",
+            "anthropic",
+            [{"usd_cost": 0.30}, {"usd_cost": -1.0}],
+        ),
+        (
+            "non-finite usd_cost (json Infinity is wire-reachable) likewise",
+            "anthropic",
+            [{"usd_cost": 0.30}, {"usd_cost": float("inf")}],
+        ),
+        (
+            "a negative token count ('-1 for unknown') is floored per receipt, "
+            "and max(0,a)+max(0,b) != max(0,a+b)",
+            "anthropic",
+            [{"input_tokens": 1_000}, {"input_tokens": -1}],
+        ),
+        (
+            "openai-shaped, cache_read > input on ONE receipt: the per-receipt "
+            "subtraction floors at zero and does not commute",
+            "openai",
+            [
+                {"input_tokens": 1_000, "cache_read_tokens": 200},
+                {"input_tokens": 50, "cache_read_tokens": 900},
+            ],
+        ),
+    ],
+)
+def test_folding_malformed_receipts_still_prices_identically(
+    case: str, provider: str, rows: list[dict[str, Any]]
+) -> None:
+    """Folding must agree with per-receipt pricing on MALFORMED input too.
+
+    `clients.py` sanitises negatives and non-finites at the wire, so these
+    shapes need a malformed stored checkpoint or a non-wire producer rather
+    than a live provider response — but the checkpoint on disk is exactly an
+    untrusted stored input, and "lossless" was stated unconditionally. These
+    are the cases that falsified it.
+    """
+    model_id = "claude-opus-4-8-20260101" if provider == "anthropic" else "gpt-5.6-sol"
+    components = [
+        Usage(output_tokens=100, provider=provider, model_id=model_id, **row) for row in rows
+    ]
+    label = f"{provider}/{model_id}"
+
+    def _price(items: list[Usage]) -> float | None:
+        total = 0.0
+        for item in items:
+            one = job_cost(
+                SimpleNamespace(usage=item, model_label=label), default_model_label=label
+            )
+            if one is None:
+                return None
+            total += one
+        return total
+
+    before = _price(components)
+    after = _price(list(_folded_components(components)))
+    assert before is not None and after is not None
+    assert after == pytest.approx(before, abs=1e-9), case

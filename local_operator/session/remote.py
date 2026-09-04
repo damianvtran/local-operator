@@ -75,6 +75,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
+    FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -215,11 +216,14 @@ class RemoteSession:
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._history_ids: set[str] = set()
-        #: The parsed transcript, handed from the threaded history read to the
-        #: cold path's checkpoint restore so the roster/todo/title recovery
-        #: costs no second parse. Set inside ``_read_transcript`` and cleared
-        #: the moment ``cold()`` consumes it; ``None`` at every other time.
-        self._cold_transcript: Any | None = None
+        #: The durable frontend checkpoint, handed from the threaded history
+        #: read to the cold path's restore so the roster/todo/title recovery
+        #: costs no second parse. A small dict rather than the parsed
+        #: ``Transcript`` deliberately: retaining the transcript pinned every
+        #: entry (1.23x file size) for the life of a warm attach that never
+        #: wanted it (review round 1, C2). Only ``cold()`` asks for it, and it
+        #: is cleared the moment that consumes it.
+        self._cold_checkpoint: dict[str, Any] | None = None
         # Message ids whose row the follower has ALREADY painted live. The sync
         # seed and relayed stream are filtered against this set as well as
         # ``_history_ids``, so a turn that became durable mid-join — or a
@@ -456,16 +460,16 @@ class RemoteSession:
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
         if (config_dir / "sessions" / session_id / "transcript.jsonl").exists():
-            await self._load_history(None)
-            # AFTER the history load, which is what parses the transcript: the
-            # checkpoint restore then reads an object that is already in memory
-            # instead of paying a second full parse. Ordered before
-            # ``_install_frontend`` so the roster, todos and title are present
-            # in the FIRST state the widgets ever see — installing twice would
-            # paint an empty panel and then repaint it, which is the visible
-            # flicker this whole change exists to remove.
+            # ``want_checkpoint`` extracts the durable status row during the
+            # SAME threaded parse the history comes from, so the restore below
+            # costs no second read of a file that is 103 MB at the top end.
+            await self._load_history(None, want_checkpoint=True)
+            # Ordered before ``_install_frontend`` so the roster, todos and
+            # title are present in the FIRST state the widgets ever see —
+            # installing twice would paint an empty panel and then repaint it,
+            # which is the visible flicker this whole change exists to remove.
             state = self._restore_cold_details(state)
-            self._cold_transcript = None
+            self._cold_checkpoint = None
         self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
@@ -504,16 +508,10 @@ class RemoteSession:
         checkpoint leaves the synthesised state untouched. Opening a
         conversation must never fail because its last status row did.
         """
-        from local_operator.session.frontend_state import (
-            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-            FrontendSessionState,
-        )
-
-        transcript = self._cold_transcript
-        if transcript is None:
+        checkpoint = self._cold_checkpoint
+        if checkpoint is None:
             return state
         try:
-            checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
                 return state
@@ -545,6 +543,23 @@ class RemoteSession:
                 "context_tokens": durable.context_tokens,
                 "context_is_estimate": durable.context_is_estimate,
                 "context_window": durable.context_window,
+                # MCP servers are the last runtime's connection report and
+                # there is no live manager to ask while cold, so the durable
+                # copy is the only thing that can populate this chrome
+                # (review round 1, C5). Restored as HISTORY: the panel shows
+                # what the session was connected to, and the runtime's own
+                # state replaces it wholesale on first engage.
+                "mcp_servers": list(durable.mcp_servers),
+                # Wakes are deliberately NOT taken from the checkpoint. The
+                # synthesised state already read them from the wake index
+                # (``_synthesise_cold_state``), which is the live derived file
+                # a supervisor rewrites without opening the session — so the
+                # index is fresher than any checkpoint and overwriting it with
+                # a stale copy would re-show a wake that already fired. Only
+                # fall back to the durable rows when the index gave nothing,
+                # which is the corrupt/deleted-index case its own self-healing
+                # rebuild is designed around.
+                "wakes": list(state.wakes) if state.wakes else list(durable.wakes),
             }
         )
 
@@ -690,7 +705,11 @@ class RemoteSession:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
     async def _load_history(
-        self, live_cursor: str | None = None, *, drop_history_duplicates: bool = True
+        self,
+        live_cursor: str | None = None,
+        *,
+        drop_history_duplicates: bool = True,
+        want_checkpoint: bool = False,
     ) -> None:
         """Read durable history exactly up to the sync's advertised boundary.
 
@@ -708,12 +727,14 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
-        entries, history = await self._read_transcript()
+        entries, history = await self._read_transcript(want_checkpoint=want_checkpoint)
         self._bind_history(
             entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
         )
 
-    async def _read_transcript(self) -> tuple[list[Any], list[Any]]:
+    async def _read_transcript(
+        self, *, want_checkpoint: bool = False
+    ) -> tuple[list[Any], list[Any]]:
         """Parse the durable transcript off-loop, once per sync.
 
         The single threaded read shared by initial connect AND reconnect:
@@ -723,19 +744,27 @@ class RemoteSession:
         for the connect path. Both callers now consume ONE threaded result
         (gap projection and ``_history`` reconciliation), so the file is
         parsed once per sync and never on the loop.
+
+        ``want_checkpoint`` is the COLD path's opt-in to also extracting the
+        durable frontend checkpoint from this same parse
+        (``_restore_cold_details``), and it is opt-in rather than
+        unconditional for a memory reason: the parsed ``Transcript`` pins
+        every entry, measured at 1.23x file size (~127 MB on the reference
+        session). Stashing it on the instance for every caller leaked that for
+        the life of a WARM attach, which neither needs it nor ever cleared it
+        (review round 1, C2). The checkpoint is a small dict, so extracting it
+        INSIDE the worker lets the transcript die with the thread — nothing
+        long-lived holds a reference on any path.
         """
 
         def _replay() -> tuple[list[Any], list[Any]]:
             transcript = Transcript(self._config_dir / "sessions" / self._session_id)
-            # Retained ONLY for the cold path's checkpoint restore, which needs
-            # a second read of the same already-parsed file (see
-            # ``_restore_cold_details``). Keeping the object rather than
-            # re-constructing one is what keeps that restore free: a second
-            # ``Transcript(...)`` re-reads and re-parses the whole file, which
-            # is 0.68 s on the largest observed session. Cleared as soon as the
-            # cold restore consumes it so a long-lived viewer does not pin the
-            # parsed entries of a 103 MB transcript for its whole life.
-            self._cold_transcript = transcript
+            if want_checkpoint:
+                # Read here, on the worker, while the object is alive and
+                # already parsed: a second ``Transcript(...)`` on the loop
+                # would re-read and re-parse the whole file (0.68 s on the
+                # largest observed session).
+                self._cold_checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             return transcript.entries(), transcript.build_llm_history()
 
         return await asyncio.to_thread(_replay)
