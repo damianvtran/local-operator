@@ -689,6 +689,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="agent_id",
         help="ID of the agent to use for this execution (alternative to --agent by name)",
     )
+    exec_parser.add_argument(
+        "--control",
+        action="store_true",
+        help=(
+            "Publish a session record and serve the control socket for this run, "
+            "so an external supervisor can steer, cancel and answer gates "
+            "mid-run. Prints the endpoint on stderr. Off by default."
+        ),
+    )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -3815,6 +3824,10 @@ def main() -> int:
                 model=args.model,
                 train=args.train,
                 resume=getattr(args, "resume", None),
+                # getattr, like the additive flags above it: `exec` is not the
+                # only subcommand routed through this Namespace in tests, and a
+                # missing attribute must read as "off", never raise.
+                control=bool(getattr(args, "control", False)),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

@@ -957,7 +957,8 @@ class AgentLoop:
                         # aborted, exactly like a signalled stop would.
                         try:
                             graceful_cancel = bool(config.graceful_cancel_requested())
-                        except Exception:  # noqa: BLE001 — a broken host hook must not strand the turn
+                        # A broken host hook must not strand the turn.
+                        except Exception:  # noqa: BLE001
                             graceful_cancel = False
                     if (signal is not None and signal.aborted) or graceful_cancel:
                         # The abort landed while the batch was running. Its

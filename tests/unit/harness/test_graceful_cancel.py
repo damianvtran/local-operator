@@ -26,12 +26,13 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolResult,
 )
-
 from tests.unit.harness.test_loop import make_config
 
 
 def _tool(name: str = "touch", on_execute: Any = None) -> AgentTool:
-    async def execute(tool_call_id, args, signal, on_update, context):  # type: ignore[no-untyped-def]
+    async def execute(  # type: ignore[no-untyped-def]
+        tool_call_id, args, signal, on_update, context
+    ):
         if on_execute is not None:
             on_execute()
         return ToolResult(
@@ -65,9 +66,7 @@ async def _events(tool: AgentTool, **config_kwargs: Any) -> tuple[list[Any], _Sc
     stream = _Scripted()
     context = LoopContext(tools=[tool])
     config = make_config(stream, **config_kwargs)
-    events = [
-        event async for event in AgentLoop().run([Message.user("go")], context, config, None)
-    ]
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
     return events, stream
 
 
