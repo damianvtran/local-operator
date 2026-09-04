@@ -10,6 +10,7 @@ import time
 from collections import Counter
 from typing import Any, Literal
 
+import httpx
 import pytest
 
 import local_operator.harness.loop as loop_module
@@ -47,9 +48,15 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    TurnEndEvent,
+    TurnStartEvent,
     Usage,
 )
-from local_operator.providers.failover import ProviderError
+from local_operator.providers.failover import (
+    ProviderError,
+    _mark_mid_stream_connectivity,
+    wrap_transport_error,
+)
 
 MODEL = ModelSpec(provider="test", model_id="m")
 
@@ -2835,16 +2842,102 @@ class FailingStream:
         return [f"{m.role}:{m.text}" for m in self.requests[index].messages]
 
 
-def _offline() -> ProviderError:
-    """The wrapped error a closed-then-moved laptop actually produces."""
-    error = ProviderError(
-        None,
-        "ConnectError: [Errno 8] nodename nor servname provided, or not known",
-        retryable=True,
-        kind="transient",
-    )
-    assert error.connectivity_loss, "fixture must be classified as a connectivity loss"
+#: The exceptions a REAL severed socket raises mid-answer, captured from a live
+#: provider whose TCP connection was killed with SO_LINGER{1,0} half way through
+#: an SSE body. This tuple is the fixture population these tests must exercise,
+#: and writing it as exception OBJECTS rather than as message strings is the
+#: point: an earlier round of these tests built every fixture from a hand-typed
+#: ``ConnectError`` string and then asserted its own premise
+#: (``assert error.connectivity_loss``), so the suite stayed green while the
+#: shipped binary did not continue a single real mid-stream cut. A fixture that
+#: cannot fail cannot catch a classifier that never matches.
+#:
+#: An EMPTY message is deliberately first: ``httpx.ReadError('')`` is the single
+#: most common shape of a mid-body RST, and it is precisely the one a
+#: text-matching classifier cannot see.
+_REAL_MID_STREAM_EXCEPTIONS: tuple[Exception, ...] = (
+    httpx.ReadError(""),
+    httpx.ReadError("[Errno 54] Connection reset by peer"),
+    httpx.RemoteProtocolError("peer closed connection without sending complete message body"),
+    # What a SILENT drop (lid closed, no RST) produces: the stall watchdog in
+    # clients.py constructs exactly this after STREAM_READ_TIMEOUT_S.
+    httpx.ReadTimeout("stream stalled: no data for 180s"),
+    httpx.WriteError("[Errno 32] Broken pipe"),
+)
+
+
+def _offline(exc: Exception | None = None) -> ProviderError:
+    """A mid-stream cut as the DRIVER hands it to the loop.
+
+    Built by pushing a real ``httpx`` exception through the same two functions
+    the live path uses — ``wrap_transport_error`` then the driver's
+    ``forwarded_any`` marking — instead of asserting a hand-written string is
+    classified the way the test wants. Nothing here asserts the premise: if the
+    classifier stops recognising a severed socket, the fixture stops carrying
+    the flag and the behavioural tests below fail, which is how it should have
+    been able to catch Q1.
+
+    Defaults to the empty-message ``ReadError`` observed against a real killed
+    connection, so the DEFAULT fixture is the hardest case rather than the
+    easiest.
+    """
+    error = wrap_transport_error(exc if exc is not None else httpx.ReadError(""))
+    _mark_mid_stream_connectivity(error)
     return error
+
+
+def _offline_preconnect() -> ProviderError:
+    """A PRE-connection connectivity loss (DNS/route), for the arm that owns it.
+
+    Kept distinct from :func:`_offline` because the two are classified by
+    different predicates for different reasons — see
+    ``is_mid_stream_connectivity_loss``.
+    """
+    return wrap_transport_error(
+        httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
+    )
+
+
+@pytest.mark.parametrize("exc", _REAL_MID_STREAM_EXCEPTIONS, ids=lambda e: type(e).__name__)
+def test_every_real_mid_stream_exception_is_continuable(exc: Exception) -> None:
+    """THE Q1 REGRESSION GUARD, at the classifier boundary.
+
+    Each of these is an exception a real severed socket raises, and every one of
+    them classified ``False`` before this fix — so the loop's continuation
+    branch, which is reachable ONLY after deltas were forwarded, had a live
+    population of exactly the failures it could not recognise.
+
+    Asserted on objects httpx itself constructs, so this cannot be satisfied by
+    a marker string that merely looks like one.
+    """
+    wrapped = wrap_transport_error(exc)
+    # Before the driver marks it, a mid-stream shape is an ORDINARY transient:
+    # seen pre-connect it must keep its fast retry and its fallback walk.
+    assert not wrapped.connectivity_loss
+    _mark_mid_stream_connectivity(wrapped)
+    assert wrapped.connectivity_loss, f"{type(exc).__name__} must be continuable mid-stream"
+
+
+def test_a_provider_that_answered_cannot_claim_the_machine_is_offline() -> None:
+    """R6: an in-band error chunk has no status, so its TEXT alone used to be
+    enough to route a provider's own upstream trouble down the continue path.
+
+    Provenance is what separates them: only ``wrap_transport_error`` — our own
+    client observing a socket die — sets ``transport``.
+    """
+    spoof = ProviderError(
+        None,
+        "upstream_error: upstream: network is unreachable at edge",
+        retryable=True,
+    )
+    assert not spoof.transport
+    _mark_mid_stream_connectivity(spoof)
+    assert not spoof.connectivity_loss
+    # And a provider that answered with a STATUS is never continuable either.
+    for status in (500, 503, 429, 401, 400):
+        answered = ProviderError(status, "boom", retryable=True)
+        _mark_mid_stream_connectivity(answered)
+        assert not answered.connectivity_loss
 
 
 @pytest.mark.asyncio
@@ -2965,9 +3058,19 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     ends = [e for e in events if isinstance(e, AgentEndEvent)]
     assert len(ends) == 1
     assert ends[0].error is not None
-    assert "Errno 8" in ends[0].error
+    # The provider layer's own diagnostic survives to the frame: the run ends
+    # NAMED (here the severed-socket class), never as a bare hang or an empty
+    # string — which is what `wrap_transport_error` keeps the class name for.
+    assert "ReadError" in ends[0].error
     # Bounded: the initial attempt plus exactly the continuation budget.
     assert len(stream.requests) == MAX_CONNECTIVITY_CONTINUATIONS + 1
+    # And the budget is SPENT VISIBLY: one notice per continuation, each naming
+    # its position, rather than three identical claims of a reconnection.
+    notices = [e.text for e in events if isinstance(e, NoticeEvent)]
+    assert notices == [
+        f"network connection lost mid-response — retrying ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
+        for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
+    ]
 
 
 @pytest.mark.asyncio
@@ -3013,6 +3116,168 @@ async def test_connectivity_continuation_drops_truncated_tool_calls() -> None:
         not m.tool_calls for m in messages if isinstance(m, Message) and m.role == "assistant"
     )
     assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_keeps_a_COMPLETE_tool_call() -> None:
+    """A call whose arguments FINISHED arriving before the cut is not truncated.
+
+    The sibling test above drops a half-dictated call, which is right. Dropping
+    a complete one is not: the tool never runs, the model must re-derive it, and
+    the continuation prompt then describes a turn whose own record of having
+    asked for a tool has been deleted from the history it is being asked to
+    continue.
+
+    The surviving call is PAIRED rather than executed — the network died before
+    the loop could run it, and an unmatched ``tool_use`` block is a 400 on the
+    Anthropic wire — so the model sees the call it made did not run and may
+    re-issue it.
+    """
+    executed: list[str] = []
+
+    class _CompleteCallStream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            index = len(self.requests)
+            self.requests.append(request)
+
+            async def gen():
+                if index == 0:
+                    yield StreamTextDelta(delta="Let me check that. ")
+                    # Arguments complete: valid JSON, fully arrived...
+                    yield tool_call_delta(0, id="c1", name="echo", args='{"text": "hello"}')
+                    # ...and only THEN the socket dies.
+                    raise _offline()
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    stream = _CompleteCallStream()
+    config = make_config(stream)
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], LoopContext(tools=[echo_tool(executed)]), config, None
+    )
+
+    # It is not EXECUTED — the turn was abandoned, not completed.
+    assert executed == []
+    # But it survives in history, so the model's own record is intact.
+    retry_history = stream.requests[1].messages
+    carried = [m for m in retry_history if isinstance(m, Message) and m.tool_calls]
+    assert len(carried) == 1
+    assert carried[0].tool_calls[0].name == "echo"
+    assert carried[0].tool_calls[0].arguments == {"text": "hello"}
+    # And it is PAIRED, so the wire stays legal.
+    paired = [
+        m
+        for m in retry_history
+        if isinstance(m, Message)
+        and m.role == "tool"
+        and m.tool_call_id == carried[0].tool_calls[0].id
+    ]
+    assert len(paired) == 1
+    assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_closes_the_turn_it_abandons() -> None:
+    """Every TurnStart gets a TurnEnd, including on the continuation path.
+
+    ``TurnEndEvent`` is what drives a front end's per-turn reconciliation — in
+    the TUI, ``_retire_live_tool_cards``, the only routine path that settles a
+    row for a call that never ran. Without it the abandoned turn's composing
+    spinner animates forever and the working line goes on announcing "composing
+    a call" while the continued turn streams prose.
+    """
+
+    class _ComposingThenCut:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            index = len(self.requests)
+            self.requests.append(request)
+
+            async def gen():
+                if index == 0:
+                    yield StreamTextDelta(delta="one moment ")
+                    yield tool_call_delta(0, id="c1", name="echo", args='{"text": "hal')
+                    raise _offline()
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool([])]),
+        make_config(_ComposingThenCut()),
+        None,
+    ):
+        events.append(event)
+
+    starts = [e for e in events if isinstance(e, TurnStartEvent)]
+    ends = [e for e in events if isinstance(e, TurnEndEvent)]
+    assert len(starts) == 2
+    assert len(ends) == len(starts), "an abandoned turn must still be closed"
+    # And the close lands BEFORE the continuation's TurnStart, so a front end
+    # reconciles the dead turn's rows before the next one opens its own.
+    order = [type(e).__name__ for e in events if isinstance(e, (TurnStartEvent, TurnEndEvent))]
+    assert order == ["TurnStartEvent", "TurnEndEvent", "TurnStartEvent", "TurnEndEvent"]
+
+
+@pytest.mark.asyncio
+async def test_connectivity_continuation_prompt_is_persisted() -> None:
+    """The prompt reaches the TRANSCRIPT, not just the live request.
+
+    ``new_messages`` is what ``AgentEndEvent`` hands the host to persist. With
+    the prompt appended only to the live context, a resumed session read the
+    partial answer glued straight to its continuation with no record that a
+    network interruption sat between them — and a run that continued more than
+    once persisted a run of consecutive assistant messages that no longer
+    explains itself, which compaction then summarises.
+    """
+    stream = FailingStream([_offline(), None])
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], LoopContext(), make_config(stream), None
+    )
+
+    roles = [m.role for m in messages if isinstance(m, Message)]
+    assert roles == ["assistant", "user", "assistant"], "no consecutive assistant runs"
+    prompts = [
+        m
+        for m in messages
+        if isinstance(m, Message) and m.text == loop_module.CONNECTIVITY_CONTINUATION_PROMPT
+    ]
+    assert len(prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_partial_is_dropped_not_referenced() -> None:
+    """R4: the guard must agree with the SERIALIZER about what counts as text.
+
+    Both wire builders drop an assistant turn whose text is whitespace-only
+    (``_is_empty_assistant``: "Whitespace-only text counts as empty"). A model
+    that emits a newline before the cut therefore had its turn vanish from the
+    request while the prompt went on telling it to continue "the partial text
+    above" — text no wire carried. Aligning the guard routes this to the
+    drop-and-re-ask arm instead.
+    """
+    stream = FailingStream([_offline(), None], partial="\n")
+    await AgentLoop().run_to_end([Message.user("go")], LoopContext(), make_config(stream), None)
+
+    retry = stream.requests[1].messages
+    assert not any(isinstance(m, Message) and m.role == "assistant" for m in retry)
+    # No dangling reference to text the model cannot see: the original question
+    # is simply re-asked.
+    assert not any(
+        isinstance(m, Message) and m.text == loop_module.CONNECTIVITY_CONTINUATION_PROMPT
+        for m in retry
+    )
+    assert [m.role for m in retry if isinstance(m, Message)] == ["user"]
 
 
 @pytest.mark.asyncio

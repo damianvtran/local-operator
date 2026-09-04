@@ -151,6 +151,69 @@ _CONNECTIVITY_LOSS_MARKERS = (
     "errno 50",
 )
 
+#: Transport failures that mean "a connection that was ALREADY WORKING died" —
+#: the mid-stream counterpart to :data:`_CONNECTIVITY_LOSS_MARKERS`, and
+#: deliberately a SEPARATE tuple consulted only by
+#: :func:`is_mid_stream_connectivity_loss`.
+#:
+#: The two lists answer different questions and must not be merged. The markers
+#: above are all PRE-connection evidence: a name that would not resolve, a route
+#: that did not exist. A socket that dies AFTER the response body started cannot
+#: produce any of them — the name already resolved and the route already existed
+#: — so it raises one of these classes instead, frequently with an EMPTY message
+#: (``httpx.ReadError('')`` is what a TCP RST mid-body actually surfaces as, so
+#: matching on text alone catches nothing and the class name is the whole of the
+#: evidence).
+#:
+#: Why these are treated as the local link failing rather than the provider
+#: failing, when the same classes could mean either: by the time this predicate
+#: is asked, bytes have ALREADY flowed on this connection. The name resolved,
+#: the route existed, the provider accepted the request and began answering. A
+#: provider that was healthy enough to start streaming and then drops the TCP
+#: connection without an HTTP status is far more likely to be on the other side
+#: of a link that just went away (the laptop closed at home and opened at work)
+#: than to have failed in a way worth rotating credentials over — and a provider
+#: that genuinely failed mid-answer says so IN BAND, with a status or an error
+#: chunk, which :func:`is_mid_stream_connectivity_loss` excludes on ``status``.
+#:
+#: ``httpx.ProtocolError`` is included for its ``RemoteProtocolError`` member
+#: ("peer closed connection without sending complete message body"), which is
+#: how a truncated chunked body arrives. ``LocalProtocolError`` rides the same
+#: base but cannot occur here: it is raised while BUILDING a request, before
+#: any byte is forwarded, so this predicate is never reached with one.
+_MID_STREAM_TRANSPORT_LOSS_CLASSES: tuple[type[BaseException], ...] = (
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.CloseError,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.ProtocolError,
+)
+
+#: Class NAMES for the wrapped-``ProviderError`` path, where the exception
+#: object is gone and its class name survives only as the HEAD of ``message``
+#: (``"<ClassName>: <detail>"``, or the bare name when the detail is empty —
+#: see :func:`wrap_transport_error`), which is precisely why that wrap puts the
+#: class name there rather than only the detail.
+#:
+#: Matched with ``startswith`` rather than a substring scan, because these are
+#: only evidence in the NAME position: a provider whose prose happens to say
+#: "read error" is describing its own trouble, not this machine's socket. The
+#: bare name is matched (no trailing colon) because ``httpx.ReadError('')``
+#: wraps to exactly ``"ReadError"`` with no colon at all — and an empty message
+#: is the single most common shape of a real mid-body RST.
+#:
+#: The CONCRETE classes are enumerated, not the bases: nothing raises a bare
+#: ``ProtocolError``. Kept adjacent to the class tuple so the two cannot drift.
+_MID_STREAM_TRANSPORT_LOSS_NAMES = (
+    "readerror",
+    "writeerror",
+    "closeerror",
+    "readtimeout",
+    "writetimeout",
+    "remoteprotocolerror",
+)
+
 
 def _is_usage_limit(status: int | None, message: str) -> bool:
     """429, or a body that SAYS it ran out.
@@ -295,6 +358,7 @@ class ProviderError(RenderedStreamError):
         retry_after_ms: int | None = None,
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
+        transport: bool = False,
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -313,6 +377,23 @@ class ProviderError(RenderedStreamError):
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
+        #: PROVENANCE, not classification: this error was built from a transport
+        #: exception this machine's own client raised (:func:`wrap_transport_error`
+        #: is the only writer), rather than parsed out of something a provider
+        #: SAID. It exists because the two are indistinguishable by text, and one
+        #: of them is a lie: an in-band error chunk on an HTTP 200 stream carries
+        #: no status, so a provider describing its OWN upstream trouble
+        #: ("upstream: network is unreachable at edge") reads exactly like this
+        #: machine's socket dying. Message text alone cannot tell a failure this
+        #: process observed from a failure a provider narrated, and
+        #: :func:`is_mid_stream_connectivity_loss` gates a control-flow decision
+        #: on that difference — whether to CONTINUE the turn or surface it.
+        #:
+        #: Deliberately not consulted by :func:`is_connectivity_loss`, whose
+        #: pre-connect semantics and callers are unchanged by this PR: a client
+        #: that builds its own connectivity ``ProviderError`` must keep taking
+        #: the patient path there.
+        self.transport = transport
         #: Stamped at construction so the flag travels with the exception across
         #: the layer boundary (see ``RenderedStreamError.connectivity_loss``):
         #: the harness must decide whether an interrupted turn is continuable,
@@ -321,7 +402,33 @@ class ProviderError(RenderedStreamError):
         #: there is still exactly one definition of "the machine is offline".
         #: Safe to evaluate here — the classifier reads only ``status`` and
         #: ``message``, both already assigned above.
-        self.connectivity_loss = is_connectivity_loss(self)
+        #:
+        #: This is the PRE-CONNECT half only. The mid-stream half cannot be
+        #: decided here, because it turns on a fact no exception carries:
+        #: whether bytes had already reached the caller on this connection.
+        #: Only the driver knows that (``forwarded_any``), so it is the driver
+        #: that upgrades this flag on the mid-stream raise path — see
+        #: :func:`is_mid_stream_connectivity_loss` and its two call sites in
+        #: :func:`stream_with_failover`.
+        #:
+        #: Gated on ``transport`` — provenance — as well as on the classifier,
+        #: and that gate is load-bearing rather than defensive. This flag DRIVES
+        #: CONTROL FLOW in the harness (continue the turn, or end the run), and
+        #: :func:`is_connectivity_loss` alone cannot support that weight: a
+        #: provider's in-band error chunk on an HTTP 200 stream carries no
+        #: status, so a provider describing its OWN upstream trouble
+        #: ("upstream: network is unreachable at edge") matches the offline
+        #: markers word for word. Believed, it would make the loop silently
+        #: re-ask a turn the provider had already failed — burning the budget
+        #: and hiding a failure the user needs to see — instead of surfacing it.
+        #: Requiring that OUR client observed the failure is what makes the
+        #: distinction, because the text cannot.
+        #:
+        #: :func:`is_connectivity_loss` itself is deliberately NOT gated this
+        #: way: its callers choose a backoff, where believing such a provider
+        #: merely means waiting patiently on one that is genuinely unwell, and
+        #: changing it would alter behaviour this fix has no business touching.
+        self.connectivity_loss = transport and is_connectivity_loss(self)
 
     def __str__(self) -> str:
         """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.
@@ -527,6 +634,74 @@ def is_transient_error(error: BaseException) -> bool:
     return classify_provider_error(error) in ("transient", "timeout")
 
 
+def is_mid_stream_connectivity_loss(error: BaseException) -> bool:
+    """The link died AFTER the answer started — a turn worth CONTINUING.
+
+    The mid-stream sibling of :func:`is_connectivity_loss`, and deliberately a
+    second predicate rather than a widening of the first. The two are asked at
+    different moments, about different evidence, to decide different things,
+    and merging them would break both:
+
+    - :func:`is_connectivity_loss` is asked BEFORE any byte was forwarded, to
+      choose a patient minutes-long backoff over a fast retry-and-rotate. Its
+      markers are pre-connection facts (a name that would not resolve, a route
+      that did not exist), and they must stay that way: a provider that is
+      genuinely broken has to keep the fast retry AND the fallback walk that
+      routes around it. Handing it the ~9-minute patient wait while suppressing
+      rotation would turn one sick provider into a stalled session.
+    - This predicate is asked only once deltas have ALREADY reached the user,
+      to decide whether the interrupted turn may be resumed. Bytes having
+      flowed is the whole of the difference: the name resolved, the route
+      existed, and the provider accepted the request and began answering, so a
+      transport death *now* is far more likely to be the local link than the
+      provider. That is an inference the pre-connect caller cannot make and
+      must not inherit.
+
+    Concretely, the exception families are disjoint. A mid-body TCP RST raises
+    ``httpx.ReadError`` (routinely with an EMPTY message), a truncated chunked
+    body raises ``RemoteProtocolError``, a silent link drop trips the stall
+    watchdog's ``ReadTimeout`` — none of which can carry a DNS or route marker,
+    which is why the pre-connect list classifies every one of them ``False``.
+
+    ``status`` must still be absent, and that guard is doing real work here: a
+    provider that answered — with an HTTP status, or with an in-band error
+    chunk carrying one — reported its OWN failure, and replaying that turn
+    would re-bill it while hiding a failure the user needs to see. Only a
+    STATUS-LESS transport death qualifies.
+    """
+    if isinstance(error, ProviderError):
+        if error.status is not None:
+            return False
+        # A provider that ANSWERED must not be able to talk its way into this
+        # branch with its own prose. `wrap_transport_error` is the only writer
+        # of a status-less transport failure, and it stamps this flag; an error
+        # parsed out of a provider's error CHUNK never has it, however much its
+        # message sounds like a socket failure (see `ProviderError.transport`).
+        if not error.transport:
+            return False
+        # Only the NAME position counts — see the marker tuple.
+        return error.message.lower().startswith(_MID_STREAM_TRANSPORT_LOSS_NAMES)
+    return isinstance(error, _MID_STREAM_TRANSPORT_LOSS_CLASSES)
+
+
+def _mark_mid_stream_connectivity(error: ProviderError) -> None:
+    """Upgrade ``connectivity_loss`` on an error raised AFTER deltas were sent.
+
+    Called from the two ``forwarded_any`` raise sites in
+    :func:`stream_with_failover`, and only from there, because "bytes already
+    reached the caller" is the fact the classification turns on and the driver
+    is the only frame that holds it. Doing it here rather than in
+    ``ProviderError.__init__`` is what keeps the pre-connect classifier honest:
+    the same ``ReadError`` seen BEFORE any delta stays an ordinary transient
+    and keeps its fast retry and its fallback walk.
+
+    Never clears the flag — a pre-connect connectivity loss that somehow
+    surfaces here is still one. Only ever an upgrade.
+    """
+    if is_mid_stream_connectivity_loss(error):
+        error.connectivity_loss = True
+
+
 def is_connectivity_loss(error: BaseException) -> bool:
     """The MACHINE is offline — DNS/route/socket-connect failed before any HTTP.
 
@@ -546,6 +721,24 @@ def is_connectivity_loss(error: BaseException) -> bool:
     ``kind``: :func:`wrap_transport_error` keeps these ``kind="transient"``
     because "transient provider error" is the right frame for the user, so the
     class/errno text is the only signal that separates them from a 5xx.
+
+    KNOWN IMPRECISION, deliberately left alone here. The ``status is None``
+    guard means "no HTTP response", but an in-band error CHUNK on an HTTP 200
+    stream also has no status (``_ANTHROPIC_ERROR_STATUS`` returns ``None`` for
+    an unknown type), so a provider narrating its OWN upstream trouble —
+    ``{"type": "upstream_error", "message": "upstream: network is unreachable
+    at edge"}`` — matches these markers and classifies as this machine being
+    offline. The consequence HERE is benign and arguably right: the caller
+    waits patiently instead of hammering a provider whose upstream is down, and
+    a provider that keeps saying it eventually exhausts the patient budget.
+
+    It is NOT benign for a control-flow decision, which is why
+    :func:`is_mid_stream_connectivity_loss` — the predicate that decides whether
+    to CONTINUE an interrupted turn — additionally requires
+    ``ProviderError.transport``, i.e. that our own client raised the failure
+    rather than a provider having described one. Tightening this function the
+    same way would change the patient-backoff behaviour of every existing
+    caller, which is out of scope for the mid-stream fix that needed it.
     """
     if isinstance(error, ProviderError):
         # `message` already carries the wrapped "<ClassName>: <detail>" text
@@ -1761,6 +1954,10 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
         f"{name}: {detail}" if detail else name,
         retryable=True,
         kind="timeout" if timed_out else "transient",
+        # PROVENANCE: this failure was observed by our own client, not narrated
+        # by a provider. `is_mid_stream_connectivity_loss` needs that distinction
+        # and cannot recover it from the text — see `ProviderError.transport`.
+        transport=True,
     )
 
 
@@ -2199,7 +2396,15 @@ async def stream_with_failover(
                 raise
             except ProviderError as exc:
                 if forwarded_any:
-                    raise  # partial output already reached the caller
+                    # Partial output already reached the caller, so this attempt
+                    # cannot be retried HERE — replaying it would stream deltas
+                    # the user has already read. Before it goes up, mark whether
+                    # it is the kind of failure the LOOP can continue instead:
+                    # only this frame knows bytes were forwarded, which is the
+                    # whole of the mid-stream inference (see
+                    # `is_mid_stream_connectivity_loss`).
+                    _mark_mid_stream_connectivity(exc)
+                    raise
                 record(exc, primary=is_primary)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 # A pre-wrapped connectivity loss (a client that turns httpx into
@@ -2322,6 +2527,12 @@ async def stream_with_failover(
                     # so the loop printed ``str(httpx.ConnectTimeout())`` (which
                     # is the empty string) into the frame AND a full traceback
                     # into the log.
+                    #
+                    # This is the arm a real mid-stream cut arrives on: no client
+                    # catches httpx, so a socket that dies mid-body reaches here
+                    # raw as `ReadError`/`RemoteProtocolError`/`ReadTimeout`.
+                    # Mark it continuable before it leaves — see the sibling arm.
+                    _mark_mid_stream_connectivity(wrapped)
                     raise wrapped from exc
                 record(wrapped, primary=is_primary)
                 # This is the arm a CONNECTIVITY LOSS actually arrives on: no
