@@ -602,6 +602,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
     wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    wake_create.add_argument(
+        "--every",
+        default="",
+        metavar="DURATION",
+        # The operator's stated use for background automations ("regular disk
+        # cleaning, automation tasks") is recurring by nature, and the model
+        # has been able to schedule one since `WakeSchedule.every_ms`; only
+        # the CLI could not. Parsed by the same `parse_wake_duration` the
+        # tool path uses, so `40s` / `8h30m` mean the same thing from either
+        # entry point — including its deliberate rejection of a bare number
+        # and of a zero interval, both of which are runaway loops.
+        help='repeat every DURATION after the first fire ("40s", "1h", "8h30m")',
+    )
     wake_create.add_argument("--json", action="store_true", help="machine-readable output")
     wake_serve = wake_sub.add_parser(
         "serve",
@@ -1699,6 +1712,7 @@ def _wake_create(args: argparse.Namespace) -> int:
     import time as _time
 
     from local_operator.harness.wake import (
+        MIN_WAKE_INTERVAL_MS,
         WakeSchedule,
         parse_wake_at,
         parse_wake_duration,
@@ -1745,11 +1759,39 @@ def _wake_create(args: argparse.Namespace) -> int:
         existing = [dict(s) for s in details.get("schedules", []) if isinstance(s, dict)]
     # Per-session handles (``w1``…), matching the in-session numbering so the
     # id a user sees here is the id `/wake` would have given it.
+    every_ms: int | None = None
+    every_raw = str(getattr(args, "every", "") or "").strip()
+    if every_raw:
+        every_ms = parse_wake_duration(every_raw)
+        if every_ms is None:
+            # The same refusal the tool path gives, for the same reason: a
+            # bare number is ambiguous between seconds and milliseconds, and
+            # guessing wrong is a runaway loop.
+            print(
+                f"could not read a repeat interval from {every_raw!r} "
+                "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
+                file=sys.stderr,
+            )
+            return 1
+        if every_ms < MIN_WAKE_INTERVAL_MS:
+            # Caught HERE rather than at the model validator so the user gets
+            # a sentence instead of a pydantic traceback. The floor is
+            # deliberate: a wake starts a full turn, so a sub-minute repeat
+            # starves the session it is meant to serve.
+            print(
+                f"repeat interval {every_raw!r} is too short — "
+                f"the minimum is {MIN_WAKE_INTERVAL_MS // 1000}s, "
+                "because each wake starts a full turn",
+                file=sys.stderr,
+            )
+            return 1
+
     schedule = WakeSchedule(
         id=f"w{len(existing) + 1}",
         message=str(args.message),
         next_due_at=due_at,
         created_at=now_ms,
+        every_ms=every_ms,
     )
     combined = [*existing, schedule.model_dump()]
 

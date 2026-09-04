@@ -31,7 +31,13 @@ def _session(config_dir: Path, session_id: str) -> Path:
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
-    base = {"session": "wakecreate01", "when": "in 2m", "message": "check the build", "json": True}
+    base = {
+        "session": "wakecreate01",
+        "when": "in 2m",
+        "message": "check the build",
+        "json": True,
+        "every": "",
+    }
     base.update(kwargs)
     return argparse.Namespace(**base)
 
@@ -106,3 +112,55 @@ def test_the_advertised_time_forms_all_parse(tmp_path: Path, when: str) -> None:
 
     _session(tmp_path, "wakecreate01")
     assert _wake_create(_args(when=when)) == 0
+
+
+def test_a_recurring_wake_stores_its_interval(tmp_path: Path) -> None:
+    """`--every` is what makes a background automation possible from the CLI.
+
+    The model has been able to schedule a recurring wake since
+    `WakeSchedule.every_ms`; only `lop wake create` could not, so the
+    operator's stated use for this ("regular disk cleaning, automation
+    tasks") was unreachable without opening a session (round 3, QA).
+    """
+    import json
+
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(every="1h")) == 0
+
+    entry = json.loads((tmp_path / "wakes" / "wakecreate01.json").read_text())
+    assert entry["schedules"][0]["every_ms"] == 3_600_000
+
+
+def test_a_one_shot_wake_stores_no_interval(tmp_path: Path) -> None:
+    """Omitting `--every` must stay a one-shot, not a zero-interval loop."""
+    import json
+
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args()) == 0
+
+    entry = json.loads((tmp_path / "wakes" / "wakecreate01.json").read_text())
+    assert entry["schedules"][0]["every_ms"] is None
+
+
+@pytest.mark.parametrize("every", ["banana", "3600", "40s"])
+def test_an_unusable_repeat_interval_is_refused_in_words(
+    tmp_path: Path, every: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Refused with a SENTENCE, not a pydantic traceback.
+
+    `3600` is ambiguous between seconds and milliseconds; `40s` is below the
+    one-minute floor, which exists because each wake starts a full turn and a
+    sub-minute repeat starves the session it serves. Both used to reach the
+    model validator and print a stack trace at the user.
+    """
+    from local_operator.cli import _wake_create
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(every=every)) == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "interval" in err
