@@ -2818,6 +2818,10 @@ class SessionStreamFn:
         # ``list_oauth_accesses`` deliberately omits a row whose refresh fails;
         # without this comparison, one omitted/unknown account plus one depleted
         # account looked like proof the WHOLE provider was depleted (review F1).
+        # A row whose grant is permanently dead is now RETURNED instead of
+        # omitted (so ``/usage`` can name the remedy), carrying no bearer. It
+        # is filtered back out below: for this quota question a dead grant is
+        # an account that cannot answer, exactly as when it was omitted.
         rows = self._auth_store.list_credentials(provider)
         oauth_rows = [row for row in rows if row.credential_type == "oauth"]
         api_key_rows = [row for row in rows if row.credential_type == "api_key"]
@@ -2829,6 +2833,13 @@ class SessionStreamFn:
         except Exception:
             accesses = []
             saw_unknown = bool(oauth_rows)
+        accesses = [
+            access for access in accesses if not getattr(access, "credential_invalid", False)
+        ]
+        # Dropping them here restores the pre-existing arithmetic exactly: the
+        # id-set comparison below then reports the same mismatch omission used
+        # to produce, so a dead grant still reads as one account that could not
+        # answer rather than as proof the provider is empty.
         if {access.credential_id for access in accesses} != {row.id for row in oauth_rows}:
             saw_unknown = True
 

@@ -119,6 +119,98 @@ class ConfigurationError(LoginError):
     """Local misconfiguration detected before any browser was opened."""
 
 
+class InvalidGrantError(LoginError):
+    """The stored grant is PERMANENTLY dead — only a fresh login can fix it.
+
+    A refresh can fail two ways that look identical at the call site and are
+    opposite in what the operator should do about them. A 5xx, a timeout, a
+    429 or a dropped connection is the provider or the network being
+    temporarily unwell: retrying is exactly right, and the existing
+    per-account backoff exists for it. ``invalid_grant`` is the IdP stating
+    that this refresh token will never be accepted again (revoked, superseded
+    by a rotation we lost, or expired past its absolute lifetime), and no
+    amount of retrying changes that answer.
+
+    Conflating them is the defect this class exists to end: a dead kimi grant
+    spent its retry budget, tripped ``usage_unavailable`` and then rendered as
+    ``usage unavailable - last known 2d ago`` forever, a message that implies
+    the numbers will come back on their own when the only remedy is
+    ``/login <provider>``.
+
+    Subclasses :class:`LoginError` deliberately: every existing ``except
+    LoginError`` handler keeps working unchanged, and only callers that want
+    the distinction test for this type.
+    """
+
+
+#: OAuth2 token-endpoint error codes that are terminal for a STORED grant
+#: (RFC 6749 SS5.2). Terminal here means "re-presenting the same refresh token
+#: to the same client can never succeed", which is a narrower question than
+#: "was this request rejected".
+#:
+#: - ``invalid_grant``: the grant itself is revoked/expired/already-rotated.
+#:   The direct signal, and the one observed against auth.kimi.com.
+#: - ``invalid_client`` / ``unauthorized_client``: the CLIENT is rejected, so
+#:   every grant held under it is unusable by us. A re-login is still the only
+#:   move available to the operator, and burning a retry loop is still wrong.
+#: - ``unsupported_grant_type``: the token endpoint refuses ``refresh_token``
+#:   for this client at all; retrying re-sends the same unsupported request.
+#:
+#: Deliberately EXCLUDED: ``invalid_request`` and ``invalid_scope``, which
+#: describe a malformed request rather than a dead grant and would blame the
+#: user's login for a bug of ours; and ``slow_down`` / ``authorization_pending``,
+#: which are device-flow polling states, not failures.
+TERMINAL_GRANT_ERRORS = frozenset(
+    {
+        "invalid_grant",
+        "invalid_client",
+        "unauthorized_client",
+        "unsupported_grant_type",
+    }
+)
+
+
+def is_terminal_grant_response(status_code: int, body: str) -> bool:
+    """Whether a non-200 token-endpoint response means the grant is dead.
+
+    **The status code alone is not the signal, and must not be used as one.**
+    RFC 6749 SS5.2 puts the machine-readable verdict in the BODY: the same 400
+    carries ``invalid_grant`` (terminal) and ``invalid_request`` (our bug,
+    retryable). Meanwhile a 401 is routinely a gateway or an auth proxy having
+    a bad minute. So the code only gates which bodies are worth reading -- 5xx
+    is the provider failing and its body is a stack trace or an HTML error
+    page, never a verdict about the operator's grant.
+
+    Substring matching against the raw body is deliberate over strict JSON
+    parsing. These endpoints are not uniformly well-behaved: bodies arrive as
+    JSON, as form-encoded pairs, and occasionally wrapped in another envelope,
+    and a JSON-only reader silently degrades every non-JSON shape to
+    "transient", which is the failure mode this whole change exists to remove.
+    The codes are specific enough that a false positive would need the literal
+    token in some other role.
+    """
+    # 5xx and 429 are the provider's problem, whatever the body says: keep
+    # today's retry/backoff behaviour for them.
+    if status_code >= 500 or status_code == 429:
+        return False
+    lowered = body.lower()
+    return any(code in lowered for code in TERMINAL_GRANT_ERRORS)
+
+
+def raise_for_refresh_failure(provider_label: str, status_code: int, body: str) -> None:
+    """Raise the right error class for a failed token-endpoint refresh.
+
+    One helper so every provider's refresh classifies identically. A dead
+    grant is a property of OAuth2, not of a vendor, so anthropic/openai/xai/
+    kimi/radient must not each decide it for themselves -- and the message
+    text stays the same as before, since it is what a user searches for.
+    """
+    message = f"{provider_label} refresh failed ({status_code}): {body}"
+    if is_terminal_grant_response(status_code, body):
+        raise InvalidGrantError(message)
+    raise LoginError(message)
+
+
 # Callbacks the host (CLI/TUI) implements to drive the interactive flow.
 # Every field is optional; sync or async callables both work.
 @dataclasses.dataclass

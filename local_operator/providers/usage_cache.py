@@ -191,6 +191,7 @@ def report_from_dict(data: Any) -> UsageReport | None:
             consecutive_failures=max(0, consecutive_failures),
             usage_unavailable=bool(data.get("usage_unavailable", False)),
             next_probe_at_ms=next_probe_at_ms,
+            credential_invalid=bool(data.get("credential_invalid", False)),
         )
     except Exception:  # noqa: BLE001 — a bad row is a miss, not a failure
         logger.debug("usage cache: unparseable report row dropped", exc_info=True)

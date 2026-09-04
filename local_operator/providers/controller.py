@@ -651,6 +651,19 @@ class ProviderController:
             return False
         if previous.usage_unavailable:
             return True
+        # A dead grant cannot be re-probed into life, so the automatic cycle
+        # skips it: it is not in a cool-down, it is waiting on the user, and
+        # spending the backoff on it is the defect this flag exists to fix.
+        #
+        # It sits BELOW the force check on purpose. ``r`` must still reach it,
+        # because that is how the state clears once the user has run ``/login``
+        # again: re-login updates the row in place for providers whose
+        # identity key is a per-provider constant (kimi), so the account
+        # fingerprint does not change and no cache invalidation would rescue a
+        # flag that ``r`` could not clear. One request on an explicit keypress
+        # is the cheap half of that trade.
+        if getattr(previous, "credential_invalid", False):
+            return True
         # Only a FAILURE cool-down skips the probe. A successful account
         # leaves next_probe_at_ms unset so a sibling's shorter backoff can
         # expire the provider row without freezing the healthy logins.
@@ -660,7 +673,15 @@ class ProviderController:
         return nxt is not None and nxt > now_ms
 
     def _reset_account_for_force(self, report: UsageReport) -> UsageReport:
-        """``r`` clears the failure streak so a maxed-out account is retried."""
+        """``r`` clears the failure streak so a maxed-out account is retried.
+
+        ``credential_invalid`` is deliberately NOT cleared here. The streak
+        and the unavailable ceiling are guesses about a provider that may have
+        recovered, so ``r`` is right to drop them; a dead grant is a verdict
+        the IdP returned, and clearing it optimistically would blank the one
+        line telling the user to re-login until the fetch re-derived it.
+        ``_mark_account_success`` clears it when a bearer actually works.
+        """
         report.consecutive_failures = 0
         report.usage_unavailable = False
         report.next_probe_at_ms = None
@@ -669,6 +690,45 @@ class ProviderController:
     def _mark_account_success(self, report: UsageReport, now_ms: int) -> UsageReport:
         """A live 200: clear the failure streak and schedule the next probe."""
         report.consecutive_failures = 0
+        report.usage_unavailable = False
+        report.next_probe_at_ms = None
+        # A 200 proves the grant minted a working bearer, so whatever the
+        # cached row said about it is stale by definition. Clearing here is
+        # what makes the state self-healing after the user re-logs in.
+        report.credential_invalid = False
+        return report
+
+    def _mark_account_invalid(
+        self,
+        previous: UsageReport | None,
+        *,
+        provider: str,
+        identity: str,
+        now_ms: int,
+    ) -> UsageReport:
+        """The grant is dead: state it, and stop spending retries on it.
+
+        Deliberately NOT ``_mark_account_failure`` with an extra flag. That
+        path exists to decide when a run of transient misses has gone on long
+        enough to stop trusting the numbers, and every part of it is wrong
+        here: the failure streak measures an outage's length, the exponential
+        backoff schedules a retry that cannot succeed, and
+        ``usage_unavailable`` renders as ``usage unavailable - last known 2d
+        ago``, which tells the user to wait when they need to act.
+
+        So the streak is left untouched and ``next_probe_at_ms`` stays None.
+        The account is not in a cool-down -- there is simply nothing to
+        re-probe until the credential is replaced, and
+        ``_account_in_backoff`` skips it on that flag alone. Last-known limits
+        stay on the report: they remain the last true reading of a login the
+        user still owns.
+        """
+        report = (
+            previous
+            if previous is not None
+            else UsageReport(provider=provider, fetched_at=now_ms, identity=identity)
+        )
+        report.credential_invalid = True
         report.usage_unavailable = False
         report.next_probe_at_ms = None
         return report
@@ -741,7 +801,7 @@ class ProviderController:
         for identity in expected:
             seen.add(identity)
             if identity in live:
-                merged.append(self._mark_account_success(live[identity], now_ms))
+                merged.append(self._settle_live_report(live[identity], now_ms))
                 continue
             prior = previous.get(identity)
             if self._account_in_backoff(prior, now_ms, force=force) and prior is not None:
@@ -761,8 +821,21 @@ class ProviderController:
         for identity, report in live.items():
             if identity in seen:
                 continue
-            merged.append(self._mark_account_success(report, now_ms))
+            merged.append(self._settle_live_report(report, now_ms))
         return merged
+
+    def _settle_live_report(self, report: UsageReport, now_ms: int) -> UsageReport:
+        """Finish a report this cycle produced, honouring a dead-grant verdict.
+
+        Everything in ``live`` used to be a 200 by construction, so the merge
+        could call ``_mark_account_success`` on all of it. A dead-grant entry
+        is also produced by this cycle (it is a fresh verdict, not last-good)
+        but it is the opposite of a success, and passing it through the
+        success path would clear the very flag it was created to carry.
+        """
+        if report.credential_invalid:
+            return report
+        return self._mark_account_success(report, now_ms)
 
     @staticmethod
     def _jittered_ttl_ms() -> int:
@@ -977,6 +1050,15 @@ class ProviderController:
                     continue
                 access = accesses_by_id.get(identity)
                 if access is None:
+                    continue
+                if getattr(access, "credential_invalid", False):
+                    # The store minted no bearer and said why: the grant is
+                    # dead. Record that verdict instead of probing with an
+                    # empty token, which would fail as a generic 401 and land
+                    # this account back in the transient-failure path.
+                    live[identity] = self._mark_account_invalid(
+                        prior, provider=provider, identity=identity, now_ms=now_ms
+                    )
                     continue
                 try:
                     report = await self._fetch_one(client, provider, access=access)

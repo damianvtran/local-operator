@@ -570,6 +570,70 @@ def test_unavailable_with_last_known_meters_keeps_binding_on_the_heading() -> No
     assert "usage unavailable" in no_heading
 
 
+def test_a_dead_grant_names_the_remedy_instead_of_an_age() -> None:
+    """The reported defect's frame: `kimi cred:8 · usage unavailable — last
+    known 2d ago`, which implies the numbers return on their own when the only
+    fix is signing in again. A dead grant is the one failure state with an
+    action attached, so the note states the action.
+    """
+    report = _report(
+        _percent("k:5h", "5h limit", 100.0, shared=True),
+        provider="kimi",
+        identity="cred:8",
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+    lines = _lines([report], now=2 * 86_400_000)
+    joined = "\n".join(lines)
+
+    assert "sign-in expired — /login kimi" in joined, joined
+    # The wait-it-out copy must be gone: it is the misleading half.
+    assert "usage unavailable" not in joined, joined
+    assert "last known" not in joined, joined
+    # The login is still real, so its last numbers stay on the card.
+    assert "cred:8" in joined
+    assert any("100%" in line for line in lines)
+
+
+def test_the_dead_grant_note_is_generic_across_providers() -> None:
+    """Nothing about this is kimi-specific — every OAuth provider can hit it."""
+    for provider in ("anthropic", "openai", "xai", "zai"):
+        report = _report(provider=provider, identity="me@example.com")
+        report.credential_invalid = True
+        joined = "\n".join(_lines([report]))
+        assert f"/login {provider}" in joined, joined
+
+
+def test_a_dead_grant_keeps_the_command_runnable_on_a_narrow_card() -> None:
+    """The provider name is the actionable half, so it is what survives.
+
+    `sign-in expired — /login anthropic` gains nothing from the generic
+    shortener (both halves are already minimal), and right-truncation would
+    print `/login anthro…` — a command that fails if typed as shown.
+    """
+    report = _report(provider="anthropic", identity="me@example.com")
+    report.credential_invalid = True
+
+    narrow = next(line for line in _lines([report], width=24) if "login" in line)
+    wide = next(line for line in _lines([report], width=76) if "login" in line)
+
+    assert "…" not in narrow, narrow
+    assert "/login anthropic" in narrow, narrow
+    assert wide.strip() == "sign-in expired — /login anthropic", wide
+
+
+def test_a_dead_grant_does_not_repeat_itself_on_the_heading() -> None:
+    """With no meters the heading may say a probe failed — but not here, where
+    the note already states the condition AND the remedy in the same cells."""
+    report = _report(provider="kimi", identity="cred:8")
+    report.credential_invalid = True
+    report.usage_unavailable = True
+    heading, note, *_rest = _lines([report], width=72)
+
+    assert "usage unavailable" not in heading, heading
+    assert "/login kimi" in note, note
+
+
 def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
     report = _report(
         _percent("a:7d", "7 day", 40.0, shared=True),

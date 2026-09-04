@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.paths import config_dir
+from local_operator.providers.oauth.callback_server import InvalidGrantError
 from local_operator.providers.registry import (
     GetApiKeyFn,
     RefreshFn,
@@ -137,6 +138,22 @@ class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
 
+class CredentialInvalidError(AuthStoreError):
+    """The row's grant is dead; retrying cannot revive it, only a re-login can.
+
+    The store-level face of
+    :class:`~local_operator.providers.oauth.callback_server.InvalidGrantError`.
+    It stays a subclass of :class:`AuthStoreError` so every existing handler
+    (the cascade rotating to a sibling, ``ensure_oauth_fresh`` swallowing to
+    ``None``) behaves exactly as before; callers that must tell a permanent
+    failure from an outage -- ``/usage`` is the first -- catch this instead.
+
+    Raising it is a STATEMENT ABOUT THE GRANT, not a routing decision: nothing
+    here disables, blocks or deletes the row. The login is still the user's,
+    and the panel keeps showing it.
+    """
+
+
 @dataclasses.dataclass
 class StoredCredential:
     """One row of ``auth_credentials`` with its parsed payload."""
@@ -175,6 +192,14 @@ class OAuthAccess:
     #: needs the OAuth ``access`` — and a usage fetcher must see the raw row
     #: to spend the right one. None for plain API-key rows.
     raw: dict[str, Any] | None = None
+    #: True when this row's stored grant was refused as permanently dead, so
+    #: no bearer could be minted and none ever will be until the user runs
+    #: ``/login <provider>`` again. Carried on the identity record rather than
+    #: signalled by omission because omission is exactly what made this state
+    #: indistinguishable from a transient outage: the row simply vanished
+    #: from the usage fetch and the panel reported stale numbers forever.
+    #: ``access_token`` is empty whenever this is set.
+    credential_invalid: bool = False
 
 
 def default_db_path() -> Path:
@@ -736,7 +761,10 @@ class AuthStore:
         """Return usable OAuth data for ``row``, refreshing single-flight.
 
         Raises :class:`AuthStoreError` when a refresh is required and fails;
-        callers treat that row as unusable and rotate.
+        callers treat that row as unusable and rotate. A grant the IdP has
+        declared permanently dead raises the :class:`CredentialInvalidError`
+        subclass instead, so a caller that can act on the difference (tell the
+        user to re-login rather than retry) is able to.
 
         Org fields are restored from the stored row AFTER the merge (PR-12):
         a refresh function that (mistakenly) returns org_id/org_name/
@@ -761,6 +789,14 @@ class AuthStore:
                 refreshed = await refresh(fresh)
             except AuthStoreError:
                 raise
+            except InvalidGrantError as exc:
+                # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
+                # own permanent-failure type so nothing above imports the
+                # OAuth flow module to identify it, and so the existing
+                # `except AuthStoreError` handlers still catch it.
+                raise CredentialInvalidError(
+                    f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
+                ) from exc
             except Exception as exc:
                 raise AuthStoreError(f"OAuth refresh failed for '{row.provider}': {exc}") from exc
             merged = dict(fresh)
@@ -1459,6 +1495,15 @@ class AuthStore:
           The last two are the same principle ``_resolve``'s ``read_only`` mode
           applies to a decorative REQUEST, which needs a bearer but is likewise
           not entitled to route the session.
+        - **A PERMANENTLY dead grant is reported, not omitted.** Omission is
+          right for a transient miss -- the caller keeps last-good numbers and
+          retries -- and wrong for a grant the IdP has refused for good, which
+          is a fact about the account the operator has to act on. Such a row
+          comes back with ``credential_invalid=True`` and an EMPTY
+          ``access_token``, so a caller that wanted a bearer still skips it
+          (there is none) while a caller that wants the account's state can
+          see why. This does not weaken the invariant above: reporting that a
+          grant is dead is still not disabling, blocking or deleting the row.
 
         Logged-out rows are still excluded — ``list_credentials`` filters on
         ``disabled_cause``, and an account the user signed out of is genuinely
@@ -1476,6 +1521,30 @@ class AuthStore:
         for row in sorted(rows, key=lambda r: r.id):
             try:
                 creds = await self._ensure_oauth_fresh(row)
+            except CredentialInvalidError:
+                # Terminal, so it earns a real log line rather than the debug
+                # one a retryable miss gets: this state never clears on its
+                # own and the user has to be told to sign in again.
+                logger.info(
+                    "usage: credential %s for %s has a dead grant; re-login required",
+                    row.id,
+                    provider,
+                )
+                data = row.data if isinstance(row.data, dict) else {}
+                accesses.append(
+                    OAuthAccess(
+                        access_token="",
+                        credential_id=row.id,
+                        account_id=data.get("account_id"),
+                        email=data.get("email"),
+                        org_id=data.get("org_id"),
+                        api_endpoint=data.get("api_endpoint"),
+                        kind="oauth",
+                        raw=data,
+                        credential_invalid=True,
+                    )
+                )
+                continue
             except AuthStoreError:
                 logger.debug(
                     "usage: credential %s for %s failed to refresh; omitting",

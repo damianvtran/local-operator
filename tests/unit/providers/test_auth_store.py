@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from local_operator.credentials import CredentialManager
-from local_operator.providers.auth_store import AuthStore, AuthStoreError
+from local_operator.providers.auth_store import (
+    AuthStore,
+    AuthStoreError,
+    CredentialInvalidError,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -643,6 +647,105 @@ class TestListOauthAccesses:
         assert [a.email for a in named] == ["a@example.com", "b@example.com"]
         assert all(a.access_token == "" for a in named)
         assert store.is_blocked(row.id, "anthropic") is False
+
+
+class TestADeadGrantIsReportedRatherThanOmitted:
+    """Omission is right for a transient miss and wrong for a permanent one.
+
+    A row whose refresh fails temporarily is dropped from the enumeration so
+    the caller keeps last-good numbers and retries. A row whose grant the IdP
+    has refused for good is a fact the operator must act on, and dropping it
+    is what made `/usage` say `usage unavailable - last known 2d ago` forever
+    against a kimi credential that needed a re-login.
+    """
+
+    @staticmethod
+    def _account(email: str, account_id: str) -> dict[str, Any]:
+        return {**_oauth(access=f"access-{account_id}"), "email": email, "account_id": account_id}
+
+    @staticmethod
+    def _kill(store: AuthStore, monkeypatch: pytest.MonkeyPatch, dead_id: int, exc) -> None:
+        async def refresh(self_, credential_row, *, force=False):  # noqa: ANN001
+            if credential_row.id == dead_id:
+                raise exc
+            return dict(credential_row.data)
+
+        monkeypatch.setattr(AuthStore, "_ensure_oauth_fresh", refresh)
+
+    async def test_a_dead_grant_is_listed_with_no_bearer(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dead = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        self._kill(store, monkeypatch, dead.id, CredentialInvalidError("grant is dead"))
+
+        accesses = await store.list_oauth_accesses("anthropic")
+        assert [a.email for a in accesses] == ["a@example.com", "b@example.com"]
+        assert accesses[0].credential_invalid is True
+        # No bearer exists, so a caller that wanted one still skips it.
+        assert accesses[0].access_token == ""
+        assert accesses[1].credential_invalid is False
+        assert accesses[1].access_token == "access-acct-b"
+
+    async def test_reporting_a_dead_grant_does_not_retire_the_credential(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The invariant the docstring is explicit about: a READ may not take a
+        credential out of service. Naming the grant dead is not disabling it —
+        the login is still the user's, and only they can replace it."""
+        dead = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        self._kill(store, monkeypatch, dead.id, CredentialInvalidError("grant is dead"))
+
+        await store.list_oauth_accesses("anthropic")
+        row = store.get_credential(dead.id)
+        assert row is not None and row.disabled_cause is None
+        assert store.is_blocked(dead.id, "anthropic") is False
+
+    async def test_a_transient_failure_is_still_omitted(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The existing behaviour must not move: an outage keeps its retry."""
+        dead = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        self._kill(store, monkeypatch, dead.id, AuthStoreError("refresh failed"))
+
+        accesses = await store.list_oauth_accesses("anthropic")
+        assert [a.email for a in accesses] == ["b@example.com"]
+
+    async def test_the_store_raises_its_own_permanent_type(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`InvalidGrantError` from the flow becomes `CredentialInvalidError`,
+        so nothing above the store imports the OAuth module to identify it —
+        while `except AuthStoreError` handlers keep catching it."""
+        from local_operator.providers.oauth.callback_server import InvalidGrantError
+
+        row = store.upsert_credential(
+            "anthropic", {**self._account("a@example.com", "acct-a"), "expires": 0}
+        )
+
+        async def refresh(creds):  # noqa: ANN001
+            raise InvalidGrantError("Anthropic refresh failed (400): invalid_grant")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        with pytest.raises(CredentialInvalidError) as caught:
+            await store._ensure_oauth_fresh(row)
+        assert isinstance(caught.value, AuthStoreError)
+
+    async def test_a_transient_refresh_error_keeps_the_generic_type(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        row = store.upsert_credential(
+            "anthropic", {**self._account("a@example.com", "acct-a"), "expires": 0}
+        )
+
+        async def refresh(creds):  # noqa: ANN001
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        with pytest.raises(AuthStoreError) as caught:
+            await store._ensure_oauth_fresh(row)
+        assert not isinstance(caught.value, CredentialInvalidError)
 
 
 class TestProviderOutageDoesNotBlockHealthyAccounts:

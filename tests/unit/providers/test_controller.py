@@ -1208,6 +1208,107 @@ class TestPerAccountLastKnown:
         assert reports[1].limits[0].amount.used == 22.0
 
     @pytest.mark.asyncio
+    async def test_a_dead_grant_is_not_a_transient_failure(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The reported defect, at the controller grain.
+
+        A permanently dead grant used to walk the same path as a network blip:
+        bump the streak, back off, and after the ceiling render `usage
+        unavailable`. It must instead be marked as needing a re-login, keep
+        its last-known numbers, and take no retry budget at all.
+        """
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "a", "email": "dead@example.com", "account_id": "acct-dead"},
+        )
+        dead = self._account("dead@example.com", "acct-dead")
+        dead.access_token = ""
+        dead.credential_invalid = True
+        store.oauth_accounts["anthropic"] = [dead]
+        probed: list[str | None] = []
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            probed.append(account_id)
+            raise AssertionError("a dead grant must never be probed")
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert probed == []  # no request is made with an empty bearer
+        assert len(reports) == 1
+        assert reports[0].credential_invalid is True
+        # The transient machinery stays untouched: no streak, no ceiling, and
+        # no scheduled retry that could never succeed.
+        assert reports[0].usage_unavailable is False
+        assert reports[0].consecutive_failures == 0
+        assert reports[0].next_probe_at_ms is None
+
+    @pytest.mark.asyncio
+    async def test_a_dead_grant_keeps_its_last_known_numbers(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The login is still real, so its final reading is still the truth
+        about it — the panel shows the meters beside the re-login note."""
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "a", "email": "dead@example.com", "account_id": "acct-dead"},
+        )
+        dead = self._account("dead@example.com", "acct-dead")
+        dead.access_token = ""
+        dead.credential_invalid = True
+        store.oauth_accounts["anthropic"] = [dead]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return self._report("dead@example.com", 61.0)
+
+        # One good round populates last-known...
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        store.oauth_accounts["anthropic"] = [self._account("dead@example.com", "acct-dead")]
+        first = await controller.fetch_usage(["anthropic"])
+        assert first[0].limits[0].amount.used == 61.0
+
+        # ...then the grant dies.
+        store.oauth_accounts["anthropic"] = [dead]
+        second = await controller.fetch_usage(["anthropic"], force_refresh=True)
+        assert second[0].credential_invalid is True
+        assert second[0].limits[0].amount.used == 61.0
+
+    @pytest.mark.asyncio
+    async def test_a_working_bearer_clears_the_dead_grant_flag(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """After `/login`, a 200 is what proves the new grant works, so the
+        state must heal itself rather than needing a cache wipe."""
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "a", "email": "dead@example.com", "account_id": "acct-dead"},
+        )
+        dead = self._account("dead@example.com", "acct-dead")
+        dead.access_token = ""
+        dead.credential_invalid = True
+        store.oauth_accounts["anthropic"] = [dead]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return self._report("dead@example.com", 5.0)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        first = await controller.fetch_usage(["anthropic"])
+        assert first[0].credential_invalid is True
+
+        # The user re-logs in: the row mints a bearer again.
+        store.oauth_accounts["anthropic"] = [self._account("dead@example.com", "acct-dead")]
+        healed = await controller.fetch_usage(["anthropic"], force_refresh=True)
+        assert healed[0].credential_invalid is False
+        assert healed[0].limits[0].amount.used == 5.0
+
+    @pytest.mark.asyncio
     async def test_an_override_fetches_the_api_key_not_stored_oauth_stubs(
         self, controller, store, monkeypatch
     ) -> None:

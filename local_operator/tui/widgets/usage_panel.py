@@ -498,8 +498,16 @@ def _account_status_note(  # noqa: ANN001
     verbatim, neither of which touches a counter. ``header_ms`` is optional so
     the pure renderer stays callable without a title (tests, ``_measure_columns``).
 
+    A dead grant outranks both: it is the only one of these states with a
+    remedy the user can act on, so it names the command instead of an age.
     An exhausted 200 (100% weekly) is quota, not this path.
     """
+    if getattr(report, "credential_invalid", False):
+        # The provider is named because the panel lists several accounts and
+        # the note sits under one block; `/login kimi` is runnable as printed,
+        # which `sign in again` would not be. Kept generic -- any provider's
+        # OAuth grant can die this way.
+        return f"sign-in expired \u2014 /login {report.provider}"
     unavailable = bool(getattr(report, "usage_unavailable", False))
     failures = int(getattr(report, "consecutive_failures", 0) or 0)
     fetched_at = int(getattr(report, "fetched_at", 0) or 0)
@@ -539,7 +547,16 @@ def _fit_status_note(note: str, width: int) -> str:
     label, _, tail = note.partition(" — ")
     # `last known 2h ago` -> `2h ago`; the `·` keeps the two facts separable.
     short = f"{label.replace('usage ', '')} · {tail.replace('last known ', '')}"
-    return short if cell_len(short) <= width else note
+    if cell_len(short) <= width:
+        return short
+    # Last resort: the tail alone. `sign-in expired — /login kimi` gains
+    # nothing from the rewrite above (both halves are already minimal, so the
+    # short form is the same length), and truncation would eat the provider
+    # name off the end — turning a command the user can run as printed into
+    # `/login anthro…`. The tail is the half that survives, for the same
+    # reason the age does above: it is the actionable one. Only taken when the
+    # label genuinely cannot fit, so the ordinary note is untouched.
+    return tail if cell_len(tail) <= width else note
 
 
 def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
@@ -557,11 +574,19 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     row.append(report.provider, style=heading)
     if report.identity:
         row.append(f"  {report.identity}", style=muted)
-    if getattr(report, "usage_unavailable", False) and not report.limits:
+    if (
+        getattr(report, "usage_unavailable", False)
+        and not getattr(report, "credential_invalid", False)
+        and not report.limits
+    ):
         # Last-known meters already occupy the heading's binding slot —
         # naming unavailable here duplicates the note and clips the
         # window on a 72-col card. With no meters there is no binding
         # to protect, so the heading may say the probe failed.
+        #
+        # A dead grant is excluded even with no meters: its note already
+        # states the condition AND the remedy, so repeating a vaguer version
+        # of it in the heading spends the same cells saying less.
         row.append("  ·  usage unavailable", style=dim)
     binding = binding_limit(report)
     if binding is not None:

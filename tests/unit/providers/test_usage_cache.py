@@ -112,6 +112,27 @@ def test_report_round_trip_keeps_per_account_failure_state() -> None:
     assert restored.next_probe_at_ms == 1_700_000_000_000
 
 
+def test_report_round_trip_keeps_the_dead_grant_verdict() -> None:
+    """The panel reads cached rows, so a flag that did not survive the round
+    trip would show the re-login note only in the session that first saw the
+    refusal — and `usage unavailable` in every session after it."""
+    report = _report()
+    report.credential_invalid = True
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.credential_invalid is True
+
+
+def test_a_row_written_before_the_flag_existed_reads_as_valid() -> None:
+    """The cache outlives the version that wrote it: an older row must be a
+    plain report, never a spurious "sign in again"."""
+    data = report_to_dict(_report())
+    data.pop("credential_invalid", None)
+    restored = report_from_dict(data)
+    assert restored is not None
+    assert restored.credential_invalid is False
+
+
 def test_secret_fingerprint_never_contains_the_secret() -> None:
     fp = fingerprint_secret("sk-or-very-secret")
     assert "sk-or-very-secret" not in fp
