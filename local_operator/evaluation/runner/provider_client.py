@@ -80,6 +80,14 @@ MAX_REJECTED_REPLY_CHARS = 4_000
 #: push a bounded log line into an unbounded one.
 MAX_TOLERATED_TRAILING_CHARS = 200
 
+#: How many candidate ``{`` positions the trailing-remainder scan may try
+#: before giving up. Each failed decode rescans forward one character, so an
+#: unbounded scan over a remainder full of bare braces goes quadratic -- the
+#: same bound, and the same reason, as ``_iter_json_objects`` in the tool
+#: layer. Giving up means "no competing batch found", which degrades to the
+#: tolerant path rather than to an error.
+_MAX_TRAILING_DECODE_ATTEMPTS = 256
+
 #: Rendered in place of an observation's text when it is byte-identical to the
 #: previous turn's. The adapter owns observation text and the runner never
 #: second-guesses it; this is the one append-only-safe dedup, because it only
@@ -308,20 +316,42 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
       the failure mode is executing a DIFFERENT batch than the model sent,
       which is far worse than losing the turn. A leading-junk reply still gets
       the ordinary parse error and a corrective re-prompt.
-    * **Two concatenated objects** (``{...}{...}``) is genuinely ambiguous --
-      which batch did the model mean? -- so it is NOT tolerated either. Silently
-      taking the first would execute a decision the model may have superseded.
+    * **A second batch for the SAME observation**, anywhere in the remainder,
+      is genuinely ambiguous -- which one did the model mean? -- so it is NOT
+      tolerated. Taking the first would execute a decision the model may have
+      superseded.
 
-    The ambiguity probe is deliberately narrowed to a trailing OBJECT. A
-    decision is always an object, so only a second object can be a competing
-    decision; asking the broader question "does the remainder parse as any
-    JSON value?" misreads ordinary prose whose first word happens to be a JSON
-    literal ("true story, that worked", "42 windows were listed", a quoted
-    sentence) as a second decision, and would reject the very turn this
-    function exists to save.
+    What makes the third rule safe to apply ANYWHERE, rather than only to an
+    immediately adjacent object, is that it keys on ``observation_id``. Two
+    weaker probes were measured against the real bundle and both fail:
+
+    * "Does the remainder start with ``{``?" only catches a directly adjacent
+      object. One character of anything else -- a comma, a newline, prose,
+      ``原始内容`` -- disables it, so a superseding batch behind a separator is
+      dropped silently, which is precisely what this rule claims to prevent.
+    * "Does anything in the remainder parse as JSON?" over-fires: it rejects
+      all three real bundle turns, because a model that quotes the harness's
+      own ``The rejected reply was: {...}`` feedback back at itself carries a
+      well-formed batch in its prose. Those batches are HISTORY, not a
+      competing decision -- in every one of the three they bind a DIFFERENT
+      observation than the turn being decided.
+
+    Binding on the observation id separates those two cases exactly: a batch
+    naming this observation is a decision about the screen in front of the
+    model and therefore competes; a batch naming any other observation is a
+    quotation of an older turn and cannot. ``ActionBatch`` would refuse the
+    latter as stale anyway, so nothing executable is being discarded.
     """
 
     decoder = json.JSONDecoder()
+    # ``json.loads`` skips leading whitespace and ``raw_decode`` does not, so
+    # stripping here keeps this helper's contract identical to the call it
+    # replaced. Doing it inside rather than relying on the caller matters
+    # because this is a general entry point: a second caller that forgot to
+    # strip would lose a turn to a leading newline, which is exactly the class
+    # of loss this function exists to prevent. Only leading WHITESPACE is
+    # skipped -- leading junk still fails at offset 0, by design.
+    payload = payload.lstrip()
     try:
         decoded, end = decoder.raw_decode(payload)
     except json.JSONDecodeError as error:
@@ -329,18 +359,77 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
         # preamble fails here rather than being skipped past.
         raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
-    if trailing.startswith("{"):
-        try:
-            decoder.raw_decode(trailing)
-        except json.JSONDecodeError:
-            # A brace that does not open a complete object is prose, not a
-            # competing decision ("{note: see above}"), so it stays tolerated.
-            pass
-        else:
-            raise DecisionParseError(
-                "decision carries more than one JSON object; send exactly one action batch"
-            )
+    if trailing and _competing_batch_offset(trailing, decoded, decoder) is not None:
+        raise DecisionParseError(
+            "decision carries a second action batch for the same observation; "
+            "send exactly one action batch"
+        )
     return decoded, trailing
+
+
+def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecoder) -> int | None:
+    """Offset of a second batch in ``trailing`` that competes with ``decoded``.
+
+    "Competes" means it names the SAME ``observation_id``: only a decision
+    about the screen currently in front of the model can supersede the one
+    already parsed. See :func:`_decode_leading_json` for why that test, rather
+    than adjacency or bare JSON-ness, is the one that separates a superseding
+    batch from the harness feedback a model quotes back at itself.
+
+    Returns ``None`` when the remainder is ordinary prose, which is the common
+    case and the one that must stay cheap.
+    """
+
+    observation_ids = _batch_observation_ids(decoded)
+    if not observation_ids:
+        return None
+    # A decision is always an object, so only "{" can start a competing batch;
+    # the scan is bounded the same way ``_iter_json_objects`` is bounded, since
+    # a remainder full of bare braces would otherwise cost a rescan each.
+    index = 0
+    attempts = 0
+    while attempts < _MAX_TRAILING_DECODE_ATTEMPTS:
+        start = trailing.find("{", index)
+        if start < 0:
+            return None
+        attempts += 1
+        try:
+            candidate, end = decoder.raw_decode(trailing, start)
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: the C decoder recurses per
+            # nesting level and raises it (NOT a ValueError subclass) on a
+            # deeply nested payload. Untrusted model output must degrade to
+            # "no competing batch found", never to an unexpected exception.
+            index = start + 1
+            continue
+        index = max(end, start + 1)
+        if not isinstance(candidate, Mapping):
+            continue
+        if _batch_observation_ids(candidate) & observation_ids:
+            return start
+    return None
+
+
+def _batch_observation_ids(value: Any) -> set[str]:
+    """The observation ids an action-batch-shaped object binds to.
+
+    Read from the ACTIONS rather than from a top-level ``observation_id``: a
+    model reply carries the id per action (the runner supplies the batch-level
+    one itself), so a top-level lookup finds nothing on the very shape this
+    needs to compare. Returns an empty set for anything that is not batch
+    shaped, which the caller treats as "not a competing decision".
+    """
+
+    if not isinstance(value, Mapping):
+        return set()
+    actions = value.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return set()
+    return {
+        action["observation_id"]
+        for action in actions
+        if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
+    }
 
 
 def parse_decision(
@@ -367,8 +456,10 @@ def parse_decision(
 
     Strict about the DECISION, not about the framing around it: text appended
     after a complete batch is tolerated and reported rather than costing the
-    turn (see :func:`_decode_leading_json` for which shapes are and are not
-    tolerated, and why the tolerance only ever runs forwards).
+    turn, while a second batch for the SAME observation anywhere in that text
+    is still refused as ambiguous (see :func:`_decode_leading_json` for which
+    shapes are and are not tolerated, and why the tolerance only ever runs
+    forwards).
     """
 
     decoded, trailing = _decode_leading_json(payload)

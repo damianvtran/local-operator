@@ -274,18 +274,78 @@ def test_parse_decision_bounds_the_reported_trailing_junk(
     assert "x" * (MAX_TOLERATED_TRAILING_CHARS + 1) not in caplog.text
 
 
-def test_parse_decision_rejects_two_concatenated_batches() -> None:
+@pytest.mark.parametrize(
+    "separator",
+    [
+        # Direct adjacency is the one shape a real model is LEAST likely to
+        # emit, and covering only it is what let a separator-bypass hide here.
+        "",
+        " ",
+        ",",
+        "\n",
+        "原始内容",
+        "\n\nOops, that was wrong. The correct batch is:\n",
+        "\n```\n```json\n",
+        "x" * 1000,
+    ],
+)
+def test_parse_decision_rejects_a_superseding_batch_behind_any_separator(
+    separator: str,
+) -> None:
     """Which batch did the model mean? Guessing could execute the wrong one.
 
-    Unlike trailing prose, a second COMPLETE value is a genuine ambiguity, and
-    executing a superseded decision is worse than losing the turn.
+    The ambiguity does not depend on the two objects being adjacent, so
+    neither may the guard: a second batch for the SAME observation is a
+    competing decision wherever it sits in the remainder.
     """
 
     current = observation()
-    payload = type_payload(current) + finish_payload(current)
+    payload = type_payload(current) + separator + finish_payload(current)
 
-    with pytest.raises(DecisionParseError, match="more than one JSON object"):
+    with pytest.raises(DecisionParseError, match="second action batch"):
         parse_decision(payload, current, route=ROUTE)
+
+
+def test_parse_decision_tolerates_a_quoted_batch_for_another_observation() -> None:
+    """The shape the real bundle actually emits, and why the guard keys on the
+    observation id rather than on JSON-ness.
+
+    A model that quotes the harness's own ``The rejected reply was: {...}``
+    feedback back at itself carries a well-formed batch in its prose. That is
+    HISTORY -- it names an OLDER observation -- so it cannot supersede the
+    decision just parsed, and ``ActionBatch`` would refuse it as stale anyway.
+    Rejecting on it would discard the very turns this tolerance exists to save.
+    """
+
+    current = observation()
+    stale = observation(1)
+    quoted = json.dumps(
+        {"actions": [{"kind": "key", "observation_id": stale.observation_id, "keys": ["ctrl"]}]}
+    )
+    payload = type_payload(current) + "\nThe rejected reply was:\n  " + quoted
+
+    decision = parse_decision(payload, current, route=ROUTE)
+
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    assert action.text == "hello"
+
+
+@pytest.mark.parametrize("whitespace", ["  ", "\n", "\t", "\r\n"])
+def test_parse_decision_accepts_leading_whitespace(whitespace: str) -> None:
+    """Parity with the ``json.loads`` this replaced, which skipped leading
+    whitespace where ``raw_decode`` does not.
+
+    Pinned inside the helper rather than left to the caller's ``.strip()``:
+    this is a general entry point, and a second caller that forgot to strip
+    would lose a turn to a leading newline.
+    """
+
+    current = observation()
+
+    decision = parse_decision(whitespace + type_payload(current), current, route=ROUTE)
+
+    assert isinstance(decision.action_batch.actions[0], TypeAction)
 
 
 @pytest.mark.parametrize(
