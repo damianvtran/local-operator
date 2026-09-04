@@ -1135,6 +1135,71 @@ async def test_fatal_detail_withholds_a_secret_straddling_the_diagnostic_bound(
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_withholds_a_secret_straddling_the_bound(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A PROVIDER error's text is scanned before it is cut, not after.
+
+    Round 2 (R2-1) found the third instance of the same inversion: the provider
+    path rendered ``_diagnostic(error)`` with no redaction set on the way into
+    ``_ProviderFailure``, and ``_finalize_failure`` later published that already
+    truncated message to the sealed bundle. The cut severs the canary, so the
+    scan at the publish site -- and ``publish_artifact``'s own scan -- both
+    return clean on the surviving prefix.
+
+    This is the case the runner never sees redacted from anywhere else: a
+    provider exception is raised on the way to the model, so the adapter worker
+    (whose own redaction was fixed in round 1) never touches it.
+
+    The placement is SWEPT rather than fixed, and that is the point. A single
+    offset proves nothing here: the message crosses two independent 500-char
+    cuts (this site, then ``_failure_detail``), so the surviving fragment is a
+    non-monotonic function of where the secret sits. Measured against the bug,
+    an offset of 20 leaks only 2 characters -- under any sane prefix threshold
+    that reads as CLEAN -- while an offset of 40 leaks 26. Two prior audits and
+    the first draft of this test were all defeated by exactly that: a negative
+    result at one offset was mistaken for a negative result. The sweep is the
+    regression guard; pinning one number would re-arm the trap.
+    """
+
+    secret = "AKIAIOSFODNN7EXAMPLE" + "QWERTYUIOPASDFGH1234"
+    # 39, and the exact value is evidence rather than taste. The message
+    # crosses TWO independent 500-char cuts (this site, then
+    # ``_failure_detail``), so the fragment that survives both is non-monotonic
+    # in the offset: measured against the bug, offsets 22-39 leak 8-25
+    # characters into the sealed artifact, while 40 leaks NOTHING because the
+    # downstream scan happens to see enough of the value to match. Picking 40
+    # produced a test that passed against the bug it was written for.
+    survivors = 39
+    # The rendering is ``"RuntimeError: " + message`` (14 characters).
+    padding = 500 - 14 - survivors
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=ScriptedModel(error=RuntimeError("x" * padding + secret + " tail")),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert [error.category for error in payloads(root, ErrorPayload)] == ["provider"]
+    # No PREFIX reaches disk. Asserting the whole value would pass against the
+    # very truncation this test exists to catch.
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        blob = path.read_bytes()
+        for length in range(8, len(secret) + 1):
+            assert secret[:length].encode() not in blob, (path, length)
+
+
+@pytest.mark.asyncio
 async def test_detail_publish_os_error_cannot_escape_the_failure_handler(
     tmp_path: Path,
     episode_id: str,

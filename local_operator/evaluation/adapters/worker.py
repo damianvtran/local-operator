@@ -114,6 +114,14 @@ def _control_safe(value: str, limit: int) -> str:
     explain a failure. Adapter text is arbitrary (a subprocess's captured
     stderr routinely carries newlines), so this is a wire requirement, not
     cosmetics.
+
+    A message that is ENTIRELY control characters therefore collapses to ``""``
+    once stripped. That is intended and is not a lossy edge case to guard:
+    ``RpcErrorDetail.message`` permits an empty string, ``render()`` omits the
+    empty half rather than emitting a dangling separator, and the exception
+    TYPE -- the field that makes a failure bucketable -- is carried separately
+    and is unaffected. Substituting a placeholder here would invent content the
+    adapter never produced.
     """
 
     collapsed = "".join(character if character.isprintable() else " " for character in value)
