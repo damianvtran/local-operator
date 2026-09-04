@@ -1021,7 +1021,22 @@ async def test_fatal_error_records_a_bounded_diagnostic_detail(
 async def test_fatal_diagnostic_detail_cannot_carry_a_resolved_secret(
     tmp_path: Path, episode_id: str
 ) -> None:
-    """The detail is scanned against the episode's redaction set like any artifact."""
+    """A secret in the failure message is withheld, and the bundle keeps a detail.
+
+    The secret must never reach disk -- that assertion is unchanged and is the
+    point of the test. What changed is the SHAPE of the refusal: the artifact
+    used to be dropped entirely (``detail_artifact is None``), because the
+    whole rendering was handed to ``publish_artifact`` and the canary scan
+    rejected the write. A reader then got a fatal error with no detail at all,
+    which is the exact opacity this PR exists to remove -- the secret was
+    protected by destroying the diagnosis along with it.
+
+    Now the value is withheld at the point it is rendered, so the artifact is
+    published carrying the exception TYPE with the message replaced. The type
+    cannot hold adapter or provider data and is what makes the failure
+    bucketable, so keeping it costs nothing and is the whole difference between
+    a diagnosable bundle and a blank one.
+    """
 
     secret = "s3cret-value-that-must-never-land-in-a-bundle"
     adapter = FakeAdapter(
@@ -1053,7 +1068,135 @@ async def test_fatal_diagnostic_detail_cannot_carry_a_resolved_secret(
     assert report.valid, [issue.code for issue in report.issues]
     fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
     assert len(fatal) == 1
-    assert fatal[0].detail_artifact is None
+    # Published, not dropped: the reader still learns WHAT failed.
+    reference = fatal[0].detail_artifact
+    assert reference is not None
+    published = (root / "artifacts" / reference.sha256).read_text()
+    assert published == "SupervisionError: <withheld: matched a secret canary>"
+
+
+@pytest.mark.asyncio
+async def test_fatal_detail_withholds_a_secret_straddling_the_diagnostic_bound(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A secret cut by ``_diagnostic``'s 500-char bound must still be withheld.
+
+    Round 1 fixed this ordering in the WORKER; the parent had the identical
+    inversion. ``_diagnostic`` truncated to 500 characters and only then were
+    the bytes handed to ``publish_artifact``, whose scan is a SUBSTRING check --
+    so a severed canary stops matching and the surviving prefix is sealed into
+    the bundle. Measured before the fix: 20 characters of a canonical AWS key,
+    and 63 of an API token echoed in a provider error URL.
+
+    The sibling test above uses a SHORT secret that fits inside the bound
+    entirely, which is exactly why it passed while this leaked: the position of
+    the secret relative to the cut is the whole property under test, so the
+    padding here is load-bearing rather than decorative.
+    """
+
+    secret = "AKIAIOSFODNN7EXAMPLE" + "QWERTYUIOPASDFGH1234"
+    # Pad so the 500-character cut lands INSIDE the credential. The rendering
+    # is ``"SupervisionError: " + message`` (18 chars) plus this prefix (16),
+    # so 446 filler characters leave exactly 20 characters of the key inside
+    # the bound -- the arithmetic is the test, and an off-by-a-few pushes the
+    # whole secret past the cut where nothing leaks even when the ordering is
+    # wrong.
+    message = "adapter failed: " + ("x" * 446) + secret + " (will not retry)"
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError(message)},
+        fail_after={"execute": 1},
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step", "step", "finish"]),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    # No PREFIX of the credential reaches disk either -- a whole-value check
+    # passes against the very truncation this test exists to catch.
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        blob = path.read_bytes()
+        for length in range(8, len(secret) + 1):
+            assert secret[:length].encode() not in blob, (path, length)
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_withholds_a_secret_straddling_the_bound(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A PROVIDER error's text is scanned before it is cut, not after.
+
+    Round 2 (R2-1) found the third instance of the same inversion: the provider
+    path rendered ``_diagnostic(error)`` with no redaction set on the way into
+    ``_ProviderFailure``, and ``_finalize_failure`` later published that already
+    truncated message to the sealed bundle. The cut severs the canary, so the
+    scan at the publish site -- and ``publish_artifact``'s own scan -- both
+    return clean on the surviving prefix.
+
+    This is the case the runner never sees redacted from anywhere else: a
+    provider exception is raised on the way to the model, so the adapter worker
+    (whose own redaction was fixed in round 1) never touches it.
+
+    The placement is SWEPT rather than fixed, and that is the point. A single
+    offset proves nothing here: the message crosses two independent 500-char
+    cuts (this site, then ``_failure_detail``), so the surviving fragment is a
+    non-monotonic function of where the secret sits. Measured against the bug,
+    an offset of 20 leaks only 2 characters -- under any sane prefix threshold
+    that reads as CLEAN -- while an offset of 40 leaks 26. Two prior audits and
+    the first draft of this test were all defeated by exactly that: a negative
+    result at one offset was mistaken for a negative result. The sweep is the
+    regression guard; pinning one number would re-arm the trap.
+    """
+
+    secret = "AKIAIOSFODNN7EXAMPLE" + "QWERTYUIOPASDFGH1234"
+    # 39, and the exact value is evidence rather than taste. The message
+    # crosses TWO independent 500-char cuts (this site, then
+    # ``_failure_detail``), so the fragment that survives both is non-monotonic
+    # in the offset: measured against the bug, offsets 22-39 leak 8-25
+    # characters into the sealed artifact, while 40 leaks NOTHING because the
+    # downstream scan happens to see enough of the value to match. Picking 40
+    # produced a test that passed against the bug it was written for.
+    survivors = 39
+    # The rendering is ``"RuntimeError: " + message`` (14 characters).
+    padding = 500 - 14 - survivors
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=ScriptedModel(error=RuntimeError("x" * padding + secret + " tail")),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert [error.category for error in payloads(root, ErrorPayload)] == ["provider"]
+    # No PREFIX reaches disk. Asserting the whole value would pass against the
+    # very truncation this test exists to catch.
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        blob = path.read_bytes()
+        for length in range(8, len(secret) + 1):
+            assert secret[:length].encode() not in blob, (path, length)
 
 
 @pytest.mark.asyncio

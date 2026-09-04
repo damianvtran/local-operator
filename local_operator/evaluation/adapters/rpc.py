@@ -9,7 +9,7 @@ import os
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from local_operator.evaluation.adapters.api import AdapterMethod
 from local_operator.evaluation.protocol import ProtocolModel
@@ -17,6 +17,19 @@ from local_operator.evaluation.protocol import ProtocolModel
 MAX_RPC_BYTES = 1024 * 1024
 MAX_ERROR_MESSAGE = 2000
 MAX_SAFE_ID = 2**53 - 1
+# Detail bounds. Every one of these is a hard wire limit rather than a
+# formatting preference: the envelope is parsed by a strict model on the far
+# side, so an unbounded field would let a worker's exception text decide how
+# much the parent must allocate and canonicalise.
+MAX_DETAIL_MESSAGE = 512
+MAX_DETAIL_TYPE = 128
+MAX_DETAIL_CAUSES = 4
+MAX_DETAIL_FRAMES = 8
+MAX_DETAIL_NAME = 128
+#: Substituted for any string the worker's own canary check rejects. Failing
+#: CLOSED (drop the text, keep the structure) rather than attempting to scrub
+#: keeps a partially-matched secret from being reassembled from what survived.
+WITHHELD = "<withheld: matched a secret canary>"
 
 
 class RpcProtocolError(RuntimeError):
@@ -24,9 +37,105 @@ class RpcProtocolError(RuntimeError):
 
 
 class RpcRemoteError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
+    """A remote error the worker ANSWERED, carrying its structured cause.
+
+    ``detail`` is optional because the closed error-code set predates it and a
+    worker that cannot describe its failure must still be able to report one.
+    It is folded into ``str()`` rather than left as an attribute the caller has
+    to know about: the runner records a fatal error by rendering the exception
+    (``episode._diagnostic``), so anything not visible through ``str`` never
+    reaches the evidence bundle a paid episode leaves behind.
+    """
+
+    def __init__(self, code: str, message: str, detail: "RpcErrorDetail | None" = None) -> None:
+        rendered = f"{code}: {message}"
+        if detail is not None:
+            rendered = f"{rendered} [{detail.render()}]"
+        super().__init__(rendered)
         self.code = code
+        self.detail = detail
+
+
+class RpcErrorFrame(ProtocolModel):
+    """One worker-side call-site: WHERE it raised, never WHAT was in scope.
+
+    A raw traceback is refused across this boundary and that refusal is right --
+    it renders source text (which can embed a literal credential) and absolute
+    paths (which leak the worker's filesystem layout and the account it runs
+    under). But "which line of the adapter raised" is the single most valuable
+    fact for diagnosis and carries neither: a BASENAME, a line number and a
+    function name are derived from the adapter's own published wheel, contain no
+    runtime value, and cannot be steered by task content. Locals are absent by
+    construction -- ``traceback.extract_tb`` never captures them -- rather than
+    stripped afterwards, so there is no filter to get wrong.
+    """
+
+    file: str = Field(min_length=1, max_length=MAX_DETAIL_NAME)
+    line: int = Field(ge=0, le=MAX_SAFE_ID)
+    function: str = Field(min_length=1, max_length=MAX_DETAIL_NAME)
+
+
+class RpcErrorCause(ProtocolModel):
+    """One link of the ``__cause__``/``__context__`` chain.
+
+    The chain is what actually names the fault. An adapter that wraps a cloud
+    SDK failure in its own ``RuntimeError`` puts the diagnosable text one link
+    down, so reporting only the outermost type reproduces the very opacity this
+    envelope exists to remove.
+    """
+
+    exception_type: str = Field(min_length=1, max_length=MAX_DETAIL_TYPE)
+    message: str = Field(max_length=MAX_DETAIL_MESSAGE)
+
+
+class RpcErrorDetail(ProtocolModel):
+    """Bounded, worker-redacted cause travelling inside the existing envelope.
+
+    This deliberately extends ``RpcError`` instead of opening a second channel.
+    The error envelope already has the properties a diagnostic needs -- it is
+    correlated to the request, it is what the operation replay cache stores, and
+    it is the one thing a poisoned channel still delivers -- so a parallel path
+    would have to re-earn all three and would be absent on exactly the failures
+    that matter. ``code`` stays a closed set and ``message`` stays a fixed
+    string; the variable part is confined here, where every field is bounded and
+    every string has passed the worker's canary check.
+    """
+
+    exception_type: str = Field(min_length=1, max_length=MAX_DETAIL_TYPE)
+    message: str = Field(max_length=MAX_DETAIL_MESSAGE)
+    method: AdapterMethod
+    # The idempotency key the failure belongs to. Without it a reader holding a
+    # bundle cannot tell which of several same-method calls died, and the
+    # operation replay cache returns this error again under a NEW request ID,
+    # so the request ID alone does not identify the originating operation.
+    operation_id: str | None = Field(default=None, max_length=MAX_DETAIL_NAME)
+    causes: tuple[RpcErrorCause, ...] = Field(default=(), max_length=MAX_DETAIL_CAUSES)
+    frames: tuple[RpcErrorFrame, ...] = Field(default=(), max_length=MAX_DETAIL_FRAMES)
+
+    @field_validator("causes", "frames", mode="before")
+    @classmethod
+    def _freeze(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    def render(self) -> str:
+        """One line naming the cause, for the fatal-error evidence artifact."""
+
+        parts = [f"{self.exception_type}: {self.message}" if self.message else self.exception_type]
+        parts.append(f"method={self.method}")
+        if self.operation_id is not None:
+            parts.append(f"operation_id={self.operation_id}")
+        for cause in self.causes:
+            parts.append(
+                f"caused by {cause.exception_type}: {cause.message}"
+                if cause.message
+                else f"caused by {cause.exception_type}"
+            )
+        if self.frames:
+            trace = " <- ".join(
+                f"{frame.file}:{frame.line} in {frame.function}" for frame in self.frames
+            )
+            parts.append(f"at {trace}")
+        return "; ".join(parts)
 
 
 class RpcError(ProtocolModel):
@@ -39,6 +148,7 @@ class RpcError(ProtocolModel):
         "timeout",
     ]
     message: str = Field(min_length=1, max_length=MAX_ERROR_MESSAGE)
+    detail: RpcErrorDetail | None = None
 
 
 class RpcRequest(ProtocolModel):
@@ -270,7 +380,9 @@ class RpcClient:
                 await asyncio.shield(self._poison())
                 raise
             if response.error is not None:
-                raise RpcRemoteError(response.error.code, response.error.message)
+                raise RpcRemoteError(
+                    response.error.code, response.error.message, response.error.detail
+                )
             assert response.result is not None
             return response.result
 

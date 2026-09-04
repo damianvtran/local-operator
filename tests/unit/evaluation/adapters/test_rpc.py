@@ -127,3 +127,105 @@ async def test_timeout_sends_cancel_then_terminates() -> None:
     assert terminated.is_set()
     for fd in (requests_read, requests_write, responses_read, responses_write):
         os.close(fd)
+
+
+def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:
+    """Detail text must never break the transport that carries it.
+
+    The framing is LF-delimited and rejects CR, so an adapter message holding
+    either would turn an answered adapter error into a channel-killing protocol
+    error -- failing loudest on precisely the path that exists to explain a
+    failure. Bounds are asserted alongside because an unbounded field would let
+    a worker's exception text decide the parent's allocation.
+    """
+
+    from local_operator.evaluation.adapters.rpc import (
+        MAX_DETAIL_MESSAGE,
+        RpcError,
+        RpcErrorDetail,
+        canonical_line,
+    )
+    from local_operator.evaluation.adapters.worker import _control_safe
+
+    hostile = "line one\r\nline two\ttabbed\x00null " + "z" * 4000
+    cleaned = _control_safe(hostile, MAX_DETAIL_MESSAGE)
+    # The VALUE carries no control characters. Asserted on the string rather
+    # than on the encoded line because JSON escapes CR/LF into a safe ``\r\n``
+    # two-byte form -- so a framing-only assertion passes even when the value
+    # is dirty, and a reader of the artifact would get the raw newlines back.
+    assert not any(character in cleaned for character in "\r\n\t\x00")
+    assert all(character.isprintable() or character == " " for character in cleaned)
+    assert len(cleaned) <= MAX_DETAIL_MESSAGE
+    detail = RpcErrorDetail(
+        exception_type="RuntimeError",
+        message=cleaned,
+        method="execute",
+        operation_id="exec-1",
+    )
+    line = canonical_line(
+        RpcError(code="adapter_error", message="adapter operation failed", detail=detail)
+    )
+    assert line.endswith(b"\n") and line.count(b"\n") == 1 and b"\r" not in line
+
+
+def test_unbuildable_canary_set_withholds_rather_than_assuming_no_secrets() -> None:
+    """A secret that cannot be canaried must fail CLOSED, never open.
+
+    Leaving the redaction set None after secrets were delivered would read
+    identically to "this worker holds none" and skip the check on the one
+    occasion something is definitely there to protect.
+    """
+
+    from local_operator.evaluation.adapters.rpc import MAX_DETAIL_MESSAGE, WITHHELD
+    from local_operator.evaluation.adapters.worker import _DENY_ALL, _redacted
+
+    assert _redacted("anything at all", MAX_DETAIL_MESSAGE, _DENY_ALL) == WITHHELD
+    # No secrets delivered at all: the text is kept, because none can leak.
+    assert _redacted("plain text", MAX_DETAIL_MESSAGE, None) == "plain text"
+
+
+def test_a_secret_straddling_the_truncation_boundary_is_still_withheld() -> None:
+    """Scan the UNBOUNDED value: truncating first severs the canary.
+
+    ``RedactionSet.assert_clear`` is a substring check, so a secret cut by the
+    field bound stops matching and its surviving prefix is returned verbatim.
+    Round 1's F1: a 40-character AWS key positioned across the 512-character
+    message cut emitted 25 characters of itself, and an 808-character JWT
+    emitted 488. It is systematic -- ANY secret longer than its field bound can
+    never match once cut -- and the parent's artifact scan cannot catch it
+    either, because it applies the same substring semantics to the already
+    truncated bytes.
+
+    Both field bounds are covered because they truncate at different lengths,
+    and the JWT case additionally pins a secret LONGER than the bound, which is
+    the shape that can never match after cutting.
+    """
+
+    from local_operator.evaluation.adapters.rpc import (
+        MAX_DETAIL_MESSAGE,
+        MAX_DETAIL_NAME,
+        WITHHELD,
+    )
+    from local_operator.evaluation.adapters.worker import _redacted
+    from local_operator.evaluation.receipts import RedactionSet
+
+    key = "AKIAIOSFODNN7EXAMPLE" + "QWERTYUIOPASDFGH1234"
+    assert len(key) == 40
+    jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9." + "a" * 400 + "." + "b" * 370
+    assert len(jwt) > MAX_DETAIL_MESSAGE
+
+    for secret, limit in (
+        (key, MAX_DETAIL_MESSAGE),
+        (key, MAX_DETAIL_NAME),
+        (jwt, MAX_DETAIL_MESSAGE),
+    ):
+        redactions = RedactionSet.from_resolved_values((secret,))
+        # Place the secret so the cut lands INSIDE it rather than before it.
+        filler = "adapter failed: " + "x" * max(limit - 16 - len(secret) // 2, 0)
+        result = _redacted(filler + secret + " trailing context", limit, redactions)
+        assert result == WITHHELD
+        # No contiguous run of the secret survives -- the assertion that fails
+        # if the scan is ever moved back after the truncation.
+        assert not any(
+            secret[:length] in result for length in range(8, len(secret) + 1)
+        ), "a prefix of the secret survived truncation"

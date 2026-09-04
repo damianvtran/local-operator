@@ -46,10 +46,27 @@ from local_operator.evaluation.receipts import (
 # has no use for credentials) and NOT on ``RescueDescriptor`` (persisted to
 # disk; a rescue worker receives secrets fresh from the parent's resolver via
 # ``BeginRescueParams`` instead).
-ADAPTER_SCHEMA_VERSION = "1.2"
+#
+# 1.3 adds ``detail`` -- a bounded, worker-redacted structured cause -- to
+# ``RpcError`` (rpc.py). A fatal ``adapter_error`` previously recorded nothing
+# but the fixed sentence "adapter operation failed": two consecutive paid
+# episodes (ep-e46c789ca818 at 19 billed steps, ep-ffda3fc88f81 at 16) died
+# there and diagnosing either would have cost another paid run.
+#
+# The bump is REQUIRED even though the field is optional and defaults to None,
+# and the reason is specific to this transport rather than to pydantic's
+# leniency. Every RPC line must round-trip byte-identically through
+# ``parse_canonical_line``, and a model always serialises its full field set --
+# so a 1.2 worker's error line (no ``detail`` key) fails a 1.3 parent's
+# canonicality check, and a 1.3 worker's line (``"detail":null``) fails a 1.2
+# parent's ``extra="forbid"``. Mixed versions break in BOTH directions, on the
+# error path, which is the worst possible place to discover a mismatch. The
+# exact-version pin in ``AdapterSelector`` turns that into a refusal at
+# selection time, before a worker is spawned or a resource allocated.
+ADAPTER_SCHEMA_VERSION = "1.3"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.2"]
+SchemaVersion: TypeAlias = Literal["1.3"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256

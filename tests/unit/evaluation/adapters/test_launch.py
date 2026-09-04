@@ -75,7 +75,7 @@ def create():
             entry_point="tiny_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.2",
+            schema_version="1.3",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -170,7 +170,7 @@ def create():
             entry_point="rescue_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="{release}",
-            schema_version="1.2",
+            schema_version="1.3",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -272,7 +272,7 @@ async def test_supervisor_launch_completes_real_handshake_and_reaps(tmp_path: Pa
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",
@@ -317,7 +317,7 @@ def _rescue_selector(tmp_path: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="rescue-e2e",
         distribution="rescue-e2e-adapter",
         version="1.0",
@@ -348,7 +348,7 @@ def _rescue_descriptor(selector: AdapterSelector, handshake: Handshake, root: Pa
         ),
     )
     return RescueDescriptor(
-        schema_version="1.2",
+        schema_version="1.3",
         selector=selector,
         handshake=handshake,
         episode_id="episode",
@@ -422,7 +422,7 @@ async def test_spawned_rescue_worker_refuses_an_adapter_without_begin_rescue(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",
@@ -448,3 +448,384 @@ async def test_spawned_rescue_worker_refuses_an_adapter_without_begin_rescue(
     with pytest.raises(RpcRemoteError) as excinfo:
         await run_rescue(descriptor)
     assert "begin_rescue" in str(excinfo.value)
+
+
+# A third spawnable distribution whose ``prepare`` FAILS, with a realistic
+# wrapped cause and a secret in scope. It exists because the defect it pins is
+# invisible in-process: the information loss happens in the worker's own
+# ``except`` clause and is only observable after the failure has crossed a real
+# pipe into a real parent. A mock adapter raising in the parent's own process
+# never exercises the encode/serialise/parse round trip that discards it.
+_FAILING_ADAPTER_SOURCE = '''from importlib.metadata import distribution
+
+from local_operator.evaluation.adapters.api import (
+    AckResult,
+    AdapterCapabilities,
+    AdapterMetadata,
+    RequirementsResult,
+)
+from local_operator.evaluation.adapters.discovery import distribution_digest
+
+
+class _CloudTimeout(Exception):
+    """Stands in for a provider SDK's own error type."""
+
+
+class FailingAdapter:
+    def __init__(self, metadata):
+        self.metadata = metadata
+        self.token = None
+
+    async def inspect_requirements(self, params):
+        return RequirementsResult(requirements=())
+
+    async def prepare(self, params):
+        # The realistic shape: an SDK error the adapter wraps in its own type.
+        # The diagnosable text is one link DOWN the chain, which is precisely
+        # what reporting only the outermost type would throw away.
+        try:
+            raise _CloudTimeout("connect timeout to ec2.us-east-1: i-0abc123")
+        except _CloudTimeout as error:
+            raise RuntimeError("could not allocate the guest instance") from error
+
+    async def reset_start(self, params): raise NotImplementedError
+
+    async def observe(self, params): raise NotImplementedError
+
+    async def execute(self, params): raise NotImplementedError
+
+    async def ask_user_exchange(self, params): raise NotImplementedError
+
+    async def score(self, params): raise NotImplementedError
+
+    async def cleanup(self, params): raise NotImplementedError
+
+    async def close(self, params): return AckResult()
+
+
+def create():
+    installed = distribution("failing-e2e-adapter")
+    return FailingAdapter(
+        AdapterMetadata(
+            adapter_id="failing-e2e",
+            distribution="failing-e2e-adapter",
+            version="1.0",
+            entry_point="failing_e2e_adapter:create",
+            package_digest=distribution_digest(installed),
+            release_digest="{release}",
+            schema_version="1.3",
+            capabilities=AdapterCapabilities(
+                routes=("computer",), ask_user=False, scoring=False
+            ),
+        )
+    )
+'''.replace("{release}", RELEASE_DIGEST)
+
+
+def _failing_selector(tmp_path: Path) -> AdapterSelector:
+    """A real interpreter with the failing adapter installed and a pinned workspace."""
+
+    executable = copied_interpreter(tmp_path / "venv")
+    site = site_packages_of(executable)
+    package_digest = _install_named_adapter(
+        site,
+        "failing_e2e_adapter",
+        "failing-e2e-adapter",
+        _FAILING_ADAPTER_SOURCE,
+        "failing-e2e",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "adapter-release.json").write_text(
+        json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
+    )
+    return AdapterSelector(
+        schema_version="1.3",
+        adapter_id="failing-e2e",
+        distribution="failing-e2e-adapter",
+        version="1.0",
+        entry_point="failing_e2e_adapter:create",
+        package_digest=package_digest,
+        release_digest=RELEASE_DIGEST,
+        python_executable=str(executable.resolve()),
+        workspace=str(workspace),
+        workspace_digest=workspace_digest(str(workspace)),
+        route_capability="computer",
+    )
+
+
+@pytest.mark.asyncio
+async def test_spawned_worker_reports_the_real_adapter_cause_across_the_boundary(
+    tmp_path: Path,
+) -> None:
+    """A REAL spawned worker's adapter failure arrives NAMED, not generic.
+
+    This is the regression for the largest cause of lost paid episodes. Two
+    consecutive real runs (ep-e46c789ca818, ep-ffda3fc88f81) died on a fatal
+    ``adapter_error`` whose entire recorded diagnostic was::
+
+        RpcRemoteError: adapter_error: adapter operation failed
+
+    The worker knew the exception type, the message, the failing method and the
+    operation ID, and the generic ``except`` clause discarded all four. It has
+    to be proven through a real subprocess: the loss happened inside the
+    worker's own handler, so an in-process mock adapter never crosses the
+    encode/serialise/parse round trip where the information actually vanished.
+
+    Asserting the CAUSE chain (not merely the outer type) is what makes this
+    evidence: ``_CloudTimeout`` is raised inside the spawned adapter, wrapped in
+    a ``RuntimeError``, and can only appear here if the chain survived the wire.
+    """
+
+    from local_operator.evaluation.adapters.api import (
+        InspectRequirementsParams,
+        PrepareParams,
+        PrepareResult,
+        RequirementsResult,
+    )
+    from local_operator.evaluation.adapters.rpc import RpcRemoteError
+
+    selector = _failing_selector(tmp_path)
+    supervisor = AdapterSupervisor.launch(selector)
+    try:
+        await supervisor.handshake(timeout=60)
+        await supervisor._call_raw(
+            "inspect_requirements",
+            InspectRequirementsParams(),
+            RequirementsResult,
+            timeout=60,
+        )
+        with pytest.raises(RpcRemoteError) as excinfo:
+            await supervisor._call_raw(
+                "prepare",
+                PrepareParams(
+                    operation_id="prepare-op-7",
+                    episode_id="episode",
+                    secret_refs=(),
+                    infra_values=(),
+                ),
+                PrepareResult,
+                timeout=60,
+            )
+    finally:
+        await supervisor.terminate()
+
+    error = excinfo.value
+    # The closed envelope is unchanged: same code, same fixed message.
+    assert error.code == "adapter_error"
+    detail = error.detail
+    assert detail is not None
+    # The four facts the episodes needed and did not get.
+    assert detail.exception_type == "RuntimeError"
+    assert "could not allocate the guest instance" in detail.message
+    assert detail.method == "prepare"
+    assert detail.operation_id == "prepare-op-7"
+    # The wrapped SDK error, one link down, is what actually names the fault.
+    assert detail.causes[0].exception_type == "_CloudTimeout"
+    assert "connect timeout to ec2.us-east-1" in detail.causes[0].message
+    # Worker-side frames are basename/line/function only -- never a path.
+    assert detail.frames, "frames carry the raising call site"
+    assert any(frame.function == "prepare" for frame in detail.frames)
+    assert all("/" not in frame.file for frame in detail.frames)
+    # And the rendered form -- what reaches the evidence artifact -- names it.
+    rendered = str(error)
+    assert "RuntimeError" in rendered and "_CloudTimeout" in rendered
+    assert "prepare-op-7" in rendered
+
+
+# A fourth spawnable distribution: it is HANDED a secret on ``reset_start`` and
+# then raises an exception whose message embeds that exact value. It is the
+# adversarial case for the new error detail -- a well-meaning adapter that
+# interpolates a credential into its own error text -- and the only way to prove
+# the worker-side canary check runs before anything crosses the pipe.
+_LEAKY_ADAPTER_SOURCE = """from importlib.metadata import distribution
+
+from local_operator.evaluation.adapters.api import (
+    AckResult,
+    AdapterCapabilities,
+    AdapterMetadata,
+    RequirementsResult,
+)
+from local_operator.evaluation.adapters.discovery import distribution_digest
+from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
+from local_operator.evaluation.adapters.api import PrepareResult
+
+
+class LeakyAdapter:
+    def __init__(self, metadata):
+        self.metadata = metadata
+
+    async def inspect_requirements(self, params):
+        return RequirementsResult(requirements=())
+
+    async def prepare(self, params):
+        return PrepareResult(cleanup_plan=CleanupPlan(
+            episode_id=params.episode_id,
+            actions=(CleanupAction(
+                action_id="release", kind="release_instance",
+                resource_ref="resource", timeout_ms=100, max_attempts=1),)))
+
+    async def reset_start(self, params):
+        # The adapter does exactly what a careless one does: puts the
+        # credential it was just handed into its own error message. The
+        # padding places the secret so the message field's 512-character bound
+        # cuts THROUGH it: truncating before the canary scan would sever the
+        # match and emit the surviving prefix verbatim (round 1, F1).
+        token = {s.name: s.value for s in params.secrets}["AWS_SECRET_ACCESS_KEY"]
+        raise RuntimeError("auth rejected: " + ("x" * 500) + token + " (retry)")
+
+    async def observe(self, params): raise NotImplementedError
+
+    async def execute(self, params): raise NotImplementedError
+
+    async def ask_user_exchange(self, params): raise NotImplementedError
+
+    async def score(self, params): raise NotImplementedError
+
+    async def cleanup(self, params): raise NotImplementedError
+
+    async def close(self, params): return AckResult()
+
+
+def create():
+    installed = distribution("leaky-e2e-adapter")
+    return LeakyAdapter(
+        AdapterMetadata(
+            adapter_id="leaky-e2e",
+            distribution="leaky-e2e-adapter",
+            version="1.0",
+            entry_point="leaky_e2e_adapter:create",
+            package_digest=distribution_digest(installed),
+            release_digest="{release}",
+            schema_version="1.3",
+            capabilities=AdapterCapabilities(
+                routes=("computer",), ask_user=False, scoring=False
+            ),
+        )
+    )
+""".replace("{release}", RELEASE_DIGEST)
+
+
+def _leaky_selector(tmp_path: Path) -> AdapterSelector:
+    """A real interpreter with the leaky adapter installed and a pinned workspace."""
+
+    executable = copied_interpreter(tmp_path / "venv")
+    site = site_packages_of(executable)
+    package_digest = _install_named_adapter(
+        site,
+        "leaky_e2e_adapter",
+        "leaky-e2e-adapter",
+        _LEAKY_ADAPTER_SOURCE,
+        "leaky-e2e",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "adapter-release.json").write_text(
+        json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
+    )
+    return AdapterSelector(
+        schema_version="1.3",
+        adapter_id="leaky-e2e",
+        distribution="leaky-e2e-adapter",
+        version="1.0",
+        entry_point="leaky_e2e_adapter:create",
+        package_digest=package_digest,
+        release_digest=RELEASE_DIGEST,
+        python_executable=str(executable.resolve()),
+        workspace=str(workspace),
+        workspace_digest=workspace_digest(str(workspace)),
+        route_capability="computer",
+    )
+
+
+@pytest.mark.asyncio
+async def test_error_detail_withholds_a_secret_the_adapter_put_in_its_message(
+    tmp_path: Path,
+) -> None:
+    """The canary check runs on the WORKER side, before anything crosses.
+
+    Carrying a real cause across the boundary is only safe if the value a
+    delivered secret has cannot ride out with it. This adapter interpolates the
+    credential it was handed into its own exception message -- the realistic
+    careless case, not a contrived one -- and the assertion is that the parent
+    never receives those bytes at all: not in the message, not in the cause
+    chain, not through ``str()``, and not in the rendered evidence artifact.
+
+    It fails CLOSED (the whole string is replaced) rather than masking, because
+    a partial mask still narrows the secret for whoever holds the bundle.
+    """
+
+    from local_operator.evaluation.adapters.api import (
+        AckResult,
+        InspectRequirementsParams,
+        PrepareParams,
+        PrepareResult,
+        RequirementsResult,
+        ResetStartParams,
+        ResolvedSecret,
+    )
+    from local_operator.evaluation.adapters.rpc import WITHHELD, RpcRemoteError
+
+    marker = "AKIA-canary-secret-value-8823xyz"
+    selector = _leaky_selector(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    supervisor = AdapterSupervisor.launch(selector)
+    try:
+        await supervisor.handshake(timeout=60)
+        await supervisor._call_raw(
+            "inspect_requirements", InspectRequirementsParams(), RequirementsResult, timeout=60
+        )
+        await supervisor._call_raw(
+            "prepare",
+            PrepareParams(
+                operation_id="prepare-op",
+                episode_id="episode",
+                secret_refs=(),
+                infra_values=(),
+            ),
+            PrepareResult,
+            timeout=60,
+        )
+        with pytest.raises(RpcRemoteError) as excinfo:
+            await supervisor._call_raw(
+                "reset_start",
+                ResetStartParams(
+                    operation_id="reset-op",
+                    task_id="task",
+                    episode_id="episode",
+                    artifact_root=str(artifact_root),
+                    secrets=(ResolvedSecret(name="AWS_SECRET_ACCESS_KEY", value=marker),),
+                ),
+                AckResult,
+                timeout=60,
+            )
+    finally:
+        await supervisor.terminate()
+
+    error = excinfo.value
+    detail = error.detail
+    assert detail is not None
+    # The structure survives -- the reader still learns type, method and key.
+    assert detail.exception_type == "RuntimeError"
+    assert detail.method == "reset_start"
+    assert detail.operation_id == "reset-op"
+    # ...but the message that embedded the credential was withheld WHOLE.
+    assert detail.message == WITHHELD
+    # No surface the parent can see carries the value.
+    for surface in (
+        str(error),
+        json.dumps(detail.model_dump(mode="json")),
+        supervisor.stdout_tail.bytes().decode(errors="replace"),
+        supervisor.stderr_tail.bytes().decode(errors="replace"),
+    ):
+        assert marker not in surface
+        assert "AKIA-canary" not in surface
+        # No PREFIX of the credential survives either. The adapter pads its
+        # message so the field bound cuts through the secret, which is the
+        # shape a truncate-then-scan ordering leaks (round 1, F1): the canary
+        # stops matching once severed, and the surviving prefix crosses the
+        # pipe verbatim.
+        assert not any(
+            marker[:length] in surface for length in range(8, len(marker) + 1)
+        ), "a prefix of the credential crossed the boundary"

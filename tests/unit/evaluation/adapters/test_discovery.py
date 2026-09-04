@@ -101,7 +101,7 @@ def selected(tmp_path: Path, digest: str) -> AdapterSelector:
         shutil.copy2(Path(sys.executable).resolve(), executable)
         executable.chmod(0o755)
     return AdapterSelector(
-        schema_version="1.2",
+        schema_version="1.3",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
