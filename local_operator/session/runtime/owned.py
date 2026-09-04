@@ -1200,6 +1200,75 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
 
+    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+        """Run an off-record provider request against this session.
+
+        The aside seam: a viewer asks a question that must NOT enter the
+        durable conversation (the model picker's "explain this model", the
+        mobile quick-ask). It runs on the authoritative session because it
+        needs the real model, credentials and context — which is why it
+        cannot be answered viewer-side.
+
+        Found by the post-U9 migration audit rather than by a review: without
+        it every aside answered "this owner cannot run off-record requests".
+        """
+        from local_operator.harness.types import Message
+
+        messages = [Message.model_validate(turn) for turn in turns]
+        return await self._session.complete_aside(messages)
+
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
+        """Fork a viewer's aside exchange into the durable conversation."""
+        from local_operator.harness.types import Message
+
+        parsed = [Message.model_validate(message) for message in messages]
+        await self._session.adopt_aside(parsed)
+        self._notify()
+        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+
+    async def recall_steer(self, command_id: str) -> str:
+        """Recall one queued steer by the Message id its producer supplied.
+
+        The viewer's "unsend" for a steer that has not been consumed yet. The
+        reservation is rejected as well as the message recalled, so the
+        command id cannot be admitted later by a racing durable event.
+        """
+        recalled = False
+        for message in self._session.queued_steering():
+            if str(getattr(message, "id", "")) == command_id:
+                recalled = bool(self._session.recall_steering(message))
+                break
+        if not recalled:
+            raise ValueError("that steering message is no longer queued")
+        self._command_reservations.reject(command_id)
+        self._notify()
+        return "steering recalled"
+
+    async def slash_images(
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Run a slash command that carries image attachments.
+
+        The old handle ran the command's UI in the OWNER's terminal and
+        returned a receipt. A runtime has no terminal, so the only commands
+        reachable this way are the routed ones — this defers to the same
+        dispatcher `run_slash_authoritative` uses and renders its notice as
+        the receipt, rather than failing the request outright.
+
+        Images are accepted and ignored for the routed set (none of
+        `/goal`, `/rename`, `/approvals`, `/compact` consumes an attachment);
+        that is stated here so a future image-consuming routed command is
+        added deliberately rather than silently dropping its payload.
+        """
+        from local_operator.session.frontend_state import SlashResult
+
+        result = await self._slash_result(command, args, SlashResult)
+        text = getattr(result, "text", "") or f"ran /{command}"
+        return str(text)
+
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent and return the REAL count.
 
