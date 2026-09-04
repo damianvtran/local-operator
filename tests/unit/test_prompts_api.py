@@ -232,6 +232,126 @@ def test_system_md_teaches_when_to_research_without_making_it_reflexive() -> Non
     assert "never the edge of your options" in text
 
 
+def test_system_md_makes_deciding_the_default_and_asking_the_exception() -> None:
+    """The ask paragraph used to open on the capability and never state a brake.
+
+    "When a decision is the user's to make, use `ask`" reads as permission and
+    leaves the antecedent — which decisions ARE the user's — entirely to the
+    model, which resolves it generously while mid-task and uncertain. Measured
+    over 600 local sessions that produced 156 calls, 35 of them in one session
+    on fully authorized work, dominated by research results reported back as
+    questions. Contract: the paragraph must establish deciding as the default
+    and name the alternatives to asking BEFORE it describes the picker, because
+    a brake stated after the affordance argues uphill against it.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    # The inversion: the agent's own judgement is the default path.
+    assert "Deciding is your job; `ask` is the exception" in text
+    # Restraint has to be actionable, so the alternatives are named as concrete
+    # moves — including spending a subagent, which is the user's stated
+    # preference for how an agent should reach a defensible answer alone.
+    assert "resolve the question yourself" in text
+    assert "`reviewer`, `architect`, or `designer` subagent" in text
+    # The cost that is invisible from inside the model: a question hands back
+    # the work the delegation existed to absorb.
+    assert "spends their attention on work" in text
+
+
+def test_system_md_enumerates_the_cases_that_still_warrant_asking() -> None:
+    """A brake with no trigger overshoots into an agent that will not stop at a
+    genuinely irreversible fork — a worse failure than the one being fixed, and
+    a silent one. So the cases that DO warrant a question are enumerated.
+
+    Four, not three. Review found that a closed set of three put three shipped
+    guides outside it while the prompt said "three cases only": the mobile guide
+    asks how the portal password should be delivered, and the teams guide asks
+    for a roster. Neither is something the user *has*, and neither is research
+    an agent can do — the answer does not exist until they state it.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    assert "destructive or irreversible" in text
+    assert "two plausible readings" in text
+    assert "only the user has" in text
+    # The fourth case, and the reason it cannot be researched away.
+    assert "genuinely theirs to state" in text
+    assert "does not exist until they say it" in text
+    # The counterpart: the categories an agent must settle on its own rather
+    # than escalate. Without naming them, "genuinely ambiguous" stretches to
+    # cover any question the model finds hard.
+    assert "Which library, which layout" in text
+
+
+def test_system_md_denies_the_ambiguity_escape_hatch_to_technical_forks() -> None:
+    """Measured leak, not a hypothetical one.
+
+    An earlier draft of this change said only "two readings lead to materially
+    different work". Probed against the live model on a real transcript case
+    (two valid ways to make a query fast), it asked anyway and justified itself
+    by quoting that clause back: two implementation options were read AS the
+    ambiguity. The distinction has to be stated explicitly — ambiguity is not
+    knowing what was ASKED, not having found several ways to build it — or the
+    exception swallows the rule it is an exception to.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    # The clause is anchored to the REQUEST's wording, not to the work.
+    assert "the words of the request have two plausible readings" in text
+    # And the leak is closed by name.
+    assert "not that you have found several ways to build it" in text
+    assert "Two technical approaches is a choice you are equipped to make" in text
+    # The tie-breaker that keeps a close call from becoming a question anyway:
+    # uncertainty is discharged into a reversible choice plus a note, which is
+    # the behaviour the picker was being misused to get.
+    assert "take the reversible one" in text
+
+
+def test_system_md_treats_a_standing_instruction_as_authorization() -> None:
+    """The largest single class of wasted calls was re-confirming the request
+    already in flight, including the obvious steps inside it.
+
+    The clause has to cover three distinct shapes, so all three are pinned:
+    re-confirming what was asked, re-asking what the conversation settled, and
+    requesting permission to continue. The last sentence handles the mid-task
+    discovery, which is where the pattern actually fires — an agent finds
+    something unexpected and reads its own surprise as grounds to stop, when
+    the user has no more information about it than the agent does.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    assert "already given is standing authorization" in text
+    assert "Do not stop to confirm what was already asked for" in text
+    assert "do not ask permission to continue" in text
+    assert "a reason to fix it and report it" in text
+
+
+def test_system_md_never_lets_authorization_reach_a_destructive_step_by_implication() -> None:
+    """The dangerous direction of this whole change, caught in review.
+
+    Two clauses were individually reasonable and jointly a hole: the trigger
+    said "destructive or irreversible and not already authorized", while
+    standing authorization was defined to cover "the obvious steps inside it
+    and the ones a stated workflow implies". An irreversible step could then be
+    authorized BY IMPLICATION and fall outside the trigger — "…and clean up
+    afterwards" reaching a `DROP TABLE`. The Safety rules require EXPLICIT
+    approval, and under an auto-approving host this paragraph is the only brake
+    left, so the two must not disagree.
+
+    Pinned as three separate properties because each closes the hole alone and
+    a future edit is likely to touch only one: the trigger demands explicit
+    approval, implication is denied reach over destructive steps, and the
+    mid-task "fix it rather than ask" instruction carries its own carve-out.
+    """
+    text = " ".join(render_template("system.md", {}).split())
+    assert "the user has not explicitly approved that action" in text
+    assert "never extends to a destructive or irreversible step by implication" in text
+    # Approval is per-action and named, with the concrete example that shows
+    # what "by implication" looked like when it was still reachable.
+    assert "approval for the specific action, named" in text
+    assert "does not authorize dropping a database" in text
+    # The mid-task discovery clause is where the hole would otherwise reopen:
+    # "finding a problem is a reason to fix it" must not license an
+    # irreversible fix.
+    assert "Fix it and report it when the fix is reversible; ask first when it is not" in text
+
+
 def test_compaction_summary_renders_optional_sections() -> None:
     full = render_template(
         "compaction_summary.md",

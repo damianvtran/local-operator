@@ -9089,6 +9089,20 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 # properly … (C) You have context I don't" — and the user then has to retype an
 # answer the agent has to re-parse. The transcript is a stream, not a form, so
 # lettered prose is the only shape a model has; this gives it a real one.
+#
+# Why the description leads with a BRAKE rather than the capability: a tool
+# described only by what it is for is read as a tool to use, and this one's cost
+# is invisible from inside the model — every call parks the turn on a human and
+# hands back work they delegated precisely so they would not have to do it.
+# Measured over 600 local sessions the failure was not rare-and-severe but
+# steady: 156 calls, and in the worst session 35 pickers on a task that had
+# already been authorized in full, most of them "here is what I found, how do
+# you want it handled?" — a research result reported as a question. So the
+# affordance and its limit ship together, in both places a model reads about the
+# tool: here (in the tools array of every request) and in the system prompt's
+# fuller trigger-then-brake paragraph. Naming the legitimate triggers is
+# what keeps this from reading as "never ask": the goal is fewer calls of higher
+# value, not a model that pushes on through a genuinely irreversible fork.
 
 
 class AskParams(BaseModel):
@@ -9208,9 +9222,19 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
         name="ask",
         label="Ask",
         description=(
-            "Ask the user to choose. Use it whenever you need a decision only they can "
-            "make — which of two approaches to take, whether to do the risky thing, "
-            "which of several things they meant — INSTEAD of writing lettered options "
+            "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run "
+            "it, or delegate it to a subagent and decide yourself, then report what you "
+            "chose. Use this when the action is destructive or irreversible and the "
+            "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
+            "two plausible readings that send the work in different directions and no "
+            "evidence picks between them, when you need something only the user has (a "
+            "credential, an access decision), or when the answer is genuinely theirs to "
+            "state (a preference, a name, a roster, how they want something delivered). "
+            "Two technical approaches is not ambiguity: weigh them, pick one, and say "
+            "why. Work the user already asked for is authorized: do not stop to confirm "
+            "it, re-ask what the conversation answered, or seek permission to continue "
+            "— but that never extends to an irreversible step by implication. "
+            "When you do ask, do it here INSTEAD of writing lettered options "
             "into your reply and waiting. Give each question at least two options, put "
             "the consequence of each in its description, and mark the one you recommend "
             "(it is moved to the top of the list and preselected). "
