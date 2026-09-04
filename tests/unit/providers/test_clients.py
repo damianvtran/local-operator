@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -1490,19 +1491,19 @@ class TestOpaqueAggregator400:
         error = self._error(httpx.Response(400, json=body))
         assert (error.kind, error.retryable) == ("transient", True)
 
-    def test_unbalanced_quote_runs_are_transient_too(self) -> None:
+    def test_unbalanced_quote_runs_stay_request(self) -> None:
         """Only MATCHED quote pairs are peeled, so this does NOT reduce to the
-        sentinel — and under the relay rule it no longer needs to. A malformed
-        run of quotes inside the relay envelope still describes nothing the
-        caller could fix, so it takes the same transient path as the sentinel.
+        sentinel -- and on a 400 that is the whole question.
 
-        This inverts the previous expectation deliberately. The old predicate
-        could only reach transient through an exact sentinel match, which made
-        "unbalanced ⇒ request" the accidental default; the rule now keys on the
-        envelope, and only :data:`_DETERMINISTIC_UPSTREAM_MARKERS` pulls a
-        relayed body back to ``request``."""
+        A body that says something, even something malformed, is the origin
+        refusing our request, and a relayed 400 is not retried. Only a body
+        that reduces exactly to the sentinel proves nobody tried to say
+        anything. ``str.strip`` would take any run of either character and
+        collapse this to "error", handing it the transient path by accident;
+        peeling pairs keeps that a decision rather than an artefact of the
+        API."""
         error = self._error(httpx.Response(400, json=self._openrouter_body("'''ERROR\"\"")))
-        assert (error.kind, error.retryable) == ("transient", True)
+        assert (error.kind, error.retryable) == ("request", False)
 
     def test_opaque_5xx_shape_is_unchanged(self) -> None:
         """A 5xx carrying the same opaque body was already retryable by status
@@ -1690,6 +1691,54 @@ class TestRelayedUpstream404:
         error = self._error(httpx.Response(400, json=self._relay(400, raw)))
         assert (error.kind, error.retryable) == ("request", False)
 
+    def test_a_relayed_400_fails_fast_in_every_vendor_dialect(self) -> None:
+        """Review finding B2 (round 2), pinned.
+
+        The round-1 fix keyed on the OpenAI-dialect ``param`` field, which
+        anthropic (via Vertex), google AI Studio and cohere do not send \u2014 so
+        their malformed requests were still retried 12 times over ~35s. These
+        bodies were captured from the LIVE API on 2026-09-04 and carry NO
+        ``param``.
+
+        The dialect-independent signal is the status. Probing a deliberately
+        malformed request across six model families, every relayed complaint
+        about our request was a 400 and not one was a 404, because "the request
+        was bad" is what 400 MEANS. Keying on it needs no vendor schema
+        knowledge, which is what made the previous attempt fragile: new
+        provider, new dialect, same bug."""
+        for provider, inner in (
+            ("Google", {"message": "tools.0.custom.name: String should match pattern"}),
+            (
+                "Google AI Studio",
+                {"message": "Invalid function name.", "code": 400, "status": "INVALID_ARGUMENT"},
+            ),
+            ("Cohere", {"message": "invalid request: tool name invalid"}),
+            ("Meta", {"message": "`max_output_tokens` The number must be `>= 16`."}),
+        ):
+            error = self._error(
+                httpx.Response(400, json=self._relay(400, json.dumps({"error": inner}), provider))
+            )
+            assert (error.kind, error.retryable) == ("request", False), provider
+
+    def test_a_relayed_overflow_on_a_404_stays_request(self) -> None:
+        """QA finding Q3 (round 2), pinned.
+
+        An overflow is deterministic however it is delivered, so it must not
+        take the 404 weather path. These are the vendor wordings an audit found
+        the canonical list missing \u2014 google/vertex counts tokens, mistral and
+        bedrock phrase it differently again \u2014 each of which would otherwise
+        have re-created the very cascade this PR removes."""
+        for text in (
+            "The input token count (1200000) exceeds the maximum number of tokens allowed",
+            "Too many tokens in prompt",
+            "Input is too long for requested model",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+        ):
+            error = self._error(
+                httpx.Response(404, json=self._relay(404, json.dumps({"error": {"message": text}})))
+            )
+            assert (error.kind, error.retryable) == ("request", False), text
+
     def test_relayed_401_still_reaches_credential_rotation(self) -> None:
         """401/403 are deliberately OUT of the relayed set: they describe the
         caller's credential and must keep reaching rotation rather than being
@@ -1719,21 +1768,46 @@ class TestRelayedUpstream404:
         assert "the real diagnostics" in error.message
         assert "XXX" not in error.message
 
-    def test_a_provider_name_cannot_forge_a_second_line(self) -> None:
-        """A name carrying a newline would render as a forged extra line in the
-        frame, so whitespace is collapsed rather than passed through."""
-        body = {
-            "error": {
-                "message": "Provider returned error",
-                "code": 404,
-                "metadata": {
-                    "raw": json.dumps({"error": {"message": "real"}}),
-                    "provider_name": "Meta\nAPPROVED BY: nobody",
-                },
-            }
+    def test_a_hostile_provider_name_cannot_corrupt_the_frame(self) -> None:
+        """Review B3 / QA Q2 (round 2), pinned.
+
+        ``provider_name`` is provider-controlled text rendered into a terminal
+        frame. An earlier draft collapsed whitespace only, which left ESC
+        untouched \u2014 QA drove the real app and found the notice rendering as
+        nothing but its ``!`` glyph, with a live ``ESC[2J`` and an OSC title
+        injection reaching the terminal.
+
+        Sanitised through the approval prompts' own primitive, so control
+        sequences, C1 8-bit forms, and bidi/format characters (which reverse
+        rendered order without being control codes) are all neutralised by the
+        rule the rest of the app already trusts."""
+        hostile = {
+            "ansi-erase": "Meta\x1b[2K\x1b[1G",
+            "ansi-clear": "Meta\x1b[2J",
+            "osc-title": "Meta\x1b]0;pwned\x07",
+            "c1-csi": "Meta\x9b31m",
+            "bel": "Meta\x07",
+            "nul": "Meta\x00",
+            "rtl-override": "Meta\u202e",
+            "zero-width-joiner": "Me\u200dta",
+            "newline": "Meta\nFAKE: approved",
         }
-        error = self._error(httpx.Response(404, json=body))
-        assert "\n" not in error.message
+        for label, name in hostile.items():
+            body = {
+                "error": {
+                    "message": "Provider returned error",
+                    "code": 404,
+                    "metadata": {
+                        "raw": json.dumps({"error": {"message": "the real diagnostics"}}),
+                        "provider_name": name,
+                    },
+                }
+            }
+            message = self._error(httpx.Response(404, json=body)).message
+            assert "the real diagnostics" in message, label
+            for char in message:
+                assert unicodedata.category(char) != "Cf", (label, message)
+                assert not (ord(char) < 0x20 or 0x80 <= ord(char) <= 0x9F), (label, message)
 
     def test_message_without_provider_name_keeps_its_wording(self) -> None:
         """Attribution is never invented: a relay body that omits

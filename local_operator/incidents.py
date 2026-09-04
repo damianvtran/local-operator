@@ -87,6 +87,15 @@ CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
     "request_too_large",
     "request entity too large",
     "payload too large",
+    # Vendors that describe the same overflow by COUNTING tokens rather than by
+    # naming the context. Added after an audit found the list recognised 6 of
+    # 10 real vendor wordings: google/vertex ("input token count ... exceeds"),
+    # mistral ("too many tokens"), and bedrock ("input is too long") all fell
+    # through, which for the provider layer meant a deterministic overflow was
+    # retried as though it were upstream weather.
+    "token count",
+    "too many tokens",
+    "input is too long",
 )
 
 #: Ordered (category, patterns) rules. First category whose pattern matches

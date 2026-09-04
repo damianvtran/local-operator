@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
+from local_operator.ansi import sanitize_prompt_line
 from local_operator.compaction.thresholds import (
     CompactionSettings,
     resolve_threshold_percent,
@@ -291,21 +292,43 @@ def _attributed_relay_message(message: str, error: Mapping[str, Any]) -> str:
     attribution the wire did not supply.
 
     The value is provider-controlled text landing in a user-facing frame, so it
-    is bounded on two axes before use. Length: the composed message is capped
-    at :data:`MAX_ERROR_MESSAGE_CHARS`, so an absurdly long name would push the
-    upstream diagnostics — the part that says what actually went wrong — off
-    the end. Shape: a name carrying a newline would render as a forged second
-    line, so whitespace is collapsed. A name that is implausible after
-    normalisation is dropped rather than trusted; the original wording is
-    strictly better than a mangled attribution.
+    is bounded on three axes before use.
+
+    Sanitised through :func:`~local_operator.ansi.sanitize_prompt_line`, the
+    primitive the approval prompts already use, rather than a second local
+    rule. It covers the three hazards this value carries, and an earlier draft
+    that hand-rolled only the third missed the first two:
+
+    - **Control sequences.** An unstripped name can carry ``ESC[2K`` to erase
+      the line already drawn or an OSC to rewrite the terminal title, so the
+      frame is not merely wrong but destructive — review demonstrated the
+      notice rendering as nothing but its ``!`` glyph. Collapsing whitespace
+      does not touch these, because ESC is not whitespace.
+    - **Bidi/format characters.** ``U+202E`` reverses the rendered order of
+      what follows, so an attribution can be made to read as something else
+      entirely while comparing equal to neither.
+    - **Whitespace**, so a name cannot forge a second line.
+
+    Length is then bounded separately by :data:`_MAX_PROVIDER_NAME_CHARS`: the
+    composed message shares :data:`MAX_ERROR_MESSAGE_CHARS` with the upstream
+    diagnostics, so an absurdly long attribution would push the part that says
+    what actually went wrong off the end.
+
+    A name that is empty or implausible afterwards is dropped rather than
+    trusted: the aggregator's original wording is strictly better than a
+    mangled attribution.
     """
     if message.strip().lower() != _OPAQUE_AGGREGATOR_MESSAGE:
         return message
     metadata = error.get("metadata")
     if not isinstance(metadata, Mapping):
         return message
-    provider = " ".join(_first_text(metadata.get("provider_name")).split())
-    if not provider or len(provider) > _MAX_PROVIDER_NAME_CHARS:
+    provider = sanitize_prompt_line(
+        _first_text(metadata.get("provider_name")), limit=_MAX_PROVIDER_NAME_CHARS
+    )
+    if not provider or len(provider) >= _MAX_PROVIDER_NAME_CHARS:
+        # At the limit the value was TRUNCATED, so it is not a name the wire
+        # actually sent; a half-name is a worse attribution than none.
         return message
     return f"{provider} returned error"
 
@@ -374,46 +397,63 @@ def _openrouter_upstream_error(error: Mapping[str, Any]) -> Mapping[str, Any] | 
 #: not part of the signal.
 _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
 
-#: Statuses an aggregator will RELAY from an origin provider that are otherwise
-#: read as "the request itself was refused". 401/403 stay out: those describe
-#: the caller's credential at the aggregator and must keep reaching credential
-#: rotation rather than being retried as weather. 429 is already quota and 5xx
-#: is already transient, so neither needs this path.
+#: Statuses on which a relayed upstream failure is treated as WEATHER.
 #:
-#: 404 is the member that matters and the reason this set exists. OpenRouter
-#: answers a model id it does not know with a FLAT 400 that names the slug
-#: ("meta/muse-spark-9.9 is not a valid model ID"), and a routing refusal it
-#: decided itself with a FLAT 404 whose message names the routing preference
-#: ("No allowed providers are available for the selected model...") — both are
-#: the aggregator's own words, and neither carries ``metadata.raw``. Verified
-#: against the live API on 2026-09-04. A 404 that arrives WRAPPED in the relay
-#: envelope is therefore never "the client asked for a model that does not
-#: exist": it is the ORIGIN provider's own 404 forwarded verbatim, which for a
-#: single-endpoint model is a transient failure to resolve its own snapshot.
-_RELAYED_UPSTREAM_STATUSES = frozenset({400, 404})
+#: Deliberately just 404, and the exclusion of 400 is the load-bearing part.
+#:
+#: An earlier draft included 400 and narrowed it afterwards by looking for the
+#: OpenAI-dialect ``param`` field. That was dialect-blind: anthropic (via
+#: Vertex), google AI Studio and cohere all describe a malformed request
+#: WITHOUT a ``param`` key, so their refusals were still retried 12 times over
+#: ~35s for defects no wait can fix.
+#:
+#: Probing a deliberately malformed request across six model families on
+#: 2026-09-04 showed the status line already carries the signal, in every
+#: dialect, without parsing vendor-specific fields:
+#:
+#:   openai / anthropic / google / meta  -> HTTP 400 (relay envelope present)
+#:   cohere / mistral                    -> HTTP 404 (NO envelope; unroutable)
+#:
+#: Every relayed complaint about our REQUEST is a 400; not one is a 404. That
+#: is the contract a caller can rely on, because "the request was bad" is what
+#: 400 MEANS -- an origin provider reaching for 404 is saying something about a
+#: resource on ITS side, not about our bytes.
+#:
+#: So a relayed 400 keeps ``request`` and fails fast, and only a relayed 404 --
+#: the recorded incident's shape -- is retried. 401/403 stay out: those describe
+#: the caller's credential and must keep reaching credential rotation. 429 is
+#: already quota and 5xx already transient, so neither needs this path.
+#:
+#: This also removes the need to understand any vendor's error schema, which is
+#: what made the previous attempt fragile: new provider, new dialect, same bug.
+_RELAYED_UPSTREAM_STATUSES = frozenset({404})
 
-#: The upstream field name that proves a relayed error is about OUR BYTES.
+#: Raw bodies short enough to prove nobody tried to say anything. Retained from
+#: the ORIGINAL opaque-aggregator fix (session e13d092c093c): a relayed 400
+#: whose ``metadata.raw`` is a bare sentinel carries no diagnostics at all, so
+#: it cannot be a complaint about our request and stays weather. A relayed 400
+#: that says something real is a refusal and is NOT retried — that is the
+#: distinction the status set above cannot make on its own.
+_OPAQUE_RAW_SENTINELS = frozenset({"error"})
+
+#: An upstream field name that proves a relayed error is about OUR BYTES.
 #:
-#: This is the load-bearing discriminator, and it replaces an earlier attempt
-#: that keyed on the mere PRESENCE of the relay envelope. That attempt was
-#: wrong, and the way it was wrong is worth recording: the envelope is a
-#: PROVENANCE signal (this failure came from an origin provider) and says
-#: nothing about RETRYABILITY. Live probes on 2026-09-04 confirmed it —
-#: a malformed tool name and an invalid response_format schema both came back
-#: fully wrapped, ``provider_name`` "OpenAI"/"Azure", and would have been
-#: retried for ~35s across 12 requests apiece for a defect no wait can fix.
+#: Belt-and-braces rather than the primary signal. The status set above does
+#: the real work: a relayed 400 is already kept as ``request``, and every
+#: malformed-request shape observed in the wild is a 400. This key covers the
+#: hypothetical origin that reaches for 404 while still pointing at a field of
+#: our request -- a body that contradicts itself, where the field name is the
+#: more specific evidence and is therefore believed.
 #:
-#: What actually separates the two, measured across seven malformed-request
-#: shapes against the live API: an origin provider refusing our REQUEST names
-#: the offending field in ``param`` ("tools[0].function.name",
-#: "messages[0].role", "response_format"). The recorded incident
-#: ("The requested model was not found.", relayed under a 404 from Meta for a
-#: model id that worked six times in the surrounding 75 seconds) carries NO
-#: ``param`` — there is no field of ours to point at, because nothing about
-#: our request was the problem.
+#: It is deliberately NOT relied on alone. ``param`` is an OpenAI-dialect
+#: field: anthropic (via Vertex), google AI Studio and cohere describe a
+#: malformed request without it, so a predicate resting on this key is blind to
+#: exactly the providers this harness uses most. That was a real defect, caught
+#: in review, and the comment stays as the reason nobody should promote this
+#: check back to primary.
 #:
-#: ``type`` deliberately does NOT feature: all three bodies above are
-#: ``invalid_request_error``, so it cannot tell them apart.
+#: ``type`` does not feature at all: the incident and the malformed-request
+#: bodies are both ``invalid_request_error``, so it separates nothing.
 _UPSTREAM_REQUEST_FIELD_KEY = "param"
 
 #: How many matched quote pairs :func:`_strip_quote_pair` will peel. Real
@@ -495,20 +535,27 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     The envelope alone is NOT enough, and an earlier draft of this function
     that stopped there was wrong. ``metadata.raw`` establishes provenance —
     the failure happened at the origin — but says nothing about whether a
-    retry could help. Live probes on 2026-09-04 settled it: a malformed tool
-    name and an invalid ``response_format`` schema both arrive fully wrapped,
-    and treating the envelope as sufficient retried each of them 12 times over
-    ~35s for a defect no wait can fix.
+    retry could help: live probes showed malformed requests arriving fully
+    wrapped, and treating the envelope as sufficient retried each of them 12
+    times over ~35s for a defect no wait can fix.
 
-    So provenance is narrowed by two carve-outs, both meaning "this describes
-    our bytes, not the provider's state":
+    The narrowing that works is the STATUS, per
+    :data:`_RELAYED_UPSTREAM_STATUSES`: only a relayed **404** is treated as
+    weather. Every relayed complaint about our request observed across six
+    model families is a **400**, in every vendor dialect, so excluding 400
+    fails those fast without parsing anyone's error schema. A second draft
+    tried to narrow by the OpenAI-dialect ``param`` field instead and was blind
+    to anthropic, google and cohere, which do not send it — the status line is
+    the only part of the contract every provider agrees on.
 
-    - :data:`_UPSTREAM_REQUEST_FIELD_KEY` — the origin named the offending
-      field of our request in ``param``. Measured across seven malformed-request
-      shapes, every one names a field; the recorded incident names none.
+    Two further carve-outs then guard the 404 path itself, both meaning "this
+    describes our bytes, not the provider's state":
+
+    - :data:`_UPSTREAM_REQUEST_FIELD_KEY` — a 404 that nevertheless names the
+      offending field of our request is believed on the more specific evidence.
     - :data:`~local_operator.incidents.CONTEXT_LENGTH_MARKERS` — an overflow
-      complaint is deterministic even when ``param`` is absent, and the
-      canonical list is shared with the harness so the two cannot drift.
+      complaint is deterministic however it is delivered, and the canonical
+      list is shared with the harness so the two cannot drift.
 
     Two deliberate widenings remain, both toward "treat no-information as
     transient":
@@ -540,8 +587,6 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     construction unattributable, so the alternative is killing a turn that
     rotation or a fallback could have served.
     """
-    if status is not None and status not in _RELAYED_UPSTREAM_STATUSES:
-        return False
     message = _first_text(error.get("message"))
     if message.lower() != _OPAQUE_AGGREGATOR_MESSAGE:
         return False
@@ -549,21 +594,28 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     if not isinstance(metadata, Mapping) or not _first_text(metadata.get("raw")):
         # The relay envelope establishes PROVENANCE: without it there is no
         # evidence of an upstream hop at all, so the body keeps whatever its
-        # status already meant. It is necessary but NOT sufficient — see below.
+        # status already meant. It is necessary but NOT sufficient.
+        return False
+    text = _strip_quote_pair(_openrouter_upstream_text(error).strip()).lower()
+    if text in _OPAQUE_RAW_SENTINELS:
+        # Says NOTHING. Whatever the status, a body with no diagnostics cannot
+        # be a complaint about our request, so it is weather on any status --
+        # which is what the original opaque-aggregator fix established.
+        return True
+    if status is not None and status not in _RELAYED_UPSTREAM_STATUSES:
+        # It said something real. Only a relayed 404 is weather; a relayed 400
+        # is the origin refusing our request, in every vendor dialect.
         return False
     upstream = _openrouter_upstream_error(error)
     if upstream is not None and _first_text(upstream.get(_UPSTREAM_REQUEST_FIELD_KEY)):
-        # The origin named a field of OUR request. That is a defect in the
-        # bytes we sent: it will fail identically on a retry and on every
-        # fallback target, so it stays `request` and surfaces immediately.
+        # A 404 that nevertheless names a field of OUR request contradicts
+        # itself; the field name is the more specific evidence, so it wins and
+        # the error stays `request`.
         return False
-    text = _strip_quote_pair(_openrouter_upstream_text(error).strip()).lower()
     if any(marker in text for marker in CONTEXT_LENGTH_MARKERS):
-        # An overflow complaint is deterministic in the same way even when the
-        # provider omits `param`: the request is too big and will stay too big.
-        # Sourced from the harness's canonical list so this file and
-        # `incidents.py` cannot drift into disagreeing about what an overflow
-        # looks like.
+        # An overflow is deterministic however it is delivered: the request is
+        # too big and will stay too big. Sourced from the harness's canonical
+        # list so this file and `incidents.py` cannot drift apart.
         return False
     return True
 
