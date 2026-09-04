@@ -75,7 +75,7 @@ def create():
             entry_point="tiny_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.3",
+            schema_version="1.4",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -170,7 +170,7 @@ def create():
             entry_point="rescue_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="{release}",
-            schema_version="1.3",
+            schema_version="1.4",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -272,7 +272,7 @@ async def test_supervisor_launch_completes_real_handshake_and_reaps(tmp_path: Pa
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",
@@ -317,7 +317,7 @@ def _rescue_selector(tmp_path: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="rescue-e2e",
         distribution="rescue-e2e-adapter",
         version="1.0",
@@ -348,7 +348,7 @@ def _rescue_descriptor(selector: AdapterSelector, handshake: Handshake, root: Pa
         ),
     )
     return RescueDescriptor(
-        schema_version="1.3",
+        schema_version="1.4",
         selector=selector,
         handshake=handshake,
         episode_id="episode",
@@ -422,7 +422,7 @@ async def test_spawned_rescue_worker_refuses_an_adapter_without_begin_rescue(
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     selector = AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="tiny-e2e",
         distribution="tiny-e2e-adapter",
         version="1.0",
@@ -513,7 +513,7 @@ def create():
             entry_point="failing_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="{release}",
-            schema_version="1.3",
+            schema_version="1.4",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -540,7 +540,7 @@ def _failing_selector(tmp_path: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="failing-e2e",
         distribution="failing-e2e-adapter",
         version="1.0",
@@ -697,7 +697,7 @@ def create():
             entry_point="leaky_e2e_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="{release}",
-            schema_version="1.3",
+            schema_version="1.4",
             capabilities=AdapterCapabilities(
                 routes=("computer",), ask_user=False, scoring=False
             ),
@@ -724,7 +724,7 @@ def _leaky_selector(tmp_path: Path) -> AdapterSelector:
         json.dumps({"release_digest": RELEASE_DIGEST}, separators=(",", ":"), sort_keys=True)
     )
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="leaky-e2e",
         distribution="leaky-e2e-adapter",
         version="1.0",

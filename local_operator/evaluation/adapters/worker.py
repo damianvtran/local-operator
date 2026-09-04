@@ -24,6 +24,7 @@ from local_operator.evaluation.adapters.api import (
     EvaluationAdapter,
     Handshake,
     HelloParams,
+    ObservationPhaseError,
     PythonRuntime,
     RescuableAdapter,
     RescueDescriptor,
@@ -44,6 +45,7 @@ from local_operator.evaluation.adapters.rpc import (
     WITHHELD,
     AsyncIncrementalReader,
     CancelRequest,
+    ErrorPhase,
     IncrementalWriter,
     RpcError,
     RpcErrorCause,
@@ -164,6 +166,28 @@ def _redacted(value: str, limit: int, redactions: RedactionSet | None) -> str:
     return _control_safe(value, limit)
 
 
+def _error_phase(error: BaseException, method: AdapterMethod) -> ErrorPhase:
+    """Read the failure phase the adapter DECLARED, never one inferred from it.
+
+    An ``isinstance`` check against a type this boundary owns is the whole
+    mechanism, deliberately. The tempting alternatives -- matching an exception
+    name, a message substring, or a traceback filename -- would each turn one
+    adapter's private internals into harness behaviour, and would silently
+    start or stop recovering when that adapter renamed something.
+
+    Only ``execute`` may claim the observation phase. The claim's safety rests
+    on the parent being able to re-read state without re-applying anything,
+    which is a property of the step loop's execute path alone; an adapter that
+    raised it from ``prepare`` or ``cleanup`` would be asking for a repeat of a
+    call the parent has no safe way to resume, so the claim is dropped rather
+    than honoured.
+    """
+
+    if method == "execute" and isinstance(error, ObservationPhaseError):
+        return "observation"
+    return "unknown"
+
+
 def _error_detail(
     error: BaseException,
     method: AdapterMethod,
@@ -219,6 +243,7 @@ def _error_detail(
                 )
             )
         return RpcErrorDetail(
+            phase=_error_phase(error, method),
             exception_type=_redacted(type(error).__name__, MAX_DETAIL_TYPE, redactions)
             or "Exception",
             message=_redacted(str(error), MAX_DETAIL_MESSAGE, redactions),

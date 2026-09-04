@@ -27,6 +27,7 @@ Run-level budget aggregation across episodes is deliberately out of scope.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from local_operator.evaluation.adapters.api import (
     CleanupParams,
     CloseParams,
     ExecuteParams,
+    ExecuteResult,
     Handshake,
     InspectRequirementsParams,
     PrepareParams,
@@ -52,7 +54,7 @@ from local_operator.evaluation.adapters.api import (
     ScoreParams,
     SecretRef,
 )
-from local_operator.evaluation.adapters.rpc import WITHHELD
+from local_operator.evaluation.adapters.rpc import WITHHELD, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
@@ -236,6 +238,23 @@ class EpisodeConfig:
     another; beyond that the model is not converging and every further call
     is money spent on a batch that can never execute. ``0`` restores the old
     one-strike behaviour.
+
+    ``observation_retry_attempts``/``observation_retry_delay`` bound recovery
+    from a transient failure to READ the environment after a step's actions
+    already committed (``_execute_with_observation_recovery``). The defaults --
+    3 attempts, 5s apart -- come from the observed failure: a burstable VM
+    starved its screenshot server for ~25s while the adapter's own upstream
+    already spent ~25s retrying, so ~15s of additional patience covers the
+    credit-recovery window without holding a paid episode open indefinitely.
+    ``0`` attempts restores the previous behaviour, where any such failure
+    destroyed the episode.
+
+    They are ON by default rather than opt-in because the path is unreachable
+    unless an adapter explicitly raises ``ObservationPhaseError``: an adapter
+    that says nothing is bit-for-bit unaffected. The conservatism therefore
+    lives in the adapter's declaration, and a second config gate would only add
+    a way for the feature to be silently off during the paid run it exists to
+    save.
     The frame policy (``keep_recent_frames``) is deliberately NOT here: the
     model client owns its context and is built before the runner
     (``create_provider_model_client(keep_recent_frames=...)``), so a copy on
@@ -256,6 +275,8 @@ class EpisodeConfig:
     max_cycle_cost_micros: int | None = None
     guards: tuple[EpisodeGuard, ...] | None = None
     max_decision_retries: int = 2
+    observation_retry_attempts: int = 3
+    observation_retry_delay: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -931,7 +952,7 @@ class EpisodeRunner:
             action_batch=batch,
             action_batch_id=_adapter_batch_id(batch),
         )
-        result = await session.execute(params, timeout=self._config.step_timeout)
+        result = await self._execute_with_observation_recovery(session, params)
         self._append_batch(batch, terminal=None)
         self._steps_taken += 1
         self._guest_actions += len(batch.actions)
@@ -978,6 +999,91 @@ class EpisodeRunner:
         self._truncation_reason = reason if truncated else None
         self._last_step_terminated = truncated
         self._record_observation(result.observation)
+
+    async def _execute_with_observation_recovery(
+        self, session: VerifiedAdapterSession, params: ExecuteParams
+    ) -> ExecuteResult:
+        """Execute a batch, re-reading state if the environment briefly went blind.
+
+        WHAT THIS EXISTS FOR. Five paid episodes died between steps 9 and 32,
+        each costing $0.12-$0.32, on the same failure: a burstable benchmark VM
+        exhausted its CPU credits, its guest screenshot server stopped
+        answering for ~25s, and the adapter -- correctly -- refused to build a
+        frameless observation for a computer-use model. The actions had already
+        landed. Only the read-back was lost, and the episode was destroyed
+        along with every valid step before it.
+
+        WHY THIS IS SAFE WHEN RETRYING ``execute`` IS NOT. It does not retry
+        the mutation. The adapter declares, by raising
+        ``ObservationPhaseError``, that the batch committed and only the
+        observation phase failed; the supervisor honours that declaration
+        alone, and ``resume_observation`` carries an explicit obligation not to
+        re-apply the batch. Every other failure -- a timeout, a dead worker, a
+        plain adapter error, anything from an adapter that never adopted the
+        contract -- is ambiguous, poisons the session, and ends the episode
+        exactly as it did before.
+
+        HONESTY. Each failed attempt is journalled as an ``error`` event with
+        the adapter's rendered cause, so a bundle shows the environment
+        degrading rather than a suspiciously clean run. Smoothing this over
+        silently would make the benchmark's scores dishonest, since a harness
+        that hides flaky infrastructure reports it as capability.
+        """
+
+        attempts = max(0, self._config.observation_retry_attempts)
+        for attempt in range(attempts + 1):
+            try:
+                if attempt == 0:
+                    return await session.execute(params, timeout=self._config.step_timeout)
+                # Each attempt is its own operation: the worker's replay cache
+                # is keyed by operation_id and would hand back the cached
+                # FAILURE for a reused key.
+                return await session.resume_observation(
+                    params.model_copy(
+                        update={"operation_id": f"{params.operation_id}-obs{attempt}"}
+                    ),
+                    timeout=self._config.step_timeout,
+                )
+            except Exception as error:
+                # Exhausted, or a failure whose mutation is ambiguous: let it
+                # end the episode. The ORIGINAL error propagates on the last
+                # attempt, so the recorded diagnostic names the real fault
+                # rather than the recovery that could not fix it.
+                if attempt == attempts or not _observation_phase_failure(error):
+                    raise
+                self._record_observation_retry(error, attempt + 1, attempts)
+                if self._config.observation_retry_delay > 0:
+                    await asyncio.sleep(self._config.observation_retry_delay)
+        raise AssertionError("unreachable: the loop returns or raises on every path")
+
+    def _record_observation_retry(self, error: Exception, attempt: int, attempts: int) -> None:
+        """Journal one degraded read, before the delay rather than after it.
+
+        Written first so a bundle sealed by a crash DURING the backoff still
+        carries the evidence of why the harness was waiting. ``retryable`` is
+        true because it describes this event, not the episode's fate: an
+        exhausted final attempt propagates and is recorded separately by the
+        fatal-error path.
+        """
+
+        detail = self._publish(
+            f"observation-phase failure, attempt {attempt} of {attempts}: "
+            f"{_diagnostic(error, self._redactions)}".encode("utf-8"),
+            media_type="text/plain",
+        )
+        self._append(
+            "error",
+            ErrorPayload(
+                error_id=f"err-{uuid.uuid4().hex[:12]}",
+                # The environment failed to answer, not the adapter's logic and
+                # not the model. Miscategorising this would let an infrastructure
+                # outage be read as an adapter defect.
+                category="environment",
+                diagnostic_code="observation-phase-retry",
+                detail_artifact=detail,
+                retryable=True,
+            ),
+        )
 
     def _close_turn(self, batch: ActionBatch, *, ask_answer: str | None = None) -> None:
         """Attach the batch just executed to the turn it was decided on.
@@ -1910,6 +2016,28 @@ def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:
             # at all -- losing it would undo this PR's own purpose.
             return f"{type(error).__name__}: {WITHHELD}"
     return rendered[:500]
+
+
+def _observation_phase_failure(error: BaseException) -> bool:
+    """Is this the one failure a re-read can recover -- as the ADAPTER declared it?
+
+    Mirrors ``supervisor._mutation_committed`` and must keep mirroring it: the
+    supervisor decides whether the session SURVIVES the failure, and this
+    decides whether the runner tries again. If the runner ever retried a case
+    the supervisor poisoned, every attempt would fail on the poison gate and
+    the episode would pay the full backoff before dying anyway.
+
+    Kept as a separate predicate rather than imported so each module states the
+    condition it depends on, and both are pinned by tests that break if one
+    drifts.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "observation"
+    )
 
 
 def _diagnostic_code(error: BaseException) -> str:

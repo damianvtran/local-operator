@@ -42,11 +42,24 @@ class FakeProvider:
         *,
         scripted_score: float = 1.0,
         fail_evaluate: bool = False,
+        blind_observations: int = 0,
+        blind_after_observe_calls: int = 0,
         has_user_simulator: bool = False,
         simulator_answer: str = "simulated user answer",
     ) -> None:
         self._scripted_score = scripted_score
         self._fail_evaluate = fail_evaluate
+        # How many upcoming observe() calls return NO frame, reproducing a
+        # guest whose screenshot server is starved (the burstable-instance
+        # failure that destroyed five paid episodes). OSWorld's own
+        # ``_get_obs`` returns None for the screenshot after exhausting its
+        # internal retries rather than raising, so the fake does the same.
+        self._blind_observations = blind_observations
+        # Which observe() call the blindness STARTS at. The real outage began
+        # mid-episode, after reset_start had already produced a good frame, so
+        # a test that blinded the very first read would exercise a different
+        # (and easier) failure than the one that cost five paid episodes.
+        self._blind_after_observe_calls = blind_after_observe_calls
         self._has_user_simulator = has_user_simulator
         self._simulator_answer = simulator_answer
         # The in-memory registry stands in for EC2: ref -> state. Teardown
@@ -96,6 +109,14 @@ class FakeProvider:
 
     async def observe(self) -> dict[str, Any]:
         self.observe_calls += 1
+        if self._blind_observations > 0 and self.observe_calls > self._blind_after_observe_calls:
+            self._blind_observations -= 1
+            return {
+                "screenshot": None,
+                "accessibility_tree": None,
+                "terminal": None,
+                "instruction": "fake instruction",
+            }
         return {
             "screenshot": self._frame(),
             "accessibility_tree": None,

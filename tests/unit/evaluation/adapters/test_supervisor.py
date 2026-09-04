@@ -22,6 +22,7 @@ from local_operator.evaluation.adapters.api import (
     CleanupOutcome,
     CleanupParams,
     CleanupResult,
+    ExecuteParams,
     Handshake,
     ObservationResult,
     ObserveParams,
@@ -34,6 +35,7 @@ from local_operator.evaluation.adapters.api import (
     ScoreResult,
     observation_content_id,
 )
+from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
     MAX_DIAGNOSTIC_TAIL,
     HostVerifier,
@@ -47,16 +49,25 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
-from local_operator.evaluation.evidence.models import EvidenceArtifactRef, ScoreArtifact
+from local_operator.evaluation.evidence.models import (
+    EvidenceArtifactRef,
+    ScoreArtifact,
+    canonical_digest,
+)
 from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
-from local_operator.evaluation.protocol import ArtifactRef, Observation
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    ArtifactRef,
+    Observation,
+    WaitAction,
+)
 
 
 def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.3",
+        schema_version="1.4",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -78,7 +89,7 @@ def metadata() -> AdapterMetadata:
         entry_point="tiny_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.3",
+        schema_version="1.4",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=True),
     )
 
@@ -110,7 +121,7 @@ def plan() -> CleanupPlan:
 
 def descriptor(tmp_path: Path) -> RescueDescriptor:
     return RescueDescriptor(
-        schema_version="1.3",
+        schema_version="1.4",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id="episode",
@@ -525,3 +536,129 @@ async def test_rescue_rejects_duplicate_receipts_and_reaps(tmp_path: Path) -> No
     with pytest.raises(SupervisionError, match="missing or duplicate"):
         await run_rescue(rescue, launch=lambda _: fake)  # type: ignore[arg-type]
     assert fake.terminated
+
+
+def _execute_params(current: Any) -> ExecuteParams:
+    """A batch bound to ``current``, as the runner builds one."""
+
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id=current.task_id,
+        episode_id=current.episode_id,
+        observation_id=current.observation_id,
+        actions=(WaitAction(observation_id=current.observation_id, duration_ms=1),),
+    )
+    return ExecuteParams(
+        operation_id="exec-0",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+
+
+def _adapter_error(phase: str) -> RpcRemoteError:
+    """The wire error a worker answers with, at the given declared phase."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="ObservationPhaseError",
+            message="environment returned no screenshot frame",
+            method="execute",
+            operation_id="exec-0",
+            phase=phase,  # pyright: ignore[reportArgumentType]
+        ),
+    )
+
+
+def test_declared_observation_phase_failure_keeps_the_session_usable(
+    tmp_path: Path,
+) -> None:
+    """The recovery precondition: a declared observation failure must NOT poison.
+
+    Without this the runner's retry is dead code -- every attempt would hit the
+    poison gate, and the episode would pay the full backoff before dying anyway.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_adapter_error("observation")])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        # Usable, not poisoned: the very next call must reach the adapter.
+        session._ensure_usable()
+
+    import asyncio
+
+    asyncio.run(run())
+    # The worker was left ALIVE and no rescue was demanded, which is what makes
+    # a subsequent re-read possible at all.
+    assert not raw.terminated and rescue_required == []
+
+
+@pytest.mark.parametrize("phase", ["unknown", "observation"])
+def test_only_a_declared_observation_phase_escapes_the_poison(tmp_path: Path, phase: str) -> None:
+    """An UNDECLARED failure stays ambiguous and must poison exactly as before.
+
+    This is the safety boundary of the whole feature: an adapter that says
+    nothing about its phase -- every adapter that has not adopted the contract
+    -- must keep the pre-existing poison-on-any-mutating-failure behaviour,
+    because a repeat call there could apply the mutation a second time.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_adapter_error(phase)])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    poisoned = phase == "unknown"
+    assert raw.terminated is poisoned
+    assert rescue_required == ([True] if poisoned else [])
+
+
+def test_a_timeout_never_claims_the_observation_phase(tmp_path: Path) -> None:
+    """A call that was never ANSWERED is ambiguous whatever its phase would be.
+
+    A timeout is the case where the worker may still be mid-mutation, so it
+    must poison. It reaches ``_mutating_call`` as a bare ``TimeoutError`` with
+    no detail at all, and the predicate must not be tempted to guess.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([TimeoutError("adapter call timed out")])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+
+    async def run() -> None:
+        with pytest.raises(TimeoutError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.terminated and rescue_required == [True]

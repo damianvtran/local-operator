@@ -70,6 +70,7 @@ from local_operator.evaluation.adapters.api import (
     ExecuteResult,
     ExecutionReceipt,
     InspectRequirementsParams,
+    ObservationPhaseError,
     ObservationResult,
     ObserveParams,
     PrepareParams,
@@ -639,7 +640,13 @@ class OSWorldV2Adapter:
         statements = actions.compile_batch(params.action_batch, geometry)
         guest_lines = [s for s in statements if not s.startswith("WAIT ")]
         waits = [int(s.split(" ", 1)[1]) for s in statements if s.startswith("WAIT ")]
-        if guest_lines or waits:
+        # RESUME: the parent is re-reading the state THIS batch already
+        # produced, after a previous attempt committed the actions and then
+        # failed to read the screen back. Re-running the guest statements here
+        # would apply the click or the keystroke a second time, so the mutation
+        # is skipped and only the read-back below runs. The parent sets this
+        # flag solely after we declared the commit via ObservationPhaseError.
+        if not params.resume_observation and (guest_lines or waits):
             if guest_lines:
                 await self._provider.execute(guest_lines)
             for wait_ms in waits:
@@ -648,14 +655,25 @@ class OSWorldV2Adapter:
                 # A pure-wait batch still advances the environment's clock.
                 await self._provider.execute([])
 
-        raw = await self._provider.observe()
+        # PAST THE POINT OF NO RETURN. The guest has moved; from here every
+        # failure is a failure to READ, and saying so is what lets the parent
+        # re-read instead of destroying an episode that has already cost money
+        # and completed many valid steps. The sequence is deliberately NOT
+        # advanced before the build: a build that raises must leave the adapter
+        # exactly where it was, or the resumed attempt would skip a sequence
+        # number and the parent's "exact next sequence" check would reject the
+        # very observation it asked for.
+        try:
+            raw = await self._provider.observe()
+            output = self._observation_builder.build(
+                raw,
+                task_id=params.action_batch.task_id,
+                episode_id=params.action_batch.episode_id,
+                sequence=self._sequence + 1,
+            )
+        except Exception as error:
+            raise ObservationPhaseError(str(error)) from error
         self._sequence += 1
-        output = self._observation_builder.build(
-            raw,
-            task_id=params.action_batch.task_id,
-            episode_id=params.action_batch.episode_id,
-            sequence=self._sequence,
-        )
         receipt = ExecutionReceipt(
             operation_id=params.operation_id,
             action_batch_id=params.action_batch_id,

@@ -25,7 +25,7 @@ asserted only in ``test_spawn.py``, and none of them are asserted here.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
@@ -33,6 +33,7 @@ from lop_osworld_v2_adapter.providers.fake import FakeProvider
 
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
+    AdapterMethod,
     AdapterSelector,
     Handshake,
     PrepareParams,
@@ -40,6 +41,8 @@ from local_operator.evaluation.adapters.api import (
     ResetStartParams,
     ScopedInfraValue,
 )
+from local_operator.evaluation.adapters.rpc import RpcRemoteError
+from local_operator.evaluation.adapters.worker import _error_detail
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
 from tests.unit.evaluation.adapters.osworld import fixtures
@@ -97,7 +100,25 @@ class _AdapterSupervisorShim:
     async def _call_raw(self, method: str, params: Any, result_type: Any, *, timeout: float) -> Any:
         del timeout
         handler = getattr(self._adapter, method)
-        return await handler(params)
+        try:
+            return await handler(params)
+        except Exception as error:
+            # Translate exactly as the worker does. Letting the adapter's own
+            # exception escape raw would be a LIE about this boundary: out of
+            # process the parent never sees an adapter exception type, only an
+            # answered ``adapter_error`` carrying the worker-built detail. The
+            # phase the parent acts on lives in that detail, so a shim that
+            # skipped this step would test a path production does not have.
+            raise RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                _error_detail(
+                    error,
+                    cast(AdapterMethod, method),
+                    getattr(params, "operation_id", None),
+                    None,
+                ),
+            ) from error
 
 
 def _selector(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter) -> AdapterSelector:
@@ -317,3 +338,57 @@ async def test_an_infeasible_task_is_refused_before_anything_is_allocated(
         )
     # Nothing was allocated, so there is nothing to leak.
     assert provider.allocated is False
+
+
+@pytest.mark.asyncio
+async def test_a_blind_guest_costs_a_re_read_not_the_episode(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The REAL adapter, blinded mid-episode, must recover without re-acting.
+
+    This is the failure that killed five paid episodes: the guest's screenshot
+    server stops answering, ``_get_obs`` yields no frame, and the adapter
+    refuses to build a frameless observation for a computer-use model. The
+    actions had already landed, so the correct outcome is a re-read, not a
+    destroyed episode.
+    """
+
+    # Blind AFTER reset_start's good frame, so the outage starts mid-episode
+    # as the real one did. Two blind reads: the first step's read-back fails,
+    # its first resume fails, the second resume succeeds -- inside the default
+    # 3-attempt bound.
+    provider = FakeProvider(scripted_score=1.0, blind_observations=2, blind_after_observe_calls=1)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+
+    runner = EpisodeRunner(
+        _spec_with_task(episode_id),
+        build_config(tmp_path, observation_retry_delay=0.0),
+        selector=selector,
+        # "type" rather than "step": a wait compiles to no guest statements,
+        # so it could not show whether a resume re-applied the batch. A typed
+        # keystroke is a real mutation, and re-applying it would be visible.
+        model=ScriptedModel(["type", "type", "finish"]),
+        launch=lambda _selector: shim,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.binary == 1
+    assert outcome.rescue_required is False
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None
+    assert report.counters.environment_step_count == 2
+
+    # THE SAFETY PROPERTY, at the adapter's own boundary: a resumed call must
+    # re-read WITHOUT re-issuing the guest statements. Each step types once, so
+    # a re-applied batch would type the same keystrokes again.
+    assert len(provider.executed_statements) == 2
+
+    # The re-reads really happened: 1 reset + 2 failed + 2 successful.
+    assert provider.observe_calls == 5
