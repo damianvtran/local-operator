@@ -8146,9 +8146,8 @@ async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command(
         await pilot.pause()
         text = _transcript_text(app)
     assert _unwrapped("this session") in _unwrapped(text), text
-    # #369 repointed the persist breadcrumb at the picker's `d` affordance, so
-    # the receipt names PERSIST_HINT rather than the old `/model default`
-    # spelling whose elided form no longer writes.
+    # The persist breadcrumb names `/model default` again: the `d` affordance
+    # #369 briefly introduced is gone, and the bare command writes.
     assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
     # The access clause is unchanged by the new one sharing the line.
     assert _unwrapped("anthropic logged in") in _unwrapped(text), text
@@ -8185,21 +8184,25 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
 
 
 @pytest.mark.asyncio
-async def test_model_default_alone_confirms_and_writes_nothing(
+async def test_model_default_alone_saves_the_model_the_session_is_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#369. A bare `/model default` used to write the CURRENT model straight
-    into config.yml, replacing a default the user may have relied on, with no
-    undo and a receipt that arrived after the write. Two intentions shared one
-    spelling and the destructive one won.
+    """Bare `/model default` WRITES the current model and switches nothing.
 
-    The assertion that matters is that the FILE IS UNCHANGED — byte for byte,
-    not merely that a notice appeared. A confirmation that still wrote would
-    pass any check made against the transcript alone.
+    "make this the default" is the phrase users arrive with, so the elided form
+    has to be the one that works. #369 made it merely confirm, on the reading
+    that it might mean "switch me to my configured default" — that reading has
+    its own word now (`/model saved`), so the confirmation asked a question the
+    grammar already answers.
+
+    The assertions that matter are the two config KEYS, not the notice: the
+    provider and a BARE model id, since `bootstrap` reads them independently and
+    a selector in `model_name` boots a model id no provider owns.
     """
+    import yaml
+
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
-    before = (tmp_path / "config.yml").read_bytes()
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -8220,13 +8223,72 @@ async def test_model_default_alone_confirms_and_writes_nothing(
         app._run_slash_command("/model default")
         await pilot.pause()
         text = _transcript_text(app)
-    assert (tmp_path / "config.yml").read_bytes() == before, "bare /model default wrote to config"
-    # It names the model it WOULD save, so the confirmation has a subject…
-    assert _unwrapped("anthropic/claude-opus-5") in _unwrapped(text), text
-    # …and both other readings, which is what removes the ambiguity rather
-    # than merely deferring it.
-    assert _unwrapped("/model saved") in _unwrapped(text), text
-    assert _unwrapped("/model default anthropic/claude-opus-5") in _unwrapped(text), text
+        label_after = session.model_label
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    # The pair the session was already on, split on the FIRST `/`.
+    assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
+    # It SWITCHED NOTHING: the elided selector resolves to the current model, so
+    # the persist path's own `set_model` is a no-op re-selection.
+    assert label_after == "anthropic/claude-opus-5", label_after
+    # Same receipt vocabulary as the explicit spelling — one outcome, one wording.
+    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    assert str(tmp_path / "config.yml") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_keeps_a_multi_slash_model_id_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The split is on the FIRST `/`, and aggregator ids are why.
+
+    `openrouter/deepseek/deepseek-chat` is one provider and an id that contains
+    its own slash. Splitting anywhere else writes `model_name: deepseek` — a
+    model OpenRouter does not serve — and the failure only surfaces at the next
+    launch, as an auth-shaped error rather than as the bad write it is.
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: anthropic\n")
+    session = _SwitchableSession()  # already on openrouter/deepseek/deepseek-chat
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model default")
+        await pilot.pause()
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert (written["hosting"], written["model_name"]) == (
+        "openrouter",
+        "deepseek/deepseek-chat",
+    ), written
+
+
+@pytest.mark.asyncio
+async def test_model_default_refuses_on_a_session_that_runs_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A follower must not write the LOCAL machine's config.
+
+    The write governs launches on the terminal running it, and a follower's
+    launches happen somewhere nobody is sitting. Asserted with the FILE, because
+    a refusal that still wrote would pass a transcript-only check — which is the
+    same trap the bare-form test above avoids.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    before = (tmp_path / "config.yml").read_bytes()
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        monkeypatch.setattr(app, "_session_runs_elsewhere", lambda: True)
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert (tmp_path / "config.yml").read_bytes() == before, "a follower wrote the local config"
+    assert _unwrapped("persists to the local machine's config") in _unwrapped(text), text
 
 
 @pytest.mark.asyncio
@@ -8296,35 +8358,36 @@ async def test_model_default_explicit_selector_still_writes(
 
 
 @pytest.mark.asyncio
-async def test_model_picker_d_saves_the_highlighted_row_as_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#369's PRIMARY fix: the affordance that removes the need to type the
-    command, and with it the ambiguity. `d` saves; it deliberately does NOT
-    switch, because Enter already means switch and a key that did both would
-    make the two indistinguishable."""
-    import yaml
+async def test_d_in_the_model_picker_filters_and_never_acts() -> None:
+    """The regression guard for the REMOVED `d` affordance.
 
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
-    session = _SwitchableSession()
+    #369 briefly bound `d` on an empty query to "save the highlighted row as the
+    boot default". Inside a filter that is a mode with nothing on screen to mark
+    it: the same key narrows the list one keystroke later, so the first `d` of a
+    model a user was about to type wrote config against whatever row the cursor
+    happened to be on. `d` is an ordinary filter character, always — asserted
+    through the real key path rather than by checking the handler is gone, since
+    what matters is what the keystroke DOES.
+    """
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
-    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    app = OperatorApp(lambda: _factory(_SwitchableSession()), provider_controller=ctrl)
     async with app.run_test(size=(90, 30)) as pilot:
         await _await_session(app, pilot)
-        app._run_slash_command("/model")
+        picker = await _open_model_picker(app, pilot)
+        offered = len(picker.rows())
+        assert picker.query_text() == "", picker.query_text()
+        await pilot.press("d")
         await pilot.pause()
-        await pilot.pause()
-        picker = app.query_one(Editor).model_picker
-        row = picker.highlighted()
-        assert row is not None
-        before_label = session.model_label
-        app._persist_default_from_picker()
-        await pilot.pause()
-    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
-    assert (written["hosting"], written["model_name"]) == (row.provider, row.model_id), written
-    # The session was NOT switched: `d` and Enter must stay distinguishable.
-    assert session.model_label == before_label, session.model_label
+        # The keystroke reached the QUERY, which is the whole claim.
+        assert picker.query_text() == "d", picker.query_text()
+        # …and it FILTERED: `deepseek` matches, `qwen3:8b` carries no `d` at all
+        # and drops out. (`claude-opus-5` survives — the match is fuzzy and the
+        # `d` of "clau_d_e" counts — which is precisely why this key could never
+        # be safely reserved: the rows a user is aiming at contain it.)
+        visible = [row.model_id for row in picker.suggestions()]
+    assert "deepseek/deepseek-chat" in visible, visible
+    assert "qwen3:8b" not in visible, visible
+    assert len(visible) < offered, (visible, offered)
 
 
 _MODEL_DEFAULT_KEYS = {" ": "space", "/": "slash", "-": "minus"}
@@ -8338,14 +8401,17 @@ async def test_typing_model_default_letter_by_letter_is_not_eaten_by_the_d_key(
 
     `/model ` opens the picker with an empty query and the current model
     highlighted — which is also the state one keystroke into `/model default
-    <p>/<id>`. The `d` gate (#369) read that `d` as "save the highlighted row":
+    <p>/<id>`. The `d` key (#369) read that `d` as "save the highlighted row":
     a silent write of the CURRENT model to config, then Enter switched to a
     model literally named `efault anthropic/…`. Measured before the fix:
     composer `/model efault anthropic/claude-opus-5`, config `model_name:
     deepseek/deepseek-chat`, notice `unknown provider: efault anthropic`.
 
-    The gate now also asks whether the user NAVIGATED the list: arrowing to a
-    row is what makes `d` a key; typing straight after the space is spelling.
+    #624 closed it with a "has the user navigated the list" gate; the key is
+    gone altogether now (see `test_d_in_the_model_picker_filters_and_never_acts`),
+    and this test outlives the gate because it pins the outcome the gate
+    existed for: the advertised command, typed one letter at a time, does
+    exactly what it says.
     """
     import yaml
 
@@ -8374,49 +8440,6 @@ async def test_typing_model_default_letter_by_letter_is_not_eaten_by_the_d_key(
     assert session.model_label == "anthropic/claude-opus-5", session.model_label
     assert "efault anthropic" not in text, text
     assert "unknown provider" not in text, text
-
-
-@pytest.mark.asyncio
-async def test_d_still_saves_after_arrowing_to_a_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The other half of U8: the #369 affordance survives, through real keys.
-
-    ``test_model_picker_d_saves_the_highlighted_row_as_default`` calls the
-    handler directly; this drives the KEY, because the gate it exercises now
-    lives on the key path (empty query AND navigated) and a handler-level test
-    could not tell a gate that never fires from one that fires correctly.
-    """
-    import yaml
-
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
-    session = _SwitchableSession()
-    ctrl = _AccessController(stored=("openrouter", "anthropic"))
-    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
-    async with app.run_test(size=(90, 30)) as pilot:
-        await _await_session(app, pilot)
-        editor = app.query_one(Editor)
-        editor.focus()
-        await pilot.pause()
-        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
-        await pilot.pause()
-        picker = editor.model_picker
-        assert picker.is_open() and not picker.navigated()
-        await pilot.press("down")
-        await pilot.pause()
-        assert picker.navigated()
-        row = picker.highlighted()
-        assert row is not None
-        before_label = session.model_label
-        await pilot.press("d")
-        await pilot.pause()
-        await pilot.pause()
-        # The letter was the KEY: it did not land in the composer.
-        assert editor.text == "/model ", editor.text
-    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
-    assert (written["hosting"], written["model_name"]) == (row.provider, row.model_id), written
-    assert session.model_label == before_label
 
 
 @pytest.mark.asyncio
@@ -8502,8 +8525,7 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     # keeps it to two wrapped lines at the widths this app supports. Folding the
     # timing into the scope parenthetical measured three.
     assert _unwrapped("(this session)") in text, text
-    # #369: the persist breadcrumb is PERSIST_HINT's `d` affordance now, not the
-    # old `/model default` spelling.
+    # The persist breadcrumb is PERSIST_HINT, which names `/model default`.
     assert _unwrapped(PERSIST_HINT) in text, text
     # SAME INK as the receipt it qualifies (design review D3). At `note` the
     # subordinate row measured 8.62:1 against the receipt's 4.55:1 and the eye

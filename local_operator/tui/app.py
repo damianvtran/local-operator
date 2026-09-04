@@ -279,16 +279,23 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: 47-cell budget at 50 columns, which is the width that decides whether it
 #: survives at all — the picker's status clauses concatenate with no shedding.
 #:
-#: REPOINTED at the `d` affordance (#369). It used to read "/model default saves
-#: this for new sessions", which is no longer true: a bare `/model default` now
-#: CONFIRMS rather than writing, precisely because that spelling was the
-#: ambiguity the issue reported. The breadcrumb names the key instead, because
-#: the key is the one route to a saved default with no ambiguity in it at all.
+#: REPOINTED BACK at `/model default`, after #369 briefly pointed it at a `d`
+#: key on a picker row. That key is gone: inside a filter every printable
+#: character belongs to the query, so a `d` that saved config on an empty query
+#: and narrowed the list otherwise was a mode with nothing on screen to mark it.
+#: The ambiguity #369 reported is closed by the COMMAND being unambiguous — a
+#: bare `/model default` writes the model the session is already on and switches
+#: nothing — not by moving the write onto a keystroke.
 #:
-#: It names `/model` as well as `d` because two of its four sites are receipts
-#: printed when NO picker is open (the switch receipt, and the bare-`/model`
-#: notice), where "press d" alone would name a key that does nothing yet.
-PERSIST_HINT = "d in /model saves this for new sessions"
+#: ONE route named here, not both. The second route (the `/settings` model rows)
+#: does not fit: this string is sized by the picker footer, whose budget is 43
+#: cells at 50 columns (card width minus `_GUTTER_CELLS` + `_EDGE_MARGIN`), and
+#: this clause is 42. Any "; /settings too" tail measures 57 and truncates
+#: mid-word at the one width where the instruction most needs to survive whole.
+#: So the footer gets the command and the roomier surfaces get the pair: the
+#: bare-`/model` notice names `/settings` in `_persist_hint_notice`, which wraps
+#: instead of truncating, and the `/help` row is reachable at any width.
+PERSIST_HINT = "/model default saves this for new sessions"
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
 #: and whose rows are therefore an older document. One constant because the
@@ -4842,9 +4849,10 @@ class OperatorApp(App[None]):
         nothing, because hosting is already valid -- and the splash says so. This
         state is reached by the app's own repair (`/login` into a provider with
         no default clears the model deliberately), which is why it must be
-        escapable rather than merely non-red: see :meth:`_cmd_model` and
-        :meth:`_persist_default_from_picker`, which rebuild the session from
-        setup instead of refusing with "session is still starting...".
+        escapable rather than merely non-red: see :meth:`_cmd_model`, whose
+        `/model <p>/<id>` path routes through
+        :meth:`_recover_from_missing_model` to rebuild the session from setup
+        instead of refusing with "session is still starting...".
 
         ``hosting_source`` keeps that honesty one step further. `/login` writes
         the CONFIG FILE, but precedence is agent > flag > config, so when the
@@ -15670,32 +15678,36 @@ class OperatorApp(App[None]):
             self._system_notice("session is still starting…", "warning")
             return
         if persist_default and not target:
-            # Bare ``/model default`` CONFIRMS rather than writing (#369).
+            # Bare ``/model default`` SAVES THE CURRENT MODEL. The elided
+            # selector resolves to the session's own model, so this spelling
+            # switches nothing and persists what the user is already looking at
+            # on the status band.
             #
-            # It used to resolve the elided selector to `session.model_label`
-            # and write immediately. That is the defect the issue reports: the
-            # user who typed it was asking to be SWITCHED to their configured
-            # default, and instead their current model silently replaced that
-            # default in config.yml, with no undo and a receipt that arrived
-            # after the write. Two intentions shared one spelling and the
-            # destructive one won.
+            # #369 made it CONFIRM instead, on the reading that a user typing it
+            # might mean "switch me to my configured default". That reading now
+            # has its own word — `/model saved` — so the confirmation was asking
+            # a question the grammar already answers, and it cost the one thing
+            # the command is for: "make this the default" is the phrase users
+            # actually arrive with, and it had no spelling that worked.
             #
-            # Nothing is written here. The confirmation names the model that
-            # WOULD be saved, and both other readings are offered by name, so
-            # the ambiguity is resolved by the user rather than guessed at:
-            # `/model saved` switches to the configured default, `/model
-            # default <p>/<id>` persists explicitly, and the `d` key on a
-            # picker row does it without the command at all.
-            label = session.model_label
-            if not label:
+            # The elided form is resolved to `provider` + BARE `model_id` here
+            # rather than passed on as a selector, because the persist path
+            # below writes the two config keys INDEPENDENTLY and `bootstrap`
+            # reads them independently: a `model_name` holding
+            # `anthropic/claude-opus-5` under an `anthropic` hosting boots a
+            # model id no provider owns. `model_label` is `provider/model_id`
+            # joined by the session, so the split is on the FIRST `/` — the same
+            # `partition` the explicit path uses, and the reason
+            # `openrouter/deepseek/deepseek-chat` keeps `deepseek/deepseek-chat`
+            # whole as an id rather than losing its own slash.
+            target = session.model_label
+            if not target or "/" not in target:
+                # No current model to elide to — the setup state, or a reduced
+                # host whose session cannot say. Naming the explicit form is the
+                # only useful answer; guessing would write an empty pair and
+                # leave the next launch with no model at all.
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
-            self._system_notice(
-                f"save {label} as the boot default? — "
-                f"/model default {label} confirms · d on a /model row does it too · "
-                "/model saved switches to the configured default instead"
-            )
-            return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             self._system_notice(
@@ -15881,72 +15893,6 @@ class OperatorApp(App[None]):
         # next change to any of those steps.
         self._cmd_model(f"{provider}/{model_id}", notice)
 
-    def _persist_default_from_picker(self) -> None:
-        """``d`` on the highlighted model-picker row — save it as the default.
-
-        The PRIMARY fix for #369: it removes the ambiguity by removing the need
-        to type the command at all. The comment on `_cmd_model` already
-        anticipated this affordance — "the user phrase 'make this the default'
-        has no other home, and the picker's current-row marker already covers
-        'which am I on'" — and the row under the cursor supplies the `this` that
-        a bare `/model default` had to guess at.
-
-        Does NOT switch the session. The picker's Enter already means "switch to
-        this", so `d` is the other half; a key that did both would make the two
-        indistinguishable and leave a user who only wanted to set a default
-        talking to a model they did not pick.
-        """
-        picker = self._editor().model_picker
-        row = picker.highlighted()
-        if row is None:
-            return
-        if self._session_runs_elsewhere():
-            # Same refusal `/model default` gives, through the same predicate —
-            # which is the point. This guard asked `is_remote` directly while
-            # `_cmd_model` had already migrated to `_session_runs_elsewhere()`,
-            # so the two halves of one feature disagreed: since 0.46.0 EVERY
-            # session is remote, and `d` refused every local user in their own
-            # terminal while `/model default` allowed them.
-            #
-            # The question a config write actually asks is "would writing this
-            # machine's config govern the runtime?", not "is there a socket in
-            # the way" — see `_session_runs_elsewhere`.
-            self._system_notice(
-                "the boot default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern",
-                "warning",
-            )
-            return
-        try:
-            from local_operator.config import ConfigManager
-            from local_operator.paths import config_dir
-
-            manager = ConfigManager(config_dir())
-            manager.set_config_value("hosting", row.provider)
-            manager.set_config_value("model_name", row.model_id)
-            saved_to = _home_relative(str(manager.config_file))
-        except Exception as error:  # noqa: BLE001 — a read-only config dir
-            self._system_notice(f"could not save default: {error}", "warning")
-            return
-        if self._setup_state and self._model_missing_for:
-            # In the no-model setup state this key is a RECOVERY, not just a
-            # preference: the value it just wrote is the one thing the session
-            # was missing, so "used from the next launch" would be false advice
-            # — there is no current launch to prefer, and telling the user to
-            # restart is the dead end this state exists to avoid.
-            self._system_notice(
-                f"boot default saved to {saved_to}: hosting {row.provider}, "
-                f"model_name {row.model_id}"
-            )
-            self._leave_setup_state_and_boot(self._notice)
-            return
-        # Names both halves, the file and the keys, exactly as the command's
-        # own receipt does — one vocabulary for one outcome reached two ways.
-        self._system_notice(
-            f"boot default saved to {saved_to}: hosting {row.provider}, "
-            f"model_name {row.model_id} (used from the next launch)"
-        )
-
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
 
@@ -16031,12 +15977,19 @@ class OperatorApp(App[None]):
         repeated here even though the status band carries it, because it is the
         subject of the sentence — "make THIS the default" needs a this, and with
         no session yet there is no this, so the label is all that varies.
+
+        This is where the SECOND route gets named. ``PERSIST_HINT`` carries only
+        the command because the picker footer truncates it at 43 cells (see the
+        constant), while a notice WRAPS — so the surface with room is the one
+        that can afford to say a default is also editable on the settings page,
+        which is the discoverable route for a user who did not arrive with the
+        command in mind.
         """
         session = self._session
         label = session.model_label if session is not None else ""
         if not label:
-            return PERSIST_HINT
-        return f"model: {label} — {PERSIST_HINT}"
+            return f"{PERSIST_HINT} · /settings sets it too"
+        return f"model: {label} — {PERSIST_HINT} · /settings sets it too"
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:

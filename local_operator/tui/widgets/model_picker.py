@@ -62,7 +62,7 @@ _COLUMN_GAP = 2
 #: by PREFIX because the app composes it with other clauses; kept as a constant
 #: here rather than imported from ``app`` because ``app`` imports this module.
 #: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
-PERSIST_HINT_PREFIX = "d in /model"
+PERSIST_HINT_PREFIX = "/model default"
 
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
@@ -428,16 +428,6 @@ class ModelPicker(Static):
         self._query = ""
         self._open = False
         self._status = ""
-        #: Whether the user has MOVED the highlight since this open — arrow,
-        #: page, home/end, wheel or a hover. The `d` affordance (#369) asks it:
-        #: a picker that just opened on `/model ` has an empty query and a
-        #: highlighted row, which is also exactly the state a user is in one
-        #: keystroke into typing `/model default …`. Without this the `d` of
-        #: `default` was consumed as "save the highlighted row" — a silent
-        #: config write of the CURRENT model — and the rest of the line ran
-        #: as a switch to a model named `efault …` (UX round 1, U8; QA Q4).
-        #: Navigating the list is what turns `d` from a letter into a key.
-        self._navigated = False
         # Whether this open has painted a status row (anything but the protected
         # persistent hint). Once it has, the row is kept — blank — until close:
         # the app paints `checking providers…` on the keystroke and clears it
@@ -473,11 +463,11 @@ class ModelPicker(Static):
     def query_text(self) -> str:
         """The filter text currently narrowing the list ("" when unfiltered).
 
-        Exposed so the editor can tell an ACTION key from a FILTER key: every
-        printable character here belongs to the query, so a key like `d` may
-        only act while the query is empty (see the `d` branch in
-        `Editor._on_key`). Without this the shortcut would eat the `d` of
-        `deepseek`.
+        No printable key is an action in this picker, so nothing routes on this
+        any more — it survives as the state a test asserts to prove that (a `d`
+        typed here filters rather than saving a boot default; see
+        `test_d_in_the_model_picker_filters_and_never_acts`) and as the read the
+        editor's non-printable branches sit beside.
         """
         return self._query
 
@@ -498,14 +488,6 @@ class ModelPicker(Static):
         if not self._open or not self._matches:
             return None
         return self._matches[self._selected]
-
-    def navigated(self) -> bool:
-        """Whether the highlight has been moved by the user since the list opened.
-
-        The gate for the `d` key: only a row the user has actually walked to
-        is one they mean to save (see ``_navigated``).
-        """
-        return self._navigated
 
     def highlighted_selector(self) -> str | None:
         """``provider/id`` of the highlighted row, or None."""
@@ -539,7 +521,6 @@ class ModelPicker(Static):
         """
         self._open = True
         self._query = query
-        self._navigated = False
         self._refilter(keep=self._current if not query.strip() else None)
 
     def set_query(self, query: str) -> None:
@@ -558,7 +539,6 @@ class ModelPicker(Static):
         self._matches = []
         self._selected = 0
         self._window_start = 0
-        self._navigated = False
         self._status_row_held = False
         self._hovered = None
         # A stationary pointer gets no mouse-move after this surface leaves;
@@ -570,7 +550,6 @@ class ModelPicker(Static):
         """Move the highlight by ``delta`` rows, wrapping at both ends."""
         if not self._matches:
             return
-        self._navigated = True
         self._selected = (self._selected + delta) % len(self._matches)
         self._scroll_to_selection()
         self._repaint()
@@ -584,7 +563,6 @@ class ModelPicker(Static):
         """
         if not self._matches:
             return
-        self._navigated = True
         step = max(1, self._row_budget()) * (1 if delta > 0 else -1)
         self._selected = max(0, min(len(self._matches) - 1, self._selected + step))
         self._scroll_to_selection()
@@ -594,7 +572,6 @@ class ModelPicker(Static):
         """Home/End, clamped."""
         if not self._matches:
             return
-        self._navigated = True
         self._selected = len(self._matches) - 1 if to_end else 0
         self._scroll_to_selection()
         self._repaint()
@@ -610,7 +587,6 @@ class ModelPicker(Static):
         """
         if not self._matches:
             return
-        self._navigated = True
         self._selected = max(0, min(len(self._matches) - 1, self._selected + delta))
         self._scroll_to_selection()
         self._repaint()
@@ -917,10 +893,6 @@ class ModelPicker(Static):
         index = self._index_at(event.y)
         if index != self._hovered:
             self._hovered = index
-            if index is not None:
-                # Pointing at a row is navigating too: a user who hovers and
-                # then presses `d` meant the key.
-                self._navigated = True
             self._repaint()
         # Hand pointer over a row only (a click chooses it); the widget's
         # non-row rows keep the default shape. The inline-rule assignment

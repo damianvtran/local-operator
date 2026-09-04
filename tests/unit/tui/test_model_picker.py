@@ -15,6 +15,7 @@ from textual.app import App, ComposeResult
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
     MAX_VISIBLE_ROWS,
+    PERSIST_HINT_PREFIX,
     ModelPicker,
     ModelRow,
     _is_parenthesised_tail,
@@ -22,6 +23,13 @@ from local_operator.tui.widgets.model_picker import (
     format_window,
     rank_rows,
 )
+
+#: A status clause the picker must recognise as THE protected one. Built from
+#: the real prefix rather than spelled out, because a hardcoded copy is exactly
+#: how these fixtures went stale when the hint was repointed off the `d` key:
+#: the clause stopped matching, the protected row silently became an ordinary
+#: one, and three tests failed for a reason that had nothing to do with them.
+_PERSIST_CLAUSE = f"{PERSIST_HINT_PREFIX} saves this"
 
 MODEL_COMMANDS = ("model", "models")
 
@@ -778,17 +786,17 @@ def test_the_status_row_is_kept_once_painted_so_the_card_does_not_reflow() -> No
     dropped everything above it while the user was reading; a blank row is less
     motion than a reflow. A fresh open starts without the row again."""
     picker = ModelPicker(lambda row: None)
-    picker.set_rows(_rows(), status="checking providers… · d in /model saves this")
+    picker.set_rows(_rows(), status=f"checking providers… · {_PERSIST_CLAUSE}")
     picker.open("")
     with_status = picker.render_text(90).plain.split("\n")
-    picker.set_rows(_rows(), status="d in /model saves this")
+    picker.set_rows(_rows(), status=_PERSIST_CLAUSE)
     settled = picker.render_text(90).plain.split("\n")
     assert len(settled) == len(with_status), (with_status, settled)
     assert settled[-2].strip() == "", settled
-    assert settled[-1].strip() == "d in /model saves this", settled
+    assert settled[-1].strip() == _PERSIST_CLAUSE, settled
     # Never painted a status this open → no held row.
     picker.close()
-    picker.set_rows(_rows(), status="d in /model saves this")
+    picker.set_rows(_rows(), status=_PERSIST_CLAUSE)
     picker.open("")
     fresh = picker.render_text(90).plain.split("\n")
     assert len(fresh) == len(settled) - 1, fresh
@@ -803,7 +811,7 @@ async def test_the_held_row_is_paid_for_out_of_the_row_budget_when_mounted(heigh
     otherwise the card grows a line on settle and pushes the composer, which is
     the reflow the hold exists to prevent. Pinned at three heights because the
     cap switches between the screen fraction and `MAX_VISIBLE_ROWS` at 45."""
-    hint = "d in /model saves this"
+    hint = _PERSIST_CLAUSE
     bulk = [
         ModelRow("openrouter", f"vendor/model-{index}", connected=True, aggregated=True)
         for index in range(60)

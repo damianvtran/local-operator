@@ -190,7 +190,7 @@ current session's cost live).
 
 | Command | What it does |
 | --- | --- |
-| `/model` | Switch model for this session; `/model default` saves it for new ones |
+| `/model` | Switch model for this session; `/model default` saves the current one for new ones (`/settings` sets it too) |
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
 | `/fast` | Toggle fast mode where the provider sells one — the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |

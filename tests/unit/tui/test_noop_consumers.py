@@ -317,9 +317,10 @@ def test_no_local_config_command_asks_is_remote_directly() -> None:
     * #576 moved ``/model default`` onto ``_session_runs_elsewhere()``;
     * #609 moved the ``/mcp`` grant verbs onto the runtime ("run grant verbs on
       the runtime instead of refusing the local user");
-    * this PR moves the model picker's ``d`` key, which #576 missed even though
-      it is the OTHER HALF of the same feature, and fixes the cold-viewer case
-      ``_session_runs_elsewhere()`` itself got wrong.
+    * #624 moved the model picker's ``d`` key, which #576 missed even though
+      it was the OTHER HALF of the same feature, and fixed the cold-viewer case
+      ``_session_runs_elsewhere()`` itself got wrong (#625 then removed the
+      key outright, so only ``_cmd_model`` remains on the list below).
 
     Nothing was left behind by the first two, which is why there was a third.
     This is that artifact: the handlers that persist to this machine's
@@ -329,8 +330,10 @@ def test_no_local_config_command_asks_is_remote_directly() -> None:
     tree = ast.parse(_APP.read_text())
     #: Handlers that write this machine's config.yml and must therefore ask
     #: "would this write govern the runtime?" rather than "is there a socket?".
+    # `_persist_default_from_picker` (the picker's `d` key) used to sit here
+    # too; #625 removed the key and its handler, so `/model default` inside
+    # `_cmd_model` is the one remaining local-config writer.
     persisting_handlers = {
-        "_persist_default_from_picker",
         "_cmd_model",
     }
     offenders: list[str] = []

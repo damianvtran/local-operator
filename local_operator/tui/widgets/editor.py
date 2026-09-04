@@ -2367,37 +2367,23 @@ class Editor(TextArea):
                 event.stop()
                 event.prevent_default()
                 return
-            if (
-                key == "d"
-                and not self._model_picker.query_text()
-                and self._model_picker.navigated()
-            ):
-                # `d` SAVES the highlighted row as the boot default (#369).
-                #
-                # Gated on an EMPTY query, which is the whole reason this is
-                # safe here: every printable key in this picker belongs to the
-                # filter, so `d` typed while narrowing (`/model d` → deepseek)
-                # must keep filtering. Only once the query is empty is `d` free
-                # to be an action, and that is exactly the state a user is in
-                # after arrowing to a row they already found.
-                #
-                # ...and gated on the user having NAVIGATED the list, because an
-                # empty query is ALSO the state one keystroke into typing
-                # `/model default <p>/<id>`: the picker opens on `/model ` with
-                # the current model highlighted, and the `d` of `default` was
-                # eaten as "save this row" — a silent config write of the
-                # current model, then a switch to a model named `efault …`
-                # (UX round 1, U8; QA Q4). Arrowing to a row is what says "this
-                # one"; typing straight after the space says "I am spelling a
-                # subcommand", and the letter goes to the composer.
-                row = self._model_picker.highlighted()
-                if row is not None:
-                    handler = getattr(self.app, "_persist_default_from_picker", None)
-                    if callable(handler):
-                        handler()
-                        event.stop()
-                        event.prevent_default()
-                        return
+            # NO printable key is an action in this picker, and `d` in
+            # particular must not become one again. It briefly saved the
+            # highlighted row as the boot default (#369), gated on an empty
+            # query so that `/model d` → deepseek kept filtering. The gate
+            # worked and the affordance still had to go: a key that filters in
+            # one state and writes config in another is a mode the user cannot
+            # see, so the first `d` of a model they were about to type landed
+            # as a config write on whatever row the cursor happened to be on.
+            # The two supported routes to a default are both explicit and both
+            # undoable by re-reading them — `/model default` and the
+            # `/settings` model rows — and they are what `app.PERSIST_HINT`
+            # advertises. Do not re-add a key here; #369's ambiguity is closed
+            # by `/model default` writing again, not by a keystroke.
+            #
+            # (#624 had narrowed the key further with a `navigated()` gate on
+            # the picker so the `d` of a typed `default` was not eaten; that
+            # gate and the picker flag behind it went with the key.)
             if key in ("tab", "enter"):
                 row = self._model_picker.highlighted()
                 if row is not None:
