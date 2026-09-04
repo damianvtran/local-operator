@@ -955,6 +955,46 @@ def test_yolo_parses_on_every_subcommand(parser: argparse.ArgumentParser, argv: 
     assert parser.parse_args(argv).yolo is True
 
 
+# --- run-shaping flags are position-independent too -----------------------------
+
+
+def test_run_shaping_flags_parse_after_the_subcommand(parser: argparse.ArgumentParser) -> None:
+    """`exec - --model X --hosting Y --run-in Z` parses instead of exiting 2.
+
+    An external supervisor composes argv programmatically and naturally writes
+    the flags after the subcommand. Before this, that form died with
+    "unrecognized arguments" and an exit 2 that reads like a broken install.
+    """
+    args = parser.parse_args(
+        ["exec", "-", "--hosting", "anthropic", "--model", "claude-opus-5", "--run-in", "/tmp"]
+    )
+    assert args.subcommand == "exec"
+    assert args.hosting == "anthropic"
+    assert args.model == "claude-opus-5"
+    assert args.run_in == "/tmp"
+
+
+def test_run_shaping_flags_still_parse_before_the_subcommand(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """The documented root-position form keeps working \u2014 this is additive."""
+    args = parser.parse_args(
+        ["--hosting", "anthropic", "--model", "claude-opus-5", "--run-in", "/tmp", "exec", "-"]
+    )
+    assert args.hosting == "anthropic"
+    assert args.model == "claude-opus-5"
+    assert args.run_in == "/tmp"
+
+
+def test_a_subcommand_does_not_clobber_a_root_run_shaping_flag(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """The argparse re-default quirk must not swallow a value set BEFORE the
+    subcommand \u2014 the exact failure ``--resume`` documents having hit."""
+    args = parser.parse_args(["--model", "claude-opus-5", "exec", "task"])
+    assert args.model == "claude-opus-5"
+
+
 # --- CL-06: startup preflight ---------------------------------------------------
 
 

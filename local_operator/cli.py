@@ -689,6 +689,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="agent_id",
         help="ID of the agent to use for this execution (alternative to --agent by name)",
     )
+    exec_parser.add_argument(
+        "--control",
+        action="store_true",
+        help=(
+            "Publish a session record and serve the control socket for this run, "
+            "so an external supervisor can steer, cancel and answer gates "
+            "mid-run. Prints the endpoint on stderr. Off by default. "
+            "Note: this routes tool approvals to the supervisor, so a run "
+            "WITHOUT --yolo parks on each gate until one answers (then denies). "
+            "An unattended run wants --control --yolo."
+        ),
+    )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -865,6 +877,36 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 metavar="SESSION_ID",
                 dest="resume",
                 help="Resume a previous session by id. Pass with no id for the most recent.",
+            )
+            # The run-shaping trio, for the same reason and by the same
+            # mechanism. An external supervisor driving `lop exec` composes its
+            # argv programmatically and naturally writes the flags AFTER the
+            # subcommand — `lop exec - --json --model X` — which failed with
+            # "unrecognized arguments" and an exit 2 that reads like a bad
+            # install rather than a word-order rule. They select which model
+            # answers and where it runs, so silently ignoring them would be
+            # worse than the parse error: the run would proceed against the
+            # wrong model, in the wrong directory.
+            subparser.add_argument(
+                "--hosting",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="hosting",
+                help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+            )
+            subparser.add_argument(
+                "--model",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="model",
+                help="Model to use for this run",
+            )
+            subparser.add_argument(
+                "--run-in",
+                type=str,
+                default=argparse.SUPPRESS,
+                dest="run_in",
+                help="Working directory to run the operator in",
             )
             _propagate_global_flags(subparser)
 
@@ -3785,6 +3827,10 @@ def main() -> int:
                 model=args.model,
                 train=args.train,
                 resume=getattr(args, "resume", None),
+                # getattr, like the additive flags above it: `exec` is not the
+                # only subcommand routed through this Namespace in tests, and a
+                # missing attribute must read as "off", never raise.
+                control=bool(getattr(args, "control", False)),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

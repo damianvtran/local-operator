@@ -128,6 +128,21 @@ class EventName:
     #: Tool finished, with its result and error flag. Maps to
     #: ``runtime.agent.item.completed`` / ``failed``.
     TOOL_END = "tool.end"
+    #: The provider began generating for the request that is ON THE WIRE,
+    #: carrying its native ``response_id``. This is the acceptance boundary an
+    #: external supervisor commits as no-replay proof (see
+    #: ``harness.types.ProviderTurnStartEvent``), which is why it is a distinct
+    #: name rather than a flag on ``turn.start``: ``turn.start`` is the loop's
+    #: own iteration boundary and is emitted before any request exists, so a
+    #: consumer keying "accepted" on it would mark a prompt un-retryable that
+    #: DNS, auth or a rate limit could still reject. ``response_id`` is ``None``
+    #: on providers that expose none (Google); a consumer needing proof must
+    #: fail closed on that rather than substitute an id of its own.
+    #:
+    #: Named ``provider.start`` and not ``provider.turn_start`` to hold the
+    #: taxonomy's shape - every name here is ``<subject>.<single lifecycle
+    #: word>``, and a two-word second segment would be the first exception.
+    PROVIDER_START = "provider.start"
     #: Turn boundaries. Map to ``runtime.agent.turn.started`` / ``completed``.
     TURN_START = "turn.start"
     TURN_END = "turn.end"
@@ -136,6 +151,13 @@ class EventName:
     AGENT_END = "agent.end"
     #: Human-facing notice (info/warning/error) surfaced in the transcript.
     NOTICE = "notice"
+    #: Queued steering messages entered the model's context. A STATE TRANSITION
+    #: a client reconciles the "queued" row it already painted against, not a
+    #: line to print - which is why it is not folded into ``notice``, where it
+    #: would append a second row saying the first row is now wrong. ``count`` is
+    #: how many messages were delivered at that one boundary (see
+    #: ``harness.types.SteeringDeliveredEvent``).
+    STEERING_DELIVERED = "steering.delivered"
     #: Context compaction began/finished - the UI may show a marker.
     COMPACTION_START = "compaction.start"
     COMPACTION_END = "compaction.end"

@@ -248,6 +248,14 @@ class SessionHandle(Protocol):
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
     #   non-interactive exec hosts that never wired it keep working — a handle
     #   lacking it answers "this session cannot receive peer messages".
+    # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
+    #   instead of cutting the running tool (Session.request_graceful_cancel).
+    #   Serves the ``cancel`` op's default mode. Deliberately distinct from
+    #   ``abort`` rather than a parameter on it: abort's contract is "stop now,
+    #   the human will repair the mess", and a supervised agent has no human to
+    #   repair a half-finished push. Optional and getattr-probed so hosts that
+    #   cannot honour a boundary (a reduced handle, an older bridge) say so
+    #   plainly instead of silently doing the destructive thing.
 
 
 class ProjectionSink(Protocol):
@@ -1200,6 +1208,27 @@ class RuntimeServer:
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
+        if op == "cancel":
+            # Two rungs, one op, because the CHOICE is the feature. The default
+            # is graceful: a supervisor cancelling a sentinel mid-``git push``
+            # must not tear the push in half, and defaulting the other way makes
+            # the dangerous behaviour the one you get by not thinking. Asking
+            # for ``immediate`` is asking for ``abort``, so it routes there
+            # rather than growing a second implementation of "stop now".
+            #
+            # Optional capability, getattr-probed like every other addition to
+            # this dispatch: a reduced test handle or an older bridge answers
+            # the unknown-op error, and a caller that needs a stop regardless
+            # falls back to ``abort`` (or to the stop ladder). Additive on the
+            # wire for the same reason ``peer_message`` and ``stop`` were, so
+            # no PROTOCOL_VERSION bump.
+            if str(frame.get("mode", "graceful")) == "immediate":
+                return await h.abort()
+            cancel = getattr(h, "cancel_gracefully", None)
+            if not callable(cancel):
+                raise ValueError("this session cannot cancel at a tool boundary")
+            typed_cancel = cast(Callable[[], Awaitable[str]], cancel)
+            return await typed_cancel()
         if op == "set_model":
             return await h.set_model(str(frame.get("provider", "")), str(frame.get("model_id", "")))
         if op == "set_effort":
@@ -1647,6 +1676,24 @@ class RuntimeServer:
                 self._record.session_id,
             )
         return sink
+
+    @property
+    def record(self) -> SessionRecord:
+        """The discovery record this runtime publishes.
+
+        Read-only by intent — the runtime owns every mutation (the port is
+        stamped when the listener binds, the heartbeat rewrites the liveness
+        fields), and a caller that reassigned it would leave the publisher
+        writing a record nobody else holds.
+
+        Exposed because a host that starts a runtime and must then TELL
+        someone where it is (``exec --control`` prints the endpoint to stderr)
+        otherwise has to re-read the file the runtime just wrote, or reach for
+        ``_record``. Deliberately not the control key by a separate accessor:
+        the key rides the record, and the record's 0600 file is the whole
+        authorization model, so nothing should be encouraged to copy it out.
+        """
+        return self._record
 
     @property
     def projection_sink(self) -> ProjectionSink | None:

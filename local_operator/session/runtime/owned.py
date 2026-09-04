@@ -839,6 +839,34 @@ class OwnedSessionHandle(SessionHandle):
         self._session.abort("stopped from mobile")
         return "stopping"
 
+    async def cancel_gracefully(self, reason: str = "cancelled by supervisor") -> str:
+        """Stop at the next post-tool boundary, leaving in-flight work intact.
+
+        The optional capability behind the ``cancel`` op's default mode (see
+        the SessionHandle contract). Where :meth:`abort` fires the turn's
+        AbortSignal and cancels the running tool task, this only SETS a sticky
+        request the harness loop reads once every call in the batch has
+        produced a paired result — so a ``git push`` or a merge-request write
+        that is already on the wire completes, and the turn then ends as
+        aborted with that work in the transcript.
+
+        Returns immediately, and the receipt says so: the boundary may be one
+        long tool away, and a caller that needs the process GONE by a deadline
+        wants the stop ladder (``lop stop``), not this. Reporting "cancelled"
+        here would claim a completion this cannot observe.
+
+        Probed with getattr on a session too: an older ``SessionProtocol``
+        implementation (or a test double) that predates
+        ``request_graceful_cancel`` gets a clear error rather than a silent
+        no-op that would leave a supervisor believing its cancel landed.
+        """
+        self._check_loop_thread()
+        request = getattr(self._session, "request_graceful_cancel", None)
+        if not callable(request):
+            raise ValueError("this session cannot cancel at a tool boundary")
+        request(reason)
+        return "cancelling at the next tool boundary"
+
     async def set_model(self, provider: str, model_id: str) -> str:
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec

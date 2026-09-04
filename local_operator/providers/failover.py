@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     ModelSpec,
     RenderedStreamError,
     StreamEvent,
+    StreamStartEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
 
@@ -2437,7 +2438,21 @@ async def stream_with_failover(
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
-                    forwarded_any = True
+                    # ``forwarded_any`` gates retry, and it means exactly one
+                    # thing: the caller has SEEN output that cannot be un-shown,
+                    # so replaying this attempt would stream deltas twice.
+                    # A ``StreamStartEvent`` shows the user nothing — it is a
+                    # boundary marker announcing that the provider began — so
+                    # counting it would make every failure that lands after
+                    # acceptance but before the first token non-retryable
+                    # (Anthropic 529s, in-band error chunks on a 200 stream),
+                    # bypassing credential rotation and the whole fallback
+                    # chain. It would also misreport a pre-content transport
+                    # death as a MID-STREAM loss, which is what
+                    # ``is_mid_stream_connectivity_loss`` infers from this very
+                    # flag. Nothing has been rendered, so nothing blocks a retry.
+                    if not isinstance(event, StreamStartEvent):
+                        forwarded_any = True
                     yield stamped
                 if route_state is not None and target == primary_target:
                     # Settled, not silent: while a fallback was pinned the front

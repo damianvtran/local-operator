@@ -154,6 +154,16 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
                     "images": images,
                 }
             )
+    elif op == "cancel":
+        # An unknown mode is REFUSED rather than defaulted. The two modes differ
+        # in whether a running tool is cut in half, so a typo ("gracefull",
+        # "soft") silently resolving to either one is a wrong-semantics bug on
+        # the exact op whose reason for existing is that the distinction
+        # matters. Absent is fine and means graceful — the safe default that a
+        # caller who has not thought about it should get.
+        mode = frame.get("mode", "graceful")
+        if mode not in ("graceful", "immediate"):
+            raise ValueError("mode must be 'graceful' or 'immediate'")
     elif op == "complete_aside":
         turns = frame.get("turns")
         if not isinstance(turns, list) or not all(isinstance(item, dict) for item in turns):
@@ -218,6 +228,18 @@ ControlOp = Literal[
     "prompt",  # {command_id, text, images?} — durable idempotent user turn
     "steer",  # {command_id, text, images?} — idempotent mid-turn injection
     "abort",  # {} — the stop button; never kills the session
+    # The supervised-agent counterpart of ``abort``, and the reason both exist.
+    # ``abort`` fires the turn's AbortSignal immediately, cancelling the running
+    # tool task — right for a human at a keyboard, who wants it to stop NOW and
+    # can see and repair whatever was left half-done. A machine supervisor has
+    # neither of those: its agent's tools push commits, open merge requests and
+    # write rows, and a cut mid-``git push`` leaves damage nobody is watching
+    # for. ``cancel`` defaults to the boundary-respecting mode, which lands
+    # after the in-flight tool batch has produced its results and before the
+    # next model request is spent (``Session.request_graceful_cancel``).
+    # ``mode: "immediate"`` is the explicit opt-in to ``abort`` semantics, so a
+    # caller only cuts a tool in half by asking for it in those words.
+    "cancel",  # {mode?: graceful|immediate}
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
     "slash",  # {command, args} — execute a TUI slash command

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+import os
 import signal
 import sys
 from pathlib import Path
@@ -60,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="job_id",
         help="Ledger job id; when set, the worker appends a terminal record"
         " (finished_at + exit_code) to the JSONL ledger on exit",
+    )
+    parser.add_argument(
+        "--control",
+        action="store_true",
+        help="Publish a session record and serve the control socket for this run",
     )
     parser.add_argument("--hosting", type=str, default=None, help="Hosting platform override")
     parser.add_argument("--model", type=str, default=None, help="Model override")
@@ -166,8 +172,29 @@ def run(
         session: SessionProtocol = await source if inspect.isawaitable(source) else source
         session_box.append(session)
 
+        # Function-local for the same reason as the engine imports above: a
+        # detached worker pays for the runtime stack only when asked for it.
+        from local_operator.session.runtime.exec_control import maybe_start_exec_control
+
+        control = await maybe_start_exec_control(
+            session,
+            enabled=bool(getattr(parsed, "control", False)),
+            cwd=os.getcwd(),
+            yolo=bool(getattr(parsed, "yolo", False)),
+        )
+        if control is not None:
+            # The spawner redirected this process's stderr to the job log, which
+            # is where a supervisor of a detached run looks for the endpoint —
+            # stdout still belongs to the NDJSON stream even here.
+            print(control.endpoint_line, file=sys.stderr, flush=True)
+
         prompt_task = asyncio.ensure_future(
-            run_print_mode(session, [parsed.prompt], json_mode=parsed.json_mode)
+            run_print_mode(
+                session,
+                [parsed.prompt],
+                json_mode=parsed.json_mode,
+                before_dispose=(control.aclose if control is not None else None),
+            )
         )
         interrupt_task = asyncio.ensure_future(interrupted.wait())
         await asyncio.wait({prompt_task, interrupt_task}, return_when=asyncio.FIRST_COMPLETED)
