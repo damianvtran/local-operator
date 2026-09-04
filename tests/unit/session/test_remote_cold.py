@@ -452,7 +452,8 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         context_tokens=322_546,
     )
     await transcript.append_custom(
-        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")}
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
     viewer = await RemoteSession.cold(

@@ -172,6 +172,7 @@ def _capped_components(components: Sequence[Any]) -> list[Any]:
         return values
     return values[len(values) - USAGE_COMPONENT_CAP :]
 
+
 # Commands whose effect belongs to the process drawing the widgets. Every other
 # advertised slash is routed to the authoritative session owner; keeping this a
 # complement means adding a command without classification fails the test rather
@@ -966,10 +967,14 @@ def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
     malformed row simply stays as it is rather than failing the whole frame —
     an attach must not be refused because one job's accounting is odd.
     """
+    # ``usage`` may be absent (a bash job, a child that has not reported a turn)
+    # — the two lists live on different objects, so each is checked in turn.
     for container, key in ((job.get("usage"), "cost_components"), (job, "descendant_usage")):
-        if not isinstance(container, dict) and key != "descendant_usage":
+        if not isinstance(container, dict):
             continue
-        rows = container.get(key) if isinstance(container, dict) else None
+        rows = container.get(key)
+        # One row cannot fold into anything, so the common case costs a length
+        # check and no validation.
         if not isinstance(rows, list) or len(rows) <= 1:
             continue
         try:
@@ -1003,10 +1008,7 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     parts: list[str] = []
     if isinstance(snapshot, dict):
         sizes = sorted(
-            (
-                (len(json.dumps(value).encode()), key, value)
-                for key, value in snapshot.items()
-            ),
+            ((len(json.dumps(value).encode()), key, value) for key, value in snapshot.items()),
             reverse=True,
             key=lambda row: row[0],
         )[:3]

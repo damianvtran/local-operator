@@ -26,18 +26,19 @@ import pytest
 from local_operator.harness.types import ModelSpec, Usage
 from local_operator.session.frontend_state import (
     USAGE_COMPONENT_CAP,
-    _folded_components,
     FrontendSessionState,
     FrontendStateStore,
+    FrontendUsage,
     JobState,
+    _folded_components,
     filter_update_trajectories,
     oversized_frame_report,
     sync_wire_payload,
 )
 from local_operator.session.remote import RemoteSession
-from local_operator.tui.costs import job_cost
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
+from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
 
 #: A tool result big enough to be realistic. The point of the cap is that ONE
@@ -169,9 +170,10 @@ def test_unfiltered_update_is_returned_unchanged_when_nothing_needs_dropping() -
 # ---------------------------------------------------------------------------
 
 
-def _identity() -> dict[str, str]:
-    """The serving identity folding keys on."""
-    return {"provider": "anthropic", "model_id": "claude-opus-4-8-20260101"}
+#: The serving identity folding keys on. Both fields must match for two
+#: receipts to fold together.
+_PROVIDER = "anthropic"
+_MODEL_ID = "claude-opus-4-8-20260101"
 
 
 def _priced_spec() -> ModelSpec:
@@ -264,7 +266,10 @@ def test_a_restored_fat_checkpoint_is_capped_on_the_way_in() -> None:
             fat = FrontendSessionState(
                 session_id="s1",
                 epoch="old",
-                usage_components=[_receipt(index) for index in range(2_685)],
+                usage_components=[
+                    FrontendUsage.model_validate(_receipt(index).model_dump(mode="json"))
+                    for index in range(2_685)
+                ],
             )
             return {"state": fat.model_dump(mode="json")}
 
@@ -272,7 +277,10 @@ def test_a_restored_fat_checkpoint_is_capped_on_the_way_in() -> None:
     store = FrontendStateStore.from_checkpoint(session)
 
     assert len(store.state.usage_components) == USAGE_COMPONENT_CAP
-    frame = {"op": "frontend_sync", "data": sync_wire_payload(store.subscribe(lambda _u: None).sync)}
+    frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
+    }
     assert _line_bytes(frame) < _MAX_LINE_BYTES
 
 
@@ -304,7 +312,10 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
         session_id="s1",
         epoch="e1",
         jobs=jobs,
-        usage_components=[_receipt(index) for index in range(5_000)],
+        usage_components=[
+            FrontendUsage.model_validate(_receipt(index).model_dump(mode="json"))
+            for index in range(5_000)
+        ],
         child_costs={f"job{index}": 1.25 for index in range(500)},
         todos=[],
         conversation_title="a" * 500,
@@ -316,7 +327,10 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
         ],
     )
     store = FrontendStateStore(state)
-    frame = {"op": "frontend_sync", "data": sync_wire_payload(store.subscribe(lambda _u: None).sync)}
+    frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
+    }
 
     size = _line_bytes(frame)
     assert size < _MAX_LINE_BYTES, (
@@ -340,16 +354,23 @@ def test_folding_a_jobs_receipts_does_not_change_what_it_cost() -> None:
     14 jobs, 104 components folding to 1, worst cost difference $0.00.
     """
     reported = [
-        Usage(input_tokens=1_000, output_tokens=100, usd_cost=0.25, **_identity())
+        Usage(
+            input_tokens=1_000,
+            output_tokens=100,
+            usd_cost=0.25,
+            provider=_PROVIDER,
+            model_id=_MODEL_ID,
+        )
         for _ in range(40)
     ]
     # No usd_cost: priced from tokens at the model's rate, which only folds
     # correctly if the tokens are summed rather than the prices.
     estimated = [
-        Usage(input_tokens=2_000, output_tokens=300, **_identity()) for _ in range(40)
+        Usage(input_tokens=2_000, output_tokens=300, provider=_PROVIDER, model_id=_MODEL_ID)
+        for _ in range(40)
     ]
     usage = Usage(input_tokens=1, cost_components=[*reported, *estimated])
-    label = "anthropic/claude-opus-4-8-20260101"
+    label = f"{_PROVIDER}/{_MODEL_ID}"
 
     before = job_cost(SimpleNamespace(usage=usage, model_label=label), default_model_label=label)
     folded = usage.model_copy(update={"cost_components": _folded_components(usage.cost_components)})
