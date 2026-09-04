@@ -263,6 +263,132 @@ class RemoteSession:
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
+        # Teams and agent profiles are LOCAL CONFIG, not runtime state: they
+        # live in `<config_dir>/teams` and `<config_dir>/agents`, the same
+        # files `lop team`/`lop agents` read with no session at all. So a
+        # viewer answers them from its OWN config dir rather than asking a
+        # runtime — which is what makes `/team` and `/agent` work on a COLD
+        # session, where there is no runtime to ask and never will be until
+        # the first message engages one.
+        #
+        # This is the invariant that regressed in the viewer transition: the
+        # TUI reads both registries off the SESSION object
+        # (`_team_registry()`, `_agent_profile_rows()`), and `Session`
+        # supplied them while `RemoteSession` did not, so every `/team` and
+        # `/agent` surface silently answered "unavailable" once `lop` stopped
+        # building a `Session`. Anything the TUI reads off the session has to
+        # exist on BOTH implementations or it fails only on the viewer path.
+        #
+        # Built lazily and cached: constructing a registry walks the config
+        # tree (and `TeamRegistry.__init__` runs crash recovery), which a
+        # session that never types `/team` must not pay at boot.
+        self._team_registry_cache: Any | None = None
+        self._agent_registry_cache: Any | None = None
+        # FAILURE is latched as well as success (R3). Returning None out of the
+        # `except` without recording it left the cache empty, so the next read
+        # re-entered the whole constructor: 25 property reads against a raising
+        # constructor measured 25 constructions. The picker re-derives its rows
+        # on EVERY keystroke, so an unreadable registry would put a directory
+        # walk plus a recovery probe on the typing path — the exact cost
+        # `teams.py` keeps off that loop ("a reader that waited turned an
+        # ordinary keystroke into a multi-second freeze").
+        #
+        # The latch is a COOLDOWN, not a tombstone (R7). A permanent latch
+        # makes any transient failure — a full disk that clears, a directory
+        # being rewritten by a concurrent `lop team` — cost `/team` and
+        # `/agent` for the entire life of the session, silently and with no way
+        # back short of restarting. Timestamps rather than a bool, so a burst
+        # of keystrokes still pays exactly one construction while a genuinely
+        # repaired registry heals on its own.
+        #
+        # Same shape and the same budget as `TeamRegistry`'s own read-path
+        # recovery cooldown (`_READ_RECOVERY_COOLDOWN_S`), deliberately: one
+        # retry convention in the codebase, not a second one invented here.
+        self._team_registry_failed_at: float | None = None
+        self._agent_registry_failed_at: float | None = None
+
+    def _within_registry_cooldown(self, failed_at: float | None) -> bool:
+        """Whether a failed registry construction is still too recent to retry.
+
+        Keeps a burst of keystrokes to ONE construction (the picker re-derives
+        its rows per character) while letting a repaired registry recover
+        without restarting the session — see the constructor's note on why a
+        permanent latch is the wrong trade.
+
+        ``monotonic`` because this is an elapsed-time question: a wall-clock
+        source would let an NTP correction either suppress the retry for hours
+        or defeat the cooldown entirely.
+        """
+        if failed_at is None:
+            return False
+        from local_operator.teams import _READ_RECOVERY_COOLDOWN_S
+
+        return (time.monotonic() - failed_at) < _READ_RECOVERY_COOLDOWN_S
+
+    @property
+    def team_registry(self) -> Any | None:
+        """The teams on this machine, read from the viewer's own config dir.
+
+        Mirrors the attribute ``Session`` carries so the TUI's
+        ``_team_registry()`` — a plain ``getattr(session, "team_registry")`` —
+        resolves identically whichever session implementation it holds.
+
+        Failure degrades ONE feature rather than the session, the same
+        discipline ``session_factory`` applies to its own construction: a
+        stranded backup or an unreadable ``teams`` directory leaves ``/team``
+        reporting "teams are unavailable" instead of taking the conversation
+        down with it. The registry itself still refuses to answer with a
+        half-truth (see ``TeamRegistry._raise_if_recovery_failed``).
+        """
+        if self._team_registry_cache is None:
+            if self._within_registry_cooldown(self._team_registry_failed_at):
+                return None
+            from local_operator.teams import TeamRegistry
+
+            try:
+                self._team_registry_cache = TeamRegistry(self._config_dir)
+            except Exception:  # noqa: BLE001 — one feature must not break the session
+                self._team_registry_failed_at = time.monotonic()
+                return None
+        return self._team_registry_cache
+
+    @property
+    def agent_registry(self) -> Any | None:
+        """The agent profiles on this machine, from the viewer's own config dir.
+
+        The sibling of :attr:`team_registry`, and broken by the same
+        mechanism: ``/agent``'s listing and launch both read this off the
+        session (``_agent_profile_rows``, ``_cmd_agent``). Same lazy
+        construction, same degrade-one-feature guard, same failure latch.
+
+        NOT symmetric with :attr:`team_registry` in one respect, which is
+        recorded here rather than silently inherited (R4):
+        ``AgentRegistry.__init__`` creates ``<config_dir>`` and
+        ``<config_dir>/agents`` and runs its two migrations, so READING this
+        property writes to disk. ``TeamRegistry`` deliberately does the
+        opposite ("No mkdir here: every interactive session constructs a
+        registry, and an unused feature must not litter the config dir").
+
+        The asymmetry is pre-existing and left alone on purpose: every other
+        host that offers `/agent` — the CLI, `exec`, the server, the mobile
+        daemon — constructs the same registry the same way, so the directory a
+        viewer creates is one every other entry point would have created
+        anyway. Changing the constructor to match ``TeamRegistry`` is a change
+        to shared behaviour with its own blast radius, not a fix belonging to
+        this regression. What is new here is only that the construction now
+        also happens on a viewer.
+        """
+        if self._agent_registry_cache is None:
+            if self._within_registry_cooldown(self._agent_registry_failed_at):
+                return None
+            from local_operator.agents import AgentRegistry
+
+            try:
+                self._agent_registry_cache = AgentRegistry(self._config_dir)
+            except Exception:  # noqa: BLE001 — one feature must not break the session
+                self._agent_registry_failed_at = time.monotonic()
+                return None
+        return self._agent_registry_cache
 
     @classmethod
     async def connect(
