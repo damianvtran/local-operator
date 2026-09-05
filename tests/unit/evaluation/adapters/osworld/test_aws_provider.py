@@ -1188,7 +1188,7 @@ async def test_execute_over_real_http_reports_partial_subprocess_failure(
     requests_seen: list[dict[str, Any]] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
         def do_POST(self) -> None:
@@ -1223,7 +1223,11 @@ async def test_execute_over_real_http_reports_partial_subprocess_failure(
             # with fixture credentials and are never invoked by execute().
             stubs.clients.http_post_json = aws.build_clients(CREDS, REGION).http_post_json
             provider = AwsProvider(
-                CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients, sleep=stubs.sleep
+                CREDS,
+                region=REGION,
+                lease_ref="lop-ttl-x",
+                clients=stubs.clients,
+                sleep=stubs.sleep,
             )
             env = _FakeEnv()
             env.pkgs_prefix = "{command}"
@@ -1236,6 +1240,15 @@ async def test_execute_over_real_http_reports_partial_subprocess_failure(
             assert marker.read_text() == "once\nonce\n"
             assert len(requests_seen) == 2
             assert stubs.slept == [3.0]
+            # Exercise the actual HTTP -> subprocess path, not just a source
+            # string assertion: 100k Unicode cannot fit Linux's single-arg cap.
+            large_marker = tmp_path / "large-text"
+            text = "🙂" * 100_000
+            large = f"from pathlib import Path; Path({str(large_marker)!r}).write_text({text!r})"
+            await provider.execute([large])
+            assert large_marker.read_text() == text
+            assert len(requests_seen) == 3
+            assert all(len(arg.encode("utf-8")) <= 64_000 for arg in requests_seen[-1]["command"])
     finally:
         server.shutdown()
         thread.join(timeout=5)

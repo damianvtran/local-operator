@@ -17,6 +17,16 @@ of the installed wheel — so it must be a *separate* distribution, or every
 harness release would invalidate the adapter pin. Isolation comes from the
 wheel + digest + isolated worker, not from the source's location.
 
+## Computer input capability
+
+Adapter 0.1.2 uses RPC 1.5 and explicitly advertises clipboard `paste_text`
+with caller-chosen keys and overwrite policy. Native `type` remains ASCII-only
+on this backend; Unicode requires the explicit paste action, never an automatic
+fallback. See [the negotiated computer-input contract](../../docs/benchmarks/computer-input.md)
+for limits, clipboard ownership, application semantics and frozen-environment
+compatibility. Historical 0.1.1 environment examples below are not migration
+instructions: new proofs need a newly built wheel and exact selector pins.
+
 ## Prerequisite: the gated inputs, in a DURABLE root
 
 OSWorld 2.0's 108 task classes and its 4.2 GB of assets are **gated** Hugging
