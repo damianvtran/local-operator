@@ -1,0 +1,358 @@
+{
+  "grid": [
+    100,
+    30
+  ],
+  "native_pixels": [
+    800.0,
+    510.0
+  ],
+  "profile": {
+    "cell_width": 8.0,
+    "cell_height": 17.0,
+    "font_size": 13.0,
+    "font_family": "Menlo, DejaVu Sans Mono, monospace"
+  },
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
+  "css_path": [
+    "local_operator.tcss"
+  ],
+  "screen": {
+    "size": [
+      98,
+      28
+    ],
+    "virtual_size": [
+      98,
+      28
+    ],
+    "region": [
+      0,
+      0,
+      100,
+      30
+    ],
+    "scrollbar": [
+      false,
+      false
+    ]
+  },
+  "widgets": [
+    {
+      "widget": "TranscriptView",
+      "id": "transcript",
+      "region": [
+        1,
+        1,
+        98,
+        23
+      ],
+      "content_region": [
+        2,
+        2,
+        97,
+        21
+      ],
+      "size": [
+        97,
+        21
+      ],
+      "virtual_size": [
+        96,
+        21
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        2,
+        96,
+        1
+      ],
+      "content_region": [
+        2,
+        2,
+        96,
+        1
+      ],
+      "size": [
+        96,
+        1
+      ],
+      "virtual_size": [
+        96,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        4,
+        96,
+        7
+      ],
+      "content_region": [
+        2,
+        4,
+        96,
+        7
+      ],
+      "size": [
+        96,
+        7
+      ],
+      "virtual_size": [
+        96,
+        7
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "input-dock",
+      "region": [
+        1,
+        24,
+        98,
+        5
+      ],
+      "content_region": [
+        1,
+        24,
+        98,
+        5
+      ],
+      "size": [
+        98,
+        5
+      ],
+      "virtual_size": [
+        98,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "input-shell",
+      "region": [
+        1,
+        24,
+        98,
+        5
+      ],
+      "content_region": [
+        2,
+        25,
+        96,
+        3
+      ],
+      "size": [
+        96,
+        3
+      ],
+      "virtual_size": [
+        96,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Band",
+      "id": "status-band",
+      "region": [
+        2,
+        26,
+        96,
+        2
+      ],
+      "content_region": [
+        2,
+        27,
+        95,
+        1
+      ],
+      "size": [
+        95,
+        1
+      ],
+      "virtual_size": [
+        96,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": "input-row",
+      "region": [
+        2,
+        25,
+        96,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        96,
+        1
+      ],
+      "size": [
+        96,
+        1
+      ],
+      "virtual_size": [
+        96,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Chrome",
+      "id": "prompt-chevron",
+      "region": [
+        2,
+        25,
+        2,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        2,
+        1
+      ],
+      "size": [
+        2,
+        1
+      ],
+      "virtual_size": [
+        2,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Editor",
+      "id": null,
+      "region": [
+        4,
+        25,
+        94,
+        1
+      ],
+      "content_region": [
+        5,
+        25,
+        92,
+        1
+      ],
+      "size": [
+        92,
+        1
+      ],
+      "virtual_size": [
+        0,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    }
+  ]
+}

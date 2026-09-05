@@ -396,10 +396,11 @@ screenshot of an empty app. `approval_shot.py` takes a third argument, `focus`,
 which puts focus in the composer before the shot — the state that used to send
 the prompt's answer keys into the prompt buffer.
 
-**Note that both force the approval gate on** (`app._set_approve_all(False)`).
-The app reads the developer's own `tool_approval_mode` from `~/.local-operator`,
-so on a machine set to `auto` a naive capture shows a frame with no prompt in it
-at all, and it looks like the surface is broken rather than skipped.
+**The scripts isolate HOME/config before app imports** and approval-specific
+fixtures force the approval gate on (`app._set_approve_all(False)`). Without
+that isolation, the app reads the developer's own `tool_approval_mode`, so a
+machine set to `auto` can capture no prompt at all. A new sample must call
+`isolate_capture()` before importing app modules, not merely before the export.
 
 For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:

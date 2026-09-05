@@ -82,6 +82,9 @@ async def test_real_app_export_and_widget_geometry(tmp_path: Path, monkeypatch) 
         await pilot.pause()
         before = {id(w): w.region for w in app.query("*")}
         target = tmp_path / "capture.svg"
+        with pytest.raises(ValueError, match="destination must end"):
+            save_capture(app, tmp_path / "wrong.png")
+        assert not (tmp_path / "wrong.png").exists()
         save_capture(app, target)
         assert before == {id(w): w.region for w in app.query("*")}
         data = json.loads(target.with_suffix(".geometry.json").read_text())
@@ -91,6 +94,14 @@ async def test_real_app_export_and_widget_geometry(tmp_path: Path, monkeypatch) 
         assert data["css_path"]
         # The public Textual export is intentionally still its legacy format.
         assert "translate(9, 41)" in app.export_screenshot()
+
+
+def test_cssless_host_cannot_be_visual_evidence(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError, match="production CSS"):
+        save_capture(SimpleNamespace(CSS_PATH=None), tmp_path / "bare.svg")
+    assert not (tmp_path / "bare.svg").exists()
 
 
 def test_all_current_sample_writers_adopt_helper() -> None:

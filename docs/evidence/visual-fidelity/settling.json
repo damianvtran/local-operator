@@ -1,0 +1,152 @@
+[
+  {
+    "page": "welcome",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "usage-error",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "copy-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "todo-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "analytics-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "resume-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "transcript-error",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "wake-overflow",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "subagent-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "resume-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "wake-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "aside-error",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "subagent-running",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "aside-loading",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "composer-multiline",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "todo-overflow",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "transcript",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "analytics-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "wake-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "todo-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "composer-picker",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "transcript-overflow",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "usage-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "specimen",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "aside-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "aside-empty",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "usage-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "transcript-loading",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "usage-loading",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  },
+  {
+    "page": "subagent-populated",
+    "screen_equal": true,
+    "widget_geometry_equal": true
+  }
+]
