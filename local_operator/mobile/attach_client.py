@@ -556,6 +556,13 @@ class AttachClient:
             "slash_result", command=command, args=args, images=images or []
         )
 
+    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+        """Copy the authenticated owner's committed history, without interrupting it."""
+        result = await self._request_payload("fork_snapshot", message=message)
+        if not isinstance(result, dict) or not result.get("fork_id"):
+            raise ValueError("owner returned no fork; retry /fork")
+        return result
+
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork an aside exchange into the conversation on the authoritative owner."""
         return await self._request("adopt_aside", messages=messages)

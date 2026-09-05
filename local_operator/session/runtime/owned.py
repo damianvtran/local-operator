@@ -1369,6 +1369,14 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
 
+    async def fork_snapshot(self, message: str) -> dict[str, Any]:
+        """Snapshot THIS authenticated owner, never a client-supplied path/id."""
+        busy = self.is_busy()
+        result = await self._session.fork_snapshot(message)
+        # Jobs and parked gates also count as original work, even between turns.
+        result["busy"] = busy
+        return result
+
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         """Run an off-record provider request against this session.
 
