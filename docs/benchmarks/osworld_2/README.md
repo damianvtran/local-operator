@@ -194,6 +194,30 @@ That key records the value **requested** on the command line. It is only
 honest because the runner refuses the one case that would make it a lie — see
 below.
 
+#### Expanded-task dependency packaging
+
+The expanded pilot exposed a packaging failure, not a model failure: task 010
+imports `evaluation_examples.task_class.generated_task_utils`, which the upstream
+`osworld` wheel excludes. The exception occurred after VM allocation with zero
+model spend. Task 001 did not exercise that import subset. Sixteen release tasks
+need the same helper; the adapter now packages the complete three-file runtime
+helper closure under its upstream namespace, with unchanged upstream bytes,
+license and SHA-256 provenance covered by the adapter wheel RECORD. No gated
+task/answer files are added to the wheel or model context.
+
+The pre-allocation static check runs only for the selected AWS task and helper
+closure, without importing tasks or executing setup. The offline acceptance
+census parsed and loaded all 108 task modules in an isolated interpreter, with
+network/process execution prohibited and no setup/evaluate calls. This proves
+import packaging, not environment setup, evaluator behavior or task scores.
+Optional `lpips`/`torch` imports in task 057 retain upstream's guarded fallback.
+
+Rebuild the adapter wheel and a **new** workspace/selector via the
+[adapter setup recipe](../../../benchmarks/osworld_v2_adapter/README.md#runtime-helper-packaging-and-pre-allocation-checks).
+The changed `package_digest`, not the reused `0.1.1` version string, identifies
+this artifact. Existing pilot evidence and installed environments remain intact;
+no harness publication is needed to test this adapter packaging correction.
+
 #### The adapter source and the pinned wheel both call themselves `0.1.1`
 
 **Read this before running with `AWS_INSTANCE_TYPE`.** The adapter source in
