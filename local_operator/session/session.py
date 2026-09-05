@@ -10164,7 +10164,7 @@ class Session:
         listener per session that fans out to the session's own consumers, so
         the order in which they see a change is deterministic.
 
-        Three groups are live, each for a reason that makes the apply trivial:
+        These groups are live, each for a reason that makes the apply trivial:
 
         * ``compaction.*`` — re-coerced into a fresh ``CompactionSettings``.
           All three trigger checks read ``self._compaction_settings`` at check
@@ -10201,7 +10201,6 @@ class Session:
           keeps its spawn inventory: re-adding would mean re-running the
           role allowlist and network-floor filtering for a short-lived run,
           and the per-call gate already makes "disabled" true for it.
-
         * ``subagents.models.*`` — the launch path reads these per spawn, but
           the ``task``/``agent`` tool SCHEMAS bake the configured tiers in at
           build time (the enum the model picks from, and the description
