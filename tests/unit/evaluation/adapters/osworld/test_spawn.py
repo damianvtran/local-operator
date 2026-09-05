@@ -355,9 +355,10 @@ def test_a_1_1_selector_cannot_even_be_built_against_a_1_2_parent(tmp_path: Path
 async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_request(
     tmp_path: Path, episode_id: str, adapter_wheel: Path
 ) -> None:
+    import hashlib
+
     from local_operator.evaluation.evidence.models import UserSimulatorExchangePayload
     from tests.unit.evaluation.runner.test_episode_subprocess import _offline_ask_client
-    import hashlib
 
     selector = spawn_helpers.build_spawnable_adapter(
         tmp_path,

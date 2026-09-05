@@ -1086,7 +1086,10 @@ async def test_worker_importing_from_the_workspace_leaves_no_bytecode_behind(
 
 
 def _offline_ask_client(artifact_root: Path) -> tuple[Any, Any]:
-    from tests.unit.evaluation.runner.test_provider_client import RecordingStream, _client
+    from tests.unit.evaluation.runner.test_provider_client import (
+        RecordingStream,
+        _client,
+    )
 
     def reply(message: Any) -> str:
         text = message.content[0].text

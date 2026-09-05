@@ -419,9 +419,11 @@ async def test_adapter_owned_responder_override_fails_before_prepare(
 async def test_simulator_is_called_once_and_host_finish_is_refused(
     tmp_path: Path, answer: str | None
 ) -> None:
-    from local_operator.evaluation.adapters.api import AskUserExchangeParams
     from unittest.mock import AsyncMock
+
     from lop_osworld_v2_adapter import taskfile
+
+    from local_operator.evaluation.adapters.api import AskUserExchangeParams
 
     provider = FakeProvider(has_user_simulator=True)
     provider.respond = AsyncMock(return_value=answer)

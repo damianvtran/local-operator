@@ -108,6 +108,54 @@ Final static gates: `git diff --check`, flake8 on every changed Python file,
 and pyright on the modified runtime and behavioral-test files all passed
 (`0 errors, 0 warnings, 0 informations`).
 
+## Integration with proxy/scoped infrastructure
+
+Rebased onto PR #683's merged `origin/main`,
+`da293e177009e5135afc9b853ad136fd61ea19c1`. Both implementation/documentation
+commits replayed without conflicts; `git range-diff` confirmed unchanged patches.
+The compatibility census included the new proxy/scoped-infrastructure tests:
+remaining `1.5` literals in executable tests are exclusively intentional
+old-protocol rejection fixtures. Shared fixture builders use RPC 1.6.
+
+Pinned isort 5.13.2 required only mechanical nested-import formatting in
+`test_episode_subprocess.py`, `test_spawn.py`, and `test_fake_end_to_end.py`.
+No proxy/scoped-infrastructure implementation or protocol behavior needed
+remediation. Black 26.1.0, isort 5.13.2, and flake8 7.3.0 were installed into an
+isolated temporary target and run with the shared interpreter; the shared
+virtual environment remained unchanged. Pyright used pinned 1.1.411.
+
+The bounded matrix above, plus the following proxy/scoped-infrastructure files,
+passed together with explicit `PYTHONPATH="$PWD"` imports and `-n 2`:
+**415 passed in 186.15s**.
+
+```text
+tests/unit/evaluation/adapters/osworld/test_proxy_policy.py
+tests/unit/evaluation/adapters/osworld/test_aws_provider.py
+tests/unit/evaluation/adapters/osworld/test_requirements.py
+tests/unit/evaluation/adapters/osworld/test_run_episode_script.py
+tests/unit/evaluation/adapters/osworld/test_provisioning.py
+tests/unit/evaluation/runner/test_run_episode_infra.py
+```
+
+This includes botocore Stubber/loopback-only provider tests and the actual
+`run_episode.py` subprocess against the installed fake-provider wheel, not
+cloud or paid-model calls. After import remediation, all whole-tree gates
+passed: `black --check --workers 2 .` (940 unchanged files), `isort --check .`,
+`flake8 --jobs 2 .`, and `pyright --pythonpath ~/local-operator/.venv/bin/python`
+(`0 errors, 0 warnings, 0 informations`).
+
+After formatting, the three affected test modules were rerun together with
+`PYTHONPATH="$PWD"` and `-n 2`: **47 passed in 119.95s**. This re-exercised the
+real supervisor/worker exchange, installed OSWorld wheel, response artifacts,
+next model requests, refusal paths, and no-regeneration checks on the final
+Python tree.
+
+A separate actual `scripts/run_episode.py` subprocess with
+`--infra unknown:NAME=synthetic-marker` returned exit 2 before reading its
+nonexistent selector: stdout was empty, stderr was
+`--infra expects [purpose:]NAME=VALUE with a valid name, purpose and value`,
+and the requested run root was not created. The value was not echoed.
+
 ## Limits and release boundary
 
 This is offline synthetic evidence, not task 098 benchmark performance. No
