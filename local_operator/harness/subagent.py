@@ -1597,6 +1597,11 @@ async def _construct_child_session(
         cleanup.push_async_callback(child_stream.close)
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
+        # A child's model was chosen HERE (tier or parent), never by the
+        # ``hosting``/``model_name`` keys, so a later edit to those must not
+        # switch it — ``_job_id`` already guards that path, this makes the
+        # provenance honest too.
+        model_source="child",
         stream_fn=child_stream,
         tools=tools,
         transcript=transcript,
@@ -1737,6 +1742,14 @@ async def _construct_child_session(
     # Unsubscribed by ``_dispose_child`` through the dispose hook, exactly as
     # the parent's is. Degrades silently: a child that cannot follow config is
     # a child built the way every child was before this seam.
+    #
+    # What a child does NOT follow, by design (``Session._apply_config_change``
+    # guards each on ``_job_id``): a ``hosting``/``model_name`` edit (its spec
+    # was picked above and a mid-task switch costs its cache prefix), and the
+    # ``web_*.enabled`` INVENTORY reconcile (re-adding would re-run the
+    # allowlist and network-floor filtering for a short-lived run). The web
+    # tools' per-call gate still refuses inside the child after a disable, and
+    # the approval MODE reaches it through the parent's gate closure.
     try:
         from local_operator.config_watch import process_watcher
 
