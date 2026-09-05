@@ -317,6 +317,15 @@ async def _fetch_or_abort(coro, signal: AbortSignal | None):
         await asyncio.gather(fetch_task, abort_task, return_exceptions=True)
 
 
+#: The refusal a call gets while ``web_fetch.enabled`` is false. Returned
+#: through ``run_fetch`` so ``web_fetch`` and ``read <url>`` refuse with one
+#: sentence, naming the key and the page that flips it.
+WEB_FETCH_DISABLED_MESSAGE = (
+    "web_fetch is disabled by config (web_fetch.enabled: false) — "
+    "turn it on in /settings › Web tools"
+)
+
+
 async def run_fetch(
     url: str,
     *,
@@ -337,6 +346,15 @@ async def run_fetch(
     """
     manager = ConfigManager(config_dir())
     settings = load_fetch_settings(manager)
+    # The master switch is re-checked PER CALL, not only at inventory build.
+    # ``web_fetch.enabled`` is LIVE: a top-level session drops the tool from
+    # its schema at the next turn boundary, but a call the model already
+    # emitted, a subagent's spawn-time inventory, and — the case that made
+    # this line necessary — the ``read <url>`` sugar all reach this engine
+    # with no createIf gate in front of them. "Disabled" now means no fetching
+    # through any spelling; before, ``read https://…`` fetched regardless.
+    if not settings.enabled:
+        return WEB_FETCH_DISABLED_MESSAGE, {"url": url, "cache": "miss"}, True
 
     try:
         normalized = normalize_url(url)

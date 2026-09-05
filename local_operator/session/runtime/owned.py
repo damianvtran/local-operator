@@ -147,14 +147,26 @@ class OwnedSessionHandle(SessionHandle):
         *,
         cwd: str,
         auto_approve: bool = False,
+        approval_pinned: bool = False,
     ) -> None:
         self._session = session
         self._loop = loop
         # When the owner's saved default is full-auto (``tool_approval_mode:
         # auto``), the phone must not park a card the TUI would never show —
-        # the gate is answered ``True`` inline instead. Stored so a future
-        # per-session toggle can flip it without reconstructing the handle.
+        # the gate is answered ``True`` inline instead. Read PER DECISION by
+        # the gate closure, which is what lets ``/approvals`` and a
+        # ``config.yml`` change (:meth:`follow_config`) move it without
+        # reconstructing the handle.
         self._auto_approve = auto_approve
+        # ``approval_pinned`` marks the value as an explicit FLAG (``lop exec
+        # --yolo``), which outranks the config key: a ``tool_approval_mode``
+        # edit must not re-arm a gate the operator disabled on the command
+        # line for this run. A separate kwarg rather than inferred from
+        # ``auto_approve`` because ``spawn_owned_session`` passes the
+        # CONFIG-derived value — the same ``True`` that must keep following
+        # the file.
+        self._approval_pinned = approval_pinned
+        self._unsubscribe_config_watch: Callable[[], None] | None = None
         #: The (kind, title, detail) of the gate currently parked, or None.
         #: Kept so the announcement can be re-run when the last viewer
         #: detaches — the routing decision is made when the gate opens, and
@@ -347,6 +359,100 @@ class OwnedSessionHandle(SessionHandle):
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
 
+    # -- live config -------------------------------------------------------------
+
+    def follow_config(self, watcher: Any) -> None:
+        """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
+
+        The handle, not the session, owns the approval mode the RUNTIME's
+        tools consult (``_auto_approve``), so it needs its own listener on the
+        process :class:`~local_operator.config_watch.ConfigWatcher` beside the
+        session's. Wired by the spawn sites (``spawn_owned_session``,
+        ``start_exec_control``) rather than in ``__init__`` so a handle built
+        around a test double never touches the real config directory.
+        Idempotent; unsubscribed in :meth:`dispose`.
+        """
+        if self._unsubscribe_config_watch is not None:
+            return
+        self._unsubscribe_config_watch = watcher.subscribe(self._on_config_change)
+
+    def _on_config_change(self, change: Any) -> None:
+        """Move the gate to the mode on disk; the next DECISION sees it.
+
+        A ``config.yml`` write is the operator's machine-wide intent ("if I
+        change a setting I want it to go into effect for all my agents"), so
+        it overrides a per-session ``/approvals`` toggle in either direction.
+        ``source`` is ignored on purpose: the runtime is never the process
+        that wrote, so every delivery is another process's edit.
+
+        Two deliberate limits. ``--yolo`` (``_approval_pinned``) outranks the
+        key — an explicit flag on this run is narrower and newer than a
+        default in a file. And a prompt already PARKED (``_pending_futures``)
+        is left alone: the gate reads ``_auto_approve`` when a decision is
+        made, so a card on screen keeps waiting for the human — never
+        auto-answered on a loosening, never auto-denied on a tightening.
+
+        The receipt goes out as a :class:`NoticeEvent` from THIS process, the
+        one that owns the gate, so every attached viewer and the phone see
+        the effect ("every tool runs without asking") rather than only the
+        TUI's own "config.yml changed" line, which fires even when no runtime
+        is attached. Two lines in the common case is accepted over losing
+        either. Subagents inherit this gate closure, so they follow too.
+        """
+        if self._disposing or "tool_approval_mode" not in getattr(change, "changed_keys", ()):
+            return
+        if self._approval_pinned:
+            return
+        values = getattr(change, "values", {})
+        mode = str(values.get("tool_approval_mode", "ask")).strip().lower()
+        if mode not in ("ask", "auto"):
+            # An unknown spelling is not "ask" by accident: the watcher only
+            # delivers parseable files, so this is a typo, and the safe answer
+            # is to keep the mode in force rather than guess.
+            logger.warning("tool_approval_mode=%r ignored; use ask or auto", mode)
+            return
+        wanted_auto = mode == "auto"
+        if wanted_auto == self._auto_approve:
+            return
+        self._auto_approve = wanted_auto
+        self._notify()
+        self._emit_notice(
+            (
+                "tool approvals: auto — config.yml changed; every tool runs without asking"
+                if wanted_auto
+                else "tool approvals: ask — config.yml changed; write and command tools "
+                "prompt again"
+            ),
+            "warning" if wanted_auto else "info",
+        )
+
+    def _emit_notice(self, text: str, kind: str) -> None:
+        """Fire-and-forget a ``NoticeEvent`` through the session's emit seam.
+
+        Same shape as :meth:`_grant_notice`: the channel every attached
+        terminal and the phone already listen on. Held on
+        ``_mcp_reload_tasks`` because it is the same class of sub-second
+        best-effort work, and ``dispose`` cancels that set.
+        """
+        from local_operator.harness.types import NoticeEvent
+
+        emit = getattr(self._session, "_emit", None)
+        if not callable(emit):
+            logger.info("notice: %s", text)
+            return
+        event_kind = kind if kind in ("info", "warning", "error") else "info"
+        typed_emit = cast("Callable[[Any], Awaitable[Any]]", emit)
+
+        async def _emit_notice() -> None:
+            try:
+                await typed_emit(NoticeEvent(text=text, kind=event_kind))
+            except Exception:  # noqa: BLE001 — a failed notice must not kill the loop
+                logger.debug("runtime notice failed", exc_info=True)
+
+        task = self._loop.create_task(_emit_notice())
+        self._mcp_reload_tasks.add(task)
+        task.add_done_callback(self._mcp_reload_tasks.discard)
+
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -354,6 +460,9 @@ class OwnedSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        if self._unsubscribe_config_watch is not None:
+            self._unsubscribe_config_watch()
+            self._unsubscribe_config_watch = None
         drain = self._prompt_drain_task
         if drain is not None and not drain.done():
             drain.cancel()
@@ -2730,6 +2839,8 @@ async def spawn_owned_session(
     # device set to full-auto still pops an approval card the desktop would
     # not. ``yolo`` stays False so the gate is INSTALLED (a per-session toggle
     # can still switch to asking); the handle short-circuits it when auto.
+    # This is only the BOOT value: ``follow_config`` below keeps the gate on
+    # the file for the session's life.
     try:
         approval_mode = (
             str(config_manager.get_config_value("tool_approval_mode", "ask")).strip().lower()
@@ -2756,4 +2867,31 @@ async def spawn_owned_session(
         has_ui=False,
         cwd=cwd,
     )
-    return OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=auto_approve)
+    # NOT pinned: this value came from config, so it must keep following
+    # config. ``create_session`` has already started the process watcher for
+    # this directory (``attach_config_watch``), so ``process_watcher`` returns
+    # the running one; the guard mirrors that seam's "boot must not depend on
+    # the watcher" degrade.
+    handle = OwnedSessionHandle(
+        session, loop, cwd=cwd, auto_approve=auto_approve, approval_pinned=False
+    )
+    attach_gate_config_watch(handle, config_directory)
+    return handle
+
+
+def attach_gate_config_watch(handle: OwnedSessionHandle, config_directory: Path) -> None:
+    """Hang the handle's approval listener on the process watcher, or degrade.
+
+    Shared by the phone/TUI runtime spawn and ``exec --control`` so the two
+    cannot drift on how the gate follows config. Degrades to "this gate does
+    not follow config" rather than failing the spawn, the same policy as
+    ``session_factory.attach_config_watch``.
+    """
+    try:
+        from local_operator.config_watch import process_watcher
+
+        watcher = process_watcher(config_directory)
+        watcher.start(asyncio.get_running_loop())
+        handle.follow_config(watcher)
+    except Exception:  # noqa: BLE001 — the gate keeps its boot value
+        logger.warning("config watcher could not be attached to the runtime gate", exc_info=True)

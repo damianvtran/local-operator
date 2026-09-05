@@ -409,6 +409,26 @@ def resolve_hosting_model(
 
     Raises ``ValueError`` with the legacy message shapes when either value is
     missing, so the CLI's red-banner handler reports it exactly like before.
+    The pair-only shape every existing caller expects; the composition root
+    uses :func:`resolve_hosting_model_with_source` because the SOURCE decides
+    whether the session later follows a ``hosting``/``model_name`` edit.
+    """
+    hosting, model_name, _source = resolve_hosting_model_with_source(agent, args, config_manager)
+    return hosting, model_name
+
+
+def resolve_hosting_model_with_source(
+    agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
+) -> tuple[str, str, str]:
+    """``resolve_hosting_model`` plus WHERE the hosting came from.
+
+    The third element is ``"agent"``, ``"flag"`` or ``"config"`` — the same
+    classification ``HostingUnknownError.source`` carries for the repair
+    prompt. The session stores it as ``model_source``: only a
+    ``"config"``-sourced session switches when the file's default changes,
+    because for the other two the file never chose the model (see
+    ``Session._apply_config_change``). Keyed on the HOSTING's source: a model
+    name from config under a flagged hosting is still a flag-chosen run.
     """
     # The SOURCE is tracked alongside the value, not just the value: the repair
     # offered when this turns out to be unusable writes the config file, which
@@ -465,7 +485,7 @@ def resolve_hosting_model(
             # repaired. The message is unchanged -- it names concrete model ids,
             # and the fail-fast paths still print exactly it.
             raise ModelNotConfiguredError(_no_model_message(hosting), hosting)
-    return hosting, model_name
+    return hosting, model_name, hosting_source
 
 
 def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
@@ -1491,7 +1511,9 @@ async def _prepare(
     ``cwd`` (default: process cwd) is the single working-directory source for
     the tool context, the session and MCP discovery."""
     agent = resolve_agent(args, agent_registry)
-    hosting, model_name = resolve_hosting_model(agent, args, config_manager)
+    hosting, model_name, model_source = resolve_hosting_model_with_source(
+        agent, args, config_manager
+    )
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
@@ -1751,6 +1773,9 @@ async def _prepare(
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,
+        # Whether a later ``hosting``/``model_name`` edit switches this session
+        # (config-sourced) or only prints a keep notice (agent/flag).
+        model_source=model_source,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,

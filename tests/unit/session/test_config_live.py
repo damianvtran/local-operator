@@ -17,6 +17,7 @@ Nothing here waits on the clock: ``poll_now()`` is the tick.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, cast
 
 import pytest
@@ -104,10 +105,27 @@ class RebindableStream:
 
 
 def make_session(tmp_path, stream, **kwargs) -> Session:
+    # Both web tools OFFERED at build, the way the factory builds a session on
+    # default config, so the ``web_*.enabled`` probes can observe a disable as
+    # the tool leaving the inventory at the next turn boundary.
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    tools = kwargs.pop(
+        "tools",
+        create_tools(
+            ToolContext(
+                cwd=str(tmp_path),
+                web_search_settings={"enabled": True},
+                web_fetch_settings={"enabled": True},
+            ),
+            enabled=("web_search", "web_fetch"),
+        ),
+    )
     return Session(
         model=MODEL,
         stream_fn=stream,
-        tools=[],
+        tools=tools,
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
         **kwargs,
@@ -171,6 +189,38 @@ def compaction_of(session: Session) -> CompactionSettings:
     settings = session._compaction_settings
     assert isinstance(settings, CompactionSettings)
     return settings
+
+
+async def _settled_model(session: Session) -> ModelSpec:
+    """``session.model`` after the background model adopt has landed.
+
+    ``_apply_config_change`` spawns the switch (``build_model_spec`` may hit
+    the network for a real provider), so the observer AWAITS the session's
+    background tasks rather than the clock. The probe table's other observers
+    are sync; the live-apply test awaits whatever an observer returns.
+    """
+    import asyncio
+
+    pending = [task for task in session._background_tasks if not task.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return session.model
+
+
+async def _settled_model_attr(session: Session, attr: str) -> Any:
+    return getattr(await _settled_model(session), attr)
+
+
+def _web_tool_offered(session: Session, name: str) -> bool:
+    """Whether ``name`` is in the inventory after the next turn-boundary reconcile.
+
+    Calls the same hook ``_run_turn`` calls, so the probe measures the real
+    path rather than the dirty flag. The probe value is ``False`` (disabled),
+    so the session under test must START with the tool offered — see
+    ``_web_session`` for how the table's session is built.
+    """
+    session._reconcile_web_tools()
+    return any(tool.name == name for tool in session._tools)
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +348,33 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
     "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
+    # -- model: the session's OWN spec, after the background adopt settles -----
+    # Observed on ``session.model``, not the snapshot: what makes these keys
+    # live is that a config-sourced session SWITCHES. ``model_name`` probes
+    # against the ``test`` provider the session boots on; ``hosting`` moves to
+    # ``openai`` with no ``model_name`` set, which exercises the
+    # default-model fallback and resolves from the static registry (verified
+    # with sockets blocked: ~4 ms, no network). The observer awaits the
+    # background adopt so the switch has landed before it reads.
+    "hosting": ("openai", lambda s, w: _settled_model_attr(s, "provider")),
+    "model_name": ("probe-model", lambda s, w: _settled_model_attr(s, "model_id")),
+    # -- web_tools: the inventory after the next turn boundary -----------------
+    # Observed through the SAME reconcile the turn start runs, on a session
+    # whose inventory starts with both tools, so a disable is seen as the tool
+    # leaving. The per-call gate inside the tools is covered separately.
+    "web_search.enabled": (False, lambda s, w: _web_tool_offered(s, "web_search")),
+    "web_fetch.enabled": (False, lambda s, w: _web_tool_offered(s, "web_fetch")),
 }
 
-#: LIVE sections whose keys have no session-side apply because the TUI owns
+#: LIVE sections whose keys have no session-side apply because a HOST owns
 #: them (``appearance``: ``OperatorApp._on_config_change`` applies
 #: ``display.*``/``tui.theme``; covered in the TUI suite).
+#:
+#: ``approvals`` is here because the approval MODE lives in the host's gate,
+#: not in the ``Session``: the runtime's ``OwnedSessionHandle._auto_approve``
+#: (``tests/unit/session/runtime/test_owned_approvals_live.py``) and the
+#: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
+#: The session only holds whatever gate closure the host installed.
 #:
 #: ``runtime`` is here for the same reason and a sharper one: its keys are
 #: read at COMMAND time by the surface that acts on them, so there is no
@@ -313,7 +385,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: moment a question parks — a different process from the ``Session`` this
 #: file drives. Both are covered where they live: the resume behaviour in the
 #: TUI suite, the gate policy in ``tests/unit/session/runtime/test_parked_gates.py``.
-TUI_OWNED_LIVE_SECTIONS = {"appearance", "runtime"}
+HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals"}
 
 
 def _live_sections() -> set[str]:
@@ -336,21 +408,33 @@ async def test_a_write_from_another_process_reaches_the_running_session(
     # `ConfigManager`). Pointing the env at the watched directory is what makes
     # those probes read the file under test instead of the operator's real one.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
-    ConfigManager(config_dir).set_config_value("hosting", "")  # a real file to diff against
+    # A real file to diff against. ``hosting`` is seeded to the session's own
+    # provider (``MODEL`` is ``test/m``) so the ``model_name`` probe exercises
+    # the common case — a bare ``model_name`` edit with ``hosting`` unchanged —
+    # and resolves to a provider that needs no network.
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
-    watcher = ConfigWatcher(config_dir)
+    # Through the process registry, not a bare ``ConfigWatcher``: the web-tool
+    # reconcile reads ``existing_watcher()`` for its snapshot, which is the
+    # contract the module docstring imposes on every listener-side consumer.
+    watcher = process_watcher(config_dir)
     subscribe(session, watcher)
+
+    async def observed() -> Any:
+        result = observe(session, watcher)
+        return await result if inspect.isawaitable(result) else result
+
     try:
-        before = observe(session, watcher)
+        before = await observed()
         assert before != value, f"{key}: the session already held the probe value"
 
         write_from_another_process(config_dir, key, value)
         change = watcher.poll_now()
 
         assert change is not None and key in change.changed_keys
-        assert observe(session, watcher) == value
+        assert await observed() == value
     finally:
         await session.dispose()
 
@@ -366,7 +450,7 @@ def test_every_live_section_is_exercised_and_every_probe_is_live() -> None:
     probed_sections = {
         cast(settings_io.Setting, settings_io.resolve_key(k)).section for k in LIVE_KEY_PROBES
     }
-    unprobed = live - probed_sections - TUI_OWNED_LIVE_SECTIONS
+    unprobed = live - probed_sections - HOST_OWNED_LIVE_SECTIONS
     assert not unprobed, f"LIVE sections with no live-apply probe: {sorted(unprobed)}"
     mislabelled = {
         k
@@ -386,9 +470,8 @@ def test_every_live_section_is_exercised_and_every_probe_is_live() -> None:
 #: legitimate. Kept explicit so the guard below fails by name on a new one
 #: rather than being widened silently.
 #:
-#: ``subagents.*`` cannot appear here — it is LIVE. ``web_*.enabled`` cannot
-#: either: the session must NOT react to them (the tool surface is build-time),
-#: which is the whole reason they were split into ``web_tools``.
+#: ``subagents.*`` and ``web_*.enabled`` cannot appear here — both are LIVE
+#: now, so the honesty test above covers them from the other direction.
 _NON_LIVE_KEYS_ALLOWED_TO_APPLY: dict[str, str] = {}
 
 
@@ -508,19 +591,34 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
         await session.dispose()
 
 
-def test_the_deliberately_build_time_keys_stay_new_sessions() -> None:
-    """The design keeps these OUT of live on purpose; a future relabel must be
-    a decision, not a side effect of the section split."""
+def test_the_scope_of_every_reclassified_key_is_the_one_its_consumer_earns() -> None:
+    """The reversal of the original build-time design, pinned as a DECISION.
+
+    ``tool_approval_mode``, ``hosting``/``model_name`` and ``web_*.enabled``
+    were kept out of LIVE on purpose and are now IN it on purpose: the gate,
+    the model and the web tools all follow the file in a running session. A
+    future relabel in either direction must be a decision, not a side effect
+    of a section split. ``auto_save_conversation`` and ``session.cleanup.*``
+    go the other way — nothing reads them after process start, so the honest
+    label is NEW_LAUNCH, not the "new sessions" the old section claimed.
+    """
     scope_of = {s.name: s.scope for s in settings_io.SECTIONS}
-    for key in ("tool_approval_mode", "auto_save_conversation"):
+    for key, section in (
+        ("tool_approval_mode", "approvals"),
+        ("hosting", "model"),
+        ("model_name", "model"),
+        ("web_search.enabled", "web_tools"),
+        ("web_fetch.enabled", "web_tools"),
+    ):
         setting = settings_io.resolve_key(key)
         assert setting is not None
-        assert scope_of[setting.section] is settings_io.Scope.NEW_SESSIONS, key
-    for key in ("web_search.enabled", "web_fetch.enabled"):
+        assert setting.section == section, key
+        assert scope_of[section] is settings_io.Scope.LIVE, key
+    for key in ("auto_save_conversation", "session.cleanup.enabled"):
         setting = settings_io.resolve_key(key)
         assert setting is not None
-        assert setting.section == "web_tools"
-        assert scope_of["web_tools"] is settings_io.Scope.NEW_SESSIONS
+        assert setting.section == "session", key
+        assert scope_of["session"] is settings_io.Scope.NEW_LAUNCH, key
 
 
 # ---------------------------------------------------------------------------
@@ -711,3 +809,278 @@ async def test_a_subagent_follows_config_and_does_not_alias_its_parents_seed(
         await parent.dispose()
         assert watcher._listeners == []
         await watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# 9. The model rule: follow the file iff the file chose the model
+# ---------------------------------------------------------------------------
+
+
+#: Events captured per session by ``_capture_events``, keyed by id.
+_EVENTS: dict[int, list[Any]] = {}
+
+
+def _notices(session: Session) -> list[str]:
+    """Texts of every ``NoticeEvent`` the session emitted, via a real subscriber."""
+    return [getattr(e, "text", "") for e in _EVENTS[id(session)] if e.type == "notice"]
+
+
+def _capture_events(session: Session) -> None:
+    events: list[Any] = []
+    _EVENTS[id(session)] = events
+    session.subscribe(events.append)
+
+
+async def _settle(session: Session) -> None:
+    import asyncio
+
+    for _ in range(3):
+        pending = [t for t in session._background_tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_model_name_edit_alone_switches_a_config_sourced_session(
+    tmp_path, monkeypatch
+) -> None:
+    """The operator's exact report: ``/model default`` (or ``lop config edit
+    model_name``) in one pane printed "model_name needs a relaunch" in every
+    other. A bare ``model_name`` diff, ``hosting`` untouched, is the common
+    shape and must switch on its own — the pair is re-read as a whole."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "model_name", "m-next")
+        change = watcher.poll_now()
+        assert change is not None and change.changed_keys == {"model_name"}
+        await _settle(session)
+        assert (session.model.provider, session.model.model_id) == ("test", "m-next")
+        # The receipt names both ends and the cause, and comes from the session.
+        assert any("test/m → test/m-next" in n and "config.yml" in n for n in _notices(session))
+        # Adopting the file is not the user choosing: a SECOND edit applies too.
+        write_from_another_process(config_dir, "model_name", "m-after")
+        watcher.poll_now()
+        await _settle(session)
+        assert session.model.model_id == "m-after"
+        # And the boot selector re-based, so the journal row for this switch is
+        # skipped on resume (the new default IS the boot).
+        assert session._boot_selector == "test/m-after"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_model_choice_keeps_its_model_and_says_so(tmp_path, monkeypatch) -> None:
+    """A session the user pointed somewhere with ``/model`` is not moved by a
+    default edit; it prints the keep notice naming ``/model saved``."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        session.set_model(MODEL.model_copy(update={"model_id": "chosen"}), explicit=True)
+        assert session._explicit_model_choice is True
+
+        write_from_another_process(config_dir, "model_name", "m-next")
+        watcher.poll_now()
+        await _settle(session)
+        assert session.model.model_id == "chosen"
+        keep = [n for n in _notices(session) if "keeping test/chosen" in n]
+        assert keep and "chosen with /model" in keep[0] and "/model saved" in keep[0], _notices(
+            session
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source, phrase", [("agent", "an agent profile"), ("flag", "a flag")])
+async def test_an_agent_or_flag_sourced_session_gets_a_notice_only(
+    tmp_path, monkeypatch, source: str, phrase: str
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(
+        tmp_path,
+        RebindableStream({}),
+        compaction_settings=CompactionSettings(),
+        model_source=source,
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "model_name", "m-next")
+        watcher.poll_now()
+        await _settle(session)
+        assert session.model.model_id == "m"
+        assert any(phrase in n and "keeping test/m" in n for n in _notices(session)), _notices(
+            session
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_session_never_follows_the_default_model(tmp_path, monkeypatch) -> None:
+    """Silent, not even a notice: the child's spec was chosen at spawn and a
+    review child losing its cache prefix mid-task is pure cost."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(
+        tmp_path,
+        RebindableStream({}),
+        compaction_settings=CompactionSettings(),
+        job_id="job-1",
+        model_source="child",
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "model_name", "m-next")
+        watcher.poll_now()
+        await _settle(session)
+        assert session.model.model_id == "m"
+        assert _notices(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_provider_in_config_warns_and_does_not_switch(
+    tmp_path, monkeypatch
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "hosting", "no-such-provider")
+        watcher.poll_now()
+        await _settle(session)
+        assert (session.model.provider, session.model.model_id) == ("test", "m")
+        warnings = [
+            e
+            for e in _EVENTS[id(session)]
+            if e.type == "notice" and getattr(e, "kind", "") == "warning"
+        ]
+        assert warnings and "unknown provider 'no-such-provider'" in warnings[0].text
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_writing_pane_is_a_no_op(tmp_path, monkeypatch) -> None:
+    """``/model default p/id`` in THIS session: the runtime already switched
+    (explicit) and the disk change names the model it is on. No receipt owed
+    — the `/model default` receipt was it — and no journal churn."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "model_name", "m")
+        change = watcher.poll_now()
+        assert change is not None
+        await _settle(session)
+        assert session.model.model_id == "m"
+        assert _notices(session) == []
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 10. Web tools: inventory at the turn boundary, never mid-turn
+# ---------------------------------------------------------------------------
+
+
+def _offered(session: Session) -> set[str]:
+    return {t.name for t in session._tools}
+
+
+@pytest.mark.asyncio
+async def test_web_tools_leave_and_return_at_the_turn_boundary(tmp_path, monkeypatch) -> None:
+    """The tick only marks dirty; the inventory moves when the next turn
+    starts (``_reconcile_web_tools`` is what ``_run_turn`` calls). Both
+    directions, and a re-enabled tool comes back through the same createIf
+    builder the factory used."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", "")
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        assert {"web_search", "web_fetch"} <= _offered(session)
+
+        write_from_another_process(config_dir, "web_search.enabled", False)
+        watcher.poll_now()
+        # Mid-turn view: still offered (a call already emitted must not 404).
+        assert "web_search" in _offered(session)
+        assert session._web_tools_dirty is True
+
+        session._reconcile_web_tools()
+        assert "web_search" not in _offered(session)
+        assert "web_fetch" in _offered(session)
+        assert session._web_tools_dirty is False
+
+        write_from_another_process(config_dir, "web_search.enabled", True)
+        write_from_another_process(config_dir, "web_fetch.enabled", False)
+        watcher.poll_now()
+        session._reconcile_web_tools()
+        assert "web_search" in _offered(session)
+        assert "web_fetch" not in _offered(session)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_keeps_its_spawn_inventory(tmp_path, monkeypatch) -> None:
+    """Per-call gate only for a child: no dirty mark, no reconcile."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", "")
+    session = make_session(
+        tmp_path,
+        RebindableStream({}),
+        compaction_settings=CompactionSettings(),
+        job_id="job-1",
+        model_source="child",
+    )
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "web_search.enabled", False)
+        watcher.poll_now()
+        assert session._web_tools_dirty is False
+        session._reconcile_web_tools()
+        assert "web_search" in _offered(session)
+    finally:
+        await session.dispose()
