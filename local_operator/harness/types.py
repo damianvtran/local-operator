@@ -1320,6 +1320,14 @@ class SubagentStartEvent(AgentEvent[Literal["subagent_start"]]):
     job_id: str
     label: str
     agent_id: str | None = None
+    #: The ``provider/model-id`` the child actually runs on, once known. Set
+    #: by the runner from the BUILT child (its effective label, so a resumed
+    #: child restored onto a fallback reports that fallback). ``None`` only
+    #: for emitters that predate the field. It exists so a consumer can name
+    #: the model behind a delegated review from the event alone, which is the
+    #: fact that was missing when a pinned reviewer silently ran on the
+    #: author's model and nothing on the stream said so.
+    model: str | None = None
 
 
 class SubagentProgressEvent(AgentEvent[Literal["subagent_progress"]]):
