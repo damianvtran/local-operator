@@ -595,16 +595,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # typed selector, which may have been elided to `default`.
     SlashCommand(
         "model",
-        # Terse by necessity — the description column wraps past ~55 cells at 80
-        # columns, and `Switch model; ` + the 42-cell hint measured 56 and
-        # orphaned "sessions" on its own line (design review D2). "Switch" alone
-        # keeps the row whole at 80 (49 cells) and still carries PERSIST_HINT
-        # verbatim rather than a fifth paraphrase; the command name beside it
-        # already says what is being switched. The `<provider>/<id>` shape it
-        # used to show moved to the tip pool, which has the room (`welcome.TIPS`).
-        # `/model saved` is not here for the same reason: the notice a bare
-        # `/model` prints is the surface with room for the third command.
-        f"Switch; {PERSIST_HINT}",
+        # A `/help`-specific carrier, NOT `PERSIST_HINT` verbatim: the footer
+        # hint is sized by the picker (42 cells), and every ≤12-cell lead that
+        # kept it whole here left the row a fragment (`Switch;` was 49 cells
+        # and stayed whole, but read as a broken sentence beside the
+        # `Switch color theme; …` neighbour — design review round 2, D7).
+        # `Switch model; ` + the hint measured 56 cells at 80 columns and
+        # orphaned "sessions" on its own line (D2), so the answer is a shorter
+        # sentence of its own: name the thing being switched and drop the
+        # "saves this" carrier the footer needs for its 43-cell budget. The
+        # notice a bare `/model` prints is the surface with room for the full
+        # three-route sentence; `/help` needs only the persist command's name.
+        "Switch model; /model default saves it for new sessions",
         aliases=("models",),
     ),
     # Next to `/model` because it is the same question one level down: which
@@ -16144,6 +16146,24 @@ class OperatorApp(App[None]):
         notice("starting session…", "info")
         self._run_session_transition(self._reload_session())
 
+    def _footer_persist_hint(self) -> str:
+        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+
+        The footer's half of U12. The notice above the list stops naming
+        `/model default` in the no-hosting and unknown-hosting setup variants
+        because every `/model` route refuses there — but the footer is a second
+        surface printing the same instruction, and a fix that left it advertising
+        the dead end would only move the trap one row down (visible in the U12
+        before/after frames: the notice was honest and the footer was not).
+
+        The predicate is ``_model_missing_for``, the same one `_cmd_model`'s
+        escape is gated on, so "the footer offers it" and "the command performs
+        it" cannot drift apart.
+        """
+        if self._setup_state and not self._model_missing_for:
+            return ""
+        return PERSIST_HINT
+
     def _persist_hint_notice(self) -> str:
         """The line a bare ``/model`` prints above the list.
 
@@ -16165,23 +16185,62 @@ class OperatorApp(App[None]):
         a user who did not arrive with a command in mind.
 
         The nouns are placed so each pronoun sits beside its antecedent (design
-        review D4): "this" is the model on the band, "the boot default" is
-        restated before "set it" so "it" does not have to reach back past
-        "this". "Boot default" is the ONE noun for the thing `/model default`
-        writes — the receipt says `boot default saved to …` and `/model saved`
-        refuses with `no boot default …` — so the user is never left wondering
-        whether a "saved default" and a "boot default" are two settings
-        (design review round 2, D6).
+        review D4). "Boot default" is the ONE noun for the thing `/model
+        default` writes — the receipt says `boot default saved to …` and
+        `/model saved` refuses with `no boot default …` — so the user is never
+        left wondering whether a "saved default" and a "boot default" are two
+        settings (design review round 2, D6).
+
+        CLAUSE ORDER IS A WRAP CONSTRAINT, not a preference (design review
+        round 2, D8). The old order ended on `· or set it in /settings`, and at
+        the three widths the block actually renders at — body budgets 70/69/76
+        cells for 80/100/120 columns — the fold left `/settings` alone on the
+        last row for most model labels: the row length varies with the label,
+        so a single label measuring clean proves nothing. The `/settings`
+        clause is therefore in the MIDDLE and carries the noun
+        (`/settings edits the boot default too`), which does three things at
+        once: it moves the command token off the fold, it puts the D6 noun
+        early enough that the trailing `it` has an antecedent one clause back
+        (design review round 3, D10 — with the `/model saved` clause dropped in
+        the setup state, the old `set it in /settings` left `it` reaching back
+        past `this`), and it ends the sentence on `reverts to it`, a three-word
+        tail that cannot orphan a command name. Measured over 11 representative
+        labels x the three rendered widths: zero lone-token last rows, and
+        `/settings` is never the final token at ANY body width from 38 to 90.
+        `test_the_bare_model_notice_does_not_orphan_a_route_token` pins it.
 
         The `/model saved` clause is DROPPED in the setup state (UX review
         round 2, U11): that state is by definition the one with no usable boot
         default, and `_cmd_model_saved` refuses there, so naming the route
         would advertise a dead end the app already knows about.
+
+        THE SETUP STATE HAS TWO SHAPES and they get different sentences (UX
+        review round 3, U12). In the no-model variant (`_model_missing_for`
+        set) the `/model` routes genuinely work: `_cmd_model` has an escape
+        that writes config and boots, so the persist hint is live advice. In
+        the no-hosting and unknown-hosting variants there is no model escape at
+        all — `_cmd_model`, `_cmd_model_saved` and the bare `/model default`
+        all fall through to `session is still starting…`, and #625 kept
+        Enter-on-a-row from writing config there for exactly that reason. So
+        naming `/model default` there advertises three dead ends beside the one
+        working route. Those variants get the `/settings` clause ALONE, which
+        is the route that actually resolves, and the splash's `/login` remains
+        the primary next step it always was. Pinned by
+        `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
         session = self._session
         label = session.model_label if session is not None else ""
-        back = "" if self._setup_state else " · /model saved switches back to the boot default"
-        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
+        # Named once: it is the one clause every variant below shares, and the
+        # wrap analysis above measured this exact string.
+        settings_clause = "/settings edits the boot default too"
+        if self._setup_state and not self._model_missing_for:
+            # No hosting / unknown hosting: every `/model` route refuses here,
+            # so the notice must not name one. `/settings` is the live escape.
+            routes = settings_clause
+        elif self._setup_state:
+            routes = f"{PERSIST_HINT} · {settings_clause}"
+        else:
+            routes = f"{PERSIST_HINT} · {settings_clause} · /model saved reverts to it"
         if not label:
             return routes
         return f"model: {label} — {routes}"
@@ -17012,7 +17071,7 @@ class OperatorApp(App[None]):
         notice ends the empty state — which collapses the boot composition and
         makes the centred prompt unreachable.
 
-        The notice is skipped when the ledger's LAST row already says it. The
+        The notice is skipped when the ledger's last ROW ALREADY SAYS IT. The
         message is meant to fire once per visible opening, and the editor now
         keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
         round 2, U8, where each Esc-then-edit cycle stacked another copy). This
@@ -17020,11 +17079,27 @@ class OperatorApp(App[None]):
         opens that produces nothing between them can print the hint twice,
         whatever the editor's resync does in future. Compared on the text, so
         a hint that changed (a switch landed between two opens) still prints.
+
+        THE SCAN SKIPS THE PINNED WORKING LINE (code review round 2, R12). A
+        turn in flight pins its working line to the bottom of the transcript
+        (``TranscriptView.pin_tail``) and every later append is inserted BEFORE
+        it, so mid-turn the hint never lands last and a guard reading only
+        ``blocks()[-1]`` could not match it — the deduplication silently
+        stopped applying in exactly the state where a user re-opening the list
+        while the agent works would stack copies. Walking back over the pinned
+        tail costs one comparison and makes the guard mean what its name says
+        in both states. Only the tail is skipped, not an arbitrary run: two
+        notices with a real block between them are two separate openings and
+        must both print.
         """
         message.stop()
         hint = self._persist_hint_notice()
-        blocks = self._transcript_view().blocks()
-        last = blocks[-1] if blocks else None
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        pinned = transcript.pinned_tail()
+        # The last block that is not the pinned working line — which is where a
+        # mid-turn append actually lands.
+        last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
             self._system_notice(hint)
         self._populate_model_picker()
@@ -17080,7 +17155,9 @@ class OperatorApp(App[None]):
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
             status=_status_line(
-                note, "checking providers…" if self._providers else "", PERSIST_HINT
+                note,
+                "checking providers…" if self._providers else "",
+                self._footer_persist_hint(),
             ),
         )
         if self._providers is not None:
@@ -17112,7 +17189,9 @@ class OperatorApp(App[None]):
                 rows,
                 current=self._current_selector(),
                 status=_status_line(
-                    note, f"{STALE_LIST_LABEL} all providers — {error}", PERSIST_HINT
+                    note,
+                    f"{STALE_LIST_LABEL} all providers — {error}",
+                    self._footer_persist_hint(),
                 ),
             )
             return
@@ -17120,7 +17199,7 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
+            status=_status_line(note, _catalogue_status(statuses), self._footer_persist_hint()),
         )
 
     def _publish_model_catalogue(self, session: Any) -> None:

@@ -8,12 +8,15 @@ list that is longer than the window without saying so.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
+    _PERSIST_KEYWORDS,
     MAX_VISIBLE_ROWS,
     PERSIST_HINT_PREFIX,
     ModelPicker,
@@ -575,6 +578,61 @@ def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:
     picker.set_rows(_rows())
     picker.open("zzzznope")
     assert "no matching models" in picker.render_text(90).plain
+
+
+@pytest.mark.parametrize("keyword", sorted(_PERSIST_KEYWORDS))
+def test_a_command_keyword_is_not_reported_as_a_failed_search(keyword: str) -> None:
+    """U3: the empty state must not contradict the hint one row below it.
+
+    `/model default` is what the footer advertises, and typing it narrowed the
+    catalogue to `no matching models` — the list calling its own instruction a
+    dead end. No row can ever be named `default` or `saved`: they are command
+    words `_cmd_model` consumes before any ranking happens, so an empty list is
+    the correct state for them, not a report about the catalogue.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open(keyword)
+    plain = picker.render_text(90).plain
+    assert "no matching models" not in plain, plain
+    assert f"{keyword} is a command, not a model" in plain, plain
+    # The protected hint row still renders: the two rows must not be traded off
+    # against each other, since together they are the whole explanation.
+    picker.set_rows(_rows(), status=_PERSIST_CLAUSE)
+    assert PERSIST_HINT_PREFIX in picker.render_text(90).plain
+
+
+def test_a_keyword_with_a_selector_after_it_is_still_an_ordinary_search() -> None:
+    """The keyword branch is EXACT, not a prefix.
+
+    `/model default anthropic/claude-opus-5` is a selector being typed: it has
+    no matches until it resolves, and reporting "default is a command" there
+    would describe the wrong half of what the user wrote.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open("default zzzznope")
+    plain = picker.render_text(90).plain
+    assert "no matching models" in plain, plain
+    assert "is a command, not a model" not in plain, plain
+
+
+def test_persist_keywords_match_the_words_the_command_actually_consumes() -> None:
+    """The widget cannot import ``app`` (``app`` imports it), so the keyword set
+    is a copy — and a copy is only safe while something asserts it is current.
+
+    Mirrors ``test_persist_hint_prefix_matches_app``: both guard a constant this
+    module holds because of the import direction, not because the vocabulary is
+    the picker's to define.
+    """
+    from local_operator.tui import app as app_mod
+
+    source = inspect.getsource(app_mod.OperatorApp._cmd_model)
+    for keyword in _PERSIST_KEYWORDS:
+        # The handler dispatches on the lowered argument; each keyword must
+        # appear as a literal it compares against, or the picker is describing
+        # a command that no longer exists.
+        assert f'"{keyword}"' in source, keyword
 
 
 # -- the buffer parse that drives it -----------------------------------------
