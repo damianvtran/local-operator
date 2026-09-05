@@ -1,0 +1,9 @@
+$ /bin/sh -c 'comm -12 <(echo a) <(echo a)'; echo "exit $?"
+/bin/sh: -c: line 0: syntax error near unexpected token `('
+/bin/sh: -c: line 0: `comm -12 <(echo a) <(echo a)'
+exit 2
+$ /bin/bash -c 'comm -12 <(echo a) <(echo a)'; echo "exit $?"
+a
+exit 0
+$ /bin/sh -c 'echo $BASH_VERSION'
+3.2.57(1)-release

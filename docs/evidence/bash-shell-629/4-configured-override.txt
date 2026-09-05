@@ -1,0 +1,35 @@
+$ lop config edit bash.shell /bin/sh   (isolated HOME/config dir)
+Successfully updated bash.shell to /bin/sh
+$ grep -A1 "^  bash:" config.yml
+  bash:
+    shell: /bin/sh
+$ execute_bash "comm -12 <(echo a) <(echo a)" with bash.shell=/bin/sh -> expected: POSIX-mode syntax error, exit 2
+tree: /private/tmp/lop-629/local_operator
+is_error: False
+exit code: 2
+--- stdout ---
+(empty)
+--- stderr ---
+/bin/sh: -c: line 0: syntax error near unexpected token `('
+/bin/sh: -c: line 0: `comm -12 <(echo a) <(echo a)'
+
+$ lop config edit bash.shell /bin/bash
+2026-09-05 11:45:00,305 - WARNING - config migration: session.reap_unused (flat) = false; session.reap_unused (nested) = false in /private/tmp/lop-629-evidence/iso-override/.local-operator/config.yml (backup at /private/tmp/lop-629-evidence/iso-override/.local-operator/config.yml.pre-cleanup-migration.20260905-114500); the retired reapers' opt-out is pinned off for any older runtime, and no automatic session cleanup runs unless you turn it on in /settings
+Successfully updated bash.shell to /bin/bash
+$ execute_bash "echo $BASH_VERSION" -> expected: system bash 3.2, not Homebrew 5.x
+tree: /private/tmp/lop-629/local_operator
+is_error: False
+exit code: 0
+--- stdout ---
+BASH_VERSION=3.2.57(1)-release
+a
+
+--- stderr ---
+(empty)
+$ lop config edit bash.shell ""   (unset -> auto-resolve)
+Successfully updated bash.shell to 
+BASH_VERSION=5.3.9(1)-release
+$ lop config list | grep -A1 bash.shell
+[1;32m│ bash.shell: [0m
+[1;32m│   Description: Path the bash tool runs commands with. Empty: bash on PATH, else /bin/sh.[0m
+[1;32m│ providers.lmstudio.base_url: http://localhost:1234/v1[0m
