@@ -148,6 +148,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
     "display.notifications": "tui/settings.py derives its defaults from this registry",
+    "display.dock": "tui/settings.py derives its defaults from this registry",
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
@@ -198,6 +199,7 @@ def test_display_keys_are_flat_dotted() -> None:
         "display.terminal_title",
         "display.images",
         "display.notifications",
+        "display.dock",
     }
 
 
@@ -711,6 +713,38 @@ def test_display_defaults_matches_the_tui_reader() -> None:
     from local_operator.tui import settings as tui_settings
 
     assert settings_io.display_defaults() == tui_settings._DEFAULT_NOTES
+
+
+def test_display_dock_is_a_closed_enum_whose_default_is_the_panels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#525 case 8: the dock density key.
+
+    Its default is the panel's own constant (the registry is the guarded
+    source, the constant is the panel's fallback — they must agree), its
+    value space is exactly the enum's, and a write round-trips through the
+    flat-dotted reader the panel uses.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+    from local_operator.tui.widgets.subagent_panel import DEFAULT_DOCK_DENSITY, Density
+
+    settings_reload()
+    setting = settings_io.BY_KEY["display.dock"]
+    assert setting.section == "appearance"
+    assert setting.kind is settings_io.Kind.ENUM
+    assert setting.default == DEFAULT_DOCK_DENSITY.value == "full"
+    assert [choice.value for choice in setting.choices] == [d.value for d in Density]
+    assert settings_io.display_defaults()["display.dock"] == "full"
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, "summary")
+    raw = yaml.safe_load((tmp_path / "config.yml").read_text())
+    assert raw["values"]["display.dock"] == "summary", raw
+    assert "display" not in raw["values"], "split into a nested mapping nothing reads"
+    # The facade dropped the cache, so the panel's reader sees it at once.
+    assert settings_get("display.dock", "full") == "summary"
+    settings_reload()
 
 
 def test_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:

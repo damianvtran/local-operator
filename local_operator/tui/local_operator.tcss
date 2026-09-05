@@ -1242,9 +1242,18 @@ KeyPromptBlock:focus {
     padding: 0 1;
 }
 
+/* Clickable in every density (issue 525): the caption is the one widget the panel
+ * paints in full AND summary, so it is the pointer's way to cycle the dock
+ * where the affordance row (overflow only) does not exist. Same hover ground
+ * as `#subagent-affordance` so the two controls read as one kind of thing. */
 #subagent-header {
     height: auto;
     color: $lo-dim;
+    pointer: pointer;
+}
+
+#subagent-header:hover {
+    background: $lo-overlay;
 }
 
 /* The rows container must SIZE TO ITS CONTENT, never stretch to fill the
