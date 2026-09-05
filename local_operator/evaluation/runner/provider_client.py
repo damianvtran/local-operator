@@ -51,6 +51,7 @@ from local_operator.evaluation.runner.public_reply import (
     REPLY_VERSION,
     decode_public_reply,
     is_public_reply,
+    looks_like_public_reply,
     public_reply_contract,
 )
 from local_operator.logger import get_logger
@@ -900,16 +901,17 @@ class ProviderModelClient:
             diagnostic = _rejection_prompt(str(error), observation)
             # Invalid notes are not factual memory. For envelope failures do
             # not quote their unvalidated (possibly secret) text on retries or
-            # in evidence. Legacy rejection evidence remains unchanged.
+            # in evidence. Classification cannot rely on successful decoding
+            # (a truncated reply fails) or literal keys (JSON Unicode escapes
+            # bypass the substring test), so the reserved-key scan is
+            # escape-aware and fails closed (F1, review round 1). Raw legacy
+            # rejection text is retained only where no reserved key appears.
             shown = text
             try:
                 rejected_value, _ = json.JSONDecoder().raw_decode(text.lstrip())
             except (ValueError, RecursionError):
                 rejected_value = None
-            if is_public_reply(rejected_value) or any(
-                key in text
-                for key in ('"reply_version"', '"public_observations"', '"action_batch"')
-            ):
+            if is_public_reply(rejected_value) or looks_like_public_reply(text):
                 shown = REJECTED_PUBLIC_REPLY
             self._context.append_rejection(shown, diagnostic)
             raise DecisionRejected(

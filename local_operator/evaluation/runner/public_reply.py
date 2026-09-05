@@ -27,6 +27,53 @@ def is_public_reply(value: Any) -> bool:
     return isinstance(value, Mapping) and bool(_ENVELOPE_KEYS.intersection(value))
 
 
+def looks_like_public_reply(payload: str) -> bool:
+    """Whether a REJECTED reply appears to attempt the reserved envelope.
+
+    Used only to withhold unvalidated output from corrective history and
+    rejection evidence; acceptance is unaffected and stays with the strict
+    decoder. A literal substring test is bypassed by legal JSON Unicode escapes
+    (``public_\\u006fbservations``), and full decoding fails on truncated
+    framing — exactly the combination that leaked an encoded known note before
+    review round 1 (F1). So scan the raw string-literal SPANS for reserved
+    keys: fully decodable names are compared after unescaping, and any
+    truncatable prefix (e.g. a malformed ``"public_`` remainder) fails closed.
+    Non-string positions are untouched, so legacy prose and actions-only
+    rejection replay keep their raw text.
+    """
+    in_string = False
+    escaped = False
+    start = 0
+    for index, char in enumerate(payload):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            if in_string:
+                escaped = True
+            continue
+        if char != '"':
+            continue
+        if not in_string:
+            in_string = True
+            start = index + 1
+            continue
+        in_string = False
+        span = payload[start:index]
+        try:
+            decoded = json.loads(payload[start - 1 : index + 1])
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, str) and decoded in _ENVELOPE_KEYS:
+            return True
+        if decoded is None or "\\" in span:
+            # An escaped name decodes above only when complete; an undecodable
+            # or escaped literal is conservatively tested by prefix too.
+            if any(key.startswith(span) for key in _ENVELOPE_KEYS):
+                return True
+    return False
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:

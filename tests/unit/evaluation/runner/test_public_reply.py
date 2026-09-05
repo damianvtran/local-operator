@@ -39,6 +39,7 @@ from local_operator.evaluation.runner.public_reply import (
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     decode_public_reply,
+    looks_like_public_reply,
     public_reply_contract,
     redact_public_reply,
 )
@@ -185,6 +186,119 @@ async def test_rejected_envelope_notes_are_not_replayed_as_facts(
     assert secret not in replay
     assert REJECTED_PUBLIC_REPLY in replay
     assert not stream.summary_requests
+
+
+def _escaped_envelope(raw: str, secret: str) -> str:
+    """The F1 encoding: reserved keys and the known note in JSON escapes."""
+
+    for key, escaped in (
+        ("public_observations", "public_\\u006fbservations"),
+        ("reply_version", "reply_\\u0076ersion"),
+        ("action_batch", "action_\\u0062atch"),
+    ):
+        raw = raw.replace(key, escaped)
+    return raw.replace(secret, secret.replace("fixture", "\\u0066ixture"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["truncated-end", "truncated-key", "truncated-value"])
+async def test_truncated_escaped_envelope_with_escaped_known_note_fails_closed(
+    tmp_path: Path, variant: str
+) -> None:
+    """F1 (review round 1): a truncated envelope whose reserved keys and known
+    note are JSON Unicode-escaped bypassed literal filters and leaked the note
+    into corrective context, the next provider request and rejection evidence."""
+
+    secret = "fixture-canary-note-653"
+    escaped = secret.replace("fixture", "\\u0066ixture")
+    raw = _escaped_envelope(envelope(type_payload(observation()), secret), secret)
+    if variant == "truncated-end":
+        raw = raw[:-1]  # exact F1 shape: missing the final closing brace
+    elif variant == "truncated-key":
+        raw = raw[: raw.index('"public_') + len('"public_')]  # framing dies mid-key
+    else:
+        raw = raw[: raw.index(escaped) + 6]  # framing dies inside the note
+    stream = RecordingStream(raw)
+    client = _client(stream, tmp_path)
+    turns = [EpisodeTurn(observation=observation())]
+    with pytest.raises(DecisionRejected) as error:
+        await client.decide(observation(), turns)
+    assert error.value.reply == REJECTED_PUBLIC_REPLY
+    stream.reply = finish_payload(observation())
+    await client.decide(observation(), turns)
+    replay = "\n".join(message.text for message in stream.requests[-1].messages)
+    for canary in (secret, escaped):
+        assert canary not in replay
+    assert REJECTED_PUBLIC_REPLY in replay
+
+
+@pytest.mark.asyncio
+async def test_f1_runner_repro_leaves_no_secret_in_bundle_or_replay(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The exact reviewer reproduction through the real EpisodeRunner: the
+    next request and every retained artifact stay clean, and the bundle still
+    verifies -- the fix removes the leak, it does not hide an invalid bundle."""
+
+    secret = "fixture-canary-runner-653"
+    escaped = secret.replace("fixture", "\\u0066ixture")
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        batch = _wait_reply(message)
+        if calls == 1:
+            return _escaped_envelope(envelope(batch, secret), secret)[:-1]
+        oid = json.loads(batch)["actions"][0]["observation_id"]
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "finish",
+                        "observation_id": oid,
+                        "status": "done",
+                        "reason": "complete",
+                    }
+                ]
+            }
+        )
+
+    config = build_config(tmp_path)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        redactions=RedactionSet.from_resolved_values([secret]),
+    )
+    outcome = await runner.run()
+    root = outcome.bundle_root
+    assert root is not None and len(stream.requests) >= 2
+    replay = "\n".join(m.text for m in stream.requests[1].messages)
+    for canary in (secret, escaped):
+        assert canary not in replay
+        assert not any(
+            canary.encode() in path.read_bytes() for path in root.rglob("*") if path.is_file()
+        )
+    assert verify_bundle(root).valid
+
+
+def test_reserved_key_scan_preserves_legacy_rejection_replay() -> None:
+    """No reserved key means legacy raw-text corrective replay is unchanged;
+    escaped or truncated reserved keys fail closed on undecodable output."""
+
+    assert not looks_like_public_reply("x" * 200)
+    assert not looks_like_public_reply('{"actions": [{"kind": "click"}]}')
+    assert not looks_like_public_reply('{"public_note": "not a reserved key"}')
+    assert looks_like_public_reply('{"public_\\u006fbservations": ""}')
+    assert looks_like_public_reply('{"public_observations": "')
+    assert looks_like_public_reply('{"reply_\\u0076ersion": "1.0"}')
+    assert looks_like_public_reply('{"action_batch": {"actions": []}')
 
 
 @pytest.mark.parametrize(
