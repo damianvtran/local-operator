@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
 from local_operator.evaluation.adapters.api import (
     AckResult,
     AdapterCapabilities,
@@ -67,7 +68,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.4",
+        schema_version="1.5",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -89,7 +90,7 @@ def metadata() -> AdapterMetadata:
         entry_point="tiny_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.4",
+        schema_version="1.5",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=True),
     )
 
@@ -121,7 +122,7 @@ def plan() -> CleanupPlan:
 
 def descriptor(tmp_path: Path) -> RescueDescriptor:
     return RescueDescriptor(
-        schema_version="1.4",
+        schema_version="1.5",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id="episode",
@@ -220,6 +221,8 @@ def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
 
 
 class RawSupervisor:
+    action_surface = LEGACY_ACTION_SURFACE
+
     def __init__(self, responses: list[Any]) -> None:
         self.responses = responses
         self.terminated = False
@@ -553,6 +556,61 @@ def _execute_params(current: Any) -> ExecuteParams:
         action_batch=batch,
         action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
     )
+
+
+@pytest.mark.parametrize("kind", ["paste_text", "type"])
+def test_action_admission_rejects_before_mutating_call_without_poison(
+    tmp_path: Path, kind: str
+) -> None:
+    import asyncio
+
+    from local_operator.evaluation.action_surface import (
+        ActionAdmissionError,
+        ActionSurface,
+    )
+
+    current = observation("task", "episode", 0)
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(current)
+    raw = RawSupervisor([])
+    # This is the surface installed by a successful handshake, independently
+    # of what the model client was told it could emit.
+    raw.action_surface = ActionSurface(type_text_mode="ascii")
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+    batch = ActionBatch.model_validate(
+        {
+            "protocol_version": "1.0",
+            "task_id": "task",
+            "episode_id": "episode",
+            "observation_id": current.observation_id,
+            "actions": [
+                {
+                    "kind": kind,
+                    "observation_id": current.observation_id,
+                    "text": "東京",
+                    **(
+                        {"keys": ["ctrl", "v"], "clipboard_policy": "overwrite"}
+                        if kind == "paste_text"
+                        else {}
+                    ),
+                }
+            ],
+        }
+    )
+    params = ExecuteParams(
+        operation_id="exec-paste",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+
+    async def run() -> None:
+        with pytest.raises(ActionAdmissionError):
+            await session.execute(params, timeout=1)
+        session._ensure_usable()
+
+    asyncio.run(run())
+    assert raw.calls == []
+    assert not raw.terminated
 
 
 def _adapter_error(phase: str) -> RpcRemoteError:

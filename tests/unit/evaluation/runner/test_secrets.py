@@ -337,8 +337,8 @@ async def test_value_reaching_the_bundle_is_refused_by_the_canaried_writer(
     class _Leaky(ScriptedModel):
         """Smuggles the value into a model_response through ``stop_reason``."""
 
-        async def decide(self, observation: Any, history: Any) -> Any:
-            decision = await super().decide(observation, history)
+        async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+            decision = await super().decide(observation, history, **kwargs)
             return decision.model_copy(update={"stop_reason": SHORT_CANARY})
 
     adapter = FakeAdapter(tmp_path, episode_id)
