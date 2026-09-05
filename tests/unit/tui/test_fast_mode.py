@@ -294,7 +294,10 @@ class PublishingFastSession(FastSession):
 
     def __init__(self, provider: str = "anthropic", model_id: str = "claude-opus-5") -> None:
         super().__init__(provider, model_id)
-        from local_operator.session.frontend_state import FrontendSessionState, FrontendStateStore
+        from local_operator.session.frontend_state import (
+            FrontendSessionState,
+            FrontendStateStore,
+        )
 
         self._store = FrontendStateStore(
             FrontendSessionState(session_id="fast-pub", epoch="e1", selected_model=self._spec)
