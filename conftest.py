@@ -25,7 +25,8 @@ original ``HOME`` captured at import:
 
 * ``shutil.rmtree``, ``os.rmdir``, ``os.removedirs``, ``os.rename``,
   ``os.replace``, ``os.renames``, ``shutil.move``, ``pathlib.Path.rmdir``,
-  ``pathlib.Path.rename`` and ``pathlib.Path.replace`` are WRAPPED for the
+  ``pathlib.Path.rename``, ``pathlib.Path.replace``, and the file removers
+  ``os.unlink``, ``os.remove``, ``pathlib.Path.unlink`` are WRAPPED for the
   whole session to raise :class:`RealStoreTouched` on any argument that
   resolves under the real store, whatever ``HOME`` says at the time.
 * At session start the store's entry NAMES are snapshotted (read-only, one
@@ -190,6 +191,12 @@ def _install_real_store_guard() -> None:
     pathlib.Path.rmdir = _guarded(pathlib.Path.rmdir, positions=(0,))
     pathlib.Path.rename = _guarded(pathlib.Path.rename, positions=(0, 1))
     pathlib.Path.replace = _guarded(pathlib.Path.replace, positions=(0, 1))
+    # File removers too (QA round 1, Q5): a test that unlinks a transcript
+    # inside a real session directory empties the session without changing
+    # the entry count, so the tripwire below would never notice.
+    os.unlink = _guarded(os.unlink, positions=(0,))
+    os.remove = _guarded(os.remove, positions=(0,))
+    pathlib.Path.unlink = _guarded(pathlib.Path.unlink, positions=(0,))
 
 
 _install_real_store_guard()
