@@ -269,7 +269,11 @@ _MODEL_ROUTING_FLAP_MARKERS = (
     "is not a valid model id",
     "is not a valid model",
     "model not found",
-    "no endpoints found",
+    # OpenRouter's routing 404. Anchored with "for" so the deterministic
+    # per-request variants ("No endpoints found that support tool use",
+    # "...matching your data policy") — which describe OUR request and will
+    # 404 identically on every re-ask — stay request defects (review R3).
+    "no endpoints found for",
     "model is not available",
     "the model does not exist",
 )
@@ -2809,6 +2813,11 @@ async def stream_with_failover(
                     continue
                 if (
                     retry.enabled
+                    # Only the request KIND: a relayed 404 that clients.py has
+                    # already reclassified transient owns the transport retry
+                    # ladder below, and letting it through here as well would
+                    # spend both budgets on one failure (review R2).
+                    and exc.kind == "request"
                     and is_model_routing_flap(exc, spec)
                     and model_flap_retries < MAX_MODEL_FLAP_RETRIES
                 ):

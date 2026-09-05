@@ -1066,6 +1066,42 @@ def test_model_routing_flap_predicate_is_narrow(monkeypatch) -> None:
     assert not is_model_routing_flap(ProviderError(400, "bad request"), served)
     assert not is_model_routing_flap(ProviderError(502, "model not found"), served)
     assert not is_model_routing_flap(ProviderError(429, "model not found"), served)
+    # OpenRouter's per-request routing 404s describe OUR request (review R3).
+    assert not is_model_routing_flap(
+        ProviderError(404, "No endpoints found that support tool use"), served
+    )
+    assert is_model_routing_flap(ProviderError(404, "No endpoints found for qwen/x"), served)
+
+
+async def test_relayed_transient_404_does_not_also_spend_the_flap_budget(monkeypatch) -> None:
+    """A 404 already classified ``transient`` (clients.py's relayed-upstream
+    reclassification) owns the transport retry ladder; the flap arm must not
+    add its own three re-asks in front of it (review R2). The body is chosen
+    to MATCH a flap marker on a served id, so the only thing keeping the arm
+    off is the ``kind == "request"`` gate. The ladder gets ``maxRetries: 1``
+    (two attempts); the arm firing would add up to three more."""
+    import local_operator.providers.failover as fo
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-4o"})
+    calls = {"n": 0}
+
+    def relayed(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        calls["n"] += 1
+        raise ProviderError(404, "model not found", retryable=True, kind="transient")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(relayed)
+
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {}}}
+    with pytest.raises(ProviderError):
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+        ):
+            pass
+    assert calls["n"] == 2, "transient ladder only: one attempt plus one retry, no flap re-asks"
 
 
 async def test_fallback_request_400_still_walks() -> None:
