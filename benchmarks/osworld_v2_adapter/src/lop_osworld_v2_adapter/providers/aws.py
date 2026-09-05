@@ -36,6 +36,12 @@ release-pinned AMI in a region where it does not exist.
 
 Every boto3 / HTTP call is blocking and runs under ``asyncio.to_thread`` so the
 worker's event loop keeps answering the parent's RPC while a waiter sleeps.
+
+``allocate`` also runs one GUEST PREPARATION step between readiness and
+upstream's reset: the released AMI ships ~93% full and its own snapd fills the
+remainder on a clock, which destroyed 7 of 8 episodes in a 424-466s window. See
+``guest_disk`` for the measurements, for why ffmpeg was NOT the cause, and for
+why that step can never fail an allocation.
 """
 
 from __future__ import annotations
@@ -45,12 +51,13 @@ import json
 import logging
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from lop_osworld_v2_adapter import scoring
+from lop_osworld_v2_adapter import guest_disk, scoring
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
     EVIDENCE_INSTANCE_TERMINATED,
@@ -90,6 +97,16 @@ _TERMINATE_TARGET_ARN = "arn:aws:scheduler:::aws-sdk:ec2:terminateInstances"
 # ``SetupController.ensure_ready`` probes (setup.py:58-70).
 GUEST_PORT = 5000
 _READY_PATH = "/terminal"
+# The guest's command endpoint. ``shell: false`` means the server execs the argv
+# directly, so a pipeline arrives as an explicit ``bash -c`` -- the same shape
+# upstream's own SetupController posts (setup.py:418).
+_EXECUTE_PATH = "/execute"
+
+# Where the episode's guest-preparation evidence is written, inside the
+# episode-owned cache root the adapter mints in ``reset_start``. It sits there
+# rather than in the artifact root because the bundle verifier refuses any entry
+# in the artifact root that is not a digest-named artifact.
+GUEST_PREPARATION_FILENAME = "guest-preparation.json"
 
 
 class AllocationError(RuntimeError):
@@ -117,14 +134,21 @@ class _Clients:
     """The injectable I/O surface, so tests use botocore's Stubber.
 
     ``ec2`` and ``scheduler`` are boto3 clients; ``http_get`` takes a URL and
-    a timeout and returns the HTTP status code (or raises). Production builds
-    all three from the credentials; tests hand in stubbed clients and a fake
-    prober.
+    a timeout and returns the HTTP status code (or raises); ``http_post_json``
+    posts a JSON body and returns the decoded response (or raises). Production
+    builds all four from the credentials; tests hand in stubbed clients and
+    fake probers.
+
+    ``http_post_json`` is REQUIRED rather than optional-with-a-default: it is
+    what drives the guest's control server for pre-episode disk reclamation
+    (``guest_disk``), and a default that quietly did nothing would make that
+    preparation silently absent in exactly the builds nobody checked.
     """
 
     ec2: Any
     scheduler: Any
     http_get: Callable[[str, float], int]
+    http_post_json: Callable[[str, dict[str, Any], float], dict[str, Any]]
 
 
 def build_clients(credentials: AwsCredentials, region: str) -> _Clients:
@@ -149,10 +173,24 @@ def build_clients(credentials: AwsCredentials, region: str) -> _Clients:
     def http_get(url: str, timeout: float) -> int:
         return int(requests.get(url, timeout=timeout).status_code)
 
+    def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=timeout,
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+        decoded = response.json()
+        if not isinstance(decoded, dict):
+            raise ValueError("guest control server returned a non-object body")
+        return decoded
+
     return _Clients(
         ec2=session.client("ec2", region_name=region),
         scheduler=session.client("scheduler", region_name=region),
         http_get=http_get,
+        http_post_json=http_post_json,
     )
 
 
@@ -361,7 +399,69 @@ class AwsProvider:
             ) from error
         self._schedule_created = True
         self._public_ip = await asyncio.to_thread(self._wait_ready, instance_id)
+        # BEFORE upstream's reset, and therefore before the episode's first
+        # observation: the guest ships ~93% full and its own snapd fills the
+        # rest on a clock, which killed 7 of 8 episodes in a 424-466s window.
+        # See ``guest_disk`` for the measurements and for why this cannot fail
+        # the allocation.
+        await asyncio.to_thread(self._prepare_guest_disk, plan)
         await asyncio.to_thread(self._start_desktop_env, plan, task)
+
+    def _run_guest_command(
+        self, command: Sequence[str], timeout: float
+    ) -> guest_disk.CommandResult:
+        """One command in the guest, through its own control server.
+
+        Raises on any transport failure; ``guest_disk`` catches that and records
+        the guest as unreachable. The response shape is upstream's own
+        (``{"status", "output", "error", "returncode"}``, setup.py:425-441), and
+        a missing ``returncode`` reads as a failure rather than a success: a
+        server that did not say the command succeeded did not say it succeeded.
+        """
+
+        url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
+        body = self._clients.http_post_json(
+            url, {"command": list(command), "shell": False}, timeout
+        )
+        returncode = body.get("returncode")
+        return guest_disk.CommandResult(
+            returncode=returncode if isinstance(returncode, int) else 1,
+            stdout=str(body.get("output") or ""),
+            stderr=str(body.get("error") or ""),
+        )
+
+    def _prepare_guest_disk(self, plan: ProvisioningPlan) -> None:
+        """Reclaim the guest's root filesystem and record what happened.
+
+        Wrapped in a blanket ``except`` on purpose, on top of ``guest_disk``'s
+        own per-step fail-soft: this is a hygiene step, and the one outcome that
+        must be impossible is a housekeeping defect destroying an episode that
+        would otherwise have run. The report is still written when the
+        reclamation itself achieved nothing -- "the guest had N bytes free at the
+        start" is the fact a later environment failure is read against.
+        """
+
+        report: guest_disk.GuestDiskReport | None = None
+        try:
+            report = guest_disk.prepare_guest_disk(
+                self._run_guest_command,
+                client_password=plan.client_password,
+                clock=time.monotonic,
+            )
+        except Exception:
+            # ``prepare_guest_disk`` raises nothing by contract; this catches a
+            # contract violation (or an injected runner that misbehaves) rather
+            # than a normal failure mode, so there is no report to write.
+            return
+        if self._cache_root is None:
+            return
+        try:
+            (self._cache_root / GUEST_PREPARATION_FILENAME).write_bytes(report.to_json_bytes())
+        except OSError:
+            # An unwritable cache root is the adapter's problem to surface
+            # elsewhere (upstream writes there too); losing the hygiene report
+            # must not be the thing that ends the episode.
+            pass
 
     def _run_instance(self, plan: ProvisioningPlan) -> str:
         ec2 = self._clients.ec2
