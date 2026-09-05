@@ -14916,8 +14916,48 @@ class OperatorApp(App[None]):
             # the whole point of the interaction (the old routing opened it in
             # the owner's process, invisible to the user who asked). Choosing a
             # row still routes the switch back to the owner.
+            #
+            # It sits ABOVE the stopped-follower answer below deliberately, so
+            # that answer only ever sees a command carrying an ARGUMENT. The
+            # picker is a local widget over this terminal's own catalogue and
+            # needs no owner, so a stopped session is no reason to refuse it:
+            # placing the guard first swallowed bare ``/model`` (and its
+            # ``/models`` alias) and painted no list, a regression against
+            # 51dc347cd that design D1, QA Q9 and review round 3 all found
+            # independently. Reading which model you are on, and `/model
+            # default`'s config write, both work with no runtime at all.
             if command == "/model" and not arg:
                 self._open_model_picker()
+                return
+            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+                # A viewer that `/stop` ended keeps the owner's LAST capability
+                # list (the sync that would clear it is never coming), so a
+                # routed command reaches `route_shared_slash` and is refused
+                # with "session is reconnecting; try /<cmd> again" — a wait for
+                # something the row above just said was stopped on purpose
+                # (QA round 2, Q5). Answered here with the stopped-state
+                # notice (`/resume <id>`), the same answer the prompt path and
+                # a second `/stop` give. Gated on `is_cold` as well: the id is
+                # recorded before the socket closes, and a still-connected
+                # facade must keep routing so the owner's own reply lands.
+                #
+                # COMMAND-AGNOSTIC BY DESIGN, not by accident of placement:
+                # this answers EVERY routed command a stopped follower can
+                # reach — `/goal`, `/rename`, `/effort`, `/compact` and the
+                # ~35 others the owner advertises — because
+                # `route_shared_slash` refuses all of them identically on
+                # `client is None`, with the same misleading "reconnecting"
+                # wording. A `/model`-only guard would have fixed one command
+                # and left every neighbour telling the user to wait for an
+                # owner that is not coming back (review round 3, MINOR-1; QA
+                # Q8 measured the breadth on `/goal`, `/rename`, `/effort`).
+                # The LOCAL pullbacks above are untouched by that breadth:
+                # `/model default`, bare `/mcp` and `/team chart` set
+                # `remote_capability = None` before this branch is entered, so
+                # they never reach it, and bare `/model` is pulled back just
+                # above for the same reason.
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
                 return
 
             async def run_remote_slash() -> None:
@@ -15907,6 +15947,58 @@ class OperatorApp(App[None]):
         notice: NoticeFn,
     ) -> None:
         old_label = session.model_label
+        # The DESTINATION is derived from the spec this command resolved, never
+        # re-read from ``session.model_label`` after ``set_model``. On a local
+        # ``Session`` the two agree — ``set_model`` assigns synchronously — but
+        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # session) ``set_model`` only schedules the request as a task and
+        # ``model_label`` keeps reading the owner's frontend-state sync, which
+        # lands on a later tick. Re-reading there printed
+        # ``model: X → X (this session)`` for a switch that DID happen: the
+        # band and the incident were right and the receipt named the old
+        # model. The effort/fast-mode copies below change neither half of the
+        # identity, so this is the same pair ``set_model`` is asked for.
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if not persist_default and bool(getattr(session, "is_cold", False)):
+            # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
+            # viewer after `/stop`) is bound to no runtime, and
+            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # anything — the same silent drop its ``set_goal`` and
+            # ``set_conversation_name`` siblings perform, and deliberately not
+            # changed there: the facade cannot raise from a synchronous setter
+            # every caller treats as fire-and-forget. Now that the receipt is
+            # built from the resolved spec rather than a re-read label, that
+            # drop would print a confident ``old → new (this session)`` for a
+            # switch that never reached anything (QA round 1, Q4). ``is_cold``
+            # is exactly the predicate the facade drops on (no client, or one
+            # that is not connected), so it is asked HERE, before the receipt,
+            # and the answer names the lever that makes the switch possible —
+            # the same wording the `/credential` cold branch uses. The persist
+            # form is exempt: its config write is what the NEXT runtime boots
+            # on, and its receipt claims a saved default, not a switch.
+            if self._stopped_session_id:
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+            elif bool(getattr(session, "_recovering", False)):
+                # `is_cold` is a superset of the drop: it is also true while
+                # the facade is redialing an owner that died. There "send a
+                # message" is not the lever — the facade's own answer for the
+                # gap is `_unavailable_reason()` ("session owner is
+                # reconnecting"), the sentence the prompt path already uses
+                # (review round 2, R2-M1).
+                reason = getattr(session, "_unavailable_reason", None)
+                self._system_notice(
+                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    "try /model again in a moment",
+                    "warning",
+                )
+            else:
+                self._system_notice(
+                    "no runtime is running for this session; "
+                    "send a message to start one, then run /model again",
+                    "warning",
+                )
+            return
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
         # what makes "switches nothing" a true statement rather than a summary
@@ -15917,9 +16009,11 @@ class OperatorApp(App[None]):
         # cleared — so "make this my default" was silently also "drop the route
         # that is currently serving me". A user who wants the fallback withdrawn
         # has the plain `/model <p>/<id>` spelling for exactly that gesture.
-        # Compared on the joined label because that is what the elided form was
-        # derived from, so the two halves cannot disagree by case or spacing.
-        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        # Compared on the joined labels — the RESOLVED spec's against the
+        # session's, both `provider/model_id` — because that is what the elided
+        # form was derived from, so the two halves cannot disagree by case,
+        # spacing, or a hosting alias the spec canonicalises.
+        write_only = persist_default and new_label == old_label
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a
             # user who dropped to `low` for cost did not mean "until I switch
@@ -16043,10 +16137,7 @@ class OperatorApp(App[None]):
             # run-on. "(this session)" is the half that answers "for how long";
             # "from the next turn" answered "starting when", which nothing had
             # asked and which the very next receipt demonstrates anyway.
-            notice(
-                f"model: {old_label} → {session.model_label} "
-                f"(this session){suffix} — {PERSIST_HINT}"
-            )
+            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -16061,12 +16152,16 @@ class OperatorApp(App[None]):
         # new model. Every spelling that switches the session owes the same
         # answer to "starting when".
         #
-        # ``old_label != session.model_label`` because re-selecting the model
-        # already in force is a no-op, and promising that "this one finishes on
-        # the old model" describes a handover that will not happen (D4). The
-        # session layer already declines to re-derive anything for a same-model
-        # write; this is the UI half of that rule.
-        if session.is_streaming and old_label != session.model_label:
+        # ``old_label != new_label`` because re-selecting the model already in
+        # force is a no-op, and promising that "this one finishes on the old
+        # model" describes a handover that will not happen (D4). The session
+        # layer already declines to re-derive anything for a same-model write;
+        # this is the UI half of that rule. Compared against the RESOLVED
+        # label, not a re-read of ``session.model_label``: on a remote session
+        # the re-read still equals ``old_label`` (see ``new_label`` above), so
+        # the mid-turn row never printed for exactly the switches it exists to
+        # qualify.
+        if session.is_streaming and old_label != new_label:
             # ``info``, matching the receipt it qualifies, NOT ``note`` (design
             # review D3). Both rows answer one action, and at ``note`` the
             # subordinate half measured 8.62:1 against the receipt's 4.55:1 —
@@ -21542,6 +21637,10 @@ class OperatorApp(App[None]):
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
             )
         old_label = session.model_label
+        # Destination from the RESOLVED spec, not a re-read of the session's
+        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # ``set_model`` asynchronously and its label follows the owner's sync.
+        new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
             self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
             explicit=True,
@@ -21554,10 +21653,7 @@ class OperatorApp(App[None]):
         # repaints from the canonical update — the receipt below only has to
         # reach the invoker. Mid-turn timing is stated by the owner-side
         # notice path (the streamed turn's own events carry it).
-        text = (
-            f"model: {old_label} → {session.model_label} "
-            f"(this session){suffix} — {PERSIST_HINT}"
-        )
+        text = f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}"
         if warning:
             text = f"{text}\n{warning}"
         return SlashResult(kind="notice", text=text, style="info")

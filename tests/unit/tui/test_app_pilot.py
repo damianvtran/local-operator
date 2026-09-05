@@ -9021,6 +9021,357 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     assert qualifier._token == receipt._token, (qualifier._token, receipt._token)
 
 
+class _AsyncLabelSession(FakeSession):
+    """A session whose label follows ``set_model`` only LATER, as ``RemoteSession``'s
+    does: there ``set_model`` schedules the owner request as a task and
+    ``model_label`` reads the frontend-state sync that lands on a later tick.
+    The label here never moves on its own, which is the sharpest form of that
+    gap — a receipt that re-reads the label after the call sees the old model.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._label = "anthropic/claude-opus-5"
+        self.requested: list[tuple[str, str]] = []
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    def set_model(self, model, *, explicit: bool = False) -> None:
+        self.requested.append((model.provider, model.model_id))
+
+
+@pytest.mark.asyncio
+async def test_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The arrow's right-hand side is the model the user ASKED for, even when the
+    session's own label has not caught up yet.
+
+    Operator report: on a terminal attached to another owner's session,
+    ``/model anthropic/claude-fable-5-1`` printed ``model: anthropic/claude-opus-5
+    → anthropic/claude-opus-5 (this session)`` while the band and the
+    model-switch incident correctly showed the new model. The receipt re-read
+    ``session.model_label`` after ``set_model``, which on a ``RemoteSession`` is
+    still the pre-switch value; the destination has to come from the spec the
+    command resolved.
+    """
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert session.model_label == "anthropic/claude-opus-5", "the fake's label must not have moved"
+    assert (
+        _unwrapped("model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)")
+        in text
+    ), text
+    assert _unwrapped("claude-opus-5 → anthropic/claude-opus-5") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_switch_row_prints_before_a_remote_label_lands() -> None:
+    """The mid-turn qualifier fires on a real change of model, judged against the
+    RESOLVED destination — not against a re-read label that, on a remote
+    session, still equals the old one and made the guard read as "no change".
+    """
+    session = _AsyncLabelSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
+
+
+class _ColdAsyncLabelSession(_AsyncLabelSession):
+    """The async-label fake as a COLD viewer: ``RemoteSession.set_model`` with no
+    client returns without sending anything, so nothing here is requested."""
+
+    @property
+    def is_cold(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
+    """A cold viewer has no runtime to switch; the answer names that, not a receipt.
+
+    QA round 1, Q4: before the receipt was built from the resolved spec the
+    cold drop printed ``old → old`` (wrong, but not a claim); built from the
+    spec it would print ``old → new (this session)`` for a switch that reached
+    nothing, with the band still on the old model. ``is_cold`` is the same
+    predicate the facade drops on, so the app asks it before printing.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("no runtime is running for this session") in text, text
+    assert _unwrapped("run /model again") in text, text
+    assert _unwrapped("→") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+class _StoppedFollowerSession(_AsyncLabelSession):
+    """The shape a real follower is in after ``/stop``: the socket is closed
+    (``is_cold``) but ``frontend_state`` still carries the owner's LAST
+    capability list, because the sync that would clear it is never coming. A
+    routed slash therefore reaches ``route_shared_slash``, which refuses with
+    the pre-existing "reconnecting" wording (QA round 2, Q5 measured this on
+    the socket rig: cell C2).
+    """
+
+    def __init__(self, *, cold: bool = True, commands: tuple[str, ...] = ("model",)) -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            CommandScope,
+            FrontendSessionState,
+            SlashCapability,
+        )
+
+        self._cold = cold
+        self.routed: list[tuple[str, str]] = []
+        # ``commands`` is parametrised because the pre-route answer is
+        # COMMAND-AGNOSTIC: the owner advertises ~35 authoritative slashes and
+        # the facade refuses all of them identically once the socket is gone,
+        # so a fixture that can only advertise ``model`` would let the breadth
+        # regress to a `/model` special case unnoticed (review round 3,
+        # MINOR-1).
+        self.frontend_state = FrontendSessionState(
+            session_id=self.session_id,
+            epoch="owner",
+            slash_capabilities=[
+                SlashCapability(
+                    command=name, scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+                )
+                for name in commands
+            ],
+        )
+
+    @property
+    def is_cold(self) -> bool:
+        return self._cold
+
+    async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+        self.routed.append((command, args))
+        if self._cold:
+            raise ConnectionError(f"session is reconnecting; try /{command} again in a moment")
+        return {"kind": "notice", "text": f"owner ran /{command} {args}", "style": "info"}
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_stopped_follower_names_the_reopen_command_before_routing() -> None:
+    """After ``/stop`` a routed ``/model`` answers with ``/resume <id>``, not
+    "reconnecting".
+
+    The stale capability list would route the command to an owner that was
+    stopped on purpose, and the facade's refusal ("session is reconnecting;
+    try /model again in a moment") tells the user to wait for something the
+    row above said is not coming. The stopped id is recorded before the socket
+    closes, so the app consults it ahead of the routing seam.
+    """
+    session = _StoppedFollowerSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_bare_model_on_a_stopped_follower_still_opens_the_picker() -> None:
+    """A bare ``/model`` is not a switch: it opens the INVOKING terminal's own
+    picker, which reads this machine's catalogue and needs no owner at all.
+
+    The round-2 pre-route answer was placed above the picker pullback and so
+    swallowed the bare form (and its ``/models`` alias), painting a refusal
+    where 51dc347cd painted a list — design D1, QA Q9 and review round 3 found
+    the same regression independently. The pullback now sits first, so the
+    stopped answer only ever sees a command carrying an argument.
+    """
+    session = _StoppedFollowerSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model")
+        for _ in range(10):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        text = _unwrapped(_transcript_text(app))
+        picker_open = editor.model_picker.is_open()
+    assert picker_open, editor.text
+    assert session.routed == [], "browsing a local catalogue must not route"
+    assert _unwrapped("this session was stopped") not in text, text
+    # The concrete switch a chosen row submits still gets the stopped answer:
+    # the argument gate moves the bare form only.
+    assert _unwrapped("/resume abc123def456") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_follower_answers_every_routed_command_not_only_model() -> None:
+    """The pre-route answer is command-agnostic by design.
+
+    ``route_shared_slash`` refuses every authoritative slash identically once
+    the client is gone, with the same "reconnecting" wording, so a
+    ``/model``-only guard would have fixed one command and left ``/goal``,
+    ``/rename``, ``/effort`` and ~35 neighbours telling the user to wait for an
+    owner that was stopped on purpose (review round 3 MINOR-1; QA Q8 measured
+    the breadth on the socket rig). Pinned with a SECOND command so the
+    generalisation reads as designed rather than accidental.
+    """
+    session = _StoppedFollowerSession(commands=("model", "goal"))
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/goal ship the receipt fix")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_with_a_stopped_id_names_the_reopen_command() -> None:
+    """``_cmd_model``'s own stopped branch, on the shape that actually reaches it.
+
+    The pre-route answer intercepts a follower that still advertises the
+    owner's stale capabilities, so it never enters ``_cmd_model``. The branch
+    is NOT dead in production: a cold viewer advertising NO capabilities plus a
+    recorded stopped id falls through to the local handler and is answered
+    there. Review round 3 MINOR-2 found that shape had lost its last test when
+    the round-1 test was re-pointed at ``_StoppedFollowerSession``; this pins
+    it again by fixture rather than by prose.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_connected_follower_with_a_stale_stopped_id_still_routes() -> None:
+    """The pre-route answer is gated on ``is_cold`` too: a facade that is still
+    connected must keep routing so the owner's own reply lands, even if a
+    stopped id from an earlier life of this app is somehow still set."""
+    session = _StoppedFollowerSession(cold=False)
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        for _ in range(20):
+            await pilot.pause()
+            if session.routed:
+                break
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [("model", "anthropic/claude-fable-5-1")], session.routed
+    assert _unwrapped("owner ran /model") in text, text
+    assert _unwrapped("this session was stopped") not in text, text
+
+
+class _RecoveringAsyncLabelSession(_ColdAsyncLabelSession):
+    """Cold because the owner DIED and the facade is redialing it, not because
+    nothing was ever bound: ``_recovering`` is set and the facade's own answer
+    for the gap is ``_unavailable_reason()``."""
+
+    _recovering = True
+
+    def _unavailable_reason(self) -> str:
+        return "session owner is reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_switch_while_the_owner_is_being_recovered_says_reconnecting() -> None:
+    """Review round 2, R2-M1: "send a message to start one" is the wrong lever
+    while the facade is already redialing; the gap's own sentence is used."""
+    session = _RecoveringAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("session owner is reconnecting; try /model again in a moment") in text, text
+    assert _unwrapped("send a message to start one") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_model_default_on_a_cold_viewer_still_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persist form is exempt from the cold refusal: its write is what the
+    NEXT runtime boots on, and its receipt claims a saved default, not a switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model default anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
+    assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_routed_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The routed ``/model`` (the owner-loop path a phone or a peer terminal
+    resolves through) formats the same receipt and had the same re-read."""
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        result = await app.run_slash_authoritative("model", "anthropic/claude-fable-5-1")
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert "model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)" in (
+        result["text"]
+    ), result
+
+
 @pytest.mark.asyncio
 async def test_model_default_mid_turn_also_says_when_it_applies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
