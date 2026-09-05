@@ -1,0 +1,31 @@
+viewer: RemoteSession.cold  id='872443a96cf9'  is_cold=True
+        capabilities advertised: 0
+        runtime records: 0
+        _session_runs_elsewhere(): True
+--- /team lopdev ship the team fix (paste + Enter at t=0) ---
+  cold at submit:           True
+  bound afterwards:         True
+  turn ran on a real child: False (5.3s)
+  request in transcript:    False
+  team stamped on runtime:  ''
+  refused with old copy:    True
+  transcript:  | this session can list and chart teams, but not run one. /team chart <name> shows a roster
+--- /credential DEMO_TOKEN (paste + Enter at t=0) ---
+  cold at submit:               True
+  prompt opened before binding: False
+  prompt opened, viewer bound:  False / True
+  stored on the runtime:        False  names=(no credential_op on main)
+  value length pasted:          20
+  value ever painted:           True
+  'not reachable' shown:        False
+--- /model default test/mock-model (paste + Enter at t=0) ---
+  cold at submit:      True
+  refused:             True
+  config now:          hosting='test' model_name='mock'
+  transcript:  | /model default persists to the local machine's config — run it on the terminal whose launches it should govern; /model <p>/<id> switches the shared session now
+--- /agent reviewer look at this (paste + Enter at t=0) ---
+  cold at submit:        True
+  bound afterwards:      True
+  receipt rendered:      False
+  refused with old copy: True
+  transcript:  | this session can list agents, but not attach one. /agent shows the roster
