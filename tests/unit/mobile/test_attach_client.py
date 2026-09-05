@@ -284,14 +284,21 @@ async def test_a_refused_frame_is_not_reported_as_an_oversized_one(config: Path)
 
         # The real shape: the sync installs, then the follower's store refuses
         # the next ordered update (a viewer left at the wrong epoch).
+        synced = asyncio.Event()
         client = AttachClient(
             lambda p: None,
             disconnected.append,
             frontend_state=True,
-            on_frontend_sync=lambda _data: None,
+            on_frontend_sync=lambda _data: synced.set(),
             on_frontend_update=refuse,
         )
         await client.connect(record, "s1")
+        # ``connect()`` returns at the WELCOME frame, but the server subscribes
+        # this connection to the frontend only afterwards. A mutation landing in
+        # that gap is folded into the sync snapshot instead of being relayed as
+        # an update, so ``refuse`` never fires and no amount of waiting on the
+        # deadline below can produce the frame. Gate on the sync itself.
+        await asyncio.wait_for(synced.wait(), timeout=5)
         handle._frontend.mutate(goal="anything that publishes an update")
         deadline = asyncio.get_running_loop().time() + 5
         while asyncio.get_running_loop().time() < deadline and not disconnected:
