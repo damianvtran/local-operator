@@ -2055,8 +2055,19 @@ async def test_the_launch_role_and_effort_are_recorded_on_the_job(tmp_path, monk
     both. Effort is recorded here rather than derived from the resolved model
     spec because a tier does not survive that resolution — two tiers can point
     at one model, and a child on the parent's own model still ran at a chosen
-    level the band should name."""
+    level the band should name.
+
+    The tier is CONFIGURED here because a launch that names a tier now fails
+    closed when nothing is configured for it (see
+    ``test_pinned_subagent_model``): an ``effort="hi"`` that silently ran on
+    the parent's model is the incident that rule exists to prevent, so this
+    test can no longer rely on it. The parent's own selector is used so the
+    child still runs through the same ``OneShotStream``."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "config.yml").write_text(
+        f"values:\n  subagents:\n    models:\n      hi: {MODEL.provider}/{MODEL.model_id}\n"
+    )
     parent = make_session(tmp_path, OneShotStream())
 
     job_id = parent._launch_subagent(
