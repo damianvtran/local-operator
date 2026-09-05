@@ -66,4 +66,12 @@ evaluation_examples = ["UPSTREAM.json"]
 # overridden onto OSWorld. This is a resolver-level override: the resulting
 # locked set is the one the paid proof runs against, and the previous pilot
 # ran thirteen paid episodes on exactly this override without incident.
-override-dependencies = ["requests>=2.32.0"]
+# OSWorld also installs ZhipuAI 2.1.5.20250825, whose PyJWT<2.9 bound
+# conflicts with the current harness's PyJWT[crypto]>=2.10,<3 requirement.
+# Keep the harness requirement rather than downgrading it. The SDK's only JWT
+# use is HS256 token signing; its actual signing helper produces byte-identical
+# tokens under the old and current pinned versions in the offline compatibility
+# proof documented in docs/benchmarks/osworld_2/dependency-policy.md. This is an
+# explicit resolver override, not a rewrite of the upstream wheel's metadata:
+# plain pip check will still report these two intentionally superseded bounds.
+override-dependencies = ["requests>=2.32.0", "pyjwt[crypto]>=2.10,<3"]
