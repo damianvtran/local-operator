@@ -60,6 +60,9 @@ dependencies = [
     "starlette",
     "uvicorn",
     "python-multipart",
+    # The personal tunnel gateway verifies the edge's RSA proof locally;
+    # declare this directly rather than relying on the MCP transitive copy.
+    "pyjwt[crypto]>=2.10,<3",
     "websockets>=15.0.1",
     "apscheduler",
     "dill",
