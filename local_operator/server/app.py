@@ -5,13 +5,17 @@ Provides REST endpoints for interacting with the Local Operator agent
 through HTTP requests instead of CLI.
 """
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.metadata import version
-from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -22,8 +26,11 @@ from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server.desktop import require_desktop
 from local_operator.server.routes import (
     agents,
+    auth,
+    capabilities,
     chat,
     config,
     credentials,
@@ -31,6 +38,7 @@ from local_operator.server.routes import (
     jobs,
     models,
     schedules,
+    settings,
     speech,
     sse,
     static,
@@ -70,7 +78,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_console_logging()
 
     # Initialize on startup by setting up the credential and config managers
-    config_dir = Path.home() / ".local-operator"
+    from local_operator.paths import config_dir as resolve_config_dir
+
+    config_dir = resolve_config_dir()
     # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
     # CLI session path. The literal ``~/local-operator-home`` here ignored the
     # override, so a relocated home still had a stray workspace created in the
@@ -111,6 +121,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
     # Clean up on shutdown
+    desktop_auth = getattr(app.state, "desktop_auth", None)
+    if desktop_auth is not None:
+        await desktop_auth.close()
+        app.state.desktop_auth = None
     await app.state.scheduler_service.shutdown()
 
     app.state.credential_manager = None
@@ -145,6 +159,42 @@ app = FastAPI(
         {"name": "Static", "description": "Static file hosting endpoints"},
     ],
 )
+
+
+@app.middleware("http")
+async def managed_desktop_boundary(request: Request, call_next):
+    path = request.url.path
+    sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
+    legacy_control = path in {"/v1/config", "/v1/config/system-prompt", "/v1/credentials"}
+    # Explicit desktop-token mode must close the old mutation bypass too. A
+    # standalone legacy server remains wire-compatible unless opted into this
+    # mode; Electron moves these calls through the same main-process proxy.
+    if os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN") and legacy_control:
+        try:
+            require_desktop(request)
+        except HTTPException as error:
+            return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+    response = await call_next(request)
+    if sensitive or legacy_control:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def desktop_validation_error(request: Request, error: RequestValidationError):
+    # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
+    # protects model dumps, not failures before a model was constructed.
+    if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
+        os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN")
+        and request.url.path in {"/v1/config", "/v1/credentials", "/v1/config/system-prompt"}
+    ):
+        return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
+    return await request_validation_exception_handler(request, error)
+
+
+app.include_router(capabilities.router)
+app.include_router(auth.router)
+app.include_router(settings.router)
 
 # Add CORS middleware
 app.add_middleware(

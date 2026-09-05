@@ -327,7 +327,9 @@ class ProviderController:
 
         return _callbacks_interactive(definition)
 
-    async def login(self, provider_id: str) -> str:
+    async def login(
+        self, provider_id: str, *, open_browser: Callable[[str], None] | None = None
+    ) -> str:
         """Run the provider's login flow and report a human summary.
 
         Must be called with the terminal yielded to the flow (a Textual app
@@ -343,7 +345,13 @@ class ProviderController:
 
         factory = self._login_callbacks or self._default_callbacks
         callbacks = factory(definition)
-        result = await definition.login(callbacks)
+        # Desktop hosts hand the URL to their own main-process browser opener.
+        # Inject it per flow: changing webbrowser globally would steal another
+        # session's concurrent login. Device flows only publish their URL.
+        options: dict[str, Any] = {}
+        if open_browser is not None and definition.callback_port is not None:
+            options["open_browser"] = open_browser
+        result = await definition.login(callbacks, **options)
 
         storage = definition.store_credentials_as or provider_id
         if isinstance(result, str):

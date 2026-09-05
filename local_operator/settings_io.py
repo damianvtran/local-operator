@@ -49,6 +49,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import functools
+import math
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -1314,12 +1315,17 @@ def validate(setting: Setting, value: Any) -> str | None:
             # `choices_source` cannot resolve — the TUI-less install the source
             # fails closed for.
             return "this setting's choices could not be read on this install"
-        if value not in [choice.value for choice in choices]:
+        # bool and int compare equal in Python, but are distinct JSON choices.
+        if not any(
+            type(value) is type(choice.value) and value == choice.value for choice in choices
+        ):
             return f"expected one of: {', '.join(str(c.label) for c in choices)}"
         return None
     if setting.kind is Kind.LIST:
         if not isinstance(value, list):
             return "expected a comma-separated list"
+        if any(not isinstance(item, str) for item in value):
+            return "expected a list of provider names"
         unknown = [item for item in value if item not in setting.members]
         if unknown:
             return f"unknown: {', '.join(str(item) for item in unknown)}"
@@ -1331,6 +1337,12 @@ def validate(setting: Setting, value: Any) -> str | None:
     if setting.kind in (Kind.INT, Kind.FLOAT):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return "expected a number"
+        # Typed HTTP edits bypass coerce(), unlike the terminal text editor.
+        # Enforce the stored type here so every writer shares the same bounds.
+        if setting.kind is Kind.INT and not isinstance(value, int):
+            return "expected a whole number"
+        if isinstance(value, float) and not math.isfinite(value):
+            return "expected a finite number"
         if setting.minimum is not None and value < setting.minimum:
             return f"must be at least {_number(setting.minimum)}"
         if setting.maximum is not None and value > setting.maximum:
