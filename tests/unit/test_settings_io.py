@@ -14,6 +14,7 @@ The two that matter most, and why:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -268,6 +269,29 @@ def test_validation_rejects_out_of_range(manager: ConfigManager) -> None:
     assert "web_search" not in manager.get_config().values or (
         manager.get_config_value("web_search", {}).get("timeout_seconds") != 500.0
     )
+
+
+@pytest.mark.parametrize("value", [1.5, float("nan"), float("inf"), -float("inf")])
+def test_numeric_settings_reject_non_finite_or_fractional_integers(value: float) -> None:
+    # HTTP clients supply typed JSON numbers, bypassing the terminal's int()
+    # parser. The shared writer must enforce the same constraint for both hosts.
+    integer = next(s for s in settings_io.SETTINGS if s.kind is settings_io.Kind.INT)
+    assert settings_io.validate(integer, value) is not None
+    if not math.isfinite(value):
+        decimal = next(s for s in settings_io.SETTINGS if s.kind is settings_io.Kind.FLOAT)
+        assert settings_io.validate(decimal, value) is not None
+
+
+def test_enum_values_do_not_accept_equal_but_different_json_types() -> None:
+    tri_state = next(
+        s
+        for s in settings_io.SETTINGS
+        if s.kind is Kind.ENUM and any(type(c.value) is bool for c in s.resolved_choices)
+    )
+    assert settings_io.validate(tri_state, 1) is not None
+    assert settings_io.validate(tri_state, True) is None
+    provider_list = next(s for s in settings_io.SETTINGS if s.kind is Kind.LIST)
+    assert settings_io.validate(provider_list, [True]) is not None
 
 
 def test_validation_rejects_unknown_enum_and_list_members(manager: ConfigManager) -> None:
