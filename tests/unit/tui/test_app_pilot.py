@@ -10855,6 +10855,15 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
 
+        # #525 case 9: the `ctrl+g` row names the three stops. A user who only
+        # ever read "expand or collapse" would not learn the panel can shrink
+        # to a row or go away; the description is 46 cells against the
+        # 47-cell budget this block's ceiling leaves a key row.
+        ctrl_g = next(row for row in keyed if row[:20].strip() == "ctrl+g")
+        description = ctrl_g[20:].strip()
+        assert description == "cycle the subagent panel: full, summary, hidden", ctrl_g
+        assert len(description) <= 47, (len(description), description)
+
 
 # -- the aside's keyboard scroll chord (D3) --------------------------------
 #

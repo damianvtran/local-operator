@@ -216,6 +216,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    Density,
     JobStats,
     SubagentPanel,
     SubagentRow,
@@ -1650,9 +1651,10 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
-        # The subagent roster's matching disclosure. `ctrl+g` is free in the
-        # app and TextArea, and bubbles so an active picker keeps first refusal.
-        Binding("ctrl+g", "toggle_subagents", "Expand/collapse subagents", show=False),
+        # The subagent dock's density cycle (full → summary → hidden, with the
+        # overflow roster as a stop inside full). `ctrl+g` is free in the app
+        # and TextArea, and bubbles so an active picker keeps first refusal.
+        Binding("ctrl+g", "toggle_subagents", "Cycle the subagent panel", show=False),
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -3113,7 +3115,10 @@ class OperatorApp(App[None]):
             # is the answer that leaves such a host exactly as it was.
             forked=bool(getattr(state, "conversation_title_forked", False)),
             streaming=bool(getattr(state, "streaming", False)),
-            subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
+            # Queued children counted, matching `_job_count("task")`: the band
+            # is the hidden dock's only liveness cue, so a follower's band must
+            # not go silent where the owner's would not (round 1, U2).
+            subagents=sum(1 for j in task_jobs if j.status == "running"),
             jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
             mcp=McpStatus(
                 configured=len(mcp_servers),
@@ -5094,6 +5099,12 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
+        # The dock density chosen for the dead conversation goes with it: the
+        # replacement session re-reads `display.dock` on its first roster and
+        # a `ctrl+g` pressed against the old children does not pin the new
+        # ones (#525 design §2).
+        if self._subagent_panel is not None:
+            self._subagent_panel.reset_density()
         return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
@@ -13753,6 +13764,8 @@ class OperatorApp(App[None]):
                 # and every block already on screen re-lays out with it. A
                 # repaint would re-ink content that has not changed colour.
                 self._sync_row_density_class()
+            elif message.key == "display.dock":
+                self._apply_dock_density()
             elif message.key.startswith("display."):
                 # The display flags are read through the cached fast path, which
                 # `settings_io` already invalidated; the widgets that resolved a
@@ -14011,31 +14024,39 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
 
         The two are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
         a tool card. Summing them would hide which kind is running.
 
-        ``queued`` is excluded to match ``AsyncJobManager``'s own running count
-        (``harness/jobs.py``): a job admitted to the ledger but held behind the
-        capacity gate carries ``status == "running"`` and has not started, so
-        counting it would report work that is not yet happening — and disagree
-        with the number the harness itself reports.
+        ``task`` INCLUDES children still queued behind the capacity gate;
+        ``bash`` does not. The asymmetry is the point. This counter is the
+        stated fallback for a dock the user has hidden with `ctrl+g` — the
+        justification for letting a live panel disappear is that the band
+        still says children exist — and excluding queued children made that
+        fallback empty for exactly the state the panel had been showing: a
+        hidden dock whose children were all queued reported nothing anywhere
+        (round 1, U2). A queued child is delegated work the user is waiting
+        on, which is the question this segment answers, whereas a queued
+        shell command still has its tool card on screen and the ``bash``
+        count stays aligned with ``AsyncJobManager``'s own running total
+        (``harness/jobs.py``).
 
         Never raises: a status segment must not be able to take the app down.
         """
         manager = getattr(self._session, "jobs", None)
         if manager is None:
             return 0
+        counts_queued = kind == "task"
         try:
             return sum(
                 1
                 for job in manager.list()
                 if job.status == "running"
                 and job.type == kind
-                and not getattr(job, "queued", False)
+                and (counts_queued or not getattr(job, "queued", False))
             )
         except Exception:
             return 0
@@ -14378,6 +14399,8 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
+        if "display.dock" in changed:
+            self._apply_dock_density()
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -16752,10 +16775,55 @@ class OperatorApp(App[None]):
                 self._repaint_themed_widgets()
 
     def action_toggle_subagents(self) -> None:
-        """``ctrl+g`` — flip the dock roster between recent and complete."""
-        if self._subagent_panel is not None and self._subagent_panel.display:
-            self._subagent_panel.toggle_expanded(enter_navigation=True)
+        """``ctrl+g`` — cycle the dock subagent panel: full, summary, hidden.
+
+        With overflow the full state has two stops (preview, then the expanded
+        roster with keyboard navigation) before it shrinks; without it the
+        first press goes straight to the summary row — which is the change
+        #525 asked for, since that press used to be a silent no-op at ≤6
+        children. ``_refresh_band`` settles the band inset and the todo budget
+        in the same frame the density changed, so the dock never paints one
+        frame at the old height.
+
+        Gated on ``_panel_holds_children`` rather than ``display``: a HIDDEN
+        panel is not displayed by definition, and the key is the only way
+        back from it.
+        """
+        panel = self._subagent_panel
+        if panel is not None and (panel.display or self._panel_holds_children(panel)):
+            panel.toggle_expanded(enter_navigation=True)
             self._refresh_band()
+
+    @staticmethod
+    def _panel_holds_children(panel: SubagentPanel) -> bool:
+        """Whether a hidden panel would show rows if brought back.
+
+        Through the panel's own ``has_children`` rather than its private
+        ``_rows``: every other app→panel call here goes through a public
+        member, and the accessor is what the todo panel's band budget needs
+        anyway (round 1, F5).
+        """
+        return panel.density is Density.HIDDEN and panel.has_children
+
+    def _apply_dock_density(self) -> None:
+        """Live-apply a changed ``display.dock`` to the mounted panel.
+
+        Honest LIVE scope for the Appearance section (#525 design §5): the
+        page's write and another process's edit both land here. The panel
+        applies it only while the user has not pressed ``ctrl+g`` this
+        session — an explicit choice outranks a file edit, the same rule the
+        todo panel's ``_expanded`` follows — so the apply cannot fight the
+        user, and the band is settled in the same frame either way.
+        """
+        panel = self._subagent_panel
+        if panel is None:
+            return
+        try:
+            panel.seed_density(panel._configured_density())
+        except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
+            logger.debug("display.dock live apply failed", exc_info=True)
+            return
+        self._refresh_band()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -20650,7 +20718,10 @@ class OperatorApp(App[None]):
         lines.append(_key_row("shift+tab", "cycle reasoning effort"))
         lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
-        lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
+        # 46 cells (66 composed) against the 74-cell ceiling: names the three
+        # stops so a user who only ever saw "expand/collapse" learns the panel
+        # can now shrink to a row or go away (#525).
+        lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
         # Directly under `ctrl+b`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
@@ -24013,6 +24084,13 @@ class OperatorApp(App[None]):
         pass
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
+        # BEFORE the refresh, so the re-emerged summary row paints in the same
+        # band pass that reads the failure — a hidden panel that came back one
+        # frame later would be a dock height jump (#525 design §2/§8). Only a
+        # FAILURE breaks through a hidden dock; cancelled and interrupted are
+        # not failures and leave the user's choice alone.
+        if message.status == "failed" and self._subagent_panel is not None:
+            self._subagent_panel.note_child_failed()
         self._refresh_band()
         # The last child settling is the moment a deferred completion becomes
         # true: the parent stopped talking earlier, and now the delegated work
