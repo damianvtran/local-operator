@@ -14,7 +14,16 @@ Local Operator currently supports Python 3.12+ and is maintained with strict sec
 - Automated static analysis (using flake8, black, isort, and pyright).
 - Comprehensive testing with pytest (including async tests).
 
-Security updates and patches will be released for all actively maintained versions.
+Security fixes ship as the **next PyPI release** of `local-operator`; there are
+no backported patch lines for older minor versions. When an advisory names a
+fixed version, upgrade to it (or newer) and pin at least that version in your
+own dependency spec, for example `local-operator>=0.47.5`.
+
+Because a fix only protects the installs that pick it up, we also recommend
+that consumers run their own dependency scanning — `pip-audit`, GitHub
+Dependabot, or Snyk — in CI so the advisory reaches you even if you miss the
+release notes. See "How advisories are published" for how we make sure those
+tools actually know about a fix.
 
 ## Security Features
 
@@ -49,10 +58,61 @@ Please ensure that sensitive details are managed securely. You can update your a
 
 ## Disclosure Policy
 
-We follow responsible disclosure practices. Once a vulnerability or incident is confirmed and addressed, we will:
+We follow responsible disclosure practices. Once a vulnerability or incident is confirmed, we will:
 
-- Publish a public security advisory on GitHub detailing the issue, affected versions, and upgrade instructions.
-- Provide a timeline for the release of patches or fixes.
+- Acknowledge the report on the private advisory within 48 hours.
+- Reproduce the issue in an isolated environment and fix it on a branch that goes through the same review and QA gate as any other change.
+- Ship the fix as a GitHub Release and PyPI release, with release notes linking the advisory.
+- Publish the advisory only **after** the fixed version is available on PyPI, so that scanners can point to a safe version rather than only flagging the vulnerable one.
+- Request a CVE, credit the reporter, and verify the advisory propagates to the databases downstream tooling reads (see below).
+
+## How advisories are published
+
+A published GitHub repository advisory is not, by itself, a warning that reaches
+users: CI/CD scanners such as `pip-audit`, Dependabot, and Snyk read from
+vulnerability databases, not from our repository page. For every advisory we
+therefore commit to the full propagation chain, not just the first step:
+
+1. **GitHub repository advisory** published with a precise affected range and
+   the patched version, a "Verified fix" section (fixed version, fixing PR,
+   before/after evidence), CWE and CVSS, and credit to the reporter.
+2. **CVE request** through GitHub. Requesting a CVE is what puts the advisory
+   into GitHub's curation queue; publishing alone does not.
+3. **GitHub Advisory Database** — the advisory appears as a reviewed global
+   entry at `https://github.com/advisories/<GHSA>`.
+4. **OSV** ([osv.dev](https://osv.dev)) ingests the reviewed entry; from there
+   it reaches **PyPI**'s per-release vulnerability data, **`pip-audit`** (both
+   the `pypi` and `osv` sources), **Dependabot** alerts, and **Snyk**.
+5. We check that chain a few days and again about two weeks after publication.
+   If the advisory has not propagated by then, we submit it directly to the
+   [PyPA advisory database](https://github.com/pypa/advisory-database) (which
+   OSV, PyPI and `pip-audit` ingest) and to Snyk's
+   [vulnerability disclosure](https://snyk.io/vulnerability-disclosure/) intake.
+
+You can verify a fix landed in the tooling you use with, for example:
+
+```sh
+echo 'local-operator==<vulnerable-version>' > /tmp/req.txt
+pip-audit --no-deps -s pypi -r /tmp/req.txt
+pip-audit --no-deps -s osv  -r /tmp/req.txt
+```
+
+The maintainer-facing procedure behind this section, including the exact
+commands and the follow-up schedule, is in
+[`docs/security-advisory-runbook.md`](docs/security-advisory-runbook.md).
+
+## Past advisories
+
+| Advisory | Severity | Published | Fixed in | Reported by |
+| --- | --- | --- | --- | --- |
+| [GHSA-22mg-8gw7-636x](https://github.com/damianvtran/local-operator/security/advisories/GHSA-22mg-8gw7-636x) | Critical | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
+| [GHSA-3xjw-9qpc-53mh](https://github.com/damianvtran/local-operator/security/advisories/GHSA-3xjw-9qpc-53mh) | High | 2026-09-05 | 0.47.5 | [@mhdgning131](https://github.com/mhdgning131) |
+
+If you are on a version earlier than 0.47.5, upgrade:
+
+```sh
+pip install --upgrade 'local-operator>=0.47.5'
+```
 
 ## Contact
 

@@ -308,6 +308,19 @@ change to `main`, run `lop-update`, verify the `.lop-source` marker, then smoke
 test `lop` from outside the repository. Never repoint `lop` at the editable
 `.venv`; doing so couples the stable command back to in-progress work.
 
+## Security advisories
+
+Any agent handling a reported vulnerability or a GHSA for this repository
+**must read [`docs/security-advisory-runbook.md`](docs/security-advisory-runbook.md)
+first** and follow its phases in order — in particular, the fix must be on PyPI
+before the advisory is published, and a CVE must be requested after publishing
+(that request, not publication, is what queues the advisory for GitHub
+curation). A published advisory is **not** the end of the task: the advisory is
+done only when the runbook's propagation checks (GitHub Advisory Database, OSV,
+PyPI, `pip-audit`) pass, or when the +3d/+14d follow-up wake and the escalation
+path (PYSEC PR, Snyk disclosure) are recorded. `SECURITY.md` carries the public
+commitment and the "Past advisories" table; update it in the fix's close-out.
+
 ## Versioning: choose the bump by materiality, not commit type
 
 The version in `pyproject.toml` and the `vX.Y.Z` release tag are chosen by the
