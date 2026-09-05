@@ -361,6 +361,62 @@ def test_resolve_bash_shell_last_resort_is_sh(monkeypatch) -> None:
     assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK == "/bin/sh"
 
 
+def test_resolve_bash_shell_expands_a_tilde(monkeypatch) -> None:
+    """`~/bin/bash` is a plausible thing to type into the Kind.TEXT settings
+    row, and nothing else on the read path expands it — unexpanded it would
+    reach execve verbatim and fail every call."""
+    monkeypatch.setenv("HOME", "/home/tester")
+    assert builtin.resolve_bash_shell("~/bin/bash") == "/home/tester/bin/bash"
+    assert builtin.resolve_bash_shell("  ~/bin/bash  ") == "/home/tester/bin/bash"
+
+
+def _set_configured_shell(monkeypatch, tmp_path, value: str):
+    """Point `bash.shell` at `value` in an isolated config dir."""
+    from local_operator.config import ConfigManager
+
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_home))
+    ConfigManager(config_home).set_config_value("bash", {"shell": value})
+
+
+@pytest.mark.asyncio
+async def test_bash_reports_a_missing_configured_shell_as_a_tool_error(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A `bash.shell` that does not exist must be a normal error result naming
+    the path and the key — not the generic boundary's `failed unexpectedly`
+    plus a traceback tail, which never said which key broke every call."""
+    _set_configured_shell(monkeypatch, tmp_path, "/nonexistent/qa-shell")
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "bash.shell" in result.text
+    assert "/nonexistent/qa-shell" in result.text
+    assert "failed unexpectedly" not in result.text
+    assert "Traceback" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_reports_a_non_executable_configured_shell_as_a_tool_error(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """The same misconfiguration arrives as PermissionError rather than
+    FileNotFoundError when the path exists but has no exec bit, which is why
+    the handler catches OSError rather than one subclass."""
+    not_executable = tmp_path / "not-executable"
+    not_executable.write_text("#!/bin/sh\necho nope\n")
+    not_executable.chmod(0o644)
+    _set_configured_shell(monkeypatch, tmp_path, str(not_executable))
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "bash.shell" in result.text
+    assert str(not_executable) in result.text
+    assert "Traceback" not in result.text
+
+
 _HOST_BASH = builtin.shutil.which("bash")
 
 

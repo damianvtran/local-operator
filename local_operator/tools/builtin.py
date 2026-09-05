@@ -1173,8 +1173,16 @@ def resolve_bash_shell(configured: str | None) -> str:
     promises, so a model writing bash would get a third dialect. Pure and
     cheap (one ``which`` per call) so the config edit is LIVE and the order is
     unit-testable without spawning anything.
+
+    ``~`` is expanded because the key is a ``Kind.TEXT`` row in ``/settings``
+    and ``~/bin/bash`` is a plausible thing to type there; nothing else in the
+    settings registry or the reader expands it, so an unexpanded value would
+    reach ``execve`` verbatim and fail every call.
     """
-    chosen = (configured or "").strip() or shutil.which("bash") or BASH_SHELL_FALLBACK
+    stripped = (configured or "").strip()
+    chosen = (
+        os.path.expanduser(stripped) if stripped else shutil.which("bash") or BASH_SHELL_FALLBACK
+    )
     logger.debug("bash tool interpreter: %s", chosen)
     return chosen
 
@@ -1188,7 +1196,7 @@ def _configured_bash_shell() -> str | None:
     command must run even when config.yml is unreadable.
     """
     try:
-        value = ConfigManager(config_dir()).get_nested_value(BASH_SHELL_PATH, None)
+        value = ConfigManager(config_dir()).get_nested_value(BASH_SHELL_PATH, BASH_SHELL_DEFAULT)
     except Exception:  # noqa: BLE001 — config trouble must never block a command
         return None
     return value if isinstance(value, str) else None
@@ -1197,10 +1205,14 @@ def _configured_bash_shell() -> str | None:
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    # Kept terse on purpose: a schema rides EVERY request in every session and
+    # subagent. The bash-syntax claim is model-actionable (it tells the model
+    # which dialect to write); the /bin/sh fallback is not — the model cannot
+    # detect or change which host it runs on.
     command: str = Field(
         description=(
-            "Shell command to run, executed via `bash -c` (falls back to /bin/sh only "
-            "when no bash exists), so bash syntax such as <(...), arrays and [[ ]] works."
+            "Bash command to run (via `bash -c`; bash syntax such as <(...), "
+            "arrays and [[ ]] works)."
         )
     )
     timeout: float = Field(
@@ -1482,16 +1494,36 @@ async def execute_bash(
     # unexpected token '('`. Resolution order: the configured `bash.shell`,
     # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
     # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
-    process = await asyncio.create_subprocess_exec(
-        resolve_bash_shell(_configured_bash_shell()),
-        "-c",
-        params.command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=_safe_cwd(context),
-        env=env,
-        start_new_session=True,
-    )
+    shell = resolve_bash_shell(_configured_bash_shell())
+    try:
+        process = await asyncio.create_subprocess_exec(
+            shell,
+            "-c",
+            params.command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=_safe_cwd(context),
+            env=env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        # A `bash.shell` pointing at a missing or non-executable file made the
+        # spawn raise out of the tool, and the generic tool boundary rendered
+        # `Tool 'bash' failed unexpectedly:` plus a 2000-char traceback tail —
+        # so EVERY call failed with a stack dump that never named the key that
+        # caused it. OSError (not just FileNotFoundError) because the same
+        # misconfiguration also arrives as PermissionError for a non-executable
+        # path, and ENOTDIR/ELOOP for a malformed one. A normal error result
+        # keeps the loop alive and tells the model exactly what to say to the
+        # operator.
+        return _error(
+            tool_call_id,
+            "bash",
+            f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}). "
+            "Point it at a real interpreter with "
+            "`lop config edit bash.shell <path>`, or clear it with "
+            "`lop config edit bash.shell ''` to auto-resolve bash on PATH.",
+        )
 
     # Record this group in the owner's process-group ledger so a HARD death of
     # THIS lop process (SIGKILL from cmux, OOM, crash) — the one stop path with

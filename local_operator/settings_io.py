@@ -1227,7 +1227,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Bash interpreter",
         kind=Kind.TEXT,
         default="",
-        help="Path the bash tool runs commands with. Empty: bash on PATH, else /bin/sh.",
+        help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
         empty_unsets=True,
     ),
     *[
