@@ -303,7 +303,7 @@ change inside a feature PR as a finding.
 
 This replaces the earlier practice of each PR bumping its own patch, which
 failed in a measurable way on 2026-09-05: with ten sessions each holding a
-reserved patch number, `0.47.1` → `0.48.0` took roughly nine hours of agents
+reserved patch number, `0.47.1` → `0.48.0` took close to five hours of agents
 serialising behind one another (the tags land at 05:24, 05:58, 06:16, 06:50,
 07:38, 08:27, 10:08 UTC — each one a PR that could not merge until its
 predecessor had released). Every rebase across another session's bump was a
