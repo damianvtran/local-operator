@@ -5396,9 +5396,20 @@ class Editor(TextArea):
         :meth:`_sync_picker` — deliberately not by :meth:`_picker_phase`, whose
         ``"argument"`` answer covers ``_argument_commands`` and reports ``None``
         on a `/model` argument, because the model list is a separate widget
-        with its own vocabulary. The command word's phase is
-        :meth:`_picker_phase`'s ``"command"``, which is the command picker's
-        own.
+        with its own vocabulary.
+
+        ``self._picker`` is asked with ANY non-``None`` phase, not just
+        ``"command"`` (round 2, R14). That widget serves FOUR lists — the
+        command word, an argument list (`/theme `, `/effort `, `/login `,
+        `/mcp `, `/team `…), the `$skill` list and the loading reserve — and
+        every one of them can hold an Esc. Narrowing the question to the
+        command word answered it for one list and returned the other three to
+        the literal-whitespace corruption U13 exists to prevent: `/theme d`
+        became `/theme d    `. ``_picker_phase()`` returning non-``None`` is
+        precisely "this widget's list is live at the caret", which is the same
+        question the model half asks of its own parse — one rule for both
+        pickers rather than a per-phase allowlist that the next new list would
+        silently fall out of.
 
         The model half is asked at the caret's LINE END rather than at the
         caret, which is the same question :meth:`_text_holds_model_token` asks
@@ -5419,7 +5430,7 @@ class Editor(TextArea):
         line_end = len(text) if newline == -1 else newline
         if slash_argument(text, self.MODEL_COMMANDS, line_end, self._command_names) is not None:
             return self._model_picker.is_dismissed()
-        if self._picker_phase() == "command":
+        if self._picker_phase() is not None:
             return self._picker.is_dismissed()
         return False
 

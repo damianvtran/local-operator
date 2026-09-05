@@ -662,22 +662,40 @@ def test_the_keyword_row_fits_the_narrow_footer() -> None:
     `…not a model — enter…` — cutting the actionable half and leaving only the
     negative clause. ``PERSIST_HINT`` is held to 42 cells for exactly this
     budget; this row is on the same surface and is held to the same one.
+
+    BOTH rows are measured (code review round 2, R17). U1 made this empty state
+    two rows — the settled `enter runs it` and the partial `keep typing` — and
+    only the one with a helper had a ceiling, so the row a user sees while
+    typing was unpinned. It fits today; the point is that it cannot stop
+    fitting silently.
     """
     from local_operator.tui.widgets.model_picker import (
         _EDGE_MARGIN,
         _GUTTER_CELLS,
         _keyword_row,
+        _partial_keyword_row,
     )
 
     budget = 50 - _GUTTER_CELLS - _EDGE_MARGIN
     for keyword in sorted(_PERSIST_KEYWORDS):
         assert cell_len(_keyword_row(keyword)) <= budget, keyword
+        assert cell_len(_partial_keyword_row(keyword)) <= budget, keyword
         # And it really does render whole, not merely measure short.
         picker = ModelPicker(lambda row: None)
         picker.set_rows(_rows())
         picker.open(keyword)
         assert "…" not in picker.render_text(50).plain, keyword
         assert "enter runs it" in picker.render_text(50).plain, keyword
+
+    # The partial row through the real render, at the same floor: a prefix that
+    # names one keyword but is not yet the whole word.
+    for prefix in ("defaul", "sav"):
+        picker = ModelPicker(lambda row: None)
+        picker.set_rows(_rows())
+        picker.open(prefix)
+        plain = picker.render_text(50).plain
+        assert "…" not in plain, prefix
+        assert "keep typing" in plain, prefix
 
 
 def test_persist_keywords_match_the_words_the_command_actually_consumes() -> None:
@@ -688,14 +706,21 @@ def test_persist_keywords_match_the_words_the_command_actually_consumes() -> Non
     module holds because of the import direction, not because the vocabulary is
     the picker's to define.
 
-    PINS THE DISPATCH, NOT THE PROSE (code review round 1, R5). This asserted
-    `f'"{keyword}"' in inspect.getsource(_cmd_model)`, and `getsource` returns
-    the comments and docstring too — `_cmd_model` is heavily commented about
-    both words, so deleting the `if lowered == "saved":` dispatch entirely left
-    the test green while the picker went on advertising a command that no
-    longer existed. Matching only executable lines is what makes the guard real:
-    the comments that mention these words are stripped before the search, so
-    the assertion can only be satisfied by code.
+    PINS THE DISPATCH, NOT THE PROSE (code review round 1, R5; corrected in
+    round 2, R15). This asserted `f'"{keyword}"' in inspect.getsource(...)`,
+    and `getsource` returns the comments and docstring too. The original
+    justification claimed deleting the `if lowered == "saved":` dispatch left
+    that guard green; it did not, and the mutant was run to check. On THIS
+    function every prose mention of the two words is bare or backticked, so the
+    only DOUBLE-QUOTED occurrences are the two dispatch lines themselves —
+    which is why the old guard happened to fail on that mutant.
+
+    The weaker true claim is the reason to keep the AST form: the old guard was
+    satisfiable by prose in principle, and stayed correct only by the accident
+    of how these comments are punctuated. Rewording one comment to double-quote
+    the word would have made it green on a deleted dispatch, with nothing to
+    say so. Matching executable literals removes the accident: comments are not
+    in the AST at all, so the assertion can only be satisfied by code.
     """
     import ast
     import textwrap
@@ -712,7 +737,12 @@ def test_persist_keywords_match_the_words_the_command_actually_consumes() -> Non
         for node in ast.walk(function)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    literals.discard(ast.get_docstring(function))
+    # `clean=False` is load-bearing (round 2, R16): `ast.get_docstring` defaults
+    # to running `inspect.cleandoc`, so it returns a DEDENTED string that never
+    # equals the raw `ast.Constant` still sitting in the set — the discard was a
+    # silent no-op, leaving a guard whose whole purpose is to be unsatisfiable
+    # by prose satisfiable by this function's own docstring.
+    literals.discard(ast.get_docstring(function, clean=False))
     for keyword in _PERSIST_KEYWORDS:
         # The handler dispatches on the lowered argument, so each keyword must
         # survive as a string literal the CODE compares against.

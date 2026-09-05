@@ -2506,8 +2506,10 @@ async def test_leaving_the_model_command_entirely_does_expire_the_escape() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("surface", ["model", "command"])
-async def test_tab_after_an_escape_does_not_type_into_the_query(surface: str) -> None:
+@pytest.mark.parametrize("surface", ["model", "command", "argument", "skill"])
+async def test_tab_after_an_escape_does_not_type_into_the_query(
+    surface: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """U13: a completion key with a latched Esc is a no-op, not a literal tab.
 
     Esc hides the list but leaves the token in the buffer, so the open-list
@@ -2515,7 +2517,30 @@ async def test_tab_after_an_escape_does_not_type_into_the_query(surface: str) ->
     `/model  ` and `/mod` became `/mod    `, silently corrupting the very word
     the user had dismissed a list over. Both pickers had it and both are fixed
     the same way, which is why this is parametrised rather than duplicated.
+
+    EVERY list is parametrised, not a sample (round 2, R14). This test read
+    ``["model", "command"]`` while :meth:`Editor._latched_picker_at_caret`
+    answered for exactly those two phases, so it pinned the gate's
+    implementation instead of its contract and stayed green through a real
+    regression: scoping the gate to ``_picker_phase() == "command"`` dropped
+    the ARGUMENT list — the most common latched list in this widget — and
+    `/theme d` went back to `/theme d    `. ``self._picker`` serves the command
+    word, argument lists, the `$skill` list and the loading reserve; the
+    surfaces below are every phase ``_picker_phase`` can report plus the model
+    picker's own parse, so narrowing the gate to any subset of them now fails
+    here rather than in the composer.
     """
+    # The `$` list is the one surface with no built-in vocabulary: the hermetic
+    # suite discovers zero skills, and an empty list never opens. Wired in
+    # through the documented env var, as `test_skill_invocation` does.
+    root = tmp_path / "skills"
+    (root / "research").mkdir(parents=True)
+    (root / "research" / "SKILL.md").write_text(
+        "---\nname: research\ndescription: Investigate a question.\n---\n\nRead sources."
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(root))
+    monkeypatch.chdir(tmp_path)
+
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -2528,13 +2553,29 @@ async def test_tab_after_an_escape_does_not_type_into_the_query(surface: str) ->
             await pilot.press("slash", "m", "o", "d", "e", "l", "space")
             picker = editor.model_picker
             expected = "/model "
-        else:
+        elif surface == "command":
             await pilot.press("slash", "m", "o", "d")
             picker = editor.picker
             expected = "/mod"
-        for _ in range(4):
+        elif surface == "argument":
+            # `/theme` takes an argument, so the space hands the SAME widget a
+            # different list. This is the case R14 regressed.
+            await pilot.press("slash", "t", "h", "e", "m", "e", "space", "d")
+            picker = editor.picker
+            expected = "/theme d"
+        else:
+            # The `$` sigil's list, also `_picker`, reached by its own parse.
+            await pilot.press("dollar_sign")
+            picker = editor.picker
+            expected = "$"
+        # The skill list is populated from an awaited discovery pass rather than
+        # from a synchronous vocabulary, so it needs more settling than the
+        # slash lists; pausing to the open state keeps one body for all four.
+        for _ in range(12):
             await pilot.pause()
-        assert picker.is_open()
+            if picker.is_open():
+                break
+        assert picker.is_open(), (surface, editor.text)
         await pilot.press("escape")
         for _ in range(4):
             await pilot.pause()
@@ -9263,7 +9304,17 @@ async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
     review round 4 D1, UX round 4 U3). A lone command token on the LAST row is
     what D8 named; a row ending on a bare `/model` whose next row opens `saved`
     splits the two-word command NAME across the fold, which costs the reader the
-    same thing. The shipped D8 copy scored 0 on the first and 5 on the second.
+    same thing. The shipped D8 copy scored 0 on the first and 4 on the second.
+
+    TWO WIDTH FAMILIES, because the block has two (QA round 2, Q3). Earlier
+    rounds measured only the PRISTINE widths a `NoticeBlock` takes in an empty
+    transcript, and reported a clean 0 that held only there. Once the
+    transcript holds any content the block is `cols - 4` — which is the family
+    the hint is normally read at, since a user meets it after they have been
+    working — and the split was still present and visible in a rendered frame.
+    Both families are asserted here so a claim measured at one cannot be
+    reported as holding at both. Confirmed against the real app: at 80/100/120
+    columns the block renders 76/75/82 pristine and 76/96/116 after one turn.
 
     ASSERTED AGAINST THE STRING THE APP EMITS, not a local rebuild of it (code
     review round 1, R4). This test previously assembled `routes` as its own
@@ -9285,10 +9336,20 @@ async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
         "openrouter/moonshotai/kimi-k2-0905",
         "anthropic/claude-sonnet-4-5-20250929",
     ]
-    # The three terminal widths the design rounds measure at. The block is
-    # narrower than the terminal (transcript padding + the hanging glyph field),
-    # which is exactly what `body_budget` accounts for.
-    block_widths = {80: 76, 100: 75, 120: 82}
+    # The three terminal widths the design rounds measure at, at BOTH families
+    # the block renders (Q3). The block is narrower than the terminal
+    # (transcript padding + the hanging glyph field), which is exactly what
+    # `body_budget` accounts for.
+    block_widths = {
+        # pristine transcript
+        (80, "pristine"): 76,
+        (100, "pristine"): 75,
+        (120, "pristine"): 82,
+        # transcript holding any content: the block is `cols - 4`
+        (80, "non-empty"): 76,
+        (100, "non-empty"): 96,
+        (120, "non-empty"): 116,
+    }
 
     # The sentence under test is the one the app builds, read back from the
     # real method rather than restated here (R4). The label is stripped so the
@@ -9329,9 +9390,10 @@ async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
 
     # The two-word command names a reader must not have to re-join across rows.
     atoms = ("/model default", "/model saved")
+    splits: dict[str, list[tuple[str, int, str]]] = {"pristine": [], "non-empty": []}
     for variant, sentence in sentences.items():
         for label in labels:
-            for cols, block_width in block_widths.items():
+            for (cols, family), block_width in block_widths.items():
                 body = NoticeBlock.body_budget(block_width)
                 rows = wrap_cells(f"model: {label} — {sentence}", body)
                 if len(rows) == 1:
@@ -9341,20 +9403,32 @@ async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
                 # alone by the fold is prose wrapping, not a route the reader
                 # cannot act on, and no phrasing that survived the wider search
                 # avoided it at every label and width (see the docstring in
-                # `_persist_hint_notice`).
+                # `_persist_hint_notice`). This holds at BOTH families.
                 last = rows[-1].split()
                 assert not (len(last) == 1 and last[0].startswith("/")), (
                     variant,
                     cols,
+                    family,
                     label,
                     rows,
                 )
-                # D1/U3: no fold falls INSIDE a two-word command name.
+                # D1/U3: where a fold falls INSIDE a two-word command name.
                 for i, row in enumerate(rows[:-1]):
                     head, nxt = row.split(), rows[i + 1].split()
                     if not head or not nxt:
                         continue
-                    assert f"{head[-1]} {nxt[0]}" not in atoms, (variant, cols, label, rows)
+                    if f"{head[-1]} {nxt[0]}" in atoms:
+                        splits[family].append((variant, cols, label))
+
+    # D1/U3 is CLEAN at the pristine family, which is what the fix bought.
+    assert splits["pristine"] == [], splits["pristine"]
+    # And BOUNDED, not clean, at the non-empty family (QA round 2, Q3). The
+    # 2,240-combination search found no arrangement clean on all three classes,
+    # so asserting 0 here would pin a copy that does not exist. The count is
+    # pinned instead: it may go DOWN freely, and a regression that pushes it up
+    # — the direction D1 was filed about — fails. Recorded as an exact figure
+    # rather than a bound so the next editor sees the real cost of the trade.
+    assert len(splits["non-empty"]) <= 3, splits["non-empty"]
 
 
 @pytest.mark.asyncio

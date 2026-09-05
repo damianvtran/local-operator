@@ -91,6 +91,23 @@ def _keyword_row(keyword: str) -> str:
     return f"{keyword} is a command — enter runs it"
 
 
+def _partial_keyword_row(keyword: str) -> str:
+    """The same row while the command word is still being TYPED.
+
+    A sibling of :func:`_keyword_row` rather than an inline f-string (code
+    review round 2, R17): D2's budget applies to whichever of the two rows the
+    user is looking at, and only the one that had a helper had a ceiling test.
+    Built here so `test_the_keyword_row_fits_the_narrow_footer` measures both.
+
+    Same subject and same shape as the settled row, differing only in the half
+    that says what to do — so the row does not change out from under the reader
+    on the keystroke that completes the word. `enter runs it` is deliberately
+    NOT promised while the word is partial: Enter there is an ordinary failed
+    search, and the promise would be false.
+    """
+    return f"{keyword} is a command — keep typing"
+
+
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
@@ -923,12 +940,9 @@ class ModelPicker(Static):
             if lowered in _PERSIST_KEYWORDS:
                 bits.append(_keyword_row(lowered))
             elif partial:
-                # Same subject and same shape as the settled row, differing only
-                # in the half that says what to do — so the row the user is
-                # reading does not change out from under them on the keystroke
-                # that completes the word. The two keywords share no common
-                # prefix, so a prefix names exactly one of them.
-                bits.append(f"{partial} is a command — keep typing")
+                # The two keywords share no common prefix, so a prefix names
+                # exactly one of them.
+                bits.append(_partial_keyword_row(partial))
             else:
                 bits.append("no matching models" if query else "no models available")
         elif total > end - start:

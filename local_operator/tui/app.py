@@ -16220,9 +16220,12 @@ class OperatorApp(App[None]):
         command names spanning a fold — nothing stronger (QA round 1, Q1). An
         earlier revision of this docstring claimed `/settings` "is never the
         final token at ANY body width from 38 to 90", which is false: it ends a
-        folded, non-final row in 62 combinations across 39 widths. A clause
-        that continues on the next row is not the defect D8 named; a command
-        the reader must re-join two rows to recover is, and that is what is
+        folded, non-final row in 58 combinations across 27 widths for the
+        ordinary variant (162 across all three), measured through
+        `NoticeBlock.body_budget` (QA round 2, Q5 — the earlier 62/39 came from
+        a harness that is not recoverable from what was written). A clause that
+        continues on the next row is not the defect D8 named; a command the
+        reader must re-join two rows to recover is, and that is what is
         actually pinned.
 
         The nouns are placed so each pronoun sits beside its antecedent (design
@@ -16247,9 +16250,11 @@ class OperatorApp(App[None]):
         of the block: a row ending on a bare `/model` whose next row opens
         `saved reverts to it` splits the two-word COMMAND NAME across the fold,
         which costs the reader exactly what D8 cost them — the command cannot
-        be read off one row. That measured 5 splits over 11 labels x the three
-        rendered widths, and the frame shipped as D8's own evidence contained
-        one.
+        be read off one row. That measured 4 splits over the 9 labels the test
+        carries x the three pristine widths (code review round 2, R18 — the
+        earlier "5 over 11 labels" described a wider matrix than the one that
+        ships as evidence), and the frame shipped as D8's own evidence
+        contained one.
 
         Both classes are scored now, and the lever turned out to be structural
         rather than lexical: it is WHERE a two-word command name sits in its
@@ -16257,24 +16262,51 @@ class OperatorApp(App[None]):
         one word from the `·` seam, so it breaks across the fold whenever that
         seam lands near the margin; a name at the clause's END has ordinary
         words ahead of it to absorb the fold. So `/model saved` moved to the
-        end of its clause and the split count goes 5 -> 0. `/settings` keeps
-        its leading position because four words follow it either way.
+        end of its clause and the pristine split count goes 4 -> 0.
+        `/settings` keeps its leading position because four words follow it
+        either way.
 
-        Measured over 11 representative labels x the three rendered body widths
-        (70/69/76), across all THREE variants this method emits: 0 command
-        tokens alone on a last row and 0 split command names, against 0 and 5
-        for the arrangement D8 shipped.
+        THE BLOCK RENDERS AT TWO WIDTH FAMILIES AND BOTH ARE MEASURED (QA
+        round 2, Q3). Earlier rounds scored only the PRISTINE family — the
+        widths a `NoticeBlock` takes in a transcript with nothing else in it
+        (block widths 76/75/82 at 80/100/120 columns, body budgets 70/69/76).
+        Once the transcript holds any content the block is `cols - 4` instead
+        (76/96/116, budgets 70/90/110), and that is the family the hint is
+        NORMALLY read at, because a user meets it after they have been working.
+        Measured over the 9 labels the test carries x 3 variants x 3 widths in
+        each family:
+
+        =========================  ========  =========
+        class                      pristine  non-empty
+        =========================  ========  =========
+        C1 lone command last row          0          0
+        C2 split command name             0          3
+        C3 lone ordinary word             2          1
+        =========================  ========  =========
+
+        So the clean 0 that earlier rounds claimed holds at the pristine family
+        only. At the non-empty family C2 is not zero, and the honest
+        justification for the arrangement is a comparison rather than a clean
+        sheet: the D8 arrangement scores C2 4 / C3 2 pristine and C2 2 / C3 1
+        non-empty, so this trades a class the reader cannot act on (a command
+        split across the fold, in the family they see least) against one they
+        can (prose wrapping). Sweeping 80-160 columns at the non-empty family
+        the two arrangements are a wash — the split occupies a narrow band — so
+        the pristine improvement is what is actually bought.
 
         What is NOT claimed: this does not promise every row ends on a
-        multi-word phrase. An ordinary word can still land alone on the last
-        row (`too` at one label x width here), which is ordinary prose wrapping
-        rather than the defect these findings are about — the reader can still
-        read every command off a single row, which is the property being
-        bought. A 2,240-combination search over clause wordings and orders
-        found no arrangement that is clean on all three classes across all
-        three variants, so this is the measured optimum and not a claim of
-        perfection. `test_the_bare_model_notice_does_not_orphan_a_route_token`
-        pins the two that matter.
+        multi-word phrase, and the residual is not a rounding error (design
+        review round 2, D4). An ordinary word can still land alone on the last
+        row — 2 label x width combinations at the pristine family and 1 at the
+        non-empty one, on the test's own 9 labels. That is ordinary prose
+        wrapping rather than the defect these findings are about, and the
+        reader can still read every command off a single row, which is the
+        property being bought — but it is a real cost paid on a real surface,
+        not a hypothetical one. A 2,240-combination search over clause wordings
+        and orders found no arrangement that is clean on all three classes
+        across all three variants, so this is the measured optimum and not a
+        claim of perfection. `test_the_bare_model_notice_does_not_orphan_a_route_token`
+        pins the two that matter, at BOTH families.
 
         The `/model saved` clause is DROPPED in the setup state (UX review
         round 2, U11): that state is by definition the one with no usable boot
@@ -16302,10 +16334,22 @@ class OperatorApp(App[None]):
         settings_clause = "/settings edits the boot default too"
         # `/model saved` sits at its clause's END, which is what removes the
         # split: as the clause's FIRST word it sat one word from the `·` seam
-        # and broke across the fold at 5 of 33 rendered label x width
-        # combinations. `/settings` is left leading its own clause because it
-        # is followed by four words, so the fold has slack after it either way.
-        saved_clause = "come back with /model saved"
+        # and broke across the fold at 4 of the 27 rendered label x width
+        # combinations the test pins (R18). `/settings` is left leading its own
+        # clause because it is followed by four words, so the fold has slack
+        # after it either way.
+        #
+        # The carrier NAMES ITS DESTINATION (design review round 2, D5). It
+        # read `come back with /model saved`, which put the only mention of
+        # what the user comes back TO at character 95 of 111 — in the following
+        # clause, attached to `/settings` — so a strictly left-to-right reader
+        # met the pronoun before its antecedent, which is what D6/D10 were
+        # filed to prevent. `boot default` now sits at character 59, beside the
+        # command it describes. It also says what the command DOES rather than
+        # naming an occasion to use it (UX review round 2, U6), and it measures
+        # better on both width families, not worse: pristine C3 3 -> 2 and
+        # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
+        saved_clause = "switch to the boot default with /model saved"
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
