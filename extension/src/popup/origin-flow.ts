@@ -10,7 +10,10 @@
  * from the CLICK alone, and a stale prompt echo must hold the ack rather than
  * resurrect the buttons. */
 
-export type OriginDecision = "once" | "always" | "all_ports" | "deny";
+import type { AccessQueueEntry, OriginDecision } from "../access-queue";
+import type { BroadGrant } from "../origin-policy";
+
+export type { OriginDecision } from "../access-queue";
 
 /** The decision this popup already made, keyed by ORIGIN — finding A6's rule:
  * a redirect chain resolves each hop independently, so a DIFFERENT pending
@@ -30,8 +33,10 @@ export interface DecisionAck {
 /** The acknowledgement each decision renders. Deny is a COMPLETED choice, not
  * a failure, so it takes the neutral register and no check — danger is
  * reserved for states the user must recover from (error/incompatible), and a
- * check over "denied" would read as the wrong verdict. */
-export function ackForDecision(decision: OriginDecision): DecisionAck {
+ * check over "denied" would read as the wrong verdict. `broadScope` names
+ * which broad grant a `domain` decision wrote so the ack says exactly what
+ * now stays allowed. */
+export function ackForDecision(decision: OriginDecision, broadScope?: BroadGrant["scope"]): DecisionAck {
   if (decision === "deny") {
     return {
       title: "Site denied.",
@@ -54,18 +59,64 @@ export function ackForDecision(decision: OriginDecision): DecisionAck {
       check: true,
     };
   }
-  const standing =
-    decision === "all_ports"
-      ? " Every port on this loopback host is allowed for this scheme. You can take it back any time in Settings."
-      : decision === "always"
-        ? " Always-allowed sites can be taken back any time in Settings."
-        : "";
+  if (decision === "domain") {
+    const standing =
+      broadScope === "host"
+        ? "Every port on this loopback host stays allowed"
+        : "Every page on this domain and its subdomains, on any port, stays allowed";
+    return {
+      title: "Domain allowed.",
+      sub: `The agent is continuing. ${standing}; take it back any time in Settings.`,
+      tone: "success",
+      check: true,
+    };
+  }
   return {
     title: "Site allowed.",
-    sub: `The agent is continuing.${standing}`,
+    sub: "The agent is continuing. This exact site (address and port) stays allowed; take it back any time in Settings.",
     tone: "success",
     check: true,
   };
+}
+
+export interface ScopeOption {
+  value: Exclude<OriginDecision, "deny">;
+  label: string;
+  /** What the option grants, rendered as data in the trough under the select. */
+  detail: string;
+}
+
+export interface ScopeOptions {
+  options: ScopeOption[];
+  defaultValue: ScopeOption["value"];
+}
+
+/** The Allow dropdown's options for a prompt, derived from the ENTRY alone.
+ * The broad (domain/host) option appears only when the worker stamped
+ * `broad` on the entry, and is then the default: it is the grant most
+ * approvals actually want (the whole product, not one subdomain and port).
+ * An entry without it (an IP literal, a bare public suffix, an entry from
+ * 0.1.7, or a /health-only render with no entry) falls back to "Only this
+ * site" as the default, which is the fail-closed choice. */
+export function scopeOptions(entry: Pick<AccessQueueEntry, "origin" | "broad"> | undefined): ScopeOptions {
+  const options: ScopeOption[] = [];
+  const broad = entry?.broad;
+  if (broad) {
+    options.push(
+      broad.scope === "host"
+        ? { value: "domain", label: "Any port on this host", detail: `${broad.key}, any port` }
+        : {
+            value: "domain",
+            label: "All pages on this domain",
+            detail: `${broad.key} and every subdomain, any port`,
+          },
+    );
+  }
+  options.push(
+    { value: "site", label: "Only this site", detail: entry?.origin ?? "this exact site" },
+    { value: "once", label: "Just this once", detail: "one navigation within 10 minutes" },
+  );
+  return { options, defaultValue: broad ? "domain" : "site" };
 }
 
 /** Which origin view a render shows. A pending origin equal to the one just

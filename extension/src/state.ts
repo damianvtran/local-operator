@@ -55,6 +55,11 @@ export interface LocalState {
   port?: number;
   origins?: Record<string, "allow" | "deny">;
   hostGrants?: import("./origin-policy").HostGrantsState;
+  siteGrants?: import("./origin-policy").SiteGrantsState;
+  /** Options-page-only bypass of the whole origin gate. Written by
+   * options.ts directly (never by a worker message or RPC), read only in
+   * origins.originAllowed. Absent or false means off. */
+  allowAllSites?: boolean;
 }
 
 export interface SessionState {
@@ -77,7 +82,7 @@ export interface SessionState {
 }
 
 export async function getLocal(): Promise<LocalState> {
-  return chrome.storage.local.get(["token", "port", "origins", "hostGrants"]);
+  return chrome.storage.local.get(["token", "port", "origins", "hostGrants", "siteGrants", "allowAllSites"]);
 }
 
 export async function getSession(): Promise<SessionState> {

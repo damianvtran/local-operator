@@ -20,8 +20,8 @@ import {
   type OnceGrants,
   type OriginDecision,
 } from "./access-queue";
-import { grantExactOriginLocked, grantLoopbackHostLocked } from "./access-grants";
-import { isLoopbackHost } from "./origin-policy";
+import { grantExactOriginLocked, grantSiteLocked } from "./access-grants";
+import { broadGrantFor } from "./origin-policy";
 import { getLocal, getSession, withSessionMutation, type SessionState } from "./state";
 
 export interface QueueSnapshot {
@@ -238,7 +238,19 @@ export function enqueueAccess(
       return { origin: url.origin, state: "none", pending_count: snapshot.queue.length, full: true };
     }
     const nextSequence = Math.max(0, ...snapshot.queue.map((entry) => entry.sequence)) + 1;
-    const entry = newEntry(url.origin, url.host, requester, kind, now, nextSequence, commandId);
+    // The worker stamps the broad option here so the popup never has to run
+    // the suffix list: what it can offer is exactly what this entry carries.
+    const entry = newEntry(
+      url.origin,
+      url.host,
+      requester,
+      kind,
+      now,
+      nextSequence,
+      commandId,
+      undefined,
+      broadGrantFor(url),
+    );
     onAdmitted?.(entry);
     snapshot.queue.push(entry);
     await persistLocked(snapshot);
@@ -307,19 +319,21 @@ export function decideAccess(entryId: string, decision: OriginDecision): Promise
     const selected = snapshot.queue.find((entry) => entry.entryId === entryId);
     if (!selected) return { applied: false, decided: [], snapshot };
     let decided = [selected];
-    if (decision === "always") {
+    if (decision === "site") {
       // Commit persistent policy first. If MV3 stops before queue receipts are
       // reconciled, a restarted worker still admits every covered request.
       await grantExactOriginLocked(selected.origin);
       decided = snapshot.queue.filter((entry) => policyCovers(selected.origin, entry.origin));
-    } else if (decision === "all_ports") {
+    } else if (decision === "domain") {
+      // The scope is recomputed from the origin rather than trusted from the
+      // entry: a null here (IP literal, bare public suffix) means the popup
+      // should never have offered the option, so the click is refused whole.
       const selectedUrl = new URL(selected.origin);
-      if (!isLoopbackHost(selectedUrl) || !(await grantLoopbackHostLocked(selectedUrl))) {
+      const broad = broadGrantFor(selectedUrl);
+      if (!broad || !(await grantSiteLocked(selectedUrl))) {
         return { applied: false, decided: [], snapshot };
       }
-      decided = snapshot.queue.filter((entry) =>
-        policyCovers(selected.origin, entry.origin, "loopback_all_ports"),
-      );
+      decided = snapshot.queue.filter((entry) => policyCovers(selected.origin, entry.origin, broad.scope));
     }
     const state: AccessReceipt["state"] = decision === "deny" ? "denied" : "allowed";
     const ids = new Set(decided.map((entry) => entry.entryId));
@@ -338,6 +352,27 @@ export function decideAccess(entryId: string, decision: OriginDecision): Promise
         expiresAt: now + ONCE_GRANT_TTL_MS,
         ...(selected.commandId ? { handoff: selected.commandId } : {}),
       };
+    }
+    snapshot.results = cleanResults(snapshot.results, now);
+    await persistLocked(snapshot);
+    observer?.(snapshot);
+    return { applied: true, decided, snapshot };
+  });
+}
+
+/** When the options page turns on `allowAllSites`, every live prompt is
+ * already moot: originAllowed() now admits everything. Resolve the queue as
+ * allowed so in-command waiters resume through the receipt observer instead
+ * of sitting in a paused navigation until the 60 s deadline denies them. No
+ * durable grant is written; the bypass itself is the policy. */
+export function allowAllPending(): Promise<DecisionResult> {
+  return withSessionMutation(async () => {
+    const now = Date.now();
+    const snapshot = await normalizedLocked(now);
+    const decided = snapshot.queue;
+    snapshot.queue = [];
+    for (const entry of decided) {
+      snapshot.results[resultKey(entry.entryId, entry.requester)] = receiptFor(entry, "allowed", now);
     }
     snapshot.results = cleanResults(snapshot.results, now);
     await persistLocked(snapshot);

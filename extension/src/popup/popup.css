@@ -231,7 +231,27 @@ input[type="number"] {
   font-size: 15px;
   letter-spacing: 0.14em;
 }
-input:focus-visible {
+/* The Allow scope picker: the text input's well (same border, radius and
+ * surface) in the 13px system face rather than the pairing field's spaced
+ * monospace, because its options are prose, not a code. The label above it
+ * is the shared .label register; the trough below carries the scope's data. */
+select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+select:disabled {
+  background: var(--sunken);
+  color: var(--ink-dim);
+}
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 1px;
 }
@@ -308,8 +328,11 @@ input:disabled {
 .actions {
   margin-top: 16px;
 }
-/* The three consent choices as one decision: Allow once / Always allow on a
- * row, Deny full-width beneath. min-width:0 keeps the pair inside 300px (D1). */
+/* Allow / Deny side by side under the scope picker. min-width:0 keeps the pair
+ * inside 300px (D1). */
+.actions .row {
+  margin-top: 12px;
+}
 .row {
   display: flex;
   gap: 8px;

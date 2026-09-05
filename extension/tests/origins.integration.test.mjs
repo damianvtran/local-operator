@@ -300,7 +300,7 @@ test("cancel is requester-bound and a stale generation cannot decide", async () 
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("allow once grants only one requester while always reconciles exact-origin entries", async () => {
+test("allow once grants only one requester while site reconciles exact-origin entries", async () => {
   const chrome = installChromeStub();
   const bundle = await loadStore();
   try {
@@ -311,14 +311,14 @@ test("allow once grants only one requester while always reconciles exact-origin 
     assert.ok(chrome.session("onceGrants")["https://same.example\nsession:A"]);
     assert.equal(chrome.session("onceGrants")["https://same.example\nsession:B"], undefined);
     const a2 = await store.enqueueAccess(url("https://same.example"), "session:A2", "async");
-    await store.decideAccess(a2.entryId, "always");
+    await store.decideAccess(a2.entryId, "site");
     assert.equal(chrome.local("origins")["https://same.example"], "allow");
     assert.equal(chrome.session("accessQueue").length, 0);
     assert.equal((await store.accessStatus("https://same.example", "session:B")).state, "allowed");
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("loopback all-port decision reconciles only same scheme and literal host", async () => {
+test("loopback domain decision reconciles every port on both schemes and literal host", async () => {
   const chrome = installChromeStub();
   const bundle = await loadStore();
   try {
@@ -336,16 +336,19 @@ test("loopback all-port decision reconciles only same scheme and literal host", 
     await store.enqueueAccess(url("http://localhost:5173"), "session:B", "async");
     await store.enqueueAccess(url("https://localhost:5173"), "session:C", "async");
     await store.enqueueAccess(url("http://127.0.0.1:5173"), "session:D", "async");
-    const decided = await store.decideAccess(selected.entryId, "all_ports");
-    assert.deepEqual(decided.decided.map((entry) => entry.requester), ["session:A", "session:B"]);
-    assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:C", "session:D"]);
+    const decided = await store.decideAccess(selected.entryId, "domain");
+    // Host scope covers every scheme and port on the literal loopback hostname.
+    assert.deepEqual(decided.decided.map((entry) => entry.requester), ["session:A", "session:B", "session:C"]);
+    assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:D"]);
     assert.equal((await store.accessStatus("http://localhost:5173", "session:B")).state, "allowed");
-    assert.ok(chrome.local("hostGrants").grants['["http:","localhost"]']);
+    assert.ok(chrome.local("siteGrants").grants["localhost"]);
+    assert.equal(chrome.local("siteGrants").grants["localhost"].scope, "host");
+    // Exact rows on the granted host are compacted away; other hosts keep theirs.
     assert.deepEqual(chrome.local("origins"), {
-      "https://localhost:5173": "allow",
       "http://127.0.0.1:5173": "allow",
       "http://localhost:9999": "deny",
     });
+    assert.equal(chrome.local("hostGrants"), undefined, "no legacy hostGrants are written");
   } finally { await bundle.close(); chrome.restore(); }
 });
 
@@ -354,14 +357,17 @@ test("covered exact approval does not recreate a compacted Settings row", async 
   const bundle = await loadModule("src/access-grants.ts");
   try {
     const grants = await bundle.import();
-    assert.equal(await grants.grantLoopbackHost(url("http://localhost:3000")), true);
+    assert.equal(await grants.grantSite(url("http://localhost:3000")), true);
     assert.equal(await grants.grantExactOrigin("http://localhost:5173"), true);
     assert.deepEqual(chrome.local("origins"), {});
-    assert.equal(Object.keys(chrome.local("hostGrants").grants).length, 1);
+    assert.equal(Object.keys(chrome.local("siteGrants").grants).length, 1);
+    // A second exact approval on a covered origin is a no-op.
+    assert.equal(await grants.grantExactOrigin("http://localhost:3000"), true);
+    assert.deepEqual(chrome.local("origins"), {});
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("exact persistent decision reconciles only the selected origin", async () => {
+test("site persistent decision reconciles only the selected origin", async () => {
   const chrome = installChromeStub();
   const bundle = await loadStore();
   try {
@@ -369,21 +375,22 @@ test("exact persistent decision reconciles only the selected origin", async () =
     const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
     await store.enqueueAccess(url("http://localhost:3000"), "session:B", "async");
     await store.enqueueAccess(url("http://localhost:5173"), "session:C", "async");
-    await store.decideAccess(selected.entryId, "always");
+    await store.decideAccess(selected.entryId, "site");
     assert.deepEqual(chrome.session("accessQueue").map((entry) => entry.requester), ["session:C"]);
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("persisted loopback grant survives module restart and admits a second port", async () => {
+test("persisted loopback host grant survives module restart and admits a second port", async () => {
   const chrome = installChromeStub();
   const bundle = await loadStore();
   const originsBundle = await loadModule("src/origins.ts");
   try {
     const store = await bundle.import();
     const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
-    await store.decideAccess(selected.entryId, "all_ports");
+    await store.decideAccess(selected.entryId, "domain");
     const origins = await originsBundle.import("restart");
     assert.equal(await origins.originAllowed(url("http://localhost:5173")), true);
+    assert.equal(await origins.originAllowed(url("https://localhost:8443")), true);
   } finally {
     await bundle.close();
     await originsBundle.close();
@@ -391,7 +398,7 @@ test("persisted loopback grant survives module restart and admits a second port"
   }
 });
 
-test("revoking a loopback all-port grant makes a later port prompt again", async () => {
+test("revoking a loopback host grant makes a later port prompt again", async () => {
   const chrome = installChromeStub();
   const storeBundle = await loadStore();
   const originsBundle = await loadModule("src/origins.ts");
@@ -399,9 +406,9 @@ test("revoking a loopback all-port grant makes a later port prompt again", async
   try {
     const store = await storeBundle.import();
     const selected = await store.enqueueAccess(url("http://localhost:3000"), "session:A", "async");
-    await store.decideAccess(selected.entryId, "all_ports");
+    await store.decideAccess(selected.entryId, "domain");
     const grants = await grantsBundle.import();
-    assert.equal(await grants.revokeLoopbackHost('["http:","localhost"]'), true);
+    assert.equal(await grants.revokeSiteGrant("localhost"), true);
     const origins = await originsBundle.import("after-revoke");
     assert.equal(await origins.originAllowed(url("http://localhost:5173")), false);
     const queued = await store.enqueueAccess(url("http://localhost:5173"), "session:B", "async");
@@ -446,7 +453,7 @@ test("same-command in-command admissions dedupe onto one generation", async () =
   } finally { await bundle.close(); chrome.restore(); }
 });
 
-test("always allow reconciles every identical in-command waiter", async () => {
+test("site allow reconciles every identical in-command waiter", async () => {
   const chrome = installChromeStub();
   const bundle = await loadModule("src/origins.ts");
   try {
@@ -455,7 +462,7 @@ test("always allow reconciles every identical in-command waiter", async () => {
     const second = origins.askOrigin(url("https://fleet-hop.example"), "same-command");
     while ((chrome.session("accessQueue")?.length ?? 0) !== 1) await new Promise((resolve) => setTimeout(resolve, 0));
     const selected = chrome.session("accessQueue")[0];
-    await origins.resolveOrigin(selected.origin, "always", selected.entryId);
+    await origins.resolveOrigin(selected.origin, "site", selected.entryId);
     assert.deepEqual(await Promise.all([first, second]), [true, true]);
     assert.equal(chrome.session("accessQueue").length, 0);
   } finally { await bundle.close(); chrome.restore(); }

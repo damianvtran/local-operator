@@ -4,13 +4,14 @@ import {
   selectEntry,
   type AccessQueueEntry,
 } from "../access-queue";
-import { isLoopbackHost } from "../origin-policy";
+import type { BroadGrant } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
   noticeForRejectedDecision,
   originPromptView,
+  scopeOptions,
   type DecidedOrigin,
   type OriginDecision,
 } from "./origin-flow";
@@ -64,6 +65,9 @@ let shownPromptId = "";
 // Popup-local selection follows an immutable generation, not an index. Storage
 // changes retain it while alive; when it disappears FIFO becomes current.
 let selectedEntryId: string | undefined;
+// The broad scope the visible prompt's domain option would write, captured at
+// render like the origin and generation, so the ack names what was granted.
+let shownBroadScope: BroadGrant["scope"] | undefined;
 
 interface Health {
   extension_connected: boolean;
@@ -139,14 +143,11 @@ async function render(): Promise<void> {
     shownPromptOrigin = pendingOriginValue;
     shownPromptId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
     renderQueueControls(queue, selected);
-    const allPorts = document.getElementById("origin-all-ports");
-    let loopbackEligible = false;
-    try {
-      loopbackEligible = !!pendingOriginValue && isLoopbackHost(new URL(pendingOriginValue));
-    } catch {
-      // Health fallback from an older peer can be malformed; broad scope stays hidden.
-    }
-    allPorts?.classList.toggle("hidden", !loopbackEligible);
+    // The option list comes from the ENTRY (worker-stamped `broad`), never
+    // from a hostname computed here: a /health-only render has no entry and
+    // therefore no domain option, which is the fail-closed shape.
+    renderScopeSelect(selected ?? (pendingOriginValue ? { origin: pendingOriginValue } : undefined));
+    shownBroadScope = selected?.broad?.scope;
     // A fresh prompt must arrive with live buttons even if a previous
     // decision's lock is still set.
     setOriginBusy(false);
@@ -181,6 +182,10 @@ async function render(): Promise<void> {
     // hides and the trough carries a plain note.
     const label = document.getElementById("connected-label");
     const detail = document.getElementById("connected-detail");
+    // The all-sites switch means no prompt will ever appear; say so here so
+    // the popup does not merely look idle while the agent roams.
+    const { allowAllSites } = await getLocal();
+    document.getElementById("connected-all-sites")?.classList.toggle("hidden", allowAllSites !== true);
     if (detail && label) {
       const url = health.current_url;
       // Parallel sessions can each drive their own tab now; the card stays a
@@ -326,10 +331,15 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
-document.getElementById("origin-allow")?.addEventListener("click", () => void decide("once"));
-document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
-document.getElementById("origin-all-ports")?.addEventListener("click", () => void decide("all_ports"));
+// Allow sends whatever scope the select holds; the select's value set is
+// exactly scopeOptions' values, so no other decision can be minted here.
+document.getElementById("origin-allow")?.addEventListener("click", () => {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  const value = select?.value;
+  if (value === "domain" || value === "site" || value === "once") void decide(value);
+});
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
+document.getElementById("origin-scope")?.addEventListener("change", () => renderScopeDetail());
 document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
 document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
 
@@ -337,17 +347,40 @@ document.getElementById("origin-next")?.addEventListener("click", () => void mov
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
 function setOriginBusy(busy: boolean): void {
-  for (const id of [
-    "origin-allow",
-    "origin-always",
-    "origin-all-ports",
-    "origin-deny",
-    "origin-previous",
-    "origin-next",
-  ]) {
-    const button = document.getElementById(id) as HTMLButtonElement | null;
-    if (button) button.disabled = busy;
+  for (const id of ["origin-scope", "origin-allow", "origin-deny", "origin-previous", "origin-next"]) {
+    const control = document.getElementById(id) as HTMLButtonElement | HTMLSelectElement | null;
+    if (control) control.disabled = busy;
   }
+}
+
+/** Fill the Allow select from the entry and preselect its default. Options
+ * are rebuilt per render because the selected entry (and so whether a
+ * domain option exists) changes with Previous/Next. */
+function renderScopeSelect(entry: Pick<AccessQueueEntry, "origin" | "broad"> | undefined): void {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  if (!select) return;
+  const { options, defaultValue } = scopeOptions(entry);
+  select.replaceChildren(
+    ...options.map((option) => {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      element.dataset.detail = option.detail;
+      return element;
+    }),
+  );
+  select.value = defaultValue;
+  renderScopeDetail();
+}
+
+/** The trough under the select names what the CURRENT option grants, as
+ * data (domain, origin, or the once window), so the user verifies the exact
+ * scope before clicking Allow. */
+function renderScopeDetail(): void {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  const detail = document.getElementById("origin-scope-detail");
+  if (!select || !detail) return;
+  detail.textContent = select.selectedOptions[0]?.dataset.detail ?? "";
 }
 
 function renderQueueControls(queue: AccessQueueEntry[], selected: AccessQueueEntry | undefined): void {
@@ -378,7 +411,7 @@ async function moveQueue(delta: -1 | 1): Promise<void> {
 }
 
 function showOriginAck(decision: OriginDecision): void {
-  const ack = ackForDecision(decision);
+  const ack = ackForDecision(decision, shownBroadScope);
   const title = document.getElementById("origin-ack-title");
   const sub = document.getElementById("origin-ack-sub");
   if (title) title.textContent = ack.title;
