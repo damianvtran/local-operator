@@ -1862,6 +1862,8 @@ class FrontendStateStore:
                     "model_id": str(getattr(entry, "model_id", "") or ""),
                     "label": str(getattr(entry, "label", "") or ""),
                     "context_window": int(getattr(entry, "context_window", 0) or 0),
+                    "default_context_window": getattr(entry, "default_context_window", None),
+                    "max_context_window": getattr(entry, "max_context_window", None),
                     "input_price": float(getattr(entry, "input_price", 0.0) or 0.0),
                     "output_price": float(getattr(entry, "output_price", 0.0) or 0.0),
                     "connected": bool(getattr(entry, "connected", False)),

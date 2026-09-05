@@ -60,6 +60,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
     ProviderTurnStartEvent,
@@ -67,6 +68,7 @@ from local_operator.harness.types import (
     StaleAside,
     StreamEndEvent,
     StreamEvent,
+    StreamModelEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -1295,7 +1297,19 @@ class AgentLoop:
             )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
-                if isinstance(event, StreamStartEvent):
+                if isinstance(event, StreamModelEvent):
+                    model = event.model
+                    yield ModelChangeEvent(
+                        provider=model.provider,
+                        model_id=model.model_id,
+                        effort=model.reasoning_effort,
+                        context_window=model.context_window,
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
+                        context_metadata=True,
+                        context_metadata_resolved=model.context_metadata_resolved,
+                    )
+                elif isinstance(event, StreamStartEvent):
                     # The provider is generating for THIS request. Republish it
                     # as a harness event so supervisors get a boundary that
                     # means "on the wire" — ``MessageStartEvent`` above is
