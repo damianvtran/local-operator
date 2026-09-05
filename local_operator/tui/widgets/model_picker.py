@@ -64,6 +64,16 @@ _COLUMN_GAP = 2
 #: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
 PERSIST_HINT_PREFIX = "/model default"
 
+#: The argument words ``/model`` consumes as COMMANDS rather than as selectors
+#: to rank rows against. Typing one filters the catalogue to nothing by
+#: construction — no row is named `default` — so the empty-state row says what
+#: the word does instead of reporting a failed search (UX review round 3, U3).
+#: Kept beside ``PERSIST_HINT_PREFIX`` because both exist for the same reason:
+#: this widget has to recognise the app's `/model` vocabulary without importing
+#: ``app``, which imports this module. ``test_persist_keywords_match_app``
+#: asserts they stay in step with the handler's own dispatch.
+_PERSIST_KEYWORDS = frozenset({"default", "saved"})
+
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
@@ -562,6 +572,18 @@ class ModelPicker(Static):
         leaves slash context — the two lists expire an Esc on the same rule."""
         self._dismissed_query = None
 
+    def is_dismissed(self) -> bool:
+        """Whether an Esc is currently latched for the query in the buffer.
+
+        The state that is invisible on screen and still load-bearing: the list
+        is hidden, the text is unchanged, and the next key must not be routed
+        as though no list had ever been asked for. The editor uses it to hold
+        completion keys (UX review round 3, U13) — Tab with a latched Esc had
+        no rows to complete from, so it fell through to ``TextArea`` and
+        inserted a literal tab into the query.
+        """
+        return self._dismissed_query is not None
+
     def dismiss(self) -> None:
         """Hide the list for the CURRENT query without touching the text.
 
@@ -849,7 +871,24 @@ class ModelPicker(Static):
 
         bits: list[str] = []
         if total == 0:
-            bits.append("no matching models" if self._query.strip() else "no models available")
+            query = self._query.strip()
+            # A KEYWORD IS NOT A FAILED SEARCH (UX review round 3, U3). The
+            # footer one row below advertises `/model default`, and typing it
+            # narrowed the catalogue to `no matching models` — the list calling
+            # the instruction it is itself printing a dead end, which is the
+            # most confusing shape a hint can take. `default` and `saved` are
+            # COMMAND WORDS consumed by `_cmd_model`, not selectors that could
+            # ever match a row, so the empty list is the correct and expected
+            # state for them rather than a report about the catalogue. The row
+            # says what pressing Enter will do instead. Compared against the
+            # same lowered spelling `_cmd_model` dispatches on, and only for an
+            # EXACT word: `/model default anthropic/claude-opus-5` is a
+            # selector being typed and genuinely has no matches until it
+            # resolves, so it keeps the ordinary message.
+            if query.lower() in _PERSIST_KEYWORDS:
+                bits.append(f"{query.lower()} is a command, not a model — enter runs it")
+            else:
+                bits.append("no matching models" if query else "no models available")
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
         bits.extend(status)

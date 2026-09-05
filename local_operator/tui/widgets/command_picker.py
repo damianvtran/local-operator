@@ -1497,6 +1497,17 @@ class CommandPicker(Static):
         self._dismissed_query = self._query
         self._close()
 
+    def is_dismissed(self) -> bool:
+        """Whether an Esc is currently latched for the token in the buffer.
+
+        The sibling of :meth:`ModelPicker.is_dismissed` and it exists for the
+        same reason: the list is hidden but the token is still live, so a
+        completion key routed as though nothing had been asked for falls
+        through to ``TextArea`` and types a literal tab into the word the user
+        dismissed a list over (UX review round 3, U13).
+        """
+        return self._dismissed_query is not None
+
     def close(self) -> None:
         """Hide the picker (submission, completion — not a dismissal)."""
         self._close()
