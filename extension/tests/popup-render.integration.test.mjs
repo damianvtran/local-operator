@@ -261,6 +261,144 @@ test("the re-ask card survives a second render and a queue move (U9/U10)", async
   }
 });
 
+test("deciding another queued origin does not evict this one's re-ask state (U12)", async () => {
+  const nodes = installDomStub();
+  const { areas, sent } = installChromeStub();
+  installFetchStub(() => undefined);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    // Two origins waiting, A twice so it survives its own decision. Answering
+    // one request while others wait is the whole point of the queue controls,
+    // so this is the ordinary path, not a contrivance.
+    areas.session.set("accessQueue", [
+      entry("gen-1"),
+      entry("gen-2"),
+      entry("gen-3", "https://third.test", null),
+    ]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+
+    const scope = nodes.get("origin-scope");
+    const again = nodes.get("origin-again");
+    scope.value = "once";
+    nodes.get("origin-allow").click();
+    await tick(20);
+    assert.equal(scope.value, "once", "precondition: A's re-ask carries the narrow choice");
+
+    // Move to the OTHER origin and decide it. A single-slot latch is
+    // overwritten here, losing A's decision while A is still queued (U12).
+    nodes.get("origin-next").click();
+    await tick(20);
+    assert.equal(nodes.get("origin-host").textContent, "third.test", "precondition: on the sibling origin");
+    nodes.get("origin-allow").click();
+    await tick(20);
+
+    // Back to A, which never left the queue.
+    nodes.get("origin-previous").click();
+    await tick(20);
+    assert.equal(nodes.get("origin-host").textContent, "app.example.com", "precondition: back on A");
+    assert.equal(again.classList.contains("hidden"), false, "after deciding another origin: the banner must survive");
+    assert.equal(scope.value, "once", "after deciding another origin: the scope must survive");
+
+    nodes.get("origin-allow").click();
+    await tick(20);
+    const forA = sent.filter((m) => m.event === "origin_decision" && m.origin === "https://app.example.com");
+    assert.deepEqual(
+      forA.map((d) => d.decision),
+      ["once", "once"],
+      "a decision on another origin must not widen what A is granted",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("an unrelated re-render never clobbers an in-flight selection (A13)", async () => {
+  const nodes = installDomStub();
+  const { areas, sent } = installChromeStub();
+  installFetchStub(() => undefined);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("accessQueue", [entry("gen-1")]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+
+    const scope = nodes.get("origin-scope");
+    // The user narrows but has NOT clicked yet. No decision exists, so the
+    // re-ask latch cannot protect this selection: only renderScopeSelect's
+    // "same prompt, already built" guard does. Deleting that guard typechecks
+    // and passed every other test while sending `domain` for a user who chose
+    // `once` - A1/U1 restored (A13).
+    scope.value = "once";
+
+    // An unrelated sibling enqueues, which re-renders the same prompt.
+    areas.session.set("accessQueue", [
+      entry("gen-1"),
+      entry("gen-9", "https://unrelated.test", null),
+    ]);
+    await chrome.storage.session.set({
+      accessQueue: [entry("gen-1"), entry("gen-9", "https://unrelated.test", null)],
+    });
+    await tick(20);
+
+    assert.equal(scope.value, "once", "an unrelated re-render must not reset the in-flight scope");
+    nodes.get("origin-allow").click();
+    await tick(20);
+    const decisions = sent.filter((m) => m.event === "origin_decision");
+    assert.equal(decisions.at(-1).decision, "once", "the wire must carry what the user selected");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a re-ask latch does not outlive its origin leaving the queue (A14)", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installFetchStub(() => undefined);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    // TWO entries for one origin: the decision is only recorded against the
+    // origin on a render where that origin is still pending, so a queue that
+    // drains on the click never reaches the latch at all.
+    areas.session.set("accessQueue", [entry("gen-1"), entry("gen-2")]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+
+    const scope = nodes.get("origin-scope");
+    const again = nodes.get("origin-again");
+    scope.value = "once";
+    nodes.get("origin-allow").click();
+    await tick(20);
+    assert.equal(again.classList.contains("hidden"), false, "precondition: the latch is set for this origin");
+
+    // The origin now leaves the queue entirely.
+    await chrome.storage.session.set({ accessQueue: [] });
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), true, "precondition: queue drained");
+
+    // It asks again later. This is a genuinely NEW request, not a re-ask of
+    // one just answered, so it must get the fail-closed default and no
+    // banner. An uncleared latch narrows instead: bounded harm, since it can
+    // only ever narrow, but the banner would be lying (A14).
+    await chrome.storage.session.set({ accessQueue: [entry("gen-77")] });
+    await tick(20);
+
+    assert.equal(again.classList.contains("hidden"), true, "a new request must not claim to be a re-ask");
+    assert.equal(scope.value, "domain", "a new request gets the fail-closed default, not a carried scope");
+  } finally {
+    await bundle.close();
+  }
+});
+
 test("a deny re-ask does not claim the answer was used (U11)", async () => {
   const nodes = installDomStub();
   const { areas } = installChromeStub();

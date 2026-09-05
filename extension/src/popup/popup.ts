@@ -92,9 +92,16 @@ let scopeBuiltForEntryId: string | undefined;
 // a storage event, or a Previous/Next move that legitimately rebuilds the
 // option list, recomputed "is this a repeat" as false and reset the scope to
 // the widest option, handing over a whole domain to a user who chose `once`
-// (U9/U10). Cleared in one place, the `!pendingOriginValue` branch, which is
-// the moment the request the decision belonged to is genuinely gone.
-let repeatAskFor: DecidedOrigin | null = null;
+// (U9/U10).
+//
+// A MAP, not a single slot: several requests wait at once - that is what the
+// Previous/Next controls are for - and answering one of them is the point of
+// the queue. A single slot let a decision on origin B evict origin A's latch
+// while A was still queued, so returning to A showed no banner and the widest
+// scope, and the next click granted A's whole domain (U12). Pruned to the
+// origins still live in the queue, which is the real expression of "until the
+// origin leaves the queue" and bounds the map by ACCESS_QUEUE_CAP.
+const repeatAskByOrigin = new Map<string, DecidedOrigin>();
 
 interface Health {
   extension_connected: boolean;
@@ -159,8 +166,23 @@ async function render(): Promise<void> {
     shownPromptOrigin = undefined;
     shownPromptId = "";
     decidedOrigin = null;
-    repeatAskFor = null;
     scopeBuiltForEntryId = undefined;
+  }
+  // Prune on EVERY render rather than only when the queue empties: an origin
+  // whose requests are all answered has left the queue even while others wait,
+  // and holding its decision past that point would claim "asking again" on a
+  // genuinely new request and carry a scope the user chose for a different
+  // one. This is the single clear site, so the latch cannot outlive its
+  // request by any path (A14).
+  if (repeatAskByOrigin.size > 0) {
+    const liveOrigins = new Set(queue.map((item) => item.origin));
+    // The /health-only fallback has no queue rows to prove liveness with, so
+    // the origin it reports counts as live; otherwise the fallback path would
+    // prune the latch it just set.
+    if (pendingOriginValue) liveOrigins.add(pendingOriginValue);
+    for (const origin of repeatAskByOrigin.keys()) {
+      if (!liveOrigins.has(origin)) repeatAskByOrigin.delete(origin);
+    }
   }
   // Hold the acknowledgement while session storage and /health still echo the
   // GENERATION the user just decided. Without this the echo redraws the full
@@ -178,12 +200,11 @@ async function render(): Promise<void> {
   // preselect the scope the user just chose, and to mark the card as a repeat
   // ask (U9). Captured here, then cleared, so no later render can treat it as
   // a live echo.
-  // Promote the spent echo latch to the origin-keyed one, which survives the
-  // later renders that need it (U10). A decision for a DIFFERENT origin does
-  // not carry over: the guards in preselectedScope/isRepeatAsk reject it, and
-  // holding it would only risk a cross-origin read.
-  if (decidedOrigin) repeatAskFor = decidedOrigin;
-  const justDecided = repeatAskFor;
+  // Promote the spent echo latch to the origin-keyed map, which survives the
+  // later renders that need it (U10). Recording it UNDER ITS OWN ORIGIN is
+  // what keeps a decision on one queued site from erasing another's (U12).
+  if (decidedOrigin) repeatAskByOrigin.set(decidedOrigin.origin, decidedOrigin);
+  const justDecided = pendingOriginValue ? (repeatAskByOrigin.get(pendingOriginValue) ?? null) : null;
   decidedOrigin = null;
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
