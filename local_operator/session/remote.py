@@ -514,8 +514,10 @@ class RemoteSession:
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
             # which is the visible flicker this whole change exists to remove.
-            state = self._restore_cold_details(state)
-            self._cold_checkpoint = None
+        # Children can persist a roster before the parent's first transcript
+        # row. Absence of that file must not hide independently durable spend.
+        state = self._restore_cold_details(state)
+        self._cold_checkpoint = None
         self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
@@ -556,7 +558,7 @@ class RemoteSession:
         """
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
-            return state
+            return self._restore_cold_subagents(state)
         try:
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
@@ -579,13 +581,13 @@ class RemoteSession:
                 "the saved session details could not be read, so the subagent and "
                 "todo panels start empty"
             )
-            return state
-        return state.model_copy(
+            return self._restore_cold_subagents(state)
+        restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
                 # derive. The panel reads these directly, so restoring them is
                 # what puts the session's details on the FIRST frame.
-                "jobs": _restored_job_rows(self._durable_roster(durable)),
+                "jobs": list(durable.jobs),
                 "todos": list(durable.todos),
                 "conversation_title": durable.conversation_title,
                 "conversation_title_user_set": durable.conversation_title_user_set,
@@ -599,6 +601,8 @@ class RemoteSession:
                 # ``_restore_reported_usage`` on the old owner path).
                 "cumulative_parent_cost": durable.cumulative_parent_cost,
                 "child_costs": dict(durable.child_costs),
+                "subagent_cost": durable.subagent_cost,
+                "subagent_cost_knowledge": durable.subagent_cost_knowledge,
                 "cost_knowledge": durable.cost_knowledge,
                 "last_usage": durable.last_usage,
                 **self._consistent_context(state, durable),
@@ -623,7 +627,52 @@ class RemoteSession:
             }
         )
 
-    def _durable_roster(self, durable: FrontendSessionState) -> Sequence[Any]:
+        return self._restore_cold_subagents(restored)
+
+    def _restore_cold_subagents(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Overlay the independently committed roster and lifetime ledger.
+
+        A child can settle without a parent turn, so the sidecar is newer than
+        the frontend checkpoint and may be the ONLY durable state. Read it once
+        for both rows and money; summing visible rows loses swept/prior work.
+        """
+        from local_operator.session.frontend_state import CostKnowledge
+        from local_operator.session.session import (
+            SUBAGENT_ROSTER_SIDECAR,
+            _read_roster_sidecar,
+        )
+        from local_operator.tui.costs import cost_summary
+
+        payload = (
+            _read_roster_sidecar(
+                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+            )
+            or {}
+        )
+        changes: dict[str, Any] = {
+            "jobs": _restored_job_rows(self._durable_roster(state, payload=payload))
+        }
+        if isinstance(payload.get("accounting"), list):
+            try:
+                # Validate the complete checkpoint before replacing money. A
+                # corrupt component must not silently turn into a smaller bill.
+                components = [Usage.model_validate(row) for row in payload["accounting"]]
+                cost, unknown = cost_summary(components, recorded_only=True)
+                changes.update(
+                    subagent_cost=cost,
+                    subagent_cost_knowledge=(
+                        CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT
+                    ),
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "session %s: subagent accounting checkpoint unreadable", self._session_id
+                )
+        return state.model_copy(update=changes)
+
+    def _durable_roster(
+        self, durable: FrontendSessionState, *, payload: dict[str, Any] | None = None
+    ) -> Sequence[Any]:
         """The roster to restore: the SIDECAR's rows, falling back to the
         checkpoint's.
 
@@ -652,11 +701,42 @@ class RemoteSession:
 
         rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
         try:
-            payload = _read_roster_sidecar(
-                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
-            )
+            if payload is None:
+                payload = _read_roster_sidecar(
+                    self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+                )
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
+                if job.usage is not None:
+                    from local_operator.session.frontend_state import _cost_knowledge
+                    from local_operator.tui.costs import cost_summary
+
+                    # The strict AsyncJob sidecar cannot grow frontend-only
+                    # fields without breaking older owners. Reconstruct only
+                    # from persisted bills/estimates here: a daemonless viewer
+                    # must not need credentials or trigger model discovery.
+                    cost, unknown = cost_summary(
+                        job.usage.cost_components or [job.usage], recorded_only=True
+                    )
+                    previous = rows.get(str(job.id))
+                    if cost is not None or previous is None:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": cost,
+                                "direct_cost_knowledge": _cost_knowledge(cost, unknown),
+                            }
+                        )
+                    else:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": previous.direct_cost,
+                                "direct_cost_knowledge": (
+                                    _cost_knowledge(previous.direct_cost, True)
+                                    if unknown
+                                    else previous.direct_cost_knowledge
+                                ),
+                            }
+                        )
                 rows[str(job.id)] = job
         except Exception:  # noqa: BLE001 — a bad sidecar must not stop the open
             logger.debug("cold state could not read the roster sidecar", exc_info=True)
