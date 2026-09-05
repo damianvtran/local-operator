@@ -48,9 +48,22 @@ async def main() -> None:
     os.chdir("/tmp")
     session = _ColdAsyncLabelSession() if cold else _AsyncLabelSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    # No network in an evidence frame: the update check would paint a
+    # `! latest is vX.Y.Z — /update` row that varies by the day the script is
+    # run (QA round 2, Q6). Same stub `tests/unit/tui/test_cold_slash_binds.py`
+    # uses.
+    OperatorApp._check_for_update = lambda self: None  # type: ignore[method-assign]
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(110, 24)) as pilot:
         await _await_session(app, pilot)
+        # The splash's model row starts as `connecting…` and repaints once the
+        # band learns the label; a frame taken between the two is not
+        # reproducible (Q6). Wait for the settled label before acting.
+        for _ in range(50):
+            if app._status is not None and app._status._model_label == session.model_label:
+                break
+            await pilot.pause()
+        await pilot.pause()
         app._run_slash_command("/model anthropic/claude-fable-5-1")
         await pilot.pause()
         await pilot.pause()

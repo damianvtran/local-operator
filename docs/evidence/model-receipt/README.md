@@ -27,9 +27,15 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 - `after-cold.*` — this branch: `no runtime is running for this session; send
   a message to start one, then run /model again` and no receipt, because the
   switch reached nothing (QA round 1, Q4). The boot splash stays, as it does
-  for every command that changed nothing (`_system_notice`).
+  for every command that changed nothing (`_system_notice`). Two other cold
+  shapes answer differently and are pinned by tests rather than frames: a
+  viewer `/stop` ended answers `this session was stopped; /resume <id> reopens
+  it` ahead of the routing seam, and one redialing a dead owner answers
+  `session owner is reconnecting; try /model again in a moment`.
 
 The status band is unchanged between each pair on purpose: it repaints from
 the owner's frontend-state sync, which the fake never delivers. The band's cwd
 is `/private/tmp` because the script `chdir`s there before painting, so no
-worktree path lands in a committed frame.
+worktree path lands in a committed frame. The script stubs the update check
+and waits for the splash's model row to settle, so two runs paint the same
+`<text>` nodes (QA round 2, Q6).

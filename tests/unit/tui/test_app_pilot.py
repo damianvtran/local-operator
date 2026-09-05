@@ -9123,11 +9123,58 @@ async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
     assert _unwrapped("(this session)") not in text, text
 
 
+class _StoppedFollowerSession(_AsyncLabelSession):
+    """The shape a real follower is in after ``/stop``: the socket is closed
+    (``is_cold``) but ``frontend_state`` still carries the owner's LAST
+    capability list, because the sync that would clear it is never coming. A
+    routed slash therefore reaches ``route_shared_slash``, which refuses with
+    the pre-existing "reconnecting" wording (QA round 2, Q5 measured this on
+    the socket rig: cell C2).
+    """
+
+    def __init__(self, *, cold: bool = True) -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            CommandScope,
+            FrontendSessionState,
+            SlashCapability,
+        )
+
+        self._cold = cold
+        self.routed: list[tuple[str, str]] = []
+        self.frontend_state = FrontendSessionState(
+            session_id=self.session_id,
+            epoch="owner",
+            slash_capabilities=[
+                SlashCapability(
+                    command="model", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+                )
+            ],
+        )
+
+    @property
+    def is_cold(self) -> bool:
+        return self._cold
+
+    async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+        self.routed.append((command, args))
+        if self._cold:
+            raise ConnectionError(f"session is reconnecting; try /{command} again in a moment")
+        return {"kind": "notice", "text": f"owner ran /{command} {args}", "style": "info"}
+
+
 @pytest.mark.asyncio
-async def test_switch_on_a_cold_viewer_after_stop_names_the_reopen_command() -> None:
-    """After ``/stop`` the viewer is cold on purpose; "send a message" would be
-    the wrong lever, so the stopped-state answer (``/resume <id>``) is used."""
-    session = _ColdAsyncLabelSession()
+async def test_switch_on_a_stopped_follower_names_the_reopen_command_before_routing() -> None:
+    """After ``/stop`` a routed ``/model`` answers with ``/resume <id>``, not
+    "reconnecting".
+
+    The stale capability list would route the command to an owner that was
+    stopped on purpose, and the facade's refusal ("session is reconnecting;
+    try /model again in a moment") tells the user to wait for something the
+    row above said is not coming. The stopped id is recorded before the socket
+    closes, so the app consults it ahead of the routing seam.
+    """
+    session = _StoppedFollowerSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(110, 24)) as pilot:
@@ -9136,8 +9183,62 @@ async def test_switch_on_a_cold_viewer_after_stop_names_the_reopen_command() -> 
         app._run_slash_command("/model anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
     assert _unwrapped("this session was stopped") in text, text
     assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_connected_follower_with_a_stale_stopped_id_still_routes() -> None:
+    """The pre-route answer is gated on ``is_cold`` too: a facade that is still
+    connected must keep routing so the owner's own reply lands, even if a
+    stopped id from an earlier life of this app is somehow still set."""
+    session = _StoppedFollowerSession(cold=False)
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        for _ in range(20):
+            await pilot.pause()
+            if session.routed:
+                break
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [("model", "anthropic/claude-fable-5-1")], session.routed
+    assert _unwrapped("owner ran /model") in text, text
+    assert _unwrapped("this session was stopped") not in text, text
+
+
+class _RecoveringAsyncLabelSession(_ColdAsyncLabelSession):
+    """Cold because the owner DIED and the facade is redialing it, not because
+    nothing was ever bound: ``_recovering`` is set and the facade's own answer
+    for the gap is ``_unavailable_reason()``."""
+
+    _recovering = True
+
+    def _unavailable_reason(self) -> str:
+        return "session owner is reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_switch_while_the_owner_is_being_recovered_says_reconnecting() -> None:
+    """Review round 2, R2-M1: "send a message to start one" is the wrong lever
+    while the facade is already redialing; the gap's own sentence is used."""
+    session = _RecoveringAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("session owner is reconnecting; try /model again in a moment") in text, text
+    assert _unwrapped("send a message to start one") not in text, text
     assert _unwrapped("(this session)") not in text, text
 
 
