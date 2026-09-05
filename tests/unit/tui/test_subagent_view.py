@@ -45,6 +45,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
     Transcript,
     TranscriptEntry,
     TranscriptPage,
@@ -66,6 +67,7 @@ from local_operator.tui.widgets.subagent_view import (
     HISTORY_UNAVAILABLE_NOTE,
     INSTRUCTION_ROWS,
     LEDGER_GONE_NOTE,
+    READ_ONLY_NOTE,
     TRAJECTORY_MAX_EVENTS,
     TRUNCATION_NOTE,
     InstructionBlock,
@@ -1164,16 +1166,17 @@ async def test_durable_history_opens_at_tail_and_pages_to_the_start(tmp_path) ->
         # recomputed on a later refresh, so a slow runner reads the previous
         # "loading earlier…" caption (CI shard 3, 3.12). Poll for the settled
         # caption rather than asserting on whichever frame arrives first.
+        settled = f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
         for _ in range(50):
-            if view._state_hint.rendered().endswith("transcript start · read-only"):
+            if view._state_hint.rendered().endswith(settled):
                 break
             await pilot.pause()
         page = " ".join(view.rendered_rows())
         assert "durable 0" in page
         assert HISTORY_START_NOTE in page
         assert len(view._history_ids) == 230
-        assert view._state_hint.rendered().endswith("transcript start · read-only")
-        assert view._state_hint.region.width >= len("transcript start · read-only")
+        assert view._state_hint.rendered().endswith(settled)
+        assert view._state_hint.region.width >= len(settled)
 
 
 @pytest.mark.asyncio
@@ -2101,7 +2104,11 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
 
         child_dir.mkdir()
-        view._history_unavailable = False
+        # No manual clear of ``_history_unavailable`` here any more. It used to
+        # be needed because that flag was a load gate nothing in the product
+        # ever cleared, so the Home retry below could not have run — the crutch
+        # was itself the evidence for the latch this file now pins. ``Home`` is
+        # an explicit reader gesture and is admitted regardless of the note.
         attempts = 0
 
         def flaky(*args, **kwargs):
@@ -4098,3 +4105,381 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
             f"growth dragged the viewport {offset - owner_top} rows into a block "
             f"(offset={offset}, owner_top={owner_top}, max={view._body.max_scroll_y})"
         )
+
+
+@pytest.mark.asyncio
+async def test_the_unavailable_note_clears_when_the_transcript_appears(tmp_path) -> None:
+    """The launch race, end to end: the note must not outlive the absence.
+
+    ``SubagentComms.attach`` binds ``session_dir`` when the child session is
+    constructed, but ``Transcript`` creates ``transcript.jsonl`` on the first
+    append, so a page opened in that window reads a valid directory with no
+    file in it. The reported symptom was the footer saying "history
+    unavailable" under a fully rendered trajectory for the rest of the page's
+    life, because the flag that failure set was also the gate on ever loading
+    again.
+
+    Driven through the app's own refresh (``_refresh_subagent_view``, the 1 Hz
+    poll's entry point) rather than by poking the flag, since the claim is
+    that the PRODUCT re-examines the directory.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    # attach() made the directory; the child's first append has not landed.
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        # Correct at this instant: there genuinely is no transcript yet.
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_child_with_no_directory_never_probes_and_keeps_the_note(tmp_path) -> None:
+    """The permanent half: no directory is an absence no refresh revises.
+
+    A child that never started a durable session has nothing to read now and
+    nothing to read later, so the note is the truth and the page must not
+    spend a disk read per refresh discovering that again — the hot loop the
+    module's other retry latches exist to prevent.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type("Comms", (), {"session_dir_of": lambda self, _job_id: None})()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert view._history_absent_final
+
+        probes = 0
+        real_probe = view._transcript_file_exists
+
+        def counted() -> bool:
+            nonlocal probes
+            probes += 1
+            return real_probe()
+
+        view._transcript_file_exists = counted  # type: ignore[method-assign]
+        for _ in range(5):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+
+        assert probes == 0, "a child with no directory must not be probed at all"
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_transcript_costs_one_stat_per_refresh_and_no_read(
+    tmp_path, monkeypatch
+) -> None:
+    """The transient half must not become a retry storm.
+
+    A directory that exists and stays empty is re-examined on every refresh —
+    that is what makes the note self-correcting — but the re-examination is a
+    ``stat``, and the expensive page read is only requested once the cheap
+    answer says there is something to read. A swept child whose transcript was
+    genuinely deleted sits here indefinitely, so this is the case that decides
+    whether "self-correcting" costs anything.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        reads = 0
+        real_read = subagent_view.read_transcript_page
+
+        def counted_read(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", counted_read)
+        for _ in range(6):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+        await _wait_history(pilot, view)
+        assert reads == 0, "an empty directory must not be re-read from disk each refresh"
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        # The moment the file appears, the SAME refresh path picks it up, and
+        # exactly one read pays for it.
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("late row", id="late-1"))
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert reads == 1
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "late row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_swept_child_with_a_deleted_transcript_reads_honestly(tmp_path) -> None:
+    """``gone`` semantics must survive the re-look.
+
+    Retention sweeps a settled child five minutes after it finishes, and its
+    session directory can be removed with it. The page then has no durable
+    rows to offer and says so — while ``LEDGER_GONE_NOTE`` continues to
+    terminate the body, because the rows above it were true when captured.
+    """
+    job = _job_with(TRAJECTORY, status="gone")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "swept"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        # The directory outlived the file, which is the sweep this covers.
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        for _ in range(3):
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert LEDGER_GONE_NOTE in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, monkeypatch) -> None:
+    """A background peek that fails must not spend the reader's error latch.
+
+    ``_history_error`` is a one-way gate: ``_maybe_load_history`` admits only
+    an explicit ``Home`` past it. That is right for a read the reader ASKED
+    for — they are owed the outcome of their gesture — but the re-look added
+    for the launch race issues reads nobody requested, so one transient
+    ``OSError`` on a speculative probe used to latch the gate on the reader's
+    behalf and permanently downgrade a self-correcting page to a manual one,
+    silently (review round 1, R2 / QA Q10).
+
+    Pins the whole property, not just the flag: after the failed probe the
+    footer still says what it said before, later refreshes still issue reads
+    (the page is still looking), and the durable row lands on its own without
+    anyone pressing anything.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        reads = 0
+        failed = 0
+        succeeded = 0
+        real_read = subagent_view.read_transcript_page
+
+        # The failure is aimed at the PROBE, identified by the only thing that
+        # distinguishes it: it is the read that happens once the transcript
+        # exists. Two weaker keys were tried and both are scheduling-dependent
+        # -- "the first read" and a plain one-shot latch each let an in-flight
+        # read left over from the open above spend the failure on a call this
+        # test is not about, after which the probe SUCCEEDED and the footer read
+        # `start of transcript` where the unchanged note belonged. That is the
+        # shape CI failed on twice.
+        #
+        # Keying on the file makes the injection indifferent to how many reads
+        # the loop happens to settle, while still being the real production
+        # shape: a network home directory hiccuping once, on the read that
+        # matters.
+        armed = True
+
+        def flaky(*args, **kwargs):
+            nonlocal reads, failed, succeeded, armed
+            reads += 1
+            if armed and (child_dir / TRANSCRIPT_FILENAME).exists():
+                armed = False
+                failed += 1
+                raise OSError("transient NFS hiccup")
+            # Counted by OUTCOME rather than by total: the total is a
+            # scheduling detail, while "the probe failed" and "a later read
+            # succeeded" are the two facts this test is about, and both are
+            # stable under load.
+            result = real_read(*args, **kwargs)
+            if failed:
+                succeeded += 1
+            return result
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", flaky)
+
+        # The file appearing is what triggers the probe, and that probe fails.
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+        app._refresh_subagent_view(view.job_id)
+        # Wait on the PROBE HAVING RUN, not on a frame budget. `_wait_history`
+        # only awaits workers that ALREADY exist, so a refresh whose worker has
+        # not been spawned yet returns having waited on nothing and leaves
+        # `reads` at 0 — which is exactly how this went red on a loaded CI
+        # shard. Bounded by loop turns, so contention stretches how long a turn
+        # takes rather than how many the probe needs.
+        # Sample the footer on EVERY settle, and assert over the whole
+        # observed sequence rather than at one chosen instant.
+        #
+        # The window between the failed probe and the re-look that heals it is
+        # not reliably observable: both can complete inside a single settle
+        # under load, so "read the footer once the probe has failed" sometimes
+        # legitimately reads the HEALED footer and the test failed for
+        # observing the fix working. The durable property does not depend on
+        # catching that instant -- across the entire recovery the reader must
+        # never be shown `load failed`, because they never asked for the read
+        # that failed. That is what R2 is about, and it is true at every
+        # sample regardless of how the turns fall.
+        notes_during_recovery = [view._history_state_text()]
+        error_during_recovery = view._history_error
+        for _ in range(200):
+            await _wait_history(pilot, view)
+            notes_during_recovery.append(view._history_state_text())
+            error_during_recovery = error_during_recovery or view._history_error
+            if failed:
+                break
+        else:
+            raise AssertionError("the probe never ran")
+        assert failed == 1, "the probe must actually have run and failed"
+        # The failed peek concluded nothing, so no sample anywhere in the
+        # recovery shows the reader an error they never provoked, and the
+        # error latch -- the gate that would end the self-healing -- is never
+        # taken by a read nobody asked for.
+        assert not any(
+            HISTORY_ERROR_NOTE in note for note in notes_during_recovery
+        ), notes_during_recovery
+        assert not error_during_recovery
+
+        # The point of the fix: the page is STILL looking. No Home, no keypress.
+        app._refresh_subagent_view(view.job_id)
+        # Same edge as above: the re-look happening IS the fix, so wait on it
+        # rather than on a fixed number of frames.
+        for _ in range(200):
+            await _wait_history(pilot, view)
+            if succeeded:
+                break
+        else:
+            raise AssertionError("the re-look never ran after the failed probe")
+
+        # Same reason as above: what this pins is that the re-look HAPPENED
+        # after a failed probe, which is the whole point of the fix. One more
+        # read than the failed probe proves it; the exact total does not.
+        assert succeeded >= 1, "a transient probe failure must not stop the re-look"
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
+    tmp_path, monkeypatch
+) -> None:
+    """Recovering from a failed probe must not become the retry storm.
+
+    The tempting fix for R2 — admitting ``recheck`` past the error guard —
+    also clears the latch, but a read that keeps failing would then cost one
+    disk read per refresh forever. Restoring the previous conclusion instead
+    keeps the cheap ``stat`` as the gate, so a persistent failure costs one
+    read per refresh at most and the note never flaps (QA Q13 measured 0 extra
+    reads over 60 refreshes on the reachable permission-denied path).
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+
+        reads = 0
+
+        def always_fails(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(subagent_view, "read_transcript_page", always_fails)
+
+        footers = set()
+        for _ in range(20):
+            app._refresh_subagent_view(view.job_id)
+            await _wait_history(pilot, view)
+            footers.add(view._history_state_text())
+
+        # One read per REFRESH is the floor the stat gate cannot lower here:
+        # the file genuinely is there, so the cheap probe says "go look" every
+        # time and the read is the only way to learn it still fails. Measured
+        # at ~1.1 per refresh — the settle that follows an abandoned probe can
+        # re-enter the refresh path once — which matches the rate QA measured
+        # on the analogous stat/read disagreement and did not file.
+        #
+        # The storm this excludes is the one an error-guard fix would create:
+        # unbounded growth with the EVENT rate rather than the refresh rate.
+        assert reads <= 2 * 20, f"probe storm: {reads} reads over 20 refreshes"
+
+        # The bound above is necessary but NOT sufficient: the rejected
+        # error-guard fix also satisfies it at this refresh count (review
+        # round 2, R5). What actually separates the two is the SHAPE of the
+        # growth — the storm rises with the event stream, this does not — so
+        # assert on that directly. `show()` is what a relayed event drives;
+        # driving it 100x more must not buy 100x the reads, because the
+        # in-flight guard serialises probes and only a settled one re-arms.
+        reads_after_refresh_phase = reads
+        for _ in range(200):
+            app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+        burst_reads = reads - reads_after_refresh_phase
+        assert burst_reads <= 20, (
+            f"probe cost tracks the EVENT rate, not the refresh rate: "
+            f"{burst_reads} reads from 200 back-to-back shows"
+        )
+
+        # And the reader sees one stable, truthful note throughout — no blink
+        # between the absence and an error nobody asked to hear about.
+        assert footers == {f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"}, footers
