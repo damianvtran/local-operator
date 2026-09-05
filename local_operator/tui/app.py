@@ -8527,7 +8527,20 @@ class OperatorApp(App[None]):
         model = getattr(state, "effective_model", None) or getattr(state, "selected_model", None)
         if model is None:
             return False
-        return bool(getattr(model, "provider", "")) and bool(getattr(model, "model_id", ""))
+        provider = str(getattr(model, "provider", "") or "")
+        if not provider:
+            return False
+        if getattr(model, "model_id", ""):
+            return True
+        # An empty ``model_name`` is NOT unconfigured: the runtime's resolver
+        # (``session_factory``) falls back to the provider's default model, so
+        # a config that names only `hosting` boots fine and must engage.
+        # Requiring a model id here regressed exactly that config to never
+        # engaging on mount OR keystroke (review round 2, MAJOR-1). Ask the
+        # same table the resolver asks.
+        from local_operator.model.defaults import default_model_for
+
+        return bool(default_model_for(provider))
 
     def _warm_runtime_for_draft(self) -> None:
         """Engage a runtime for a cold viewer, at most once per binding.
@@ -8584,7 +8597,7 @@ class OperatorApp(App[None]):
     def _cancel_runtime_engage(self) -> None:
         """Stop an engage that is still in flight for the session being left.
 
-        The mount engage runs in a worker that outlives nothing on its own: a
+        The mount engage runs in a worker that nothing cancels by itself: a
         `/resume` or `/new` typed inside the first second of a fresh `lop`
         (the engage takes ~0.5–2 s with a dozen MCP servers) used to let it
         finish AFTER the swap had disposed its viewer, attaching a socket to a

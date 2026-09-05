@@ -1217,15 +1217,11 @@ class RuntimeServer:
                 # ordinary residency drain (``process._should_exit``) reaps it
                 # seconds later once nobody is attached. This op only makes
                 # that immediate for the one case where waiting is pointless.
-                observers = sum(
-                    1
-                    for other in self._clients.values()
-                    if other.kind == "attach" and other is not conn
-                )
+                observers = self._other_observers(conn)
                 if observers > 0:
                     detail = f"kept: {observers} viewer(s) still attached"
                 else:
-                    detail = await self._retire_if_pristine()
+                    detail = await self._retire_if_pristine(leaving=conn)
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -1283,14 +1279,25 @@ class RuntimeServer:
             await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
             await self._push()
 
-    async def _retire_if_pristine(self) -> str:
+    def _other_observers(self, leaving: _ClientConn) -> int:
+        """Attach clients other than the one asking to leave.
+
+        The residency predicate's term 3 with the leaving viewer excluded:
+        its own connection is still registered while its op is dispatched,
+        so counting it would make every retirement refuse itself.
+        """
+        return sum(
+            1 for other in self._clients.values() if other.kind == "attach" and other is not leaving
+        )
+
+    async def _retire_if_pristine(self, *, leaving: _ClientConn) -> str:
         """Stop this runtime iff nothing has ever happened in its session.
 
         The caller (``_on_request``) has already established that no OTHER
         viewer is attached; this half answers "is there anything here worth
         keeping". Split out so the observer check reads next to the connection
         it inspects while the disposal ordering stays beside the ``stop`` op it
-        mirrors.
+        mirrors. Both checks are repeated after the one await below.
 
         Every failure path RETURNS rather than raises, and every one of them
         keeps the runtime alive. A wrong "retire" ends a session the user may
@@ -1328,6 +1335,13 @@ class RuntimeServer:
         # SIGTERM racing a turn already does; the message is not lost, it is
         # persisted and the sender's next engage starts a fresh runtime.
         await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
+        # The observer count is repeated too: a viewer that attached DURING
+        # the broadcast was not on the recipient list, so it never heard
+        # `stopping` and would read the exit as owner death — and it is a
+        # user who just opened this session (review round 2, MINOR-2).
+        late = self._other_observers(leaving)
+        if late > 0:
+            return f"kept: {late} viewer(s) attached while stopping was announced"
         try:
             if not pristine():
                 # Refusing AFTER announcing is safe: ``stopping`` only latches

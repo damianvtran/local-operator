@@ -903,7 +903,16 @@ class RemoteSession:
             on_frontend_sync=self._on_frontend_sync,
             on_frontend_update=self._on_frontend_update,
         )
-        await client.connect(record, self._session_id)
+        try:
+            await client.connect(record, self._session_id)
+        except BaseException:
+            # A cancel (the app cancelling its engage worker at a swap) or a
+            # failure inside `connect` leaves a half-open socket that nothing
+            # else references; closing it here rather than leaving it to GC
+            # is the same discipline `_deliver` keeps (review round 2,
+            # MINOR-1).
+            client.close()
+            raise
         if self._disposed:
             # The facade was disposed while the socket was connecting. Holding
             # the client would leave an `attach` connection nobody owns on the

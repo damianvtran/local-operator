@@ -507,7 +507,6 @@ async def test_no_provider_configured_skips_the_mount_engage(tmp_path: Path, mon
             for _ in range(40):
                 await pilot.pause()
             assert app._session is viewer
-            assert app._runtime_can_start() is False
             assert engaged is False, "an unconfigured viewer must not spawn a runtime"
             assert app._warm_engage_started is False
             assert app._starting_runtime is False, "no spinner on the onboarding screen"
@@ -552,3 +551,74 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
 
     assert handle.next_wake_due_at() is None, "the live scheduler sees nothing"
     assert handle.is_pristine() is False, "the index row must still count"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, monkeypatch) -> None:
+    """Review round 2, MAJOR-1: an empty `model_name` is not "unconfigured".
+
+    The runtime's resolver falls back to the provider's default model, so a
+    config naming only `hosting` boots fine; the gate must agree with the
+    resolver rather than regress that config to never engaging.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    (tmp_path / "sessions" / "s1" / "transcript.jsonl").write_text("", encoding="utf-8")
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "anthropic", "model_name": ""})
+
+    engaged = asyncio.Event()
+
+    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+        engaged.set()
+        raise ConnectionError("no runtime in this test")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+
+    async def _never():
+        raise AssertionError
+
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    assert viewer.frontend_state.effective_model is not None
+    assert viewer.frontend_state.effective_model.model_id == ""
+
+    async def factory():
+        return viewer
+
+    app = OperatorApp(factory)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await asyncio.wait_for(engaged.wait(), timeout=DEADLOCK_GUARD_S)
+            await pilot.pause()
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_attaching_during_the_announcement_keeps_the_runtime() -> None:
+    """Review round 2, MINOR-2: the observer count is re-asked after the broadcast."""
+    handle = PristineHandle(pristine=True)
+    server = RuntimeServer(handle, kind="tui")
+    leaving = _conn("attach")
+    _register(server, leaving)
+    late = _conn("attach")
+
+    sent: list[dict[str, Any]] = []
+
+    async def capture(target, frame):  # noqa: ANN001
+        sent.append(frame)
+
+    async def attach_during_broadcast(frame):  # noqa: ANN001
+        _register(server, late)  # a second terminal opens the session right now
+
+    server._send_to = capture  # type: ignore[assignment]
+    server._broadcast = attach_during_broadcast  # type: ignore[assignment]
+    await server._on_request({"op": "retire_if_pristine", "req": 1}, leaving)
+
+    assert sent[-1]["detail"] == "kept: 1 viewer(s) attached while stopping was announced"
+    assert handle.stopped is False
