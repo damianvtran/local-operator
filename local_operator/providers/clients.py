@@ -25,6 +25,7 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -2007,6 +2008,34 @@ class OpenAICompatClient:
             headers["Authorization"] = f"Bearer {bearer}"
         return headers
 
+    def _codex_affinity_headers(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None", url: str
+    ) -> dict[str, str]:
+        """Keep a transcript's cache routing stable on the built-in OAuth route.
+
+        Codex emits both headers (codex-api/src/requests/headers.rs at
+        459a79eb). Matched live Sol/Astra tool loops favored this pair over the
+        body key alone. Independent QA confirmed improvement but also misses:
+        affinity is not a cache-hit guarantee. This is a GROUP, not stored history:
+        forks intentionally inherit the cache lineage and still replay full
+        input with store:false. Stateful transport would need a separate id.
+        """
+        key = request.prompt_cache_key
+        if (
+            url != CODEX_RESPONSES_URL
+            or self._base_url != "https://api.openai.com/v1"
+            or request.model.provider not in {"openai", "openai-device"}
+            or not self._codex_responses_mode(oauth_access)
+            or not key
+            or not key.strip()
+        ):
+            return {}
+        # Never send a filesystem/session label verbatim in a header. A fixed
+        # namespace makes the bounded ASCII UUID stable across retries, resumes,
+        # model changes and fresh client instances, without retaining credentials.
+        affinity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:codex-cache:{key}"))
+        return {"session-id": affinity, "thread-id": affinity}
+
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
         request = bind_native_context(
@@ -2180,13 +2209,11 @@ class OpenAICompatClient:
             ),
         }
         if request.system_blocks:
-            # The stable system prefix rides top-level ``instructions``, exactly
-            # as real Codex does (client.rs: ``instructions = base_instructions``).
-            # We deliberately do NOT move it into ``developer`` messages or attach
-            # ``prompt_cache_breakpoint`` markers: the ChatGPT-subscription Codex
-            # backend rejects both ``prompt_cache_breakpoint`` and
-            # ``prompt_cache_options`` with HTTP 400 (matches OpenAI Codex bug
-            # #35300), and that OAuth backend is the only path in use here.
+            # Preserve the established legacy layout. Current Codex also has
+            # Lite developer input items, but that changes reasoning context
+            # and showed no benefit in our probes (docs/OPENAI_CACHING.md).
+            # Public breakpoint/TTL support is a different contract: current
+            # OAuth probes reject explicit markers even with the Lite header.
             body["instructions"] = "\n\n".join(request.system_blocks)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
@@ -2212,8 +2239,9 @@ class OpenAICompatClient:
             # body above: the Responses API spells `service_tier` identically.
             body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
-            # The 24h policy is meaningful only with a stable key. SessionStreamFn
-            # supplies one per transcript, and retries preserve it on ChatRequest.
+            # Preserve the existing public request policy here; modern public
+            # TTL compatibility needs separate API-key validation. The Codex
+            # builder below removes retention, but keeps the routing key.
             body["prompt_cache_key"] = request.prompt_cache_key
             body["prompt_cache_retention"] = "24h"
         return body
@@ -2223,18 +2251,12 @@ class OpenAICompatClient:
     ) -> dict[str, Any]:
         """ChatGPT Codex body: Responses-shaped, on the ``store:false`` backend.
 
-        Reuses the public Responses body, then strips the fields the codex
-        backend does not take. Note that ``prompt_cache_key`` is deliberately
-        NOT stripped any more: an earlier version popped it under a comment
-        calling it "public-API-only", which was a wrong assumption. Real Codex
-        (client.rs, ``build_responses_request``) sets ``prompt_cache_key``
-        UNCONDITIONALLY on this same ``store:false`` backend for routing
-        stickiness, and the model's ~89-90% cache-read rate versus ~97-98% for
-        OpenAI-shaped peers was traced to us stripping it. ``prompt_cache_key``
-        and ``include`` (defect #2's encrypted reasoning) flow through from
-        ``_build_responses_body``. Only ``prompt_cache_retention`` is popped:
-        the codex backend is ``store:false``, so public retention does not
-        apply.
+        Reuses the public builder while removing unsupported retention, output
+        cap and sampling fields. The body cache key and encrypted reasoning
+        include remain intact. The key is a routing hint, not a cache-hit
+        guarantee; current matched experiments also needed the canonical
+        session/thread affinity headers. See ``_codex_affinity_headers`` and
+        docs/OPENAI_CACHING.md for the measured endpoint-specific evidence.
         """
         body = self._build_responses_body(request, endpoint=CODEX_RESPONSES_URL, scope=scope)
         body["store"] = False
@@ -2484,6 +2506,8 @@ class OpenAICompatClient:
             if codex
             else self._build_responses_body(request, scope=scope)
         )
+        headers = self._headers(api_key, oauth_access)
+        headers.update(self._codex_affinity_headers(request, oauth_access, url))
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
@@ -2502,7 +2526,7 @@ class OpenAICompatClient:
             "POST",
             url,
             json=body,
-            headers=self._headers(api_key, oauth_access),
+            headers=headers,
         ) as response:
             if response.status_code >= 400:
                 await response.aread()

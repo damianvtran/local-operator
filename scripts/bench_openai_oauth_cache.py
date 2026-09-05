@@ -1,98 +1,44 @@
 #!/usr/bin/env python3
-"""Live prompt-cache benchmark for the OpenAI OAuth (ChatGPT / Codex) path.
+"""Measure the current OpenAI OAuth wire path, not a promised cache improvement.
 
-This drives REAL multi-turn conversations through the harness' actual wire
-client (``OpenAICompatClient``) against the operator's ChatGPT-subscription
-OAuth credential for ``gpt-5.6-sol``, and reports the server-side prompt-cache
-hit rate the Codex Responses backend actually delivers. Its purpose is a
-before/after measurement: run the SAME script on ``origin/main`` and on a fix
-branch and compare the numbers. It deliberately hardcodes nothing about any
-fix -- it exercises whatever request the current code builds, so the delta is
-attributable to the code under test rather than to the harness.
+Run the SAME script on the baseline and candidate checkout. The adapter owns
+all request shaping; this benchmark does not enable experimental API fields.
+Every live invocation uses a fresh synthetic prefix namespace, redirects HOME
+and config, and reads one existing OAuth access token without refreshing it.
+No real user conversations or external tool execution enter the experiment.
 
-Why this exists
----------------
-The Codex Responses path (``_build_codex_responses_body``) currently strips
-``prompt_cache_key`` from the body (it is popped as a "public-API-only" key).
-OpenAI's Responses cache keys off request-prefix identity, and a stable
-``prompt_cache_key`` is what pins diverging sessions that share a big system +
-tools prefix onto the same cache bucket (the failure mode OpenAI Codex issue
-#35300 targets). Without it, a large stable prefix reused across sessions that
-diverge at the first user turn caches far worse than it should. We need a live
-BEFORE number to prove the gap and an AFTER number to prove a fix.
+OpenAI cached/write tokens are subsets of input: rate = sum(cached)/sum(input).
+Provider usage is authoritative; list-price-equivalent input units are only an
+estimate, NOT an OAuth subscription charge. A zero cache result is evidence,
+not a reason to discard a run or claim a speedup. See docs/OPENAI_CACHING.md.
 
-The cache-read rate and its subset semantics
---------------------------------------------
-On OpenAI, ``usage.input_tokens_details.cached_tokens`` (mapped onto
-``Usage.cache_read_tokens``) is a SUBSET of ``usage.input_tokens`` -- the cached
-tokens are counted INSIDE the input total, not in addition to it. The Codex
-backend does not report a separate cache-WRITE count, so ``cache_write_tokens``
-is 0 on this path. To keep the rate comparable to the other providers' rate in
-``bench_cache_rate.py`` (where cached is reported OUTSIDE input), and to keep
-the denominator equal to the true prompt-side token volume, we compute:
-
-    cache_read_rate = sum(cache_read) / sum(input + cache_read + cache_write)
-
-Because ``cached ⊆ input`` here, ``input + cache_read`` double-counts the cached
-slice on purpose: the denominator is then "prompt tokens billed at full price
-(input - cached) + cached tokens counted once as input + cached counted again",
-which for OpenAI reduces to ``input + cached`` and makes the ratio directly the
-fraction of the prompt that was served from cache relative to a
-cached-outside-input convention. In practice ``cache_write`` is 0 here, so the
-denominator is ``input + cached`` and the rate is ``cached / (input + cached)``.
-The per-scenario table prints the raw sums so the semantics are auditable.
-
-What each scenario probes
--------------------------
-1. ``long_session`` -- one session, 6-8 append-only turns that build on each
-   other. This is the operator's dominant usage; the whole prefix (system +
-   tools + growing history) is stable turn to turn, so it should show the
-   HIGHEST baseline cache rate even without the fix, because a single session
-   naturally reuses its own prefix.
-2. ``stable_prefix`` -- the same large system + tools prefix, but 5 SEPARATE
-   short sessions that diverge at the very first user turn. This is the issue
-   #35300 failure mode: the big shared prefix should hit cache across sessions,
-   and the ``prompt_cache_key`` is what makes that happen. Expect the biggest
-   before/after gap here.
-3. ``tool_heavy`` -- one session where each turn issues a tool call and feeds
-   the ``function_call`` / ``function_call_output`` back, 5-6 turns. Probes how
-   the cache behaves when the tail of the prefix is tool traffic rather than
-   plain user/assistant text (breakpoint-after-tool-result behavior).
-4. ``reasoning_on`` -- like scenario 1 but with reasoning effort set to
-   ``medium`` so the encrypted-reasoning-content path is exercised. Reasoning
-   items ride the Responses prefix; this checks caching still lands with them.
-
-Cost discipline
----------------
-Model OUTPUT is the expensive part and it is capped hard: every prompt asks for
-a terse (<=15 word) answer, and turn counts are small and flag-tunable. The
-PREFIX (system + tools) is deliberately realistic (~10-15k tokens) so the cached
-prefix clears OpenAI's 1024-token cache floor -- a toy prefix would never cache
-and the measurement would be meaningless. Net: a full run spends a few thousand
-input tokens per turn (cached after the first) and a few hundred output tokens.
-
-Usage
------
+Examples (live calls are opt-in; --turns is the POST budget per scenario):
     .venv/bin/python scripts/bench_openai_oauth_cache.py --dry-run
-    .venv/bin/python scripts/bench_openai_oauth_cache.py --scenario long_session --turns 6
-    .venv/bin/python scripts/bench_openai_oauth_cache.py            # all scenarios, live
+    .venv/bin/python scripts/bench_openai_oauth_cache.py --live --model gpt-6-astra \
+        --scenario long_session --turns 3 --output /tmp/cache-run.jsonl
 
-``--dry-run`` prints the redacted request-body shape WITHOUT any network call so
-the codex routing (posts to the Codex URL, and -- on origin/main -- carries NO
-``prompt_cache_key``) can be inspected. Exit code is ALWAYS 0: this is a
-measurement tool, not a gate. A missing OAuth credential prints a skip line and
-exits 0.
+The Codex backend removes max_output_tokens. Terse synthetic prompts and a
+request timeout bound exposure, but are NOT a provider-enforced output cap.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
+import sqlite3
+import subprocess
 import sys
+import tempfile
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+import httpx
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -103,48 +49,43 @@ from local_operator.harness.types import (  # noqa: E402
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
     StreamUsageEvent,
+    TextContent,
     ToolCall,
     ToolContext,
-    Usage,
+    ToolResult,
 )
 from local_operator.model.configure import build_model_spec  # noqa: E402
 from local_operator.prompts_api import build_system_blocks  # noqa: E402
-from local_operator.providers.auth_store import AuthStore, OAuthAccess  # noqa: E402
+from local_operator.providers.auth_store import OAuthAccess  # noqa: E402
 from local_operator.providers.clients import (  # noqa: E402
     CODEX_RESPONSES_URL,
     OpenAICompatClient,
-    client_for_spec,
 )
 from local_operator.tools.registry import create_tools  # noqa: E402
 
-# The model under test. Resolved through the real registry so
-# supports_prompt_cache / supports_responses_api / context_window are the exact
-# values the app runs with, not guesses.
 MODEL_ID = "gpt-5.6-sol"
-
-# A terse-answer instruction appended to every user prompt. Output tokens are
-# the costly ones; the whole benchmark is about INPUT-side caching, so we cap
-# generation to a handful of tokens per turn without changing the prefix.
-TERSE = " Answer in 15 words or fewer, no code."
-
-# A small, realistic skills block so the frozen skills tail matches what a live
-# session carries. Kept byte-stable for a session exactly as the harness freezes
-# its selected skills block for the conversation.
-SKILLS_BLOCK = "<skills>\nminerva-observability: Datadog incident playbooks\n</skills>"
-
-ENV_DETAILS = "Platform: Darwin (arm64). Shell: /bin/zsh. Working on a Python project."
-DATE_STR = "2026-08-26"
+SCENARIOS = ("long_session", "stable_prefix", "tool_heavy", "reasoning_on", "repeat_then_append")
+TERSE = " Answer in 15 words or fewer, no code or tool calls."
 
 
 @dataclass
 class TurnUsage:
-    """One turn's prompt-side token accounting from the provider's usage event."""
+    """Provider counters: cached and written are subsets of input, not extras."""
 
     input_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     output_tokens: int = 0
+
+    @property
+    def input_price_equivalent_tokens(self) -> float:
+        # Public GPT-5.6+ list-rate multipliers, not subscription billing. Never
+        # infer cache writes from misses: these are the reported buckets only.
+        plain = self.input_tokens - self.cache_read_tokens - self.cache_write_tokens
+        return plain + 0.1 * self.cache_read_tokens + 1.25 * self.cache_write_tokens
 
 
 @dataclass
@@ -167,46 +108,54 @@ class ScenarioResult:
 
     @property
     def denom(self) -> int:
-        # See the module docstring: cached ⊆ input on OpenAI, so the denominator
-        # counts input + cache_read (+ cache_write, 0 here) to express the rate
-        # on the same "cached outside input" convention the other bench uses.
-        return self.total_input + self.total_cache_read + self.total_cache_write
+        return self.total_input
 
     @property
     def cache_rate(self) -> float:
         return self.total_cache_read / self.denom if self.denom else 0.0
 
 
-# ---------------------------------------------------------------------------
-# Prefix construction (identical big prefix for every scenario)
-# ---------------------------------------------------------------------------
+def _build_prefix(namespace: str, rows: int) -> tuple[list[AgentTool], list[str]]:
+    """Real tool schemas plus synthetic reference text, never private context."""
+    tools = create_tools(ToolContext(cwd=str(Path.home()), session_id="bench-oauth-cache"))
+    if tools:
+        # Tools precede developer instructions on the wire. Isolate that earliest
+        # prefix too, otherwise independent arms can share cached schema tokens.
+        tools[0] = tools[0].model_copy(
+            update={"description": f"Synthetic namespace {namespace}. " + tools[0].description}
+        )
+    tools.append(
+        AgentTool(
+            name="synthetic_lookup",
+            description="Return the benchmark's synthetic color without reading files.",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            execute=_lookup,
+        )
+    )
+    blocks = build_system_blocks(tools, "", "Synthetic isolated benchmark workspace.", "2026-09-04")
+    # Keys only influence routing. Independent leading CONTENT, not keys alone,
+    # keeps an earlier arm from warming the reusable developer prefix of this arm.
+    blocks[0] = f"Synthetic cache namespace: {namespace}\n" + blocks[0]
+    blocks.append(
+        " ".join(
+            f"Synthetic record {i}: approved color is blue, revision {i % 7}." for i in range(rows)
+        )
+        + "\nFor a lookup, call ONLY synthetic_lookup once, then acknowledge its result with OK."
+    )
+    return tools, blocks
 
 
-def _build_prefix() -> tuple[list[AgentTool], list[str]]:
-    """The realistic (tools, system_blocks) prefix shared by every scenario.
-
-    The tool inventory and system blocks are what dominate the cached prefix
-    (~10-15k tokens together), so they are built once and reused: two scenarios
-    that share this prefix byte-for-byte are exactly what a server-side prefix
-    cache is supposed to reward.
-    """
-    tools = create_tools(ToolContext(cwd=str(REPO), session_id="bench-oauth-cache"))
-    system_blocks = build_system_blocks(tools, SKILLS_BLOCK, ENV_DETAILS, DATE_STR)
-    return tools, system_blocks
+async def _lookup(call_id: str, *_args: Any, **_kwargs: Any) -> ToolResult:
+    return ToolResult(
+        tool_call_id=call_id, tool_name="synthetic_lookup", content=[TextContent(text="blue")]
+    )
 
 
-def _resolve_spec(reasoning_effort: str | None) -> ModelSpec:
-    """The real ModelSpec for the model, optionally pinned to a reasoning level.
-
-    Resolved via ``build_model_spec`` (the same path the session uses) so
-    ``supports_prompt_cache`` and ``supports_responses_api`` are authoritative.
-    A reasoning level is only applied when the model's own ladder accepts it, so
-    the request never carries a level the provider would 400 on.
-    """
-    spec = build_model_spec("openai", MODEL_ID)
-    if reasoning_effort and reasoning_effort in spec.reasoning_efforts:
-        spec = spec.model_copy(update={"reasoning_effort": reasoning_effort})
-    return spec
+def _resolve_spec(model: str, reasoning_effort: str) -> ModelSpec:
+    spec = build_model_spec("openai", model)
+    if reasoning_effort not in spec.reasoning_efforts:
+        raise ValueError(f"Unsupported benchmark reasoning effort: {reasoning_effort}")
+    return spec.model_copy(update={"reasoning_effort": reasoning_effort})
 
 
 def _make_request(
@@ -216,417 +165,406 @@ def _make_request(
     messages: list[Message],
     session_id: str,
 ) -> ChatRequest:
-    """Build a ChatRequest exactly as the session host does.
-
-    Critically, ``prompt_cache_key`` is set to the session id, mirroring
-    ``SessionStreamFn.stream`` in ``model/configure.py`` (which copies the
-    session id onto the request when the field is unset). This is the realistic
-    behavior; whether the Codex body then FORWARDS it is the code under test.
-    """
     return ChatRequest(
         model=spec,
         system_blocks=system_blocks,
-        messages=messages,
+        messages=list(messages),
         tools=tools,
         prompt_cache_key=session_id,
     )
 
 
-# ---------------------------------------------------------------------------
-# Scenario message builders
-# ---------------------------------------------------------------------------
+def _source_identity() -> dict[str, Any]:
+    """A dirty worktree needs a source hash as well as its last committed SHA."""
+    from local_operator.providers import clients
 
-# Scenario 1 & 4: an append-only coding conversation. Each prompt builds on the
-# last so the whole history is a stable growing prefix.
-_LONG_PROMPTS = [
-    "I'm building a CLI todo app in Python. What single module layout do you suggest?",
-    "Name the dataclass fields for a Todo item.",
-    "What method signatures should the TodoList class expose?",
-    "How should completed todos be marked in storage?",
-    "Suggest one edge case my remove() method must handle.",
-    "What's a good name for the JSON persistence file?",
-    "One sentence: how should I test the add() path?",
-    "Summarize the design in one line.",
-]
-
-# Scenario 2: five short sessions that share the big prefix but DIVERGE at the
-# very first user turn. Each is a different domain question, so nothing but the
-# system + tools prefix is shared -- which is precisely what a stable
-# prompt_cache_key is supposed to keep warm across sessions.
-_DIVERGING_FIRST_TURNS = [
-    "In one line, what does a load balancer do?",
-    "In one line, what is a Python context manager?",
-    "In one line, what is TCP backpressure?",
-    "In one line, what is a database index?",
-    "In one line, what is idempotency?",
-]
-
-# Scenario 3: tool-heavy. Each turn asks for a lookup that the model answers
-# with a function_call; we synthesize the function_call_output and feed it back,
-# so the tail of the prefix is tool traffic rather than plain prose.
-_TOOL_PROMPTS = [
-    "Read the file config.yaml and tell me the port in one line.",
-    "Now read app.log and report the last error in one line.",
-    "Read version.txt and report the version in one line.",
-    "Read hosts.txt and report the first host in one line.",
-    "Read status.json and report the state in one line.",
-    "Read notes.md and report the title in one line.",
-]
-
-_TOOL_OUTPUTS = [
-    "port: 8080",
-    "ERROR connection reset by peer",
-    "v2.3.1",
-    "web-01.internal",
-    '{"state": "healthy"}',
-    "# Deployment notes",
-]
+    try:
+        revision = subprocess.check_output(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        revision = None
+    return {
+        "source_revision": revision,
+        "adapter_sha256": hashlib.sha256(Path(clients.__file__).read_bytes()).hexdigest(),
+        "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
 
 
-def _long_messages(turn_idx: int, history: list[Message], prompt: str) -> list[Message]:
-    """Append-only: add a user turn, keep all prior assistant/user turns."""
-    history.append(Message.user(prompt + TERSE))
-    return list(history)
+def _oauth_access(path: Path) -> OAuthAccess:
+    """Read an unexpired access token without store migration or token rotation."""
+    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+        rows = db.execute(
+            "SELECT id, data FROM auth_credentials WHERE provider='openai' "
+            "AND credential_type='oauth' AND disabled_cause IS NULL ORDER BY id"
+        )
+        for row_id, data in rows:
+            credential = json.loads(data)
+            if (
+                credential.get("access")
+                and credential.get("org_id")
+                and credential.get("expires", 0) > time.time() * 1000 + 120_000
+            ):
+                return OAuthAccess(
+                    access_token=credential["access"],
+                    credential_id=row_id,
+                    org_id=credential["org_id"],
+                )
+    raise ValueError("No unexpired OpenAI OAuth access token; log in outside this benchmark.")
 
 
-def _tool_call_message(name: str, path: str) -> Message:
-    """An assistant turn requesting a single read tool call.
+class _CaptureStream(httpx.AsyncByteStream):
+    """Observe usage only; forward original bytes without buffering the response."""
 
-    Uses a real ToolCall shape (id, name, arguments) so the Responses converter
-    emits a proper ``function_call`` input item, exercising the tool-result
-    breakpoint path rather than plain prose.
-    """
-    call = ToolCall(name=name, arguments={"path": path})
-    return Message(role="assistant", tool_calls=[call])
+    def __init__(self, stream: httpx.AsyncByteStream, record: dict[str, Any]) -> None:
+        self.stream, self.record = stream, record
 
+    async def __aiter__(self):
+        pending = b""
+        async for data in self.stream:
+            pending += data
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if not line.startswith(b"data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if event.get("type") in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    response = event.get("response") or {}
+                    self.record["raw_usage"] = response.get("usage")
+                    self.record["returned_model"] = response.get("model")
+                    self.record["terminal"] = event["type"]
+            yield data
 
-def _tool_result_message(call_id: str, output: str) -> Message:
-    """A tool result answering a specific call id (=> ``function_call_output``)."""
-    from local_operator.harness.types import TextContent
-
-    return Message(
-        role="tool",
-        content=[TextContent(text=output)],
-        tool_call_id=call_id,
-        tool_name="read",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Scenario runners
-# ---------------------------------------------------------------------------
-
-
-async def _stream_turn(
-    client: Any,
-    request: ChatRequest,
-    oauth_access: OAuthAccess | None,
-) -> TurnUsage:
-    """Drive one real provider turn and return its prompt-side usage.
-
-    Usage arrives on ``StreamUsageEvent`` and/or the terminal ``StreamEndEvent``;
-    we take the last non-empty usage seen. ``api_key`` is None because the OAuth
-    bearer is carried on ``oauth_access`` and injected by the client's headers.
-    """
-    last_usage: Usage | None = None
-    async for event in client.stream(request, None, oauth_access=oauth_access):
-        if isinstance(event, StreamUsageEvent) and event.usage is not None:
-            last_usage = event.usage
-        elif isinstance(event, StreamEndEvent) and event.usage is not None:
-            last_usage = event.usage
-    if last_usage is None:
-        return TurnUsage()
-    return TurnUsage(
-        input_tokens=last_usage.input_tokens,
-        cache_read_tokens=last_usage.cache_read_tokens,
-        cache_write_tokens=last_usage.cache_write_tokens,
-        output_tokens=last_usage.output_tokens,
-    )
+    async def aclose(self) -> None:
+        await self.stream.aclose()
 
 
-async def run_long_session(
-    client: Any,
-    oauth_access: OAuthAccess | None,
-    turns: int,
-    reasoning_effort: str | None,
-    scenario_name: str,
-) -> ScenarioResult:
-    """Scenario 1/4: one session, append-only turns."""
-    spec = _resolve_spec(reasoning_effort)
-    tools, system_blocks = _build_prefix()
-    session_id = f"bench-{scenario_name}"
-    result = ScenarioResult(name=scenario_name)
-    history: list[Message] = []
-    for i, prompt in enumerate(_LONG_PROMPTS[:turns]):
-        messages = _long_messages(i, history, prompt)
-        request = _make_request(spec, system_blocks, tools, messages, session_id)
-        turn = await _stream_turn(client, request, oauth_access)
-        result.turns.append(turn)
-        # Keep the conversation growing so the next turn's prefix extends this
-        # one. A terse canned assistant reply keeps output cost near zero while
-        # preserving a realistic append-only history shape.
-        history.append(Message.assistant("ok"))
-    return result
+class _CaptureTransport(httpx.AsyncBaseTransport):
+    """Observe the real adapter's body; never rewrite it into a candidate API."""
 
+    def __init__(self, inner: httpx.AsyncBaseTransport | None = None) -> None:
+        self.inner = inner or httpx.AsyncHTTPTransport(retries=0)
+        self.record: dict[str, Any] = {}
 
-async def run_stable_prefix(
-    client: Any,
-    oauth_access: OAuthAccess | None,
-    turns: int,
-) -> ScenarioResult:
-    """Scenario 2: N separate sessions sharing the prefix, diverging at turn 1.
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.record.update(
+            endpoint=str(request.url),
+            requested_model=body["model"],
+            body_sha256=hashlib.sha256(request.content).hexdigest(),
+            body_shape=_redact_body(body),
+            affinity_headers={
+                name: request.headers[name]
+                for name in ("session-id", "thread-id")
+                if name in request.headers
+            },
+        )
+        response = await self.inner.handle_async_request(request)
+        self.record["http_status"] = response.status_code
+        assert isinstance(response.stream, httpx.AsyncByteStream)
+        response.stream = _CaptureStream(response.stream, self.record)
+        return response
 
-    Each session gets its OWN prompt_cache_key (session id) because that is how
-    the harness assigns them -- the point of the fix is that a STABLE key per
-    session still lets the shared system+tools prefix hit the server cache
-    across sessions. ``turns`` here means "number of diverging sessions".
-    """
-    spec = _resolve_spec(None)
-    tools, system_blocks = _build_prefix()
-    result = ScenarioResult(name="stable_prefix")
-    count = min(turns, len(_DIVERGING_FIRST_TURNS)) or len(_DIVERGING_FIRST_TURNS)
-    for i in range(count):
-        prompt = _DIVERGING_FIRST_TURNS[i]
-        session_id = f"bench-stable-prefix-{i}"
-        messages = [Message.user(prompt + TERSE)]
-        request = _make_request(spec, system_blocks, tools, messages, session_id)
-        turn = await _stream_turn(client, request, oauth_access)
-        result.turns.append(turn)
-    return result
-
-
-async def run_tool_heavy(
-    client: Any,
-    oauth_access: OAuthAccess | None,
-    turns: int,
-) -> ScenarioResult:
-    """Scenario 3: each turn carries a tool call + its result in the history."""
-    spec = _resolve_spec(None)
-    tools, system_blocks = _build_prefix()
-    session_id = "bench-tool-heavy"
-    result = ScenarioResult(name="tool_heavy")
-    history: list[Message] = []
-    count = min(turns, len(_TOOL_PROMPTS))
-    for i in range(count):
-        prompt = _TOOL_PROMPTS[i]
-        history.append(Message.user(prompt + TERSE))
-        # Model "asks" for a read; we answer with a synthesized tool result so
-        # the NEXT turn's prefix ends in function_call + function_call_output.
-        call_msg = _tool_call_message("read", f"./file_{i}.txt")
-        history.append(call_msg)
-        call_id = call_msg.tool_calls[0].id
-        history.append(_tool_result_message(call_id, _TOOL_OUTPUTS[i]))
-        request = _make_request(spec, system_blocks, tools, list(history), session_id)
-        turn = await _stream_turn(client, request, oauth_access)
-        result.turns.append(turn)
-        history.append(Message.assistant("ok"))
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Dry-run: show the redacted body shape WITHOUT any network call
-# ---------------------------------------------------------------------------
+    async def aclose(self) -> None:
+        await self.inner.aclose()
 
 
 def _redact_body(body: dict[str, Any]) -> dict[str, Any]:
-    """A compact, secret-free view of a request body for inspection.
-
-    Large arrays (instructions, input, tools) are summarized by shape/size
-    rather than dumped, and no credential is present in a body anyway (auth is
-    header-only). This exists to CONFIRM routing and key presence, not to leak.
-    """
-    out: dict[str, Any] = {}
-    for k, v in body.items():
-        if k == "instructions":
-            out[k] = f"<str {len(v)} chars>"
-        elif k == "input":
-            kinds: dict[str, int] = {}
-            for item in v:
-                key = item.get("type") or item.get("role") or "?"
-                kinds[key] = kinds.get(key, 0) + 1
-            out[k] = f"<{len(v)} items: {kinds}>"
-        elif k == "tools":
-            out[k] = f"<{len(v)} tool schemas>"
-        else:
-            out[k] = v
+    out = {
+        key: value for key, value in body.items() if key not in ("instructions", "input", "tools")
+    }
+    out["instructions_chars"] = len(body.get("instructions", ""))
+    out["input_types"] = [item.get("type") or item.get("role") for item in body.get("input", [])]
+    out["tool_names"] = [tool.get("name") for tool in body.get("tools", [])]
     return out
 
 
-def _dry_run() -> None:
-    """Print the redacted codex body shape for a representative turn per scenario.
+def _validated_usage(raw: Any) -> TurnUsage:
+    """Unknown billing buckets must not turn into measured zeroes.
 
-    Builds the client and the exact ChatRequest each scenario's first turn would
-    send, then renders the body via the client's own codex builder -- so what is
-    printed is what would actually be POSTed. The absence of a
-    ``prompt_cache_key`` key here on origin/main is the current bug made visible.
+    JSON booleans inherit from Python integers but are never token counts.
+    Require all four cost-critical fields explicitly; a future wire schema
+    needs a deliberate benchmark update rather than fabricated savings.
     """
-    spec = _resolve_spec("medium")
-    tools, system_blocks = _build_prefix()
-    # ``client_for_spec`` is typed as the ``WireClient`` protocol; for an OpenAI
-    # spec it is concretely an ``OpenAICompatClient``, whose codex body builder
-    # and ``aclose`` this benchmark introspects. Assert the concrete type so the
-    # introspection type-checks (CI runs whole-tree pyright).
-    client = client_for_spec(spec, openai_api="responses")
-    assert isinstance(client, OpenAICompatClient)
+    if not isinstance(raw, dict):
+        raise ValueError("Raw provider usage is missing or malformed.")
+    details = raw.get("input_tokens_details")
+    if not isinstance(details, dict):
+        raise ValueError("Raw input_tokens_details is missing or malformed.")
+    counts = (
+        raw.get("input_tokens"),
+        details.get("cached_tokens"),
+        details.get("cache_write_tokens"),
+        raw.get("output_tokens"),
+    )
+    names = ("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens")
+    validated: list[int] = []
+    for name, value in zip(names, counts):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"Raw {name} must be a reported nonnegative integer.")
+        validated.append(value)
+    turn = TurnUsage(*validated)
+    if turn.cache_read_tokens + turn.cache_write_tokens > turn.input_tokens:
+        raise ValueError("Raw provider cache buckets do not fit inside input tokens.")
+    return turn
 
-    print(f"Codex Responses URL: {CODEX_RESPONSES_URL}")
-    print("prompt_cache_key set on ChatRequest: yes (= session id)\n")
 
-    # Representative first-turn requests for each scenario.
-    samples: list[tuple[str, ChatRequest]] = []
-    samples.append(
-        (
-            "long_session",
-            _make_request(
-                spec,
-                system_blocks,
-                tools,
-                [Message.user(_LONG_PROMPTS[0] + TERSE)],
-                "bench-long_session",
-            ),
+async def _stream_turn(
+    client: OpenAICompatClient, request: ChatRequest, access: OAuthAccess, record: dict[str, Any]
+) -> tuple[TurnUsage, Message]:
+    start = time.monotonic()
+    text = ""
+    calls: dict[int, dict[str, str]] = {}
+    terminal: StreamEndEvent | None = None
+    usage = None
+    try:
+        # A read timeout alone never stops an active reasoning stream.
+        async with asyncio.timeout(90):
+            async for event in client.stream(request, None, oauth_access=access):
+                if isinstance(event, StreamTextDelta):
+                    record.setdefault("ttft_s", time.monotonic() - start)
+                    text += event.delta
+                elif isinstance(event, StreamToolCallDelta):
+                    call = calls.setdefault(event.index, {"id": "", "name": "", "arguments": ""})
+                    if event.id:
+                        call["id"] = event.id
+                    if event.name:
+                        call["name"] = event.name
+                    call["arguments"] += event.argument_delta
+                elif isinstance(event, StreamUsageEvent):
+                    usage = event.usage
+                elif isinstance(event, StreamEndEvent):
+                    terminal = event
+                    usage = event.usage or usage
+        record["actual_response_text"] = text
+        if terminal is None or terminal.stop_reason not in ("stop", "toolUse"):
+            stop_reason = terminal.stop_reason if terminal else "no terminal"
+            raise ValueError(f"Incomplete benchmark response: {stop_reason}")
+        record["stop_reason"] = terminal.stop_reason
+        if usage is None:
+            raise ValueError("Provider completed without usage; cache rate is unknown.")
+        turn = _validated_usage(record.get("raw_usage"))
+        if record.get("returned_model") != request.model.model_id:
+            raise ValueError("Provider returned a different or unidentified model.")
+        normalized = TurnUsage(
+            usage.input_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.output_tokens,
         )
-    )
-    samples.append(
-        (
-            "stable_prefix",
-            _make_request(
-                spec,
-                system_blocks,
-                tools,
-                [Message.user(_DIVERGING_FIRST_TURNS[0] + TERSE)],
-                "bench-stable-prefix-0",
-            ),
+        if normalized != turn:
+            raise ValueError("Raw and normalized provider token counts disagree.")
+        # Publish normalized counters only after validating their raw source, so
+        # a rejected record cannot present adapter defaults as measurements.
+        record["normalized_usage"] = usage.model_dump()
+        record["raw_usage_validated"] = True
+        tool_calls = [
+            ToolCall(id=c["id"], name=c["name"], arguments=json.loads(c["arguments"] or "{}"))
+            for c in calls.values()
+        ]
+        record["tool_calls"] = [call.model_dump() for call in tool_calls]
+        record["public_list_input_equivalent_tokens_estimate"] = turn.input_price_equivalent_tokens
+        return turn, Message.assistant(
+            text, tool_calls=tool_calls, usage=usage, provider_payload=terminal.provider_payload
         )
-    )
-    # tool_heavy: a second-turn request whose history already carries a tool call.
-    th_history: list[Message] = [Message.user(_TOOL_PROMPTS[0] + TERSE)]
-    call_msg = _tool_call_message("read", "./file_0.txt")
-    th_history.append(call_msg)
-    th_history.append(_tool_result_message(call_msg.tool_calls[0].id, _TOOL_OUTPUTS[0]))
-    samples.append(
-        ("tool_heavy", _make_request(spec, system_blocks, tools, th_history, "bench-tool-heavy"))
-    )
-
-    for name, request in samples:
-        # Use the client's OWN codex body builder so the printed shape is the
-        # real wire body, not a reconstruction.
-        body = client._build_codex_responses_body(request)  # noqa: SLF001 (bench introspection)
-        redacted = _redact_body(body)
-        print(f"--- scenario: {name} ---")
-        print(f"  posts to: {CODEX_RESPONSES_URL}")
-        print(f"  body keys: {sorted(body.keys())}")
-        print(f"  has prompt_cache_key in body: {'prompt_cache_key' in body}")
-        print(f"  redacted body: {json.dumps(redacted, indent=2)}")
-        print()
+    finally:
+        record["actual_response_text"] = text
+        record["total_s"] = time.monotonic() - start
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
+async def _run_scenario(
+    args: argparse.Namespace, name: str, access: OAuthAccess | None, output: Any
+) -> ScenarioResult:
+    result = ScenarioResult(name)
+    provenance = _source_identity()
+    namespace = f"{args.seed}:{args.model}:{name}"
+    tools, blocks = _build_prefix(namespace, args.prefix_rows)
+    spec = _resolve_spec(args.model, "medium" if name == "reasoning_on" else "low")
+    history: list[Message] = []
+    transport = _CaptureTransport()
+    async with httpx.AsyncClient(transport=transport, timeout=90) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        for index in range(args.turns):
+            if name == "stable_prefix":
+                history = [
+                    Message.user(f"Synthetic question {index}: name a primary color." + TERSE)
+                ]
+            elif name == "repeat_then_append" and index < 3:
+                history = [Message.user("Name a primary color." + TERSE)]
+            elif not history or history[-1].role != "tool":
+                history.append(
+                    Message.user(
+                        "Perform the synthetic_lookup now."
+                        if name == "tool_heavy" and index % 2 == 0
+                        else f"Synthetic question {index}: acknowledge with OK." + TERSE
+                    )
+                )
+            request = _make_request(spec, blocks, tools, history, namespace)
+            if name == "tool_heavy" and index % 2 == 0:
+                request = request.model_copy(update={"tool_choice": "required"})
+            record: dict[str, Any] = dict(
+                scenario=name,
+                turn=index,
+                seed=args.seed,
+                auth_mode="chatgpt_oauth",
+                retries=0,
+                source_root=str(REPO),
+                prefix_rows=args.prefix_rows,
+                public_list_estimate_not_subscription_charge=True,
+            )
+            record.update(provenance)
+            record["started_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            transport.record = record
+            try:
+                if args.dry_run:
+                    body = client._build_codex_responses_body(request)
+                    record.update(
+                        endpoint=CODEX_RESPONSES_URL,
+                        body_shape=_redact_body(body),
+                        requested_model=args.model,
+                    )
+                else:
+                    assert access is not None
+                    turn, assistant = await _stream_turn(client, request, access, record)
+                    result.turns.append(turn)
+                    history.append(assistant)
+                    for call in assistant.tool_calls:
+                        # The real inventory is present only to measure its schema
+                        # footprint. Never execute a model-selected filesystem/shell tool.
+                        if call.name != "synthetic_lookup" or call.arguments:
+                            raise ValueError(
+                                "Unexpected tool call; benchmark executes only its "
+                                "empty-argument synthetic lookup."
+                            )
+                        reply = await _lookup(call.id)
+                        history.append(
+                            Message(
+                                role="tool",
+                                tool_call_id=call.id,
+                                tool_name=call.name,
+                                content=reply.content,
+                            )
+                        )
+            except Exception as error:
+                message = str(error) or type(error).__name__
+                if access:
+                    for secret in (access.access_token, access.org_id):
+                        if secret:
+                            message = message.replace(secret, "<redacted>")
+                result.error = message
+                record["error"] = message
+            output.write(json.dumps(record) + "\n")
+            output.flush()
+            if result.error or args.dry_run:
+                break
+            if index + 1 < args.turns:
+                await asyncio.sleep(args.gap)
+    return result
 
 
 def _print_scenario_table(results: list[ScenarioResult]) -> None:
-    header = (
-        f"{'scenario':<16} {'turns':>5} {'input':>10} {'cache_read':>11} "
-        f"{'cache_write':>11} {'rate %':>8}"
-    )
-    print(header)
-    print("-" * len(header))
-    total_read = 0
-    total_denom = 0
-    for r in results:
-        if r.error:
-            print(f"{r.name:<16} ERROR: {r.error}")
-            continue
-        total_read += r.total_cache_read
-        total_denom += r.denom
+    print("scenario         calls      input     cached     writes   hit rate", file=sys.stderr)
+    for result in results:
+        rate_label = f"{result.cache_rate:.1%}" if result.denom else "unknown"
         print(
-            f"{r.name:<16} {len(r.turns):>5} {r.total_input:>10} "
-            f"{r.total_cache_read:>11} {r.total_cache_write:>11} "
-            f"{r.cache_rate * 100:>7.1f}%"
+            f"{result.name:<16} {len(result.turns):>5} {result.total_input:>10} "
+            f"{result.total_cache_read:>10} {result.total_cache_write:>10} "
+            f"{rate_label:>9}",
+            file=sys.stderr,
         )
-    print("-" * len(header))
-    overall = (total_read / total_denom * 100) if total_denom else 0.0
-    print(f"{'OVERALL':<16} {'':>5} {'':>10} {total_read:>11} {'':>11} {overall:>7.1f}%")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-_SCENARIO_RUNNERS: dict[str, Callable[..., Any]] = {
-    "long_session": lambda c, o, t: run_long_session(c, o, t, None, "long_session"),
-    "stable_prefix": run_stable_prefix,
-    "tool_heavy": run_tool_heavy,
-    "reasoning_on": lambda c, o, t: run_long_session(c, o, t, "medium", "reasoning_on"),
-}
-
-
-async def _run_live(scenario: str | None, turns: int) -> int:
-    store = AuthStore()
-    oauth_access = await store.get_oauth_access("openai", read_only=True)
-    # The Codex Responses route only engages for an OAuth grant carrying an
-    # org_id (see OpenAICompatClient._codex_responses_mode). Anything else means
-    # there is no ChatGPT subscription credential to measure.
-    if oauth_access is None or oauth_access.kind != "oauth" or not oauth_access.org_id:
-        print("skipped: no OpenAI OAuth credential")
-        return 0
-
-    spec = _resolve_spec(None)
-    client = client_for_spec(spec, openai_api="responses")
-    assert isinstance(client, OpenAICompatClient)
-
-    names = [scenario] if scenario else list(_SCENARIO_RUNNERS.keys())
-    results: list[ScenarioResult] = []
-    try:
-        for name in names:
-            runner = _SCENARIO_RUNNERS.get(name)
-            if runner is None:
-                print(f"unknown scenario: {name}")
-                continue
-            try:
-                result = await runner(client, oauth_access, turns)
-            except Exception as exc:  # noqa: BLE001 - measurement must not crash
-                # A 400 from the Codex backend (e.g. when a new field is added)
-                # is itself important signal; capture it redacted rather than
-                # letting it abort the whole run.
-                result = ScenarioResult(name=name, error=f"{type(exc).__name__}: {exc}"[:400])
-            results.append(result)
-    finally:
-        await client.aclose()
-
-    _print_scenario_table(results)
-    return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Live OAuth prompt-cache benchmark.")
-    parser.add_argument(
-        "--scenario",
-        choices=sorted(_SCENARIO_RUNNERS.keys()),
-        default=None,
-        help="Run one scenario (default: all).",
+        if result.error:
+            print(f"ERROR: {result.error}", file=sys.stderr)
+    denominator = sum(result.denom for result in results)
+    rate = sum(result.total_cache_read for result in results) / denominator if denominator else 0
+    warm = [turn for result in results for turn in result.turns[1:]]
+    warm_input = sum(turn.input_tokens for turn in warm)
+    warm_rate = sum(turn.cache_read_tokens for turn in warm) / warm_input if warm_input else None
+    cold_label = f"{rate:.1%}" if denominator else "unknown"
+    warm_label = f"{warm_rate:.1%}" if warm_rate is not None else "unknown"
+    print(
+        f"Reported-call weighted hit rate: {cold_label}; warm-only: {warm_label} "
+        "(excluding each scenario's first call). Errors remain failures.",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "--turns",
-        type=int,
-        default=6,
-        help="Turns per session (scenario 1/3/4) or number of sessions (scenario 2).",
-    )
-    parser.add_argument(
+
+
+async def _run(args: argparse.Namespace, access: OAuthAccess | None, output: Any) -> int:
+    results = []
+    for name in [args.scenario] if args.scenario else SCENARIOS:
+        result = await _run_scenario(args, name, access, output)
+        results.append(result)
+        if result.error:
+            break
+    if not args.dry_run:
+        _print_scenario_table(results)
+    return int(any(result.error for result in results))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the redacted request body shape without any network call.",
+        help="Show adapter bodies without credentials or requests.",
     )
-    args = parser.parse_args()
-
-    if args.dry_run:
-        _dry_run()
-        return 0
-
-    return asyncio.run(_run_live(args.scenario, args.turns))
+    mode.add_argument("--live", action="store_true", help="Spend the explicit bounded POST budget.")
+    parser.add_argument("--model", choices=(MODEL_ID, "gpt-6-astra"), default=MODEL_ID)
+    parser.add_argument("--scenario", choices=SCENARIOS)
+    parser.add_argument("--turns", type=int, choices=range(1, 9), default=3)
+    parser.add_argument(
+        "--prefix-rows", type=int, choices=range(0, 1801), default=0, metavar="0..1800"
+    )
+    parser.add_argument("--gap", type=float, default=5, help="Seconds between requests, minimum 4.")
+    parser.add_argument(
+        "--seed",
+        default=uuid.uuid4().hex,
+        help="Fresh by default; reuse deliberately for warm-cache controls.",
+    )
+    parser.add_argument(
+        "--auth-db",
+        type=Path,
+        default=Path(
+            os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", str(Path.home() / ".local-operator"))
+        )
+        / "auth.db",
+    )
+    parser.add_argument(
+        "--output", type=Path, help="New JSONL file; existing evidence is never overwritten."
+    )
+    args = parser.parse_args(argv)
+    if not 4 <= args.gap <= 60:
+        parser.error("--gap must be between 4 and 60 seconds")
+    if not args.seed or len(args.seed) > 80:
+        parser.error("--seed must contain 1..80 characters")
+    try:
+        access = None if args.dry_run else _oauth_access(args.auth_db)
+        output = args.output.open("x") if args.output else sys.stdout
+        saved = {key: os.environ.get(key) for key in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR")}
+        try:
+            with tempfile.TemporaryDirectory(prefix="lop-openai-cache-") as home:
+                os.environ["HOME"] = home
+                os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(Path(home) / ".local-operator")
+                return asyncio.run(_run(args, access, output))
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if output is not sys.stdout:
+                output.close()
+    except (OSError, ValueError, sqlite3.Error) as error:
+        print(f"Benchmark failed: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    # Exit 0 always: this is measurement, not a gate.
     raise SystemExit(main())
