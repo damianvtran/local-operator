@@ -117,6 +117,79 @@ async def test_watch_aggregation_does_not_resurrect_an_expired_viewer(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_the_last_lease_to_expire_is_still_reported_to_the_owner(tmp_path, monkeypatch):
+    """Expiring the FINAL lease must recompute presence before the loop ends.
+
+    `_expire_watches` returned as soon as no live lease remained, which left
+    the owner holding whatever presence the previous pass asserted -- visible
+    and notifiable -- for the rest of the session, because nothing else
+    recomputes it once the loop is gone. The expiry that ends the loop is
+    exactly the one the owner needs to hear about.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        remote = bridge.remote
+        writes: list[dict[str, Any]] = []
+
+        async def record(**kwargs):
+            writes.append(kwargs)
+
+        bridge.remote = cast(Any, SimpleNamespace(is_cold=False, update_desktop_watch=record))
+        try:
+            now = 100.0
+            monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
+            watcher = bridge.subscribe()
+            watcher.visible, watcher.can_notify = True, True
+            watcher.expires = 100.5
+            await bridge.refresh_watch()
+            assert writes[-1] == {"visible": True, "can_notify": True}
+
+            # Time passes the only lease's TTL, and the expiry loop runs out.
+            now = 101.0
+            await bridge._expire_watches()
+
+            assert writes[-1] == {
+                "visible": False,
+                "can_notify": False,
+            }, "the owner was left believing a watcher is present after its lease expired"
+        finally:
+            bridge.remote = remote
+
+
+@pytest.mark.asyncio
+async def test_a_stream_lease_is_released_even_if_the_body_is_never_consumed(tmp_path):
+    """A response whose generator never runs must not strand an acquired bridge.
+
+    The bridge is acquired BEFORE the response exists, so an invalid session is
+    a JSON error rather than a 200 with a broken stream. That leaves the
+    release owed by something other than the generator: a client that
+    disconnects between headers and body never iterates it, and the session
+    would stay attached for the life of the process.
+    """
+    from local_operator.server.routes.desktop_sessions import events
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    request = cast(Any, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())))
+    request.app.state.desktop_sessions = pool
+
+    response = await events(sid, request, epoch=None, after_seq=0)
+    bridge = pool.bridges[sid]
+    assert bridge.users == 1, "the stream did not acquire the bridge"
+
+    # The body is DISCARDED without ever being iterated; Starlette still runs
+    # the response's background task, which is what must return the lease.
+    assert response.background is not None
+    await response.background()
+    assert bridge.users == 0, "an unconsumed stream leaked its bridge lease"
+
+    # Idempotent: the generator's own teardown may still run afterwards.
+    await response.background()
+    assert bridge.users == 0
+
+
+@pytest.mark.asyncio
 async def test_active_bridge_is_never_evicted_or_duplicated(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
     pool = DesktopSessions(tmp_path)

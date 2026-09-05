@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from starlette.background import BackgroundTask
 
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
@@ -380,12 +381,32 @@ async def events(
             await context.__aexit__(None, None, None)
             raise
 
+    # The bridge is acquired ABOVE, before any response exists, so that an
+    # invalid session or a full subscriber table is a JSON error rather than a
+    # 200 followed by a broken stream. That leaves the release owed by
+    # something other than the generator: if the generator is never consumed --
+    # the client disconnects between headers and body, or the response is
+    # discarded before iteration -- its `finally` never runs and the bridge
+    # stays acquired for the process's lifetime, holding a session attached.
+    #
+    # Released exactly once, from whichever path gets there first: the
+    # generator's own teardown for a stream that ran, and the response's
+    # background task for one that never did.
+    released = False
+
+    async def release_once() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        await context.__aexit__(None, None, None)
+
     async def stream():
         try:
             async for frame in bridge.events(sub, epoch=epoch, after_seq=after_seq):
                 yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
         finally:
-            await context.__aexit__(None, None, None)
+            await release_once()
 
     return StreamingResponse(
         stream(),
@@ -394,4 +415,5 @@ async def events(
             "Cache-Control": "no-store",
             "X-Accel-Buffering": "no",
         },
+        background=BackgroundTask(release_once),
     )

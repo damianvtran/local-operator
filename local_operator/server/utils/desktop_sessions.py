@@ -267,6 +267,14 @@ class DesktopSessionBridge:
                 if not s.overflow and s.expires > time.monotonic()
             ]
             if not remaining:
+                # LAST lease has expired. Returning here without a final refresh
+                # left the owner holding whatever presence the previous pass
+                # asserted -- visible, notifiable -- for the rest of the
+                # session, because nothing else recomputes it once the loop is
+                # gone. The expiry that ends the loop is exactly the one the
+                # owner still needs to be told about.
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await self.refresh_watch()
                 return
             await asyncio.sleep(max(0, min(remaining) - time.monotonic()))
             with contextlib.suppress(ConnectionError, RuntimeError):
