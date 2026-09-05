@@ -1,6 +1,10 @@
 {
   "base": "619ec60a52efc11e3257d5439ace31dd4bcec22f",
+  "manual_live_probes": {
+    "eager_boot_shot.py --live": "Explicit opt-in real provider/MCP bootstrap; not run against user credentials. --isolated exercises its export path with real unconfigured boot."
+  },
   "capture_scripts": {
+    "eager_boot_shot.py": ["isolated-unconfigured"],
     "approval_shot.py": [
       "default",
       "focus"

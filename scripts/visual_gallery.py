@@ -26,7 +26,9 @@ def cases() -> list[dict[str, Any]]:
     for script, variants in inventory["capture_scripts"].items():
         for variant in variants:
             args = ["{output}"]
-            if script in {"ask_long_shot.py", "ask_user_repro.py"}:
+            if script == "eager_boot_shot.py":
+                args += ["--isolated"]
+            elif script in {"ask_long_shot.py", "ask_user_repro.py"}:
                 args += ["150x40", variant[3], *(["reveal"] if "reveal" in variant else [])]
             elif script == "ask_scroll_shot.py":
                 args += [

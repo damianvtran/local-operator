@@ -268,6 +268,10 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # A record-time table estimate is durable money, but NOT a provider receipt.
+    # Keeping the provenance separate lets offline viewers/resumes retain known
+    # spend without pretending the provider reported a bill or repricing history.
+    estimated_usd_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Aggregate-only copies of the calls behind this usage. Token buckets alone
     # cannot preserve which calls carried authoritative provider receipts and
     # which still need a table estimate; keeping the components lets money be
@@ -1420,6 +1424,10 @@ class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
     # denominators truthful without re-resolving the model themselves. Zero
     # means the emitter did not know, and readers keep their previous value.
     context_window: int = 0
+    default_context_window: int | None = None
+    max_context_window: int | None = None
+    context_metadata: bool = False
+    context_metadata_resolved: bool = False
 
 
 class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
@@ -1624,6 +1632,12 @@ class ModelSpec(BaseModel):
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
     context_window: int = 128_000
+    # A conservative unknown route is still freshly resolved; absence of
+    # positive provider limits must not let a legacy checkpoint override it.
+    context_metadata_resolved: bool = False
+    # context_window remains the active budget; these retain provider provenance.
+    default_context_window: int | None = None
+    max_context_window: int | None = None
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
@@ -1682,6 +1696,25 @@ class ModelSpec(BaseModel):
     # knowledge out of the widgets — the division ``model.effort`` claims in its
     # own docstring and which those two sites were quietly breaking.
     reasoning_default_effort: str | None = None
+    # Whether this ROUTE can serve this model at the provider's fast tier, and
+    # whether the user has asked it to. Same division of labour as the effort
+    # pair above, and for the same reason: the wire clients need "do I send the
+    # key", while ``/fast`` and the status band need "is this dial even
+    # available here" so the command can say so instead of accepting a toggle
+    # the request would silently drop.
+    #
+    # Derived once in ``build_model_spec`` from ``model.speed`` — which is keyed
+    # on the PROVIDER AND MODEL together, unlike the effort table's model-only
+    # key, because the dialect belongs to the route: the same Claude model takes
+    # ``speed: "fast"`` direct and ``service_tier: "priority"`` through an
+    # aggregator. Keeping the derivation there is what leaves the wire clients
+    # and every widget free of model-name knowledge.
+    #
+    # Fast mode is a SPEED dial, not a depth dial: it buys the same answer
+    # sooner at a premium price, where ``reasoning_effort`` changes how hard the
+    # model thinks. The two are set and reported independently.
+    supports_fast_mode: bool = False
+    fast_mode: bool = False
     # The model's HUMAN name as metadata resolution found it — "Claude Opus 5"
     # for ``anthropic/claude-opus-5``, "MoonshotAI: Kimi K2" for an OpenRouter
     # id no registry row covers. Carried on the spec rather than looked up by
@@ -1903,6 +1936,22 @@ class StreamEndEvent(BaseModel):
     error: str | None = None
 
 
+class StreamModelEvent(BaseModel):
+    """Request-local serving metadata, emitted before dispatch, including rotation.
+
+    Unlike a shared stream callback, this follows the parent or child request
+    that selected the credential and cannot overwrite another session's spec.
+    """
+
+    type: Literal["model"] = "model"
+    model: ModelSpec
+
+
 StreamEvent = (
-    StreamStartEvent | StreamTextDelta | StreamToolCallDelta | StreamUsageEvent | StreamEndEvent
+    StreamStartEvent
+    | StreamTextDelta
+    | StreamToolCallDelta
+    | StreamUsageEvent
+    | StreamEndEvent
+    | StreamModelEvent
 )

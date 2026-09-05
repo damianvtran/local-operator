@@ -8,8 +8,13 @@ Never change live TUI CSS to compensate for a screenshot viewer's thumbnail.
 
 All current `scripts/*shot.py`, `shot_login.py`, `ask_user_repro.py`,
 `theme_preview.py` and `steer_receipt_probe.py` use `scripts.visual_capture`.
-Their existing positional CLIs are unchanged. Historical evidence under
-`docs/assets` and `docs/evidence` remains historical, not regenerated evidence.
+Their existing positional CLIs are unchanged. The subsequently integrated
+`eager_boot_shot.py` is a real-provider bootstrap probe: explicit `--live` retains
+its configured-provider/MCP purpose, while `--isolated` captures real
+unconfigured boot safely and is the only mode included in the gallery. Live
+provider binding is manual opt-in, not part of the offline coverage claim.
+Historical PR evidence remains available through its original commit/PR links;
+new generated evidence belongs on the PR, not in this repository.
 The app's public `save_screenshot` / `export_screenshot` APIs are unchanged.
 
 ```sh
@@ -33,8 +38,9 @@ artifact starts `NOT_INSPECTED`; QA/design record what they actually viewed.
 
 The committed `scripts/visual_inventory.json` freezes the source census and
 page/state boundaries. `visual_gallery.py --list` is the executable matrix:
-111 documented legacy variants, all registered palettes, the missing page
-families, plus representative sizes rather than a Cartesian product. A script
+111 documented legacy variants plus the new isolated bootstrap probe, all
+registered palettes, the missing page families, and representative sizes rather
+than a Cartesian product. A script
 may emit several frames in one invocation. Existing script nominal dimensions
 remain authoritative. Empty todo/wake sidebars deliberately collapse; no fixture
 forces them open to manufacture a page. Providers, jobs and analytics use
@@ -82,9 +88,11 @@ LOP_CAPTURE_FONT_SIZE=13 LOP_CAPTURE_FONT_FAMILY='Menlo, monospace' \
 Measure actual cell pitch at the terminal's current font/zoom first. Positive,
 finite dimensions are required; font size must not exceed cell height. Font
 fallback and glyph coverage remain rasterizer concerns, not evidence to resize
-the app. Every sample establishes a temporary HOME **and** config root before
+the app. Every offline sample establishes a temporary HOME **and** config root before
 app imports so themes, caches, auth and approval policy do not leak from the
-operator. Settings samples use that same root for their explicit config fixtures.
+operator. The separately labelled `eager_boot_shot.py --live` intentionally uses
+real configuration and must not be run automatically or without that explicit
+operator choice. Settings samples use that same root for their explicit config fixtures.
 
 ## Comparing the supplied terminal references
 

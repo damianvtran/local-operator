@@ -27,6 +27,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -49,6 +50,7 @@ from local_operator.model.registry import (
     get_model_info,
     unknown_model_info,
 )
+from local_operator.model.speed import supports_fast_mode
 from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
@@ -731,6 +733,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         provider=canonical,
         model_id=model_name,
         context_window=context_window,
+        default_context_window=getattr(info, "default_context_window", None),
+        max_context_window=getattr(info, "max_context_window", None),
         max_output_tokens=max_output,
         supports_tools=True,
         supports_images=supports_images,
@@ -747,6 +751,18 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # diverge as soon as the user picks a level, which is precisely when
         # `/effort auto` needs the original still recorded somewhere.
         reasoning_default_effort=reasoning_effort,
+        # Derived from the CANONICAL provider and the model together, because
+        # the fast-mode dialect belongs to the route rather than to the model
+        # (`model.speed` opens with why). `canonical` and not `hosting`: the
+        # same normalisation the rest of this function runs on, so an alias
+        # spelling of a provider cannot silently lose the dial.
+        #
+        # Only the AVAILABILITY is seeded. `fast_mode` stays False until the
+        # user turns it on, and that asymmetry is deliberate: fast mode is
+        # billed at a premium (Anthropic and OpenAI both charge roughly double),
+        # so it is the one dial that must never arrive switched on by
+        # inference. `/fast` is an explicit, session-scoped opt-in.
+        supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
 
@@ -1347,7 +1363,7 @@ def _info_from_discovery(
             sane_listing_max_tokens,
         )
 
-        secret, is_oauth, account_id = _catalogue_credential(provider)
+        secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(provider)
         rows, status = available_models(
             provider,
             api_key=secret or None,
@@ -1360,6 +1376,10 @@ def _info_from_discovery(
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
         return fallback
 
+    if provider == "openai" and is_oauth and status == "static":
+        # Offline/missing-account discovery must not reintroduce API limits via
+        # available_models' normal static fallback.
+        return fallback
     row = next((candidate for candidate in rows if candidate.id == model_name), None)
     if row is None:
         # Exact first, normalised second: the exact hit is what every provider but
@@ -1382,6 +1402,8 @@ def _info_from_discovery(
     info.name = row.name or info.name or row.id
     if row.context_window > 0:
         info.context_window = row.context_window
+        info.default_context_window = row.default_context_window
+        info.max_context_window = row.max_context_window
     if row.max_tokens > 0:
         # Same guard as the discovery merge, applied here because this is the
         # OTHER path a listing's numbers reach a ``ModelInfo`` by — a row from
@@ -1680,8 +1702,17 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
     return ModelInfo(id=model_id, name=model_id, description="Unknown model")
 
 
+# Secrets are call-local, never memo keys. Only the existing hashed account
+# identity crosses into the metadata memo; token refresh does not change scope.
+_listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVar(
+    "listing_credential", default=None
+)
+
+
 @functools.lru_cache(maxsize=64)
-def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> ModelInfo:
+def _resolve_model_info_cached(
+    provider: str, model_id: str, _bucket: int, _scope: str = ""
+) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
     ``_bucket`` is unused by the logic and present only to expire the memo: it
@@ -1695,7 +1726,18 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
     canonical = "test" if provider == "noop" else provider
     started = time.monotonic()
     info = _registry_fallback(canonical, model_id)
-    if _listing_can_correct(info):
+    credential = _listing_credential.get()
+    oauth = canonical == "openai" and credential is not None and credential[1]
+    if oauth:
+        # Public API limits are not an offline fallback for a ChatGPT account.
+        info = info.model_copy(
+            update={
+                "context_window": -1,
+                "default_context_window": None,
+                "max_context_window": None,
+            }
+        )
+    if oauth or _listing_can_correct(info):
         # EVERY provider, not just the aggregators. The gate used to be
         # `canonical in LISTING_PROVIDERS`, which left a hole that the model picker
         # turned into a routine path: the picker offers whatever a provider's live
@@ -1726,6 +1768,7 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
             info,
             timeout=None if _needs_enrichment(info) else _REFRESH_TIMEOUT_S,
         )
+    route_context = (info.context_window, info.default_context_window, info.max_context_window)
     if _needs_enrichment(info):
         # STILL incomplete after the provider's own listing had its turn, which for
         # every DIRECT provider is the normal outcome rather than a failure: none of
@@ -1759,6 +1802,15 @@ def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> Mo
         info = _from_aggregator_catalogue(
             canonical, model_id, info, timeout=_remaining_budget(started)
         )
+    if oauth:
+        info = info.model_copy(
+            update=dict(
+                zip(
+                    ("context_window", "default_context_window", "max_context_window"),
+                    route_context,
+                )
+            )
+        )
     return info
 
 
@@ -1784,7 +1836,9 @@ def invalidate_model_info_cache() -> None:
     _sampling_support_memo.clear()
 
 
-def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
+def resolve_model_info(
+    provider: str, model_id: str, *, credential: tuple[str, bool, str | None] | None = None
+) -> ModelInfo:
     """A model's real metadata: static registry first, catalogue to fill gaps.
 
     THE one resolution path, so the numbers a session runs on and the numbers a
@@ -1821,7 +1875,20 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
     against the ~25ms JSON parse this memo exists to avoid.
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
-    info = _resolve_model_info_cached(provider, model_id, bucket)
+    if provider == "openai":
+        from local_operator.model.discovery import _cache_key
+
+        credential = credential if credential is not None else _catalogue_credential(provider)
+        scope = _cache_key("openai", account_scoped=credential[1], account_id=credential[2])
+        if credential[1] and not credential[2]:
+            scope = "openai-oauth-unscoped"
+        token = _listing_credential.set(credential)
+        try:
+            info = _resolve_model_info_cached(provider, model_id, bucket, scope)
+        finally:
+            _listing_credential.reset(token)
+    else:
+        info = _resolve_model_info_cached(provider, model_id, bucket)
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
@@ -2231,6 +2298,61 @@ def configure_model(
     )
 
 
+OPENAI_USE_MAX_CONTEXT_WINDOW = True
+
+
+def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
+    """Only an explicit boolean opt-out changes the catalogue's active maximum."""
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    openai = providers.get("openai") if isinstance(providers, Mapping) else None
+    if isinstance(openai, Mapping) and openai.get("use_max_context_window") is False:
+        return False
+    return OPENAI_USE_MAX_CONTEXT_WINDOW
+
+
+def context_spec_for_access(
+    spec: ModelSpec, access: Any, settings: Mapping[str, Any] | None
+) -> ModelSpec:
+    """Resolve limits for the credential actually selected by the dispatch path.
+
+    No wire override exists: Codex's maximum is a local budgeting ceiling.
+    Sampling, effort and public API routing stay on the caller's original spec.
+    """
+    if spec.provider != "openai":
+        return spec
+    if access is None:
+        return spec.model_copy(
+            update={
+                "context_window": UNKNOWN_CONTEXT_WINDOW,
+                "default_context_window": None,
+                "max_context_window": None,
+                "context_metadata_resolved": True,
+            }
+        )
+    # Always resolve the selected route: an unavailable OAuth listing has no
+    # positive default/max fields, but switching to an API key must recover
+    # the public limit rather than retaining that conservative unknown budget.
+    # Codex dispatch's account header is org_id; older records may retain only
+    # account_id, so use it only when the wire identity is absent.
+    credential = (access.access_token, access.kind == "oauth", access.org_id or access.account_id)
+    info = resolve_model_info(spec.provider, spec.model_id, credential=credential)
+    window = (
+        info.context_window
+        if info.context_window and info.context_window > 0
+        else UNKNOWN_CONTEXT_WINDOW
+    )
+    if not _openai_use_max_context_window(settings) and info.default_context_window:
+        window = info.default_context_window
+    return spec.model_copy(
+        update={
+            "context_window": window,
+            "default_context_window": info.default_context_window,
+            "max_context_window": info.max_context_window,
+            "context_metadata_resolved": True,
+        }
+    )
+
+
 def _openai_api_mode(settings: Mapping[str, Any] | None) -> str:
     """Resolve the direct OpenAI wire route, defaulting safely to Responses."""
     providers = settings.get("providers") if isinstance(settings, Mapping) else None
@@ -2364,9 +2486,14 @@ class SessionStreamFn:
         # notice handler above — the stream owns routing, the session owns
         # ordered event delivery.
         self._route_handler: Callable[[Any, str], Awaitable[None] | None] | None = None
+        # The fast-mode refusal bridge, installed by the owning Session like
+        # the two above. Called once per selector, the first time a provider
+        # refuses a fast request and the driver serves it at standard speed.
+        self._fast_refused_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         self._route_state = FailoverRouteState(
             on_change=self._on_route_change,
             on_settle=self._on_route_settle,
+            on_fast_refused=self._on_fast_refused,
         )
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
@@ -2581,6 +2708,46 @@ class SessionStreamFn:
         # the grace, the ordinary boundary probe reclaims a recovered primary.
         self._route_state.primary_retry_at_ms = int(time.time() * 1000) + 60_000
         self._primary_selector = primary_selector
+
+    def set_fast_refused_handler(
+        self, handler: Callable[[str, str], Awaitable[None] | None] | None
+    ) -> None:
+        """Install the owning session's fast-mode refusal bridge.
+
+        Called with ``(selector, provider_message)`` the FIRST time a route
+        refuses fast mode for this session's account. The session uses it to
+        tell the user and to switch its own dial off, so the band stops
+        asserting ``fast`` over requests being served at standard speed.
+        """
+        self._fast_refused_handler = handler
+
+    def forget_fast_refusal(self) -> None:
+        """The user turned fast mode on again: let the next request re-ask.
+
+        Every selector, not just the current one: the entitlement is an
+        account fact, and a user who re-arms the dial after buying credits
+        expects it to work on whichever model they switch to next.
+        """
+        self._route_state.forget_fast_refusal()
+
+    async def _on_fast_refused(self, selector: str, message: str) -> None:
+        # The provider's own words are the useful half ("Usage credits are
+        # required for fast mode."); the clause after names what the session
+        # did about it. Warning, not error: the turn is being served. Opens
+        # with the feature's `fast mode:` subject like every other line of
+        # it, and the fixed text is kept short (design D7): with Anthropic's
+        # measured message the line is 129 cells, inside the 140-cell notice
+        # budget at the 150-cell reference frame.
+        await self._notice(
+            f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
+            "switched off, serving at standard speed",
+            "warning",
+        )
+        if self._fast_refused_handler is None:
+            return
+        result = self._fast_refused_handler(selector, message)
+        if inspect.isawaitable(result):
+            await result
 
     def withdraw_fallback(self) -> None:
         """The user explicitly re-selected a model; drop the pinned fallback route.
@@ -3154,6 +3321,29 @@ class SessionStreamFn:
                 )
         else:
             auth_store.block_credential(credential_id, storage, block_ms=block_ms)
+
+    async def resolve_context_model(self, model: ModelSpec) -> ModelSpec:
+        """Budget against the same selected credential as dispatch, before compaction."""
+        if model.provider != "openai":
+            return model
+        import asyncio
+
+        from local_operator.providers.failover import (
+            AuthRetryKeyState,
+            _resolve_access_for_provider,
+        )
+
+        access = await _resolve_access_for_provider(
+            self._auth_store,
+            model.provider,
+            self._session_id,
+            AuthRetryKeyState(),
+            None,
+            read_only=True,
+            model_id=model.model_id,
+            scoped_blocks=True,
+        )
+        return await asyncio.to_thread(context_spec_for_access, model, access, self._settings)
 
     async def preflight_usage(self, model: ModelSpec, *, consume_boundary: bool = True) -> None:
         """Check reliable OAuth quota once per user-message boundary.

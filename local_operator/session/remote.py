@@ -24,7 +24,7 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -514,8 +514,10 @@ class RemoteSession:
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
             # which is the visible flicker this whole change exists to remove.
-            state = self._restore_cold_details(state)
-            self._cold_checkpoint = None
+        # Children can persist a roster before the parent's first transcript
+        # row. Absence of that file must not hide independently durable spend.
+        state = self._restore_cold_details(state)
+        self._cold_checkpoint = None
         self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
@@ -556,7 +558,7 @@ class RemoteSession:
         """
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
-            return state
+            return self._restore_cold_subagents(state)
         try:
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
@@ -579,13 +581,13 @@ class RemoteSession:
                 "the saved session details could not be read, so the subagent and "
                 "todo panels start empty"
             )
-            return state
-        return state.model_copy(
+            return self._restore_cold_subagents(state)
+        restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
                 # derive. The panel reads these directly, so restoring them is
                 # what puts the session's details on the FIRST frame.
-                "jobs": _restored_job_rows(self._durable_roster(durable)),
+                "jobs": list(durable.jobs),
                 "todos": list(durable.todos),
                 "conversation_title": durable.conversation_title,
                 "conversation_title_user_set": durable.conversation_title_user_set,
@@ -599,6 +601,8 @@ class RemoteSession:
                 # ``_restore_reported_usage`` on the old owner path).
                 "cumulative_parent_cost": durable.cumulative_parent_cost,
                 "child_costs": dict(durable.child_costs),
+                "subagent_cost": durable.subagent_cost,
+                "subagent_cost_knowledge": durable.subagent_cost_knowledge,
                 "cost_knowledge": durable.cost_knowledge,
                 "last_usage": durable.last_usage,
                 **self._consistent_context(state, durable),
@@ -623,7 +627,52 @@ class RemoteSession:
             }
         )
 
-    def _durable_roster(self, durable: FrontendSessionState) -> Sequence[Any]:
+        return self._restore_cold_subagents(restored)
+
+    def _restore_cold_subagents(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Overlay the independently committed roster and lifetime ledger.
+
+        A child can settle without a parent turn, so the sidecar is newer than
+        the frontend checkpoint and may be the ONLY durable state. Read it once
+        for both rows and money; summing visible rows loses swept/prior work.
+        """
+        from local_operator.session.frontend_state import CostKnowledge
+        from local_operator.session.session import (
+            SUBAGENT_ROSTER_SIDECAR,
+            _read_roster_sidecar,
+        )
+        from local_operator.tui.costs import cost_summary
+
+        payload = (
+            _read_roster_sidecar(
+                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+            )
+            or {}
+        )
+        changes: dict[str, Any] = {
+            "jobs": _restored_job_rows(self._durable_roster(state, payload=payload))
+        }
+        if isinstance(payload.get("accounting"), list):
+            try:
+                # Validate the complete checkpoint before replacing money. A
+                # corrupt component must not silently turn into a smaller bill.
+                components = [Usage.model_validate(row) for row in payload["accounting"]]
+                cost, unknown = cost_summary(components, recorded_only=True)
+                changes.update(
+                    subagent_cost=cost,
+                    subagent_cost_knowledge=(
+                        CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT
+                    ),
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "session %s: subagent accounting checkpoint unreadable", self._session_id
+                )
+        return state.model_copy(update=changes)
+
+    def _durable_roster(
+        self, durable: FrontendSessionState, *, payload: dict[str, Any] | None = None
+    ) -> Sequence[Any]:
         """The roster to restore: the SIDECAR's rows, falling back to the
         checkpoint's.
 
@@ -652,11 +701,42 @@ class RemoteSession:
 
         rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
         try:
-            payload = _read_roster_sidecar(
-                self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
-            )
+            if payload is None:
+                payload = _read_roster_sidecar(
+                    self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
+                )
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
+                if job.usage is not None:
+                    from local_operator.session.frontend_state import _cost_knowledge
+                    from local_operator.tui.costs import cost_summary
+
+                    # The strict AsyncJob sidecar cannot grow frontend-only
+                    # fields without breaking older owners. Reconstruct only
+                    # from persisted bills/estimates here: a daemonless viewer
+                    # must not need credentials or trigger model discovery.
+                    cost, unknown = cost_summary(
+                        job.usage.cost_components or [job.usage], recorded_only=True
+                    )
+                    previous = rows.get(str(job.id))
+                    if cost is not None or previous is None:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": cost,
+                                "direct_cost_knowledge": _cost_knowledge(cost, unknown),
+                            }
+                        )
+                    else:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": previous.direct_cost,
+                                "direct_cost_knowledge": (
+                                    _cost_knowledge(previous.direct_cost, True)
+                                    if unknown
+                                    else previous.direct_cost_knowledge
+                                ),
+                            }
+                        )
                 rows[str(job.id)] = job
         except Exception:  # noqa: BLE001 — a bad sidecar must not stop the open
             logger.debug("cold state could not read the roster sidecar", exc_info=True)
@@ -731,15 +811,28 @@ class RemoteSession:
         )
         if not same_model:
             return {}
+        # Fresh route metadata outranks an old owner's active window (which
+        # may predate maximum-context support or a changed opt-out setting).
+        if (
+            configured.context_metadata_resolved
+            or configured.default_context_window
+            or configured.max_context_window
+        ):
+            return {}
         # Only the window is adopted. Everything else on the configured spec
         # reflects THIS process's config, which is current by definition.
         window = int(getattr(stored, "context_window", 0) or 0)
         if window <= 0:
             return {}
+        update = {
+            "context_window": window,
+            "default_context_window": stored.default_context_window,
+            "max_context_window": stored.max_context_window,
+        }
         return {
-            "selected_model": configured.model_copy(update={"context_window": window}),
+            "selected_model": configured.model_copy(update=update),
             "effective_model": (
-                state.effective_model.model_copy(update={"context_window": window})
+                state.effective_model.model_copy(update=update)
                 if state.effective_model is not None
                 else None
             ),
@@ -799,7 +892,48 @@ class RemoteSession:
                 wakes=wakes,
             )
 
-        return await asyncio.to_thread(_build)
+        state = await asyncio.to_thread(_build)
+        if state.selected_model is not None and state.selected_model.provider == "openai":
+            from local_operator.config import ConfigManager
+            from local_operator.model.configure import context_spec_for_access
+            from local_operator.providers.auth_store import AuthStore
+            from local_operator.providers.failover import (
+                AuthRetryKeyState,
+                _resolve_access_for_provider,
+            )
+
+            # Resolve the same account as dispatch, not a saved denominator
+            # from before maximum-context support. Never move account stickiness
+            # merely because a viewer opened a cold session.
+            configured_model = state.selected_model
+
+            async def _resolve() -> ModelSpec:
+                # AuthStore's SQLite connection is thread-affine. Creation,
+                # credential resolution and close belong to this ONE worker's
+                # event loop, not separately scheduled default-executor jobs.
+                auth = AuthStore(self._config_dir / "auth.db")
+                try:
+                    access = await _resolve_access_for_provider(
+                        auth,
+                        "openai",
+                        self._session_id,
+                        AuthRetryKeyState(),
+                        None,
+                        read_only=True,
+                        model_id=configured_model.model_id,
+                        scoped_blocks=True,
+                    )
+                    settings = ConfigManager(config_dir=self._config_dir).get_config().values
+                    return context_spec_for_access(configured_model, access, settings)
+                finally:
+                    auth.close()
+
+            try:
+                model = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+                state = state.model_copy(update={"selected_model": model, "effective_model": model})
+            except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
+                logger.debug("cold context metadata unavailable", exc_info=True)
+        return state
 
     @property
     def is_cold(self) -> bool:
@@ -821,10 +955,10 @@ class RemoteSession:
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
         """
-        if not self._can_go_cold or not self.is_cold:
+        if not self._can_go_cold or not self.is_cold or self._disposed:
             return
         async with self._bind_lock:
-            if not self.is_cold:
+            if not self.is_cold or self._disposed:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -835,11 +969,24 @@ class RemoteSession:
                 WarmErrand(),
                 config_dir=self._config_dir,
             )
+            # Re-checked AFTER the engage, which is the long await here (a
+            # spawn plus up to ~2 s of construction). The TUI engages at mount
+            # now, so `/resume` or `/new` typed in that first second disposes
+            # this facade while the engage is in flight; binding anyway would
+            # attach a live `attach` socket to a dead viewer — one nobody
+            # closes, which holds the old runtime resident (residency term 3)
+            # and never offers it back (review round 1, MAJOR-1). The runtime
+            # that was spawned is left to the drain: with no viewer attached
+            # and nothing written it exits in ~3 s and removes its directory.
+            if self._disposed:
+                return
             record, _owner = await asyncio.to_thread(
                 find_owner_record, self._config_dir, self._session_id
             )
             if record is None:
                 raise ConnectionError("could not start a runtime for this session")
+            if self._disposed:
+                return
             await self._bind_to(record)
 
     async def _bind_to(self, record: SessionRecord) -> None:
@@ -890,7 +1037,23 @@ class RemoteSession:
             on_frontend_sync=self._on_frontend_sync,
             on_frontend_update=self._on_frontend_update,
         )
-        await client.connect(record, self._session_id)
+        try:
+            await client.connect(record, self._session_id)
+        except BaseException:
+            # A cancel (the app cancelling its engage worker at a swap) or a
+            # failure inside `connect` leaves a half-open socket that nothing
+            # else references; closing it here rather than leaving it to GC
+            # is the same discipline `_deliver` keeps (review round 2,
+            # MINOR-1).
+            client.close()
+            raise
+        if self._disposed:
+            # The facade was disposed while the socket was connecting. Holding
+            # the client would leave an `attach` connection nobody owns on the
+            # runtime, which pins it resident. Close it here, where the socket
+            # was opened; `dispose` has already run and will not run again.
+            client.close()
+            raise ConnectionError("viewer disposed while attaching")
         self._client = client
 
     async def _await_frontend(self) -> FrontendSync:
@@ -2135,6 +2298,37 @@ class RemoteSession:
                 self._handlers.remove(handler)
 
         return unsubscribe
+
+    async def retire_if_unused(self) -> str:
+        """Offer this viewer's runtime back if the session was never used.
+
+        Called when a viewer LEAVES a session it engaged eagerly — the TUI is
+        quitting, or `/resume` is moving to a different conversation. Without
+        it, eager engagement would leak one idle runtime per terminal opened
+        and closed without a message.
+
+        This method only ASKS. Whether the runtime actually goes is decided by
+        the runtime itself, which alone can see the things that make stopping
+        unsafe — a wake that just fired, a peer's message arriving, a second
+        terminal attached to the same session. See
+        ``RuntimeServer._retire_if_pristine``.
+
+        Never raises. Every failure means "the runtime stays up", which is the
+        same outcome as before this existed: the residency drain reaps it once
+        nobody is attached. A shutdown path is the wrong place to surface an
+        error nobody can act on.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            return "no runtime attached"
+        ask = getattr(client, "retire_if_pristine", None)
+        if not callable(ask):
+            return "client cannot ask for retirement"
+        try:
+            return str(await cast(Callable[[], Awaitable[str]], ask)())
+        except Exception as exc:  # noqa: BLE001 — the drain is the fallback
+            logger.debug("retire-if-pristine request failed", exc_info=True)
+            return f"request failed: {exc}"
 
     async def dispose(self) -> None:
         self._disposed = True

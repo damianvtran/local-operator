@@ -53,6 +53,28 @@ def test_gallery_inventory_lists_and_rejects_unknown_case(tmp_path: Path) -> Non
     assert "unknown case" in failed.stderr
 
 
+def test_bootstrap_probe_requires_choice_and_isolates_real_boot(tmp_path: Path) -> None:
+    command = [sys.executable, str(ROOT / "scripts/eager_boot_shot.py")]
+    output = tmp_path / "boot.svg"
+    sentinel = tmp_path / "operator-config" / "keep.txt"
+    sentinel.parent.mkdir()
+    sentinel.write_text("do not modify")
+    env = dict(os.environ, HOME=str(tmp_path), LOCAL_OPERATOR_CONFIG_DIR=str(sentinel.parent))
+    rejected = subprocess.run(command + [str(output)], env=env, capture_output=True, text=True)
+    assert rejected.returncode == 2
+    assert not output.exists()
+    result = subprocess.run(
+        command + [str(output), "--isolated"], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert "is_cold:          True" in result.stdout
+    assert "effective model:  unconfigured" in result.stdout
+    assert "mcp servers:      0" in result.stdout
+    geometry = json.loads(output.with_suffix(".geometry.json").read_text())
+    assert geometry["native_pixels"] == [960, 544]
+    assert sentinel.read_text() == "do not modify"
+
+
 def test_all_sample_isolation_precedes_app_imports() -> None:
     import ast
 
@@ -60,6 +82,10 @@ def test_all_sample_isolation_precedes_app_imports() -> None:
         text = path.read_text()
         if "save_capture(app," not in text or path.name == "visual_capture.py":
             continue
+        if path.name == "eager_boot_shot.py":
+            # Explicit live bootstrap is the sole opt-in exception; the default
+            # gallery uses its isolated unconfigured path, never operator auth.
+            assert "CAPTURE_REQUIRES_LIVE_OPT_IN = True" in text
         tree = ast.parse(text)
         isolation = next(
             n.lineno

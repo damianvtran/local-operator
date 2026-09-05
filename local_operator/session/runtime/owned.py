@@ -28,6 +28,7 @@ import uuid
 from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, cast
 
 from local_operator.harness.approval import (
@@ -48,6 +49,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import image_blocks as _image_blocks
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +410,80 @@ class OwnedSessionHandle(SessionHandle):
         if any(not task.done() for task in self._background_tasks):
             return True
         return False
+
+    def is_pristine(self) -> bool:
+        """True when nothing has ever happened in this session.
+
+        The retirement predicate for an EAGERLY started runtime
+        (``retire_if_pristine`` in ``server.py``). A viewer now engages a
+        runtime the moment the TUI mounts, so the band can show the model, the
+        MCP roster and the context reading without waiting for a keystroke.
+        The cost of that is a process the user may never use: opening a
+        terminal, reading the band and pressing ``ctrl+d`` must not leave a
+        session behind, and neither must ``/resume`` onto a different one.
+
+        "Pristine" is deliberately much stricter than "idle". :meth:`is_busy`
+        answers *may this exit later*, which a runtime carrying a whole
+        finished conversation satisfies the moment its last turn lands. This
+        answers *did this session ever exist as far as the user is concerned*,
+        and a single durable row anywhere is enough to say yes. Getting that
+        backwards deletes a conversation, so every probe below fails CLOSED:
+        anything unreadable reports "not pristine" and the runtime lives on to
+        be reaped by the ordinary residency drain instead.
+
+        Wakes are checked because a scheduled wake is the one piece of session
+        state that is durable, invisible in the transcript, and worth more than
+        the process holding it — retiring a runtime whose scheduler is armed
+        would silently drop the schedule the user asked for. Both the live
+        scheduler AND the on-disk wake index are consulted: the scheduler is
+        the truth while it is armed, but it reports "no wakes" once disposed or
+        absent on a reduced host, and the index row is what a cold resume
+        re-arms from — so an index row alone is enough to say "not pristine"
+        (review round 1, MINOR-4).
+        """
+        if self.is_busy():
+            return False
+        session = self._session
+        try:
+            transcript = getattr(session, "_transcript", None)
+            if transcript is None:
+                return False
+            # The durable row count, not the model-facing window: compaction
+            # shrinks what the model sees and must never make a real
+            # conversation look like a fresh one.
+            if transcript.entries():
+                return False
+            # A transcript file that exists at all means a write happened, even
+            # if every row was since compacted away.
+            directory = Path(getattr(transcript, "directory", "") or "")
+            if (directory / TRANSCRIPT_FILENAME).exists():
+                return False
+        except Exception:  # noqa: BLE001 — an unreadable transcript is not pristine
+            logger.debug("pristine probe: transcript unreadable", exc_info=True)
+            return False
+        try:
+            if self.next_wake_due_at() is not None:
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: wake scheduler unreadable", exc_info=True)
+            return False
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.wakes.store import read_entry
+
+            entry = read_entry(config_dir(), str(getattr(session, "session_id", "") or ""))
+            if entry and (entry.get("schedules") or []):
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: wake index unreadable", exc_info=True)
+            return False
+        try:
+            if session.history():
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: history unreadable", exc_info=True)
+            return False
+        return True
 
     def next_wake_due_at(self) -> int | None:
         """Epoch-ms of the earliest armed wake, or ``None`` when none is set.
@@ -1450,6 +1526,8 @@ class OwnedSessionHandle(SessionHandle):
             return self._rename_slash(session, args, SlashResult)
         if command == "effort":
             return await self._effort_slash(session, args, SlashResult)
+        if command == "fast":
+            return self._fast_slash(session, args, SlashResult)
         if command == "approvals":
             return self._approvals_slash(session, args, SlashResult)
         if command == "compact":
@@ -1929,6 +2007,71 @@ class OwnedSessionHandle(SessionHandle):
         except Exception as error:  # noqa: BLE001 — a bad rung is a user error
             return SlashResult(kind="notice", text=str(error), style="warning")
         return SlashResult(kind="notice", text=str(detail), style="info")
+
+    def _fast_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Report or switch fast mode on the runtime's own spec.
+
+        The same rules as the terminal's ``/fast`` (`OperatorApp._cmd_fast`),
+        restated here because the detached runtime builds its requests from
+        ITS spec: a phone toggling the dial must reach the spec the next
+        provider call is built from, and the app's copy of the rule is not
+        loaded in a headless process. Bare toggles, ``on``/``off`` name the
+        resulting state, ``status`` only reports. Session-scoped and never
+        persisted — fast mode is billed at a premium, so it must not outlive
+        the task it was switched on for.
+        """
+        spec = getattr(session, "model", None)
+        label = getattr(session, "model_label", "") or "this model"
+        if spec is None or not hasattr(session, "set_model"):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if not getattr(spec, "supports_fast_mode", False):
+            return SlashResult(
+                kind="notice", text=f"fast mode: not available on {label}", style="info"
+            )
+        current = bool(getattr(spec, "fast_mode", False))
+        wanted = (arg or "").strip().lower()
+
+        def status() -> Any:
+            text = (
+                f"fast mode: on for {label} — faster output at premium pricing"
+                if current
+                else f"fast mode: off for {label} — /fast turns it on at premium pricing"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+
+        if wanted in ("status", "show"):
+            return status()
+        if wanted in ("on", "yes", "true", "enable", "enabled"):
+            target = True
+        elif wanted in ("off", "no", "false", "disable", "disabled"):
+            target = False
+        elif not wanted:
+            target = not current
+        else:
+            return SlashResult(
+                kind="notice",
+                text=f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
+                style="warning",
+            )
+        if target == current:
+            return status()
+        session.set_model(spec.model_copy(update={"fast_mode": target}))
+        if target:
+            # An explicit re-ask clears the driver's refusal latch (see
+            # `FailoverRouteState.fast_refused`); the terminal does the same.
+            forget = getattr(getattr(session, "_stream_fn", None), "forget_fast_refusal", None)
+            if callable(forget):
+                forget()
+        self._notify()
+        # Same receipt as the terminal's `_fast_receipt` (design D2/D6): no
+        # label, because an aggregator label pushes the line past the notice
+        # width and orphans the last word.
+        text = (
+            "fast mode: off → on — faster output at premium pricing"
+            if target
+            else "fast mode: on → off — standard speed and pricing"
+        )
+        return SlashResult(kind="notice", text=text, style="info")
 
     def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
