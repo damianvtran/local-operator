@@ -173,7 +173,16 @@ app = FastAPI(
 
 
 def _legacy_desktop_control_path(path: str) -> bool:
+    """Legacy routes that carry desktop-privileged CONTROL in managed mode.
+
+    ``/v1/agents/import`` writes a whole agent from an uploaded ZIP, which is
+    every bit as privileged as the credential and config writes beside it. It
+    was reachable cross-origin with no bearer while its own renderer caller
+    already went through the authenticated media relay, so gating it closes a
+    write bypass without moving a single call site.
+    """
     return path in {
+        "/v1/agents/import",
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",
@@ -183,11 +192,37 @@ def _legacy_desktop_control_path(path: str) -> bool:
     } or (path.startswith("/v1/agents/") and path.rsplit("/", 1)[-1] in {"upload", "speech"})
 
 
+#: Legacy READ routes that disclose the same tenant's data as the gated control
+#: plane: agent inventory and names, working-directory paths (the filesystem
+#: layout of the user's machine), job history, and conversation content.
+#:
+#: They are gated only in managed mode, exactly like the control paths above, so
+#: a standalone legacy server and every CLI/script client stay wire-compatible.
+#: The desktop app reaches them through the authenticated contract instead --
+#: see ``legacy.agents.list`` / ``legacy.agent.get`` / ``legacy.jobs.list``.
+_LEGACY_READ_PATHS = {"/v1/agents", "/v1/jobs"}
+
+
+def _legacy_desktop_read_path(path: str, method: str) -> bool:
+    if method not in {"GET", "HEAD"}:
+        return False
+    if path in _LEGACY_READ_PATHS:
+        return True
+    # `/v1/agents/{id}` and `/v1/agents/{id}/conversation`. Matched structurally
+    # rather than by a literal set because the id is caller-supplied.
+    parts = path.strip("/").split("/")
+    if len(parts) == 3 and parts[:2] == ["v1", "agents"]:
+        return parts[2] != "import"
+    return len(parts) == 4 and parts[:2] == ["v1", "agents"] and parts[3] == "conversation"
+
+
 @app.middleware("http")
 async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
     sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
-    legacy_control = _legacy_desktop_control_path(path)
+    legacy_control = _legacy_desktop_control_path(path) or _legacy_desktop_read_path(
+        path, request.method
+    )
     # Explicit desktop-token mode must close the old mutation bypass too. A
     # standalone legacy server remains wire-compatible unless opted into this
     # mode; Electron moves these calls through the same main-process proxy.
@@ -230,6 +265,50 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+
+
+@app.middleware("http")
+async def desktop_origin_cors(request: Request, call_next):
+    """Stop echoing arbitrary origins once a desktop allowlist is configured.
+
+    ``CORSMiddleware`` is registered with ``allow_origins=["*"]`` and
+    ``allow_credentials=True``, which makes Starlette ECHO the requesting
+    origin into ``Access-Control-Allow-Origin``. That turns every legacy route
+    into something a drive-by page can read with ``fetch()`` while the desktop
+    app holds the backend open on a predictable loopback port -- the browser
+    vector behind QA's Q2, distinct from the missing bearer.
+
+    Registered AFTER the CORS middleware ON PURPOSE: Starlette runs the most
+    recently added middleware OUTERMOST, so this is the only position from
+    which the header CORS just wrote is observable. A middleware declared
+    above it sees no ``Access-Control-Allow-Origin`` at all (verified, not
+    assumed) and would silently strip nothing.
+
+    Scoped to the managed desktop posture. With no allowlist configured, a
+    standalone server keeps its historical wildcard CORS, so CLI clients,
+    scripts and existing embedders are untouched.
+    """
+    response = await call_next(request)
+    allowed = {
+        item.strip()
+        for item in os.environ.get("LOCAL_OPERATOR_DESKTOP_ORIGINS", "").split(",")
+        if item.strip() and item.strip() != "null"
+    }
+    if not allowed:
+        return response
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in allowed:
+        # Removed rather than set to a placeholder: absent means "no CORS grant",
+        # which is what a browser must conclude. Credentials must go with it, or
+        # the pair reads as a grant to the wildcard.
+        #
+        # `del`, not `.pop()`: Starlette's MutableHeaders implements neither
+        # `pop` nor dict's default-argument protocol, and deleting an absent
+        # key is already a no-op there.
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+    return response
+
 
 # Include routers from the routes modules
 
