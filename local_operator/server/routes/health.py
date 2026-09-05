@@ -43,7 +43,13 @@ async def health_check() -> CRUDResponse[HealthCheckResponse]:
     Raises:
         HTTPException: If there's an error retrieving version information.
     """
-    version = importlib.metadata.version("local-operator")
+    # `installed_version()` rather than raw metadata: an editable install's
+    # dist-info is frozen at install time, so this reported the version the
+    # tree was installed AT rather than the version it now is, and the app
+    # showed that stale number in Settings > Updates (QA Q3 / UX U13).
+    from local_operator.update import installed_version
+
+    version = installed_version() or importlib.metadata.version("local-operator")
     result = HealthCheckResponse(version=version)
 
     return CRUDResponse(status=200, message="ok", result=result)

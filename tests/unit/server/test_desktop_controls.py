@@ -100,6 +100,117 @@ async def test_managed_legacy_controls_require_token_but_unmanaged_remains_compa
     ).status_code == 200
 
 
+async def test_legacy_reads_and_import_are_gated_in_managed_mode(desktop, monkeypatch):
+    """Agent inventory, conversations, jobs and ZIP import sit behind the boundary.
+
+    These routes disclose the same tenant's data as the control plane (names,
+    working-directory paths, job history, conversation content) and were
+    answering any origin without a bearer while the desktop app held the
+    backend open on a predictable loopback port.
+    """
+    client, _ = desktop
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    reads = (
+        "/v1/agents",
+        "/v1/jobs",
+        f"/v1/agents/{agent_id}",
+        f"/v1/agents/{agent_id}/conversation",
+    )
+    for path in reads:
+        assert (await client.get(path, headers={"Authorization": ""})).status_code == 401, path
+        assert (
+            await client.get(path, headers={"Origin": "https://evil.example"})
+        ).status_code == 403, path
+    # The ungated WRITE from the same family.
+    assert (
+        await client.post("/v1/agents/import", headers={"Authorization": ""})
+    ).status_code == 401
+    assert (
+        await client.post("/v1/agents/import", headers={"Origin": "https://evil.example"})
+    ).status_code == 403
+    # Unmanaged (no desktop token) must stay wire-compatible for CLI clients.
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN")
+    for path in reads:
+        assert (await client.get(path, headers={"Authorization": ""})).status_code != 401, path
+
+
+async def test_absent_origin_is_refused_only_for_browser_shaped_requests(desktop, monkeypatch):
+    """An absent Origin used to skip the allowlist entirely.
+
+    It cannot become an unconditional requirement: Electron main and the dev
+    proxy both fetch server-side and legitimately send none. ``Sec-Fetch-Site``
+    is attached by the browser and cannot be forged or removed by page script,
+    so it is what separates the two.
+    """
+    client, _ = desktop
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+    # Native caller: no Origin, no fetch metadata. Must still work.
+    assert (await client.get("/v1/settings")).status_code == 200
+    # Browser-shaped: fetch metadata present, Origin withheld to dodge the check.
+    for value in ("cross-site", "same-site", "none"):
+        assert (
+            await client.get("/v1/settings", headers={"Sec-Fetch-Site": value})
+        ).status_code == 403, value
+    # An allowed origin still passes with the metadata attached.
+    assert (
+        await client.get(
+            "/v1/settings",
+            headers={"Origin": "http://localhost:5187", "Sec-Fetch-Site": "same-origin"},
+        )
+    ).status_code == 200
+
+
+async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Path, monkeypatch):
+    """A hostile origin must get no ``Access-Control-Allow-Origin`` at all.
+
+    The app is mounted with ``allow_origins=["*"]`` and
+    ``allow_credentials=True``, which makes Starlette ECHO the caller's origin
+    -- turning every open route into something a drive-by page can read with
+    ``fetch()`` while the desktop app holds the backend on a known loopback
+    port. Missing auth was only half of QA's Q2; this is the half that made it
+    browser-exploitable rather than curl-only.
+    """
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from local_operator.server.app import desktop_origin_cors
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    app = FastAPI()
+
+    @app.get("/health")
+    async def _health():
+        return {"ok": True}
+
+    # Registration ORDER is the load-bearing part: Starlette runs the most
+    # recently added middleware outermost, so only a middleware added AFTER the
+    # CORS one can observe (and remove) the header it wrote.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.middleware("http")(desktop_origin_cors)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        # No allowlist configured: a standalone server keeps its historical
+        # wildcard CORS, so existing embedders are untouched.
+        hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
+        assert hostile.headers.get("access-control-allow-origin") == "http://evil.example"
+
+        monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+        hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
+        assert hostile.status_code == 200
+        assert "access-control-allow-origin" not in hostile.headers
+        # Credentials must go with the grant, or the pair reads as a wildcard one.
+        assert "access-control-allow-credentials" not in hostile.headers
+
+        allowed = await client.get("/health", headers={"Origin": "http://localhost:5187"})
+        assert allowed.headers.get("access-control-allow-origin") == "http://localhost:5187"
+
+
 async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     client, app = desktop
     manager = app.state.config_manager

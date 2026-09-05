@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from local_operator.session.runtime.launch import (
     _MAX_SPAWNS,
     PeerMessageErrand,
     PromptErrand,
+    RuntimeStartupError,
     WarmErrand,
     engage_runtime,
 )
@@ -410,10 +412,69 @@ async def test_a_candidate_that_dies_during_construction_is_respawned(
         "local_operator.session.runtime.launch._spawn_runtime", dies_during_construction
     )
 
-    with pytest.raises(TimeoutError):
+    # RuntimeStartupError, not TimeoutError, and it must arrive well inside the
+    # deadline. Waiting out the full deadline for a session whose every
+    # candidate has already died is what made the first message in a new chat
+    # look hung for 30 seconds before failing (QA Q1); a timeout here would
+    # mean that behaviour had returned.
+    started = time.monotonic()
+    with pytest.raises(RuntimeStartupError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=6.0
+        )
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, f"engage burned {elapsed:.1f}s of a 6s deadline instead of failing fast"
+
+    assert len(attempts) > 1, "a dead candidate was never respawned; R1 has regressed"
+    assert len(attempts) <= _MAX_SPAWNS, "respawning is unbounded; a broken session crash-loops"
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The child's fatal error must reach the caller, in words a user can act on.
+
+    Both spawn streams used to go to DEVNULL, so a candidate that could never
+    construct produced no traceback, no message and no exit reason anywhere the
+    parent could see -- the whole reason a misconfigured session reported only
+    "owner unavailable" (QA Q1).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    class _DeadPopen:
+        returncode = 2
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def dies_with_a_reason(session_id: str, cwd: str, *, defer_materialise: bool) -> _DeadPopen:
+        from local_operator.session_lease import acquire_session_lease
+
+        acquire_session_lease(tmp_path / "sessions" / session_id).release()
+        process = _DeadPopen()
+        capture = tmp_path / f"capture-{len(list(tmp_path.glob('capture-*')))}.log"
+        # Exactly the shape `process.py` now writes to stderr on a fatal
+        # construction failure.
+        capture.write_text(
+            "Traceback (most recent call last):\n"
+            '  File "x.py", line 1, in y\n'
+            "local_operator.session_factory.HostingNotConfiguredError: "
+            "Hosting platform is not configured.\n"
+        )
+        setattr(process, "lop_capture_path", capture)
+        return process
+
+    monkeypatch.setattr("local_operator.session.runtime.launch._spawn_runtime", dies_with_a_reason)
+
+    with pytest.raises(RuntimeStartupError) as raised:
         await engage_runtime(
             SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=6.0
         )
 
-    assert len(attempts) > 1, "a dead candidate was never respawned; R1 has regressed"
-    assert len(attempts) <= _MAX_SPAWNS, "respawning is unbounded; a broken session crash-loops"
+    # The vetted, user-facing sentence -- not the raw exception text, which can
+    # carry endpoint URLs and filesystem paths.
+    assert "Settings > Providers" in raised.value.actionable
+    assert "Traceback" not in raised.value.actionable
+    assert "x.py" not in raised.value.actionable
