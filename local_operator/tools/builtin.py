@@ -1495,6 +1495,7 @@ async def execute_bash(
     # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
     # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
     shell = resolve_bash_shell(_configured_bash_shell())
+    cwd = _safe_cwd(context)
     try:
         process = await asyncio.create_subprocess_exec(
             shell,
@@ -1502,7 +1503,7 @@ async def execute_bash(
             params.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=_safe_cwd(context),
+            cwd=cwd,
             env=env,
             start_new_session=True,
         )
@@ -1513,16 +1514,51 @@ async def execute_bash(
         # so EVERY call failed with a stack dump that never named the key that
         # caused it. OSError (not just FileNotFoundError) because the same
         # misconfiguration also arrives as PermissionError for a non-executable
-        # path, and ENOTDIR/ELOOP for a malformed one. A normal error result
-        # keeps the loop alive and tells the model exactly what to say to the
-        # operator.
+        # path, and ENOTDIR/ELOOP for a malformed one.
+        #
+        # But the SAME OSError family covers two distinct arguments, and only
+        # one of them is `bash.shell`: argv[0] (the interpreter) and `cwd=`
+        # (the session directory, which is routinely deleted under us — a
+        # removed worktree, a reclaimed tmpdir). Blaming `bash.shell`
+        # unconditionally named a key the operator may never have set and
+        # prescribed two commands that cannot fix a missing directory.
+        # `exc.filename` is the discriminator: CPython sets it to the path that
+        # actually failed, and the child chdirs BEFORE execve, so a bad cwd
+        # correctly wins even when both are bad. It is None only for errors
+        # that carry no path at all, which must not be attributed to either.
+        #
+        # Each message is split across short lines and carries no backticks:
+        # the tool card truncates per line and paints Text rather than
+        # markdown, so a single long sentence loses its own recovery half and
+        # backticks land literally inside the command the operator must type.
+        if exc.filename is None:
+            return _error(
+                tool_call_id,
+                "bash",
+                f"cannot start the command ({exc.strerror or exc}).\n"
+                f"Interpreter: {shell}\n"
+                f"Working directory: {cwd}",
+            )
+        if exc.filename != shell:
+            # The offending path IS the cwd in the case this branch exists for,
+            # so repeating it on its own line would spend a scarce card line on
+            # a duplicate; it is named separately only when the two differ.
+            where = "" if exc.filename == cwd else f"Working directory: {cwd}\n"
+            return _error(
+                tool_call_id,
+                "bash",
+                f"cannot start the command in {exc.filename!r} "
+                f"({exc.strerror or exc}).\n"
+                f"{where}"
+                "That directory is gone or unreadable. Recreate it, or work "
+                "from a directory that exists.",
+            )
         return _error(
             tool_call_id,
             "bash",
-            f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}). "
-            "Point it at a real interpreter with "
-            "`lop config edit bash.shell <path>`, or clear it with "
-            "`lop config edit bash.shell ''` to auto-resolve bash on PATH.",
+            f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}).\n"
+            "Point it at a real interpreter: lop config edit bash.shell <path>\n"
+            "Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ''",
         )
 
     # Record this group in the owner's process-group ledger so a HARD death of

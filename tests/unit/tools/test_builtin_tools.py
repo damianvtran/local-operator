@@ -394,7 +394,6 @@ async def test_bash_reports_a_missing_configured_shell_as_a_tool_error(
     assert "bash.shell" in result.text
     assert "/nonexistent/qa-shell" in result.text
     assert "failed unexpectedly" not in result.text
-    assert "Traceback" not in result.text
 
 
 @pytest.mark.asyncio
@@ -414,7 +413,33 @@ async def test_bash_reports_a_non_executable_configured_shell_as_a_tool_error(
     assert result.is_error is True
     assert "bash.shell" in result.text
     assert str(not_executable) in result.text
-    assert "Traceback" not in result.text
+    # `Traceback` cannot discriminate here: the boundary emits only the last
+    # 2000 chars of the formatted traceback, which cuts the header off, so the
+    # literal string is absent from the pre-fix output too.
+    assert "failed unexpectedly" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_blames_the_working_directory_not_bash_shell(tmp_path, monkeypatch) -> None:
+    """`create_subprocess_exec` raises the same OSError family for a deleted
+    `cwd=` as for a bad argv[0], so the handler must discriminate on
+    `exc.filename`. With `bash.shell` unset and the session directory gone —
+    an ordinary condition after a removed worktree or a reclaimed tmpdir — the
+    error must name the directory and never mention a key the operator never
+    set, whose two prescribed fixes cannot repair a missing directory."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))
+    gone = tmp_path / "deleted-cwd"
+    gone.mkdir()
+    gone_context = ToolContext(cwd=str(gone), session_id="unit-test")
+    gone_tools = {tool.name: tool for tool in create_tools(gone_context)}
+    gone.rmdir()
+
+    result = await _call(gone_tools, "bash", {"command": "echo hi"}, gone_context)
+
+    assert result.is_error is True
+    assert str(gone) in result.text
+    assert "bash.shell" not in result.text
+    assert "failed unexpectedly" not in result.text
 
 
 _HOST_BASH = builtin.shutil.which("bash")
