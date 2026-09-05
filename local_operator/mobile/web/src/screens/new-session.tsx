@@ -1,6 +1,6 @@
 /**
  * New session sheet (`#/new`): working directory (home, recents, or free
- * input), optional model, Start. On `{ok, pid}` the router takes the user
+ * input), optional model, Start. On `{ok, session_id}` the router takes the user
  * straight into the new session view.
  */
 import { useEffect, useMemo, useState } from "react";
@@ -87,7 +87,7 @@ export function NewSessionScreen() {
 				model_id: model?.model_id,
 			});
 			if (res.ok) {
-				navigate(`/s/${res.pid}`);
+				navigate(`/s/${encodeURIComponent(res.session_id)}`);
 			} else {
 				setError("the daemon refused to start the session");
 			}

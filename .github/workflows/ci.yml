@@ -162,10 +162,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    # Sharded across 5 parallel jobs to bring individual test runner execution
-    # time safely within the 7-9 minute window while staying well within the
-    # 20-job concurrency budget. Timeout set to 15m.
-    timeout-minutes: 15
+    # Keep five shards within the 20-job concurrency budget. PR #643 job
+    # 101250352578 reached 97% before GitHub cancelled it at the 15-minute
+    # limit, so allow 20 minutes for setup and the long tail without dropping
+    # tests, coverage, or the independent per-test/e2e watchdogs.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

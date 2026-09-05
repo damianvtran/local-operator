@@ -1572,6 +1572,7 @@ def _band():
     band._approvals_auto = False
     band._approvals_always = False
     band._attention = False
+    band._failed = False
     band._active_seconds = 0.0
     band._turn_started_at = None
     band._spinner_index = 0

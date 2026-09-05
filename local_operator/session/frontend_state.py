@@ -333,6 +333,9 @@ _FRONTEND_LOCAL_SLASHES = {
     "skills",
     "login",
     "logout",
+    # Remote access is enrolled using this frontend computer's OAuth store and
+    # service manager; routing to the session owner would expose another host.
+    "mobile",
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the owner's screen, which nobody is looking at. This is
