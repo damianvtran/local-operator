@@ -275,20 +275,27 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: and this clause sits after the access note, so it has to be complete and short.
 #: "Saves provider and model" named the payload but not why it mattered; "saves
 #: this for new sessions" names the consequence, fits the same slot, and includes
-#: the article the clipped phrase lacked. At 38 cells it clears the footer's
-#: 47-cell budget at 50 columns, which is the width that decides whether it
-#: survives at all — the picker's status clauses concatenate with no shedding.
+#: the article the clipped phrase lacked. The budget arithmetic is in the last
+#: paragraph below — one set of figures, so nobody "fixes" the string toward a
+#: stale number.
 #:
-#: REPOINTED at the `d` affordance (#369). It used to read "/model default saves
-#: this for new sessions", which is no longer true: a bare `/model default` now
-#: CONFIRMS rather than writing, precisely because that spelling was the
-#: ambiguity the issue reported. The breadcrumb names the key instead, because
-#: the key is the one route to a saved default with no ambiguity in it at all.
+#: REPOINTED BACK at `/model default`, after #369 briefly pointed it at a `d`
+#: key on a picker row. That key is gone: inside a filter every printable
+#: character belongs to the query, so a `d` that saved config on an empty query
+#: and narrowed the list otherwise was a mode with nothing on screen to mark it.
+#: The ambiguity #369 reported is closed by the COMMAND being unambiguous — a
+#: bare `/model default` writes the model the session is already on and switches
+#: nothing — not by moving the write onto a keystroke.
 #:
-#: It names `/model` as well as `d` because two of its four sites are receipts
-#: printed when NO picker is open (the switch receipt, and the bare-`/model`
-#: notice), where "press d" alone would name a key that does nothing yet.
-PERSIST_HINT = "d in /model saves this for new sessions"
+#: ONE route named here, not both. The second route (the `/settings` model rows)
+#: does not fit: this string is sized by the picker footer, whose budget is 43
+#: cells at 50 columns (card width minus `_GUTTER_CELLS` + `_EDGE_MARGIN`), and
+#: this clause is 42. Any "; /settings too" tail measures 57 and truncates
+#: mid-word at the one width where the instruction most needs to survive whole.
+#: So the footer gets the command and the roomier surfaces get the pair: the
+#: bare-`/model` notice names `/settings` in `_persist_hint_notice`, which wraps
+#: instead of truncating, and the `/help` row is reachable at any width.
+PERSIST_HINT = "/model default saves this for new sessions"
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
 #: and whose rows are therefore an older document. One constant because the
@@ -588,11 +595,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # typed selector, which may have been elided to `default`.
     SlashCommand(
         "model",
-        # Terse by necessity — the description column wraps past ~55 cells — but
-        # it still carries PERSIST_HINT verbatim rather than a fifth paraphrase.
-        # The `<provider>/<id>` shape it used to show moved to the tip pool, which
-        # has the room for it (`welcome.TIPS`).
-        f"Switch model; {PERSIST_HINT}",
+        # Terse by necessity — the description column wraps past ~55 cells at 80
+        # columns, and `Switch model; ` + the 42-cell hint measured 56 and
+        # orphaned "sessions" on its own line (design review D2). "Switch" alone
+        # keeps the row whole at 80 (49 cells) and still carries PERSIST_HINT
+        # verbatim rather than a fifth paraphrase; the command name beside it
+        # already says what is being switched. The `<provider>/<id>` shape it
+        # used to show moved to the tip pool, which has the room (`welcome.TIPS`).
+        # `/model saved` is not here for the same reason: the notice a bare
+        # `/model` prints is the surface with room for the third command.
+        f"Switch; {PERSIST_HINT}",
         aliases=("models",),
     ),
     # Next to `/model` because it is the same question one level down: which
@@ -1552,6 +1564,18 @@ class _HeldAnswerKey:
 
 RESIZE_REFIT_DELAY_S = 0.05
 
+#: How often, and for how long, to re-check ``sessions/last-cleanup.json``
+#: after adoption. The startup cleanup pass is dispatched at session
+#: construction and waits ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS``
+#: (0.75 s) before touching the disk, then walks the store — sub-second on
+#: a small store, longer on a large one — so no single fixed delay is right:
+#: a 5 s timer lagged ~4 s on small stores and silently deferred a pass that
+#: took longer than 5 s to the NEXT boot (UX round 3, U16/U17). Polled at
+#: the interval until the window closes; a late notice is still a notice, a
+#: missed one is the incident's silent splash.
+STARTUP_CLEANUP_RECHECK_S = 1.0
+STARTUP_CLEANUP_RECHECK_WINDOW_S = 30.0
+
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
 #: is wide enough for the boot input to read as a CARD rather than as a bar. It
 #: is a measurement, not a mode — see ``OperatorApp._sync_boot_card``.
@@ -2149,9 +2173,11 @@ class OperatorApp(App[None]):
         self._invalid_hosting: str | None = None
         #: The provider that resolved fine but has no model, when THAT is why we
         #: are in the setup state (``None`` otherwise). Unlike `_invalid_hosting`
-        #: this one IS read: `/model` and the picker's `d` key consult it to
-        #: decide that a saved default should also boot the session that does
-        #: not exist yet, which is what makes this setup state escapable.
+        #: this one IS read: `/model <p>/<id>` (via `_recover_from_missing_model`)
+        #: consults it to decide that a saved default should also boot the
+        #: session that does not exist yet, which is what makes this setup state
+        #: escapable. It was briefly a second caller's flag too — a `d` key on a
+        #: picker row — and that key is gone; nothing else routes on it.
         self._model_missing_for: str | None = None
         #: Invoked before a post-login session rebuild so the launch-time config
         #: manager (captured by the session factory closure) re-reads the
@@ -3281,6 +3307,12 @@ class OperatorApp(App[None]):
         # `_render_resumed_history` no-ops there, so the boot splash is
         # untouched and the notice still lands under it.
         self._report_attachment_restore(session)
+        # A launch that removed sessions must SAY SO on this screen. Checked
+        # now (a viewer attaching to a runtime that already ran its pass) and
+        # again after the pass's idle window (this process's own pass runs in
+        # the background AFTER the first frame). Both read one file; the
+        # first to find it unacknowledged announces it.
+        self._report_startup_cleanup(rechecks_left=STARTUP_CLEANUP_RECHECK_WINDOW_S)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -4847,9 +4879,10 @@ class OperatorApp(App[None]):
         nothing, because hosting is already valid -- and the splash says so. This
         state is reached by the app's own repair (`/login` into a provider with
         no default clears the model deliberately), which is why it must be
-        escapable rather than merely non-red: see :meth:`_cmd_model` and
-        :meth:`_persist_default_from_picker`, which rebuild the session from
-        setup instead of refusing with "session is still starting...".
+        escapable rather than merely non-red: see :meth:`_cmd_model`, whose
+        `/model <p>/<id>` path routes through
+        :meth:`_recover_from_missing_model` to rebuild the session from setup
+        instead of refusing with "session is still starting...".
 
         ``hosting_source`` keeps that honesty one step further. `/login` writes
         the CONFIG FILE, but precedence is agent > flag > config, so when the
@@ -7738,6 +7771,56 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    def _report_startup_cleanup(self, *, rechecks_left: float = 0.0) -> None:
+        """Announce a startup cleanup pass that removed sessions, once.
+
+        The pass runs in the runtime process, in the background, after the
+        first frame — so neither "the session object" nor "this process" is a
+        place the fact reliably lives when the TUI paints. It lives on disk:
+        ``sessions/last-cleanup.json``, written by the removing pass and
+        flipped to acknowledged by the viewer that reports it (see
+        ``session.cleanup.take_unannounced_cleanup`` for WHICH viewer: the
+        one attached to the removing runtime, while that runtime lives).
+        Routed through :meth:`_system_notice` so it lands under the splash
+        without ending the empty state, the same channel an MCP startup
+        failure uses; WARNING kind because sessions are gone, whatever the
+        policy said.
+
+        Polls rather than fires once: the pass finishes whenever the store
+        walk finishes, so the check repeats every ``STARTUP_CLEANUP_RECHECK_S``
+        until it has announced or ``rechecks_left`` seconds have elapsed.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import (
+            SESSIONS_DIRNAME,
+            format_cleanup_notice,
+            take_unannounced_cleanup,
+        )
+
+        # The FORMAT is inside the try too: a hand-edited or newer-schema
+        # record (`"removed": "many"`) crashed the first frame when only the
+        # read was guarded (review round 3, R3-2). The formatter is total on
+        # its own; this is the belt to its braces.
+        try:
+            runtime_pid = getattr(self._session, "runtime_pid", None)
+            payload = take_unannounced_cleanup(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            body = None if payload is None else format_cleanup_notice(payload)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("startup cleanup notice could not be built", exc_info=True)
+            return
+        if body is not None:
+            self._system_notice(body, "warning")
+            return
+        if rechecks_left > 0:
+            remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
+            self.set_timer(
+                STARTUP_CLEANUP_RECHECK_S,
+                lambda: self._report_startup_cleanup(rechecks_left=remaining),
+            )
 
     def _report_attachment_restore(self, session: SessionProtocol) -> None:
         """Say so when a resumed session's team/agent could not be re-attached.
@@ -14821,7 +14904,6 @@ class OperatorApp(App[None]):
             # the owner's process, invisible to the user who asked). Choosing a
             # row still routes the switch back to the owner.
             if command == "/model" and not arg:
-                self._system_notice(self._persist_hint_notice())
                 self._open_model_picker()
                 return
 
@@ -15604,14 +15686,9 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if not arg:
-            # ``_system_notice``, NOT ``notice``: opening the picker is the user
-            # configuring the app, not starting a conversation, and a plain
-            # notice ends the empty state — which collapses the boot
-            # composition and makes the centred prompt unreachable. That is the
-            # same failure a broken MCP server caused before ``_system_notice``
-            # existed; routing a hint about the app's own settings through the
-            # conversation path reintroduced it.
-            self._system_notice(self._persist_hint_notice())
+            # The persist-hint notice is NOT printed here: reopening the list
+            # posts ``ModelQueryOpened`` and ``on_model_query_opened`` prints it,
+            # on this route and on the keystroke route alike.
             self._open_model_picker()
             return
         # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
@@ -15636,6 +15713,34 @@ class OperatorApp(App[None]):
         # direction.
         if lowered == "saved":
             self._cmd_model_saved(notice)
+            return
+        if (
+            persist_default
+            and not target
+            and session is None
+            and self._setup_state
+            and self._model_missing_for
+        ):
+            # The setup-state TRAP (UX review U1). The picker footer advertises
+            # a bare `/model default` there too, and with no session there is
+            # no current model to elide to — so, left to the generic guard
+            # below, the advertised command answered "session is still
+            # starting…" forever. Nothing is starting: the app already knows
+            # why there is no session. Ordered ABOVE that guard so the answer
+            # is the state's own next step, and worded to name both ways out
+            # (a row in the picker, or the explicit spelling), because those
+            # are the two routes `_recover_from_missing_model` actually takes.
+            #
+            # Gated on ``_model_missing_for`` — the predicate the escape below
+            # checks — so the advice is only given where following it works.
+            # In the no-hosting and unknown-hosting variants `/model default
+            # <p>/<id>` falls to the generic guard too, and the splash's
+            # `/login` is the real next step (code review round 2, R7).
+            self._system_notice(
+                "no model yet — usage: /model default <provider>/<model-id>, "
+                "or pick a row in /model",
+                "warning",
+            )
             return
         if persist_default and self._session_runs_elsewhere():
             # Persisting writes THIS machine's config, so it only makes sense
@@ -15677,32 +15782,36 @@ class OperatorApp(App[None]):
             self._system_notice("session is still starting…", "warning")
             return
         if persist_default and not target:
-            # Bare ``/model default`` CONFIRMS rather than writing (#369).
+            # Bare ``/model default`` SAVES THE CURRENT MODEL. The elided
+            # selector resolves to the session's own model, so this spelling
+            # switches nothing and persists what the user is already looking at
+            # on the status band.
             #
-            # It used to resolve the elided selector to `session.model_label`
-            # and write immediately. That is the defect the issue reports: the
-            # user who typed it was asking to be SWITCHED to their configured
-            # default, and instead their current model silently replaced that
-            # default in config.yml, with no undo and a receipt that arrived
-            # after the write. Two intentions shared one spelling and the
-            # destructive one won.
+            # #369 made it CONFIRM instead, on the reading that a user typing it
+            # might mean "switch me to my configured default". That reading now
+            # has its own word — `/model saved` — so the confirmation was asking
+            # a question the grammar already answers, and it cost the one thing
+            # the command is for: "make this the default" is the phrase users
+            # actually arrive with, and it had no spelling that worked.
             #
-            # Nothing is written here. The confirmation names the model that
-            # WOULD be saved, and both other readings are offered by name, so
-            # the ambiguity is resolved by the user rather than guessed at:
-            # `/model saved` switches to the configured default, `/model
-            # default <p>/<id>` persists explicitly, and the `d` key on a
-            # picker row does it without the command at all.
-            label = session.model_label
-            if not label:
+            # The elided form is resolved to `provider` + BARE `model_id` here
+            # rather than passed on as a selector, because the persist path
+            # below writes the two config keys INDEPENDENTLY and `bootstrap`
+            # reads them independently: a `model_name` holding
+            # `anthropic/claude-opus-5` under an `anthropic` hosting boots a
+            # model id no provider owns. `model_label` is `provider/model_id`
+            # joined by the session, so the split is on the FIRST `/` — the same
+            # `partition` the explicit path uses, and the reason
+            # `openrouter/deepseek/deepseek-chat` keeps `deepseek/deepseek-chat`
+            # whole as an id rather than losing its own slash.
+            target = session.model_label
+            if not target or "/" not in target:
+                # No current model to elide to — the setup state, or a reduced
+                # host whose session cannot say. Naming the explicit form is the
+                # only useful answer; guessing would write an empty pair and
+                # leave the next launch with no model at all.
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
-            self._system_notice(
-                f"save {label} as the boot default? — "
-                f"/model default {label} confirms · d on a /model row does it too · "
-                "/model saved switches to the configured default instead"
-            )
-            return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             self._system_notice(
@@ -15785,50 +15894,91 @@ class OperatorApp(App[None]):
         notice: NoticeFn,
     ) -> None:
         old_label = session.model_label
-        # The chosen effort rides along when the new model accepts it: a user
-        # who dropped to `low` for cost did not mean "until I switch models".
-        # ``explicit``: this is a deliberate model choice, so a pinned fallback
-        # route is withdrawn even when the choice re-selects the model the
-        # fallback displaced — see ``Session.set_model``.
-        session.set_model(
-            self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
-            explicit=True,
-        )
-        self._probe_quota_after_switch(session)
-        # A text-only model renders the history WITHOUT its images (see
-        # ``Session._render_history``), so the estimate painted for the vision
-        # model overstates what the new one actually carries. Re-measure so
-        # the band agrees with what the next request sends; the measure's own
-        # exact-count guard makes this a no-op once a turn has reported.
-        self._measure_preloaded_context(session)
-        # A different model may well have a dial, so the per-model refusal latch
-        # goes with the old one.
-        self._effort_refusal_shown = None
-        # The active provider just changed; warm its quota row so a `/usage`
-        # right after the switch answers from disk too. The age gate makes this
-        # a no-op when the row is already warm.
-        self._warm_usage_background()
+        # WRITE-ONLY when the default being saved is the model already in force
+        # (review round 1, R3/Q1). This is the whole of the bare form, and it is
+        # what makes "switches nothing" a true statement rather than a summary
+        # of the label: the switch tail below is not a no-op on a same-model
+        # re-selection. `Session.set_model(..., explicit=True)` reads it as the
+        # user reclaiming the primary from a pinned provider fallback and
+        # WITHDRAWS the fallback, and the per-model effort-refusal latch is
+        # cleared — so "make this my default" was silently also "drop the route
+        # that is currently serving me". A user who wants the fallback withdrawn
+        # has the plain `/model <p>/<id>` spelling for exactly that gesture.
+        # Compared on the joined label because that is what the elided form was
+        # derived from, so the two halves cannot disagree by case or spacing.
+        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        if not write_only:
+            # The chosen effort rides along when the new model accepts it: a
+            # user who dropped to `low` for cost did not mean "until I switch
+            # models". ``explicit``: this is a deliberate model choice, so a
+            # pinned fallback route is withdrawn even when the choice
+            # re-selects the model the fallback displaced — see
+            # ``Session.set_model``.
+            session.set_model(
+                self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
+                explicit=True,
+            )
+            self._probe_quota_after_switch(session)
+            # A text-only model renders the history WITHOUT its images (see
+            # ``Session._render_history``), so the estimate painted for the
+            # vision model overstates what the new one actually carries.
+            # Re-measure so the band agrees with what the next request sends;
+            # the measure's own exact-count guard makes this a no-op once a
+            # turn has reported.
+            self._measure_preloaded_context(session)
+            # A different model may well have a dial, so the per-model refusal
+            # latch goes with the old one.
+            self._effort_refusal_shown = None
+            # The active provider just changed; warm its quota row so a
+            # `/usage` right after the switch answers from disk too. The age
+            # gate makes this a no-op when the row is already warm.
+            self._warm_usage_background()
         persist_result: str | None = None
         saved_to = ""
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
-            # both switches AND persists; a future flag could persist-only).
-            # Failure to write is reported but not fatal — the session already
-            # switched, and a read-only config dir should not take down a
-            # working prompt. The status line is repainted regardless (the
-            # ``return`` below used to skip it, leaving the band's model label
-            # stale on the very config the user just asked to make permanent).
+            # both switches AND persists; the bare form is the persist-only
+            # case). Failure to write is reported but not fatal — a read-only
+            # config dir should not take down a working prompt. The status line
+            # is repainted regardless (the ``return`` below used to skip it,
+            # leaving the band's model label stale on the very config the user
+            # just asked to make permanent).
+            #
+            # Through the ``settings_io`` FACADE, not ``manager.set_config_value``
+            # (design review D1 / UX review U4), for the reason
+            # `_save_approvals_default` gives: the facade is what marks a write
+            # as this process's own. It notifies the config watcher, which fans
+            # the change out with ``source="local"``, which is how
+            # :meth:`_on_config_change` knows the receipt below already told the
+            # user and stays quiet. Written underneath it, this process's own
+            # write arrived through the poll one tick later as ``source="disk"``
+            # and the user read a second row — `config.yml changed: model_name
+            # needs a relaunch` — that is worded for an edit someone ELSE made,
+            # names only the key that happened to differ, and says "when" a
+            # second time in a third phrasing. Two facade calls because the
+            # registry holds the pair as two settings; each notifies once and
+            # both arrive as local, so neither prints.
             try:
+                from local_operator import settings_io
                 from local_operator.config import ConfigManager
                 from local_operator.paths import config_dir
 
                 manager = ConfigManager(config_dir())
-                manager.set_config_value("hosting", provider)
-                manager.set_config_value("model_name", model_id)
+                for key, value in (("hosting", provider), ("model_name", model_id)):
+                    setting = settings_io.resolve_key(key)
+                    if setting is None:  # pragma: no cover - both keys are registered
+                        raise KeyError(f"{key} is not a registered setting")
+                    settings_io.write_setting(manager, setting, value)
                 saved_to = _home_relative(str(manager.config_file))
             except Exception as error:  # config write failure
-                persist_result = f"model switched, but could not save default: {error}"
+                # The write-only form switched nothing, so its failure receipt
+                # must not claim it did (QA round 1, Q1b).
+                persist_result = (
+                    f"could not save default: {error}"
+                    if write_only
+                    else f"model switched, but could not save default: {error}"
+                )
         if self._status is not None:
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
@@ -15843,7 +15993,12 @@ class OperatorApp(App[None]):
                 fast=_fast_label(session),
                 context_window=_context_window(session),
             )
-        suffix, warning = self._model_access_note(provider)
+        # The access note answers "can I use the model I just switched to". On
+        # the write-only form nothing was switched to, so the note is filler on
+        # a row that is already three lines at 50 columns (UX review U7) and
+        # the login warning would be about a provider already serving the
+        # session.
+        suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
@@ -15851,9 +16006,17 @@ class OperatorApp(App[None]):
             # the user cannot check without quitting and relaunching, and the
             # PROVIDER is the half that rides along silently — it is written from
             # the selector's left side, never typed as its own setting.
+            #
+            # "used by new sessions", the noun PERSIST_HINT already uses, not
+            # "from the next launch" (design review D3): a user who ran this
+            # after reading the footer met three phrasings of "when" within two
+            # rows. "New sessions" is also the fuller claim — `/new` reloads
+            # `hosting`/`model_name` before it builds, so the default applies
+            # there as well as at relaunch. The settings page keeps its own
+            # "new launch" vocabulary; it is a different surface.
             notice(
                 f"boot default saved to {saved_to}: hosting {provider}, "
-                f"model_name {model_id} (used from the next launch){suffix}"
+                f"model_name {model_id} (used by new sessions){suffix}"
             )
         else:
             # "(next turn)" alone read as permanent — the complaint behind this
@@ -15915,6 +16078,27 @@ class OperatorApp(App[None]):
         the user back to the model they were already trying to leave.
         """
         session = self._session
+        if session is None and self._setup_state and self._model_missing_for:
+            # The setup state is BY DEFINITION the state with no usable boot
+            # default — that is why there is no session — so "session is still
+            # starting…" would be the same dead end U1 closes for the bare
+            # `/model default`: nothing is starting, and the honest answer is
+            # that there is nothing to switch back to yet, plus the route that
+            # creates one. Ordered above the generic guard for that reason.
+            #
+            # Gated on ``_model_missing_for`` because the route this names
+            # (`/model default <p>/<id>`) only WORKS in that variant — it is
+            # the same predicate `_cmd_model`'s escape checks. The other two
+            # setup variants (no hosting, unknown hosting) have no model escape
+            # and their next step is `/login`, which the splash already says;
+            # naming the model route there would re-create the trap one step
+            # later (code review round 2, R7).
+            self._system_notice(
+                "no boot default to switch to yet — /model default "
+                "<provider>/<model-id> sets one, or pick a row in /model",
+                "warning",
+            )
+            return
         if session is None or not hasattr(session, "set_model"):
             self._system_notice("session is still starting…", "warning")
             return
@@ -15943,72 +16127,6 @@ class OperatorApp(App[None]):
         # A second switch implementation here is how the two would drift on the
         # next change to any of those steps.
         self._cmd_model(f"{provider}/{model_id}", notice)
-
-    def _persist_default_from_picker(self) -> None:
-        """``d`` on the highlighted model-picker row — save it as the default.
-
-        The PRIMARY fix for #369: it removes the ambiguity by removing the need
-        to type the command at all. The comment on `_cmd_model` already
-        anticipated this affordance — "the user phrase 'make this the default'
-        has no other home, and the picker's current-row marker already covers
-        'which am I on'" — and the row under the cursor supplies the `this` that
-        a bare `/model default` had to guess at.
-
-        Does NOT switch the session. The picker's Enter already means "switch to
-        this", so `d` is the other half; a key that did both would make the two
-        indistinguishable and leave a user who only wanted to set a default
-        talking to a model they did not pick.
-        """
-        picker = self._editor().model_picker
-        row = picker.highlighted()
-        if row is None:
-            return
-        if self._session_runs_elsewhere():
-            # Same refusal `/model default` gives, through the same predicate —
-            # which is the point. This guard asked `is_remote` directly while
-            # `_cmd_model` had already migrated to `_session_runs_elsewhere()`,
-            # so the two halves of one feature disagreed: since 0.46.0 EVERY
-            # session is remote, and `d` refused every local user in their own
-            # terminal while `/model default` allowed them.
-            #
-            # The question a config write actually asks is "would writing this
-            # machine's config govern the runtime?", not "is there a socket in
-            # the way" — see `_session_runs_elsewhere`.
-            self._system_notice(
-                "the boot default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern",
-                "warning",
-            )
-            return
-        try:
-            from local_operator.config import ConfigManager
-            from local_operator.paths import config_dir
-
-            manager = ConfigManager(config_dir())
-            manager.set_config_value("hosting", row.provider)
-            manager.set_config_value("model_name", row.model_id)
-            saved_to = _home_relative(str(manager.config_file))
-        except Exception as error:  # noqa: BLE001 — a read-only config dir
-            self._system_notice(f"could not save default: {error}", "warning")
-            return
-        if self._setup_state and self._model_missing_for:
-            # In the no-model setup state this key is a RECOVERY, not just a
-            # preference: the value it just wrote is the one thing the session
-            # was missing, so "used from the next launch" would be false advice
-            # — there is no current launch to prefer, and telling the user to
-            # restart is the dead end this state exists to avoid.
-            self._system_notice(
-                f"boot default saved to {saved_to}: hosting {row.provider}, "
-                f"model_name {row.model_id}"
-            )
-            self._leave_setup_state_and_boot(self._notice)
-            return
-        # Names both halves, the file and the keys, exactly as the command's
-        # own receipt does — one vocabulary for one outcome reached two ways.
-        self._system_notice(
-            f"boot default saved to {saved_to}: hosting {row.provider}, "
-            f"model_name {row.model_id} (used from the next launch)"
-        )
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
@@ -16064,13 +16182,17 @@ class OperatorApp(App[None]):
     def _leave_setup_state_and_boot(self, notice: NoticeFn) -> None:
         """Clear the setup state and build the session its config now allows.
 
-        Shared by the two commands that can supply the missing model — `/model
-        <p>/<id>` and the picker's `d` key — so the escape is one sequence
-        rather than two copies that drift; that class of divergence is what
-        `providers/login_defaults` was extracted to end. `/login` keeps its own
-        tail because it is already inside a worker and awaits the rebuild
-        directly, while these two are synchronous command handlers and must hand
-        the rebuild to one.
+        Reached today only through :meth:`_recover_from_missing_model` (the
+        `/model <p>/<id>` spelling, typed or chosen from a picker row). It is
+        kept as its own step rather than inlined there because the escape is a
+        SEQUENCE whose order matters (below), and the next command that can
+        supply a missing model must run the same one rather than a copy that
+        drifts — the class of divergence `providers/login_defaults` was
+        extracted to end. It did briefly have a second caller, the picker's `d`
+        key; that key is gone and nothing should be re-added on its account.
+        `/login` keeps its own tail because it is already inside a worker and
+        awaits the rebuild directly, while a synchronous command handler must
+        hand the rebuild to one.
 
         The ordering is load-bearing rather than incidental: ``_on_config_changed``
         must run before the rebuild, or the launch-time config manager captured
@@ -16094,12 +16216,38 @@ class OperatorApp(App[None]):
         repeated here even though the status band carries it, because it is the
         subject of the sentence — "make THIS the default" needs a this, and with
         no session yet there is no this, so the label is all that varies.
+
+        This is where the OTHER TWO routes get named. ``PERSIST_HINT`` carries
+        only the command because the picker footer truncates it at 43 cells (see
+        the constant), while a notice WRAPS — so the surface with room is the
+        one that can afford the pair this string cannot: that `/model saved`
+        is the way BACK to the default (UX review U2 — the confirmation line
+        that used to be its only mention is gone, and a command the app never
+        names is one the user has to already know), and that the default is
+        also editable on the settings page, which is the discoverable route for
+        a user who did not arrive with a command in mind.
+
+        The nouns are placed so each pronoun sits beside its antecedent (design
+        review D4): "this" is the model on the band, "the boot default" is
+        restated before "set it" so "it" does not have to reach back past
+        "this". "Boot default" is the ONE noun for the thing `/model default`
+        writes — the receipt says `boot default saved to …` and `/model saved`
+        refuses with `no boot default …` — so the user is never left wondering
+        whether a "saved default" and a "boot default" are two settings
+        (design review round 2, D6).
+
+        The `/model saved` clause is DROPPED in the setup state (UX review
+        round 2, U11): that state is by definition the one with no usable boot
+        default, and `_cmd_model_saved` refuses there, so naming the route
+        would advertise a dead end the app already knows about.
         """
         session = self._session
         label = session.model_label if session is not None else ""
+        back = "" if self._setup_state else " · /model saved switches back to the boot default"
+        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
         if not label:
-            return PERSIST_HINT
-        return f"model: {label} — {PERSIST_HINT}"
+            return routes
+        return f"model: {label} — {routes}"
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -16913,8 +17061,35 @@ class OperatorApp(App[None]):
         makes every route into the list identical: typing `/model ` by hand, being
         completed into it by the command picker, or dispatching `/model` all end up
         here. Before this, only the dispatched route had rows.
+
+        The persist-hint notice is printed HERE for the same reason (UX review
+        U5). It used to be printed by ``_cmd_model`` before it reopened the
+        list, so only a dispatched `/model` (Esc past the command picker, then
+        Enter, or the `/models` alias) ever named `/model saved` and `/settings`
+        — the primary keystroke path, where the command picker completes
+        `/model ` and the list opens without a dispatch, printed nothing. The
+        message fires once per closed→open transition, so this is one row per
+        opening on every route, exactly what the dispatched route already did.
+        ``_system_notice`` rather than ``_notice``: opening the picker is the
+        user configuring the app, not starting a conversation, and a plain
+        notice ends the empty state — which collapses the boot composition and
+        makes the centred prompt unreachable.
+
+        The notice is skipped when the ledger's LAST row already says it. The
+        message is meant to fire once per visible opening, and the editor now
+        keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
+        round 2, U8, where each Esc-then-edit cycle stacked another copy). This
+        is the second line of defence for the same property: no sequence of
+        opens that produces nothing between them can print the hint twice,
+        whatever the editor's resync does in future. Compared on the text, so
+        a hint that changed (a switch landed between two opens) still prints.
         """
         message.stop()
+        hint = self._persist_hint_notice()
+        blocks = self._transcript_view().blocks()
+        last = blocks[-1] if blocks else None
+        if not (isinstance(last, NoticeBlock) and last.text() == hint):
+            self._system_notice(hint)
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -20510,6 +20685,20 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        # The record of every session the cleanup policy has removed. Named
+        # HERE, next to the log path, because the removal itself happens in
+        # the runtime process whose log is not the one above (UX round 2,
+        # U6 residual): a user asking "what happened to my session" from
+        # /help must land on the file that answers, not on a log that never
+        # mentions it. Shown even when the file does not exist yet — its
+        # absence IS the answer "nothing was ever removed".
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.session.cleanup import CLEANUP_LOG_NAME, SESSIONS_DIRNAME
+
+        record_row = Text()
+        record_row.append("cleanup record".ljust(name_width), style=muted)
+        record_row.append(str(_config_dir() / SESSIONS_DIRNAME / CLEANUP_LOG_NAME), style=dim)
+        lines.append(record_row)
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(

@@ -1362,6 +1362,26 @@ class NoticeBlock(TranscriptBlock):
         width = max((self.size.width or 80) - 2, 12)
         body = self.body_budget(self.size.width or 80)
         rows = self._rows(body)
+        # PINNED to the authored row count, for the reason ``UserBlock._build``
+        # gives: under ``auto`` the engine measures this block, and the first
+        # measurement is taken of the 80-column fallback build folded into the
+        # real width — a three-row notice built at 74 cells measures FIVE at
+        # the 75-cell boot column, because each authored row is one or two
+        # cells too long and folds again. The rebuild that lands with the
+        # resize authors three rows, but its refresh does not bump the box
+        # model's cache key when the block's layout flag was already raised
+        # (a block appended from inside a message handler, where the layout
+        # pass runs before the block's own idle check clears the flag), so the
+        # stale five-row box is reused: two blank rows under the text, and at
+        # 80-100 columns a transcript scrollbar over a two-block ledger. Seen
+        # the moment the bare-`/model` notice moved onto ``ModelQueryOpened``.
+        # Writing the height is itself a style-key change the cache honours.
+        # The same defect reached the startup-cleanup notice by the recheck
+        # timer: region 8 rows for 5 of content, and at 80x24 the dead rows
+        # scrolled the wordmark off the top (PR #645, design round 3 D11) —
+        # ``test_a_timer_delivered_notice_keeps_the_wordmark_in_frame`` pins
+        # the timer path so a future un-pin is caught there too.
+        self._set_authored_height(len(rows))
         centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
