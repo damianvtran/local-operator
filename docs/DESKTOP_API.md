@@ -129,3 +129,126 @@ The TUI imports that same registry; canonical frontend capabilities derive from
 it without importing the Textual application. A desktop command UI must consume
 these names, aliases, argument and prompt-consumption semantics rather than
 maintain a second vocabulary.
+
+## Canonical HTTP sessions (implementation checkpoint)
+
+These additive routes use the same bearer/Origin boundary and `no-store` policy
+as the adapters above. **The broad desktop `sessions`/`commands` capabilities are
+not advertised yet:** the full command/native-action, MCP, loop, attachment and
+Electron streaming surfaces are not complete. Do not enable the production
+composer merely because these routes exist. Legacy chat/SSE shapes are unchanged.
+
+`DesktopSessions` shares one `DesktopSessionBridge` per canonical 12-lowercase-hex
+session ID. An agent profile is not a session ID. Creation is explicit and writes
+a small `sessions/<id>/desktop.json` draft marker with the chosen cwd; it starts
+no runtime. This makes a blank desktop conversation reopenable after an HTTP
+restart without inventing a new session per request. Ordinary transcript/session
+origin metadata remain authoritative; no `desktop` origin hides the session from
+terminal/phone lists. Older sessions use their saved frontend checkpoint cwd,
+falling back to the parent of the config root when no cwd was retained.
+
+| Endpoint | Request | Result inside `CRUDResponse.result` |
+| --- | --- | --- |
+| GET `/v1/desktop/sessions` | `limit` 1..500, default100 | `{sessions: [...]}` canonical rows plus explicit desktop drafts |
+| POST `/v1/desktop/sessions` | `{request_id, cwd}` | `{session_id}`; cwd must exist |
+| GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
+| POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
+| POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | owner receipt; stale owner/request/question409 |
+| GET `.../{id}/events` | optional `epoch`, `after_seq` | authenticated SSE, `data: <DesktopSessionFrame>` |
+| POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
+
+Create/message/command `request_id` is a canonical lowercase UUID string, reused
+for a retry of the **same** operation. Answer `request_id` is instead the pending
+gate's opaque ID, and answer `epoch` is the **owner** epoch from frontend state,
+not the HTTP stream epoch. Approval booleans and question indices are strict.
+Answer bodies are never retained in the HTTP receipt journal or echoed back.
+
+Images use the runtime's `{data_b64,mime_type}` shape (png/jpeg/gif/webp), at most8;
+the encoded message/command body must fit900,000bytes. Empty prompts without an
+image, invalid base64 and slash text on `/messages` return422 before owner binding.
+The existing Electron request transport currently has a smaller262,144byte body
+budget: this checkpoint does not claim larger native image uploads work.
+
+The owner-only command endpoint currently accepts rename, model, effort, fast,
+context, goal, compact, approvals, team and agent (including shared aliases).
+It returns the actual owner result, including warnings and picker/noop metadata;
+it is **not** the complete35-command desktop dispatcher. In particular, native
+pickers/actions, provider/MCP controls, loop, fork, aside and explicit stop/abort
+still need the next adapter slice. On a `team_attached` or `agent_attached`
+result, the owner's `data.request` plus images is admitted **once by the bridge**
+under the original request UUID; an added `result.admission` records that fact.
+The renderer must not independently re-submit that consumed request.
+
+### Admission and retry semantics
+
+A200 message receipt means the canonical runtime acknowledged admission, not
+that the model succeeded or the turn completed. The owner's canonical events
+and durable history are the authority for completion and side effects. Explicit
+mutations use `RemoteSession.bind_runtime` / existing `engage_runtime` lease
+arbitration. A cold read or stream attaches only to an already-live owner.
+HTTP shutdown/last-reader cleanup only disposes the viewer; it never stops work.
+
+The private0600 `desktop-receipts.db` stores request fingerprints and completed
+non-secret responses, not raw request or answer bodies. Reusing a UUID with
+changed input returns409. A completed receipt survives HTTP restart. A control
+interrupted between durable reservation and result commit is **indeterminate**:
+a retry returns409 and requires state reconciliation, not another side effect.
+Only natural prompt/steer admissions can retry an indeterminate receipt, because
+the owner already reserves those UUIDs durably. This is at-most-once control
+execution with honest crash ambiguity, not a claim of transactional exactly-once
+execution across the HTTP worker and canonical owner. Receipts currently follow
+the retained session lifetime; no automatic deletion/expiry is claimed.
+
+### Stream ordering and lifecycle
+
+Frames carry `{session_id,epoch,seq,type,payload}`; `heartbeat` and overflow `gap`
+carry only `{session_id,type}`. This outer epoch/seq is the HTTP **semantic receipt
+cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
+
+1. `open` supplies `{subscription_id,gap,watch_ttl_seconds}`. Its seq is connection
+   metadata, **not** permission to discard replay up through that number.
+2. If retained, ordered frames after the supplied receipt cursor are replayed.
+   This includes semantic `event` frames already covered by newer paint state.
+3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold}`. Its
+   history page ends inclusively at the captured canonical history cursor, not
+   at a newer tail read after an await. Missing replaced cursor produces
+   `cursor_missing:true` and an empty page; use `/history` to reconcile that gap.
+4. New frames continue in receipt order: `frontend.update` is a canonical field
+   delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
+   after replay so an old cumulative record cannot repaint newer snapshot text.
+   Preserve owner sequence/epoch checks independently of semantic event dedupe.
+
+A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
+cursor requires a gap snapshot. One live shared bridge retains at most256frames
+and8MiB; each subscriber has the same backlog bounds. Overflow emits `gap` and
+closes instead of silently losing semantic events. Max32subscribers per session,
+64cached bridges; only idle bridges are evicted. Job trajectories stay out of
+snapshots and deltas, through existing canonical serializers. Per-job trajectory
+retrieval is not exposed by this HTTP checkpoint yet.
+
+Watch ownership belongs to an active SSE subscription, not an arbitrary window
+ID. Visibility and native-notification delivery are aggregated independently
+across its unexpired leases. Renew while the surface is genuinely alive; no
+heartbeat automatically grants presence. Expiry clears owner presence, and ASGI
+disconnect cleanup is shielded from the cancelled request scope so lease revoke
+and detach actually reach the owner. A stream alone means neither visible nor
+notification-capable. Electron must set can_notify=false until native delivery
+really exists; its gate/turn notification dedupe/click behavior is not implemented
+by these backend routes.
+
+### Verification
+
+`tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
+Session/OwnedSessionHandle/RuntimeServer/AttachClient with only the provider
+stream scripted: same-session terminal controls, consumed team prompt, durable
+single admission, actual owner ask/approval futures, invalid/stale answers,
+ordered replay, session isolation, disconnect/watch cleanup and reopen.
+`tests/e2e/test_desktop_spawn.py` additionally executes the real detached process
+launcher using the built-in test provider, then recreates the HTTP lifespan and
+checks stable identity/title, persisted receipts, authoritative history and epoch
+reset. The test-owned runtime exits through its own stop protocol. Neither test
+uses operator credentials or connects to operator sessions. Unit tests exercise
+receipt crash ambiguity, byte/count overflow, lease aggregation, cache isolation
+and the inclusive history paging boundary.

@@ -949,6 +949,43 @@ class RemoteSession:
         """No runtime is attached (nor being attached) for this viewer."""
         return self._client is None or not self._client.connected
 
+    async def attach_existing(self) -> bool:
+        """Attach if an owner exists, without turning a history read into work.
+
+        Desktop read/subscription requests use the cold viewer's recovery policy
+        even when an owner is already live: losing that owner must never move
+        execution into the HTTP worker or start a replacement just for a reader.
+        """
+        from local_operator.mobile.attach_client import find_owner_record
+
+        async with self._bind_lock:
+            if self._disposed or not self.is_cold:
+                return not self.is_cold
+            record, _ = await asyncio.to_thread(
+                find_owner_record, self._config_dir, self._session_id
+            )
+            if record is None or self._disposed:
+                return False
+            await self._bind_to(record)
+            return True
+
+    async def admit_prompt(
+        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+    ) -> tuple[str, bool]:
+        """Return the owner's admission receipt, not a fictitious completed turn.
+
+        Retrying the caller's stable ID crosses the existing durable reservation
+        boundary. Unlike submit_response this does not wait for model completion,
+        so an HTTP disconnect cannot cancel work the owner already accepted.
+        """
+        await self._ensure_bound()
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError(self._unavailable_reason())
+        return await client.request_ack_with_duplicate(
+            "steer" if steer else "prompt", text=text, images=images, command_id=command_id
+        )
+
     async def bind_runtime(self) -> None:
         """Bind a viewer before an explicitly requested owner control operation."""
         await self._ensure_bound()
