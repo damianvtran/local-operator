@@ -208,10 +208,15 @@ class RemoteSession:
         config_dir: Path,
         session_id: str,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
         self._takeover_factory = takeover_factory
+        self._surface = surface
+        self._desktop_visible = False
+        self._desktop_can_notify = False
+        self._desktop_seen = 0.0
         self._client: AttachClient | None = None
         #: Where a runtime for this session should be started. Only a cold
         #: viewer needs it (an attached one inherits the runtime's own cwd);
@@ -225,7 +230,7 @@ class RemoteSession:
         #: process must never take it); left False for the legacy attach path,
         #: whose contract is still "recover the conversation into this
         #: process" and whose tests assert exactly that.
-        self._can_go_cold = False
+        self._can_go_cold = surface == "desktop"
         #: Why this viewer opened WITHOUT live state, when that was not the
         #: ordinary "no runtime was running" case. Set by the launcher when an
         #: attach to a live runtime failed and it fell back to cold; the TUI
@@ -453,6 +458,7 @@ class RemoteSession:
         *,
         config_dir: Path,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> "RemoteSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
@@ -462,6 +468,7 @@ class RemoteSession:
             config_dir=config_dir,
             session_id=session_id,
             takeover_factory=takeover_factory,
+            surface=surface,
         )
         await self._dial(record)
         frontend = await self._await_frontend()
@@ -478,6 +485,7 @@ class RemoteSession:
         config_dir: Path,
         cwd: str,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> "RemoteSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -499,6 +507,7 @@ class RemoteSession:
             config_dir=config_dir,
             session_id=session_id,
             takeover_factory=takeover_factory,
+            surface=surface,
         )
         self._cwd = cwd
         self._can_go_cold = True
@@ -940,6 +949,49 @@ class RemoteSession:
         """No runtime is attached (nor being attached) for this viewer."""
         return self._client is None or not self._client.connected
 
+    async def bind_runtime(self) -> None:
+        """Bind a viewer before an explicitly requested owner control operation."""
+        await self._ensure_bound()
+
+    async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+        """Update the existing attach lease; a proxy socket alone is not a human."""
+        if self._surface != "desktop":
+            raise ValueError("only a desktop viewer can renew a desktop lease")
+        self._desktop_visible = visible
+        self._desktop_can_notify = can_notify
+        self._desktop_seen = time.monotonic()
+        if self._client is not None and self._client.connected:
+            await self._client.desktop_watch(visible=visible, can_notify=can_notify)
+
+    async def answer_gate(
+        self,
+        request_id: str,
+        *,
+        value: str | None = None,
+        approved: bool | None = None,
+        question_index: int | None = None,
+    ) -> str:
+        """Answer the current owner gate without a terminal-local prompt task.
+
+        The owner validates again across the socket. This early identity check
+        prevents a stale desktop popup from accidentally answering a newer gate
+        while a reconnect or a multi-question ask advances in another window.
+        """
+        pending = self.frontend_state.pending_gate
+        client = self._client
+        if (
+            pending is None
+            or pending.request_id != request_id
+            or client is None
+            or not client.connected
+        ):
+            raise ValueError("this question is no longer pending")
+        if pending.kind == "approval" and type(approved) is bool:
+            return await client.approval_answer(request_id, approved)
+        if pending.kind == "ask" and value is not None and question_index == pending.question_index:
+            return await client.ask_answer(request_id, value, question_index=question_index)
+        raise ValueError("the answer does not match the current question")
+
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
@@ -1036,6 +1088,7 @@ class RemoteSession:
             frontend_state=True,
             on_frontend_sync=self._on_frontend_sync,
             on_frontend_update=self._on_frontend_update,
+            surface=self._surface,
         )
         try:
             await client.connect(record, self._session_id)
@@ -1055,6 +1108,21 @@ class RemoteSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        if self._surface == "desktop":
+            from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
+
+            # Reconnecting the proxy must not resurrect a renderer's expired
+            # visibility/notification lease. Only another host heartbeat may.
+            live = time.monotonic() - self._desktop_seen < DESKTOP_WATCH_LEASE_S
+            try:
+                await client.desktop_watch(
+                    visible=live and self._desktop_visible,
+                    can_notify=live and self._desktop_can_notify,
+                )
+            except BaseException:
+                client.close()
+                self._client = None
+                raise
 
     async def _await_frontend(self) -> FrontendSync:
         future = self._frontend_future
