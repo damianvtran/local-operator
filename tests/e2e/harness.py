@@ -125,6 +125,13 @@ def build_session(
     test is not sending, and the approval surface has its own dedicated unit
     coverage (``tests/unit/tui/test_approvals_ux.py``).
     """
+    # ``variables`` is wired the way ``session_factory`` wires it in
+    # production. Without it ``session.variables`` is None, and a test driving
+    # ``/credential`` over the runtime would exercise a session shape no real
+    # `lop` ever builds — which is exactly the substitution that let the viewer
+    # capability gap ship (see ``test_viewer_attach_e2e``'s module docstring).
+    from local_operator.variables import VariableStore
+
     return Session(
         model=TEST_MODEL,
         stream_fn=stream,
@@ -133,6 +140,7 @@ def build_session(
         system_blocks_provider=lambda *_args: [],
         yolo=True,
         cwd=str(cwd) if cwd is not None else None,
+        variables=VariableStore(cwd=str(cwd) if cwd is not None else str(directory)),
     )
 
 

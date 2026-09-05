@@ -727,7 +727,8 @@ def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None
     panel._scroll_by(8)
     rendered = panel.render_lines_for_test()
     assert rendered[3].startswith("▌ question 4?")
-    assert rendered[4].strip() == "• line"
+    assert rendered[4].strip() == ""
+    assert rendered[5].strip() == "• line"
 
 
 def test_one_long_answer_states_the_rows_it_withheld() -> None:
@@ -1110,6 +1111,54 @@ def test_the_question_is_never_markdown_rendered() -> None:
 
     assert "**kwargs" in body
     assert "`f(**kwargs)`" in body
+
+
+@pytest.mark.parametrize("width", [12, 26, 46])
+def test_every_wrapped_question_row_keeps_the_transcript_spine(width: int) -> None:
+    from rich.console import Console
+    from rich.style import Style
+
+    panel = AsidePanel()
+    console = Console()
+    mark = Style(color="red", dim=True)
+    prose = Style(color="white", dim=False)
+    question = "What does **kwargs mean in `f(**kwargs)` when the question wraps?"
+    rows = panel._question_rows(question, width, mark, prose)
+
+    assert len(rows) > 1
+    for row in rows:
+        assert row.plain.startswith("▌ ")
+        assert row.cell_len <= width
+        assert row.get_style_at_offset(console, 0) == mark
+        assert row.get_style_at_offset(console, 2) == prose
+    assert "".join(row.plain[2:] for row in rows).replace(" ", "") == question.replace(" ", "")
+
+
+@pytest.mark.parametrize(
+    "turn, expected",
+    [
+        (AsideTurn("question", answer="Short answer.", state="done"), "Short answer."),
+        (AsideTurn("question", state="running"), "thinking…"),
+        (AsideTurn("question", error="Failure.", state="error"), "! Failure."),
+        (AsideTurn("question", state="cancelled"), "no answer"),
+        (AsideTurn("question", answer="Partial answer.", state="cancelled"), "Partial answer."),
+    ],
+)
+def test_each_turn_separates_its_question_from_answer_side_rows(
+    turn: AsideTurn, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    panel = AsidePanel()
+    panel.display = True
+    monkeypatch.setattr(panel, "_content_width", lambda: 26)
+    turn.question = "This question needs several wrapped rows to finish"
+    panel._turns = [turn, AsideTurn("Next question?", answer="Next answer.", state="done")]
+    flat = panel._flat_body()
+    for start, end in flat.heads:
+        assert all(row.plain.startswith("▌ ") for row in flat.lines[start:end])
+        assert flat.lines[end].plain == ""
+        assert flat.lines[end + 1].plain.strip(), "exactly one question/answer separator"
+    assert flat.lines[flat.heads[0][1] + 1].plain.strip() == expected
+    assert len(flat.lines) == len(flat.owners), "separators participate in row windowing"
 
 
 def test_an_error_is_shown_verbatim_rather_than_parsed() -> None:

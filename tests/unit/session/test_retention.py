@@ -534,6 +534,15 @@ def test_the_probe_agrees_with_the_byte_sum_on_every_shape(tmp_path):
             (d / ".session.pid").write_text("1"),
             (d / "transcript.jsonl").write_text(""),
         ),
+        # A team attached and then abandoned before a first message (#624 R7):
+        # the sidecar names an attachment to a conversation that never
+        # existed, nothing lists the directory, so it must stay reapable.
+        "attachment_only": lambda d: (d / "attachment.json").write_text('{"team": "x"}'),
+        # ...but beside a real transcript it is ordinary session state.
+        "attachment_and_transcript": lambda d: (
+            (d / "attachment.json").write_text('{"team": "x"}'),
+            (d / "transcript.jsonl").write_text("{}\n"),
+        ),
     }
 
     for name, populate in shapes.items():
@@ -543,6 +552,47 @@ def test_the_probe_agrees_with_the_byte_sum_on_every_shape(tmp_path):
             f"the probe disagreed with the byte sum on {name!r}: "
             f"_holds_content={_holds_content(directory)} _dir_size={_dir_size(directory)}"
         )
+
+
+def test_an_attachment_only_directory_is_reaped_after_the_grace_window(tmp_path, monkeypatch):
+    """#624 review round 2, R7: the stranded shape a pre-fix retirement left.
+
+    A cold viewer that ran `/team <name>` and quit before its first message
+    used to have its runtime retired with only ``attachment.json`` on disk —
+    a directory `/resume` never lists and the runtime's own `rmdir` cannot
+    remove. Rather than leave a third state, the sidecar is bookkeeping to the
+    sweep: reapable once the grace window has passed, protected while a
+    first message may still be coming, and never touched beside a transcript.
+    """
+    import os
+    import time
+
+    from local_operator.session.retention import EMPTY_DIR_GRACE_SECONDS, sweep_sessions
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    stranded = sessions / "strandedaaaa"
+    stranded.mkdir()
+    (stranded / "attachment.json").write_text('{"team": "lopdev"}')
+    fresh = sessions / "freshbbbbbbb"
+    fresh.mkdir()
+    (fresh / "attachment.json").write_text('{"team": "lopdev"}')
+    real = sessions / "realccccccccc"
+    real.mkdir()
+    (real / "attachment.json").write_text('{"team": "lopdev"}')
+    (real / "transcript.jsonl").write_text("{}\n")
+    old = time.time() - EMPTY_DIR_GRACE_SECONDS - 60
+    for path in (stranded, stranded / "attachment.json", real, real / "transcript.jsonl"):
+        os.utime(path, (old, old))
+
+    sweep_sessions(sessions)
+
+    assert not stranded.exists(), "the sidecar-only corpse past the grace window must be reaped"
+    assert (
+        fresh.exists()
+    ), "inside the grace window a sidecar-only directory may still get a first message"
+    assert real.exists() and (real / "attachment.json").exists(), "a transcript makes it content"
 
 
 def test_a_zero_byte_transcript_is_not_content(tmp_path):

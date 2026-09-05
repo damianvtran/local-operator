@@ -333,6 +333,20 @@ _FRONTEND_LOCAL_SLASHES = {
     "skills",
     "login",
     "logout",
+    # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
+    # sitting at this terminal — routing the whole command would raise the
+    # paste prompt on the owner's screen, which nobody is looking at. This is
+    # the same split bare ``/model`` makes: the interaction is hosted here, the
+    # effect lands on the owner.
+    #
+    # The STORE is emphatically NOT local. ``VariableStore._credentials`` is an
+    # in-memory per-process dict, and the reader is ``credential_env()`` inside
+    # the `bash` tool, which runs in the OWNER's process. A viewer that stored
+    # locally would hold a secret no tool could ever read while telling the
+    # model the key exists — a silent failure whose workaround is pasting the
+    # secret into the chat, which is the exact leak this feature prevents. So
+    # ``_cmd_credential`` keeps the prompt here and routes every store/forget
+    # over the dedicated ``credential`` op to the owner's store.
     "credential",
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on RemoteSession.

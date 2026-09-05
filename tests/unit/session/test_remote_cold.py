@@ -362,6 +362,14 @@ async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkey
     The question the refusal always meant is narrower: would this machine's
     config write reach the runtime? A runtime that published a record HERE is
     local, whatever transport talks to it.
+
+    The COLD half of this changed in #624 (review round 1, R1): this test
+    used to assert that a cold viewer with no record is "elsewhere", which is
+    the state every fresh `lop` boots into — so `/model default` and the
+    picker's `d` refused the local user before their first message. A cold
+    viewer has no runtime at all, so there is nothing anywhere for the wrong
+    config to govern; it is known-local, not unknown. The record half below
+    is unchanged.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_transcript(tmp_path, "s1")
@@ -381,9 +389,11 @@ async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkey
         for _ in range(30):
             await pilot.pause()
 
-        # No record published: the runtime is not reachable from this config,
-        # so persisting here would write the wrong machine's config.
-        assert app._session_runs_elsewhere() is True
+        # No record published AND no runtime: the cold viewer `lop` boots
+        # into. The next runtime this terminal starts is exactly what the
+        # write is for (#624 R1) — not "elsewhere".
+        assert viewer.is_cold is True
+        assert app._session_runs_elsewhere() is False
 
         # A record for this session id is what "local" MEANS.
         from local_operator.session.runtime import registry
