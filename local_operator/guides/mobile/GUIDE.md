@@ -167,8 +167,8 @@ flag; check `lop mobile logs`.
 - Do not print the password into a commit, a PR, a ticket, or a log file.
 - Do not pass it on a command line (`lop mobile serve --password …` does
   not exist, and inventing one would be `ps`-readable).
-- Do not bind `0.0.0.0`. The FastAPI `lop serve` default is not this
-  daemon's default.
+- Do not bind `0.0.0.0`. Both daemons default to loopback, but unlike
+  `lop serve`, the mobile daemon does not permit widening its bind.
 - Do not skip the delivery ask and paste the password "so they have it".
 - Do not treat `docs/mobile.md` as the playbook — it is the architecture.
   This guide is what you execute.
