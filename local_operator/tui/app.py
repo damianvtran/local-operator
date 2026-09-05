@@ -15919,6 +15919,33 @@ class OperatorApp(App[None]):
         # model. The effort/fast-mode copies below change neither half of the
         # identity, so this is the same pair ``set_model`` is asked for.
         new_label = f"{spec.provider}/{spec.model_id}"
+        if not persist_default and bool(getattr(session, "is_cold", False)):
+            # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
+            # viewer after `/stop`) is bound to no runtime, and
+            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # anything — the same silent drop its ``set_goal`` and
+            # ``set_conversation_name`` siblings perform, and deliberately not
+            # changed there: the facade cannot raise from a synchronous setter
+            # every caller treats as fire-and-forget. Now that the receipt is
+            # built from the resolved spec rather than a re-read label, that
+            # drop would print a confident ``old → new (this session)`` for a
+            # switch that never reached anything (QA round 1, Q4). ``is_cold``
+            # is exactly the predicate the facade drops on (no client, or one
+            # that is not connected), so it is asked HERE, before the receipt,
+            # and the answer names the lever that makes the switch possible —
+            # the same wording the `/credential` cold branch uses. The persist
+            # form is exempt: its config write is what the NEXT runtime boots
+            # on, and its receipt claims a saved default, not a switch.
+            if self._stopped_session_id:
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+            else:
+                self._system_notice(
+                    "no runtime is running for this session; "
+                    "send a message to start one, then run /model again",
+                    "warning",
+                )
+            return
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
         # what makes "switches nothing" a true statement rather than a summary
@@ -15929,8 +15956,10 @@ class OperatorApp(App[None]):
         # cleared — so "make this my default" was silently also "drop the route
         # that is currently serving me". A user who wants the fallback withdrawn
         # has the plain `/model <p>/<id>` spelling for exactly that gesture.
-        # Compared on the joined label because that is what the elided form was
-        # derived from, so the two halves cannot disagree by case or spacing.
+        # Compared on the joined labels — the RESOLVED spec's against the
+        # session's, both `provider/model_id` — because that is what the elided
+        # form was derived from, so the two halves cannot disagree by case,
+        # spacing, or a hosting alias the spec canonicalises.
         write_only = persist_default and new_label == old_label
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a

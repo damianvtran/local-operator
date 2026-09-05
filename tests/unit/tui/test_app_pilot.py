@@ -9090,6 +9090,78 @@ async def test_mid_turn_switch_row_prints_before_a_remote_label_lands() -> None:
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
 
 
+class _ColdAsyncLabelSession(_AsyncLabelSession):
+    """The async-label fake as a COLD viewer: ``RemoteSession.set_model`` with no
+    client returns without sending anything, so nothing here is requested."""
+
+    @property
+    def is_cold(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
+    """A cold viewer has no runtime to switch; the answer names that, not a receipt.
+
+    QA round 1, Q4: before the receipt was built from the resolved spec the
+    cold drop printed ``old → old`` (wrong, but not a claim); built from the
+    spec it would print ``old → new (this session)`` for a switch that reached
+    nothing, with the band still on the old model. ``is_cold`` is the same
+    predicate the facade drops on, so the app asks it before printing.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("no runtime is running for this session") in text, text
+    assert _unwrapped("run /model again") in text, text
+    assert _unwrapped("→") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_after_stop_names_the_reopen_command() -> None:
+    """After ``/stop`` the viewer is cold on purpose; "send a message" would be
+    the wrong lever, so the stopped-state answer (``/resume <id>``) is used."""
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_model_default_on_a_cold_viewer_still_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persist form is exempt from the cold refusal: its write is what the
+    NEXT runtime boots on, and its receipt claims a saved default, not a switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model default anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
+    assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
+
+
 @pytest.mark.asyncio
 async def test_routed_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
     """The routed ``/model`` (the owner-loop path a phone or a peer terminal

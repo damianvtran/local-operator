@@ -1,46 +1,52 @@
 """Frame the `/model` receipt on a session whose label updates ASYNCHRONOUSLY.
 
 Mirrors `RemoteSession.set_model` (an `asyncio.create_task` against the owner;
-`model_label` reads the frontend-state sync that lands later). Usage:
+`model_label` reads the frontend-state sync that lands later). The fake is the
+SAME class the regression tests assert against, imported from the test module,
+so the frames and the assertions describe one behaviour. Usage, from anywhere:
 
-    env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/lop-shot-model-receipt.py out.svg
+    env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+        docs/evidence/model-receipt/shot.py.txt out.svg [cold]
+
+`cold` frames the viewer that has no runtime yet (`is_cold`), the state every
+fresh `lop` is in for its first 1-3 s and after `/stop`.
 """
 
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.getcwd())  # repo root, so `tests.` imports resolve
+# The repo root, from this file's own location: `docs/evidence/<topic>/` is
+# three levels down, so the script reads the tree it lives in regardless of
+# the caller's cwd (review round 1, N3).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.unit.tui.test_app_pilot import (  # noqa: E402
-    FakeSession,
     _AccessController,
+    _AsyncLabelSession,
     _await_session,
     _factory,
     _transcript_text,
 )
 
 
-class _AsyncLabelSession(FakeSession):
-    def __init__(self) -> None:
-        super().__init__()
-        self._label = "anthropic/claude-opus-5"
+class _ColdAsyncLabelSession(_AsyncLabelSession):
+    """The async-label fake as a COLD viewer: nothing is bound to switch."""
 
     @property
-    def model_label(self) -> str:
-        return self._label
-
-    def set_model(self, model, *, explicit: bool = False) -> None:
-        async def _land() -> None:
-            await asyncio.sleep(0.5)
-            self._label = f"{model.provider}/{model.model_id}"
-
-        asyncio.get_running_loop().create_task(_land())
+    def is_cold(self) -> bool:
+        return True
 
 
 async def main() -> None:
-    session = _AsyncLabelSession()
+    out = sys.argv[1]
+    cold = len(sys.argv) > 2 and sys.argv[2] == "cold"
+    # The band paints the process cwd; a neutral one keeps a worktree path out
+    # of the committed frame (review round 1, N2).
+    os.chdir("/tmp")
+    session = _ColdAsyncLabelSession() if cold else _AsyncLabelSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(110, 24)) as pilot:
@@ -48,7 +54,7 @@ async def main() -> None:
         app._run_slash_command("/model anthropic/claude-fable-5-1")
         await pilot.pause()
         await pilot.pause()
-        app.save_screenshot(sys.argv[1])
+        app.save_screenshot(out)
         print(_transcript_text(app))
 
 
