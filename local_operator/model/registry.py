@@ -239,6 +239,10 @@ class ModelInfo(BaseModel):
     description: str = Field(..., description="Description of the model")
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
+    # Route-local provenance, never filled from a different provider's limits.
+    # Existing context_window remains the active budget for legacy consumers.
+    default_context_window: int | None = None
+    max_context_window: int | None = None
     limits_from_listing: bool = Field(
         default=False,
         description=(

@@ -34,6 +34,7 @@ from local_operator.harness.types import (
     ModelSpec,
     RenderedStreamError,
     StreamEvent,
+    StreamModelEvent,
     StreamStartEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
@@ -2426,6 +2427,22 @@ async def stream_with_failover(
             if access is not None:
                 last_access = access
             key = access.access_token if access is not None else None
+            if provider == "openai" and access is not None:
+                from local_operator.model.configure import context_spec_for_access
+
+                # Resolve after EVERY account selection, even when the selector
+                # is unchanged. Metadata is local budget, not a provider wire flag.
+                resolved = await asyncio.to_thread(context_spec_for_access, spec, access, settings)
+                changed_budget = any(
+                    getattr(resolved, key) != getattr(spec, key)
+                    for key in ("context_window", "default_context_window", "max_context_window")
+                )
+                spec = resolved
+                current_request = current_request.model_copy(update={"model": spec})
+                # An API request whose budget did not move remains a transparent
+                # stream. OAuth still publishes unknown-resolution provenance.
+                if changed_budget or access.kind == "oauth":
+                    yield StreamModelEvent(model=spec)
 
             forwarded_any = False
             # A replayable call holds its events back so a failed attempt can be

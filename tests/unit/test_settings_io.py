@@ -38,7 +38,10 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
-    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    from local_operator.model.configure import (
+        ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
+        OPENAI_USE_MAX_CONTEXT_WINDOW,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -79,6 +82,7 @@ def _consumer_defaults() -> dict[str, object]:
         "session.reap_unused": DEFAULT_REAP_UNUSED,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
+        "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_
         # 1h_min_context_tokens`` restates it for a settings mapping without the
         # key); the config default is checked against the same constant below.
