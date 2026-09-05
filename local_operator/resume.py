@@ -905,6 +905,18 @@ def is_user_session(session_dir: Path) -> bool:
     return not origin or origin in USER_ORIGINS
 
 
+class _reverse_name(str):
+    """A ``max`` key for "ascending id wins on a tie": ``max`` over
+    ``(activity, id)`` would pick the LARGEST id, and the picker's sort puts
+    the smallest first."""
+
+    def __lt__(self, other: object) -> bool:
+        return str.__gt__(self, str(other))
+
+    def __gt__(self, other: object) -> bool:
+        return str.__lt__(self, str(other))
+
+
 def resume_dir(config_dir: Path, requested: str) -> Path:
     """The session directory ``--resume`` names, or raise :class:`ResumeNotFound`.
 
@@ -917,7 +929,19 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
     a typo'd id would otherwise create an empty directory and start a session
     that looks resumed and has no history — the one failure a resume must never
     have.
+
+    WHAT COUNTS AS RESUMABLE IS WHAT THE PICKER LISTS: a directory with
+    activity (``session_activity`` — a transcript OR an unread mail spool).
+    One rule on both surfaces, or the picker offers a row this function then
+    refuses (review round 3, R3-5: a peer's message spooled into an idle
+    open-and-quit session gave it the top picker row and ``ResumeNotFound``).
+    An inbox-only session IS worth reopening — a spooled message is a reason
+    to come back, and the transcript store starts empty for it exactly as it
+    does for a fresh session — so the rule was widened rather than the row
+    hidden.
     """
+    from local_operator.session.retention import session_activity
+
     sessions = config_dir / "sessions"
     if requested == RESUME_LATEST:
         # ``@latest`` means the latest conversation THE USER had. A subagent
@@ -925,25 +949,16 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
         # review finishing after the parent's last turn made it the newest
         # directory on disk — so a bare ``--resume`` reopened the reviewer
         # rather than the session that launched it.
+        # Ranked by the picker's clock with the picker's tie-break, so
+        # ``@latest`` is the picker's first row by construction (R3-5).
         candidates = [
-            path
+            (activity, path)
             for path in sessions.glob("*")
-            if (path / TRANSCRIPT_NAME).is_file() and is_user_session(path)
+            if (activity := session_activity(path)) is not None and is_user_session(path)
         ]
         if not candidates:
             raise ResumeNotFound("no previous session to resume")
-
-        def newest(path: Path) -> float:
-            try:
-                return (path / TRANSCRIPT_NAME).stat().st_mtime
-            except OSError:
-                # A directory that vanished mid-scan (retention sweeps run
-                # concurrently) or one whose transcript is unreadable sorts
-                # oldest rather than taking down the resolver on the way to the
-                # TUI.
-                return 0.0
-
-        return max(candidates, key=newest)
+        return max(candidates, key=lambda item: (item[0], _reverse_name(item[1].name)))[1]
 
     # A session id must be ONE path component and nothing else. Enumerating the
     # ways to escape (`/`, `\`, `..`, and on Windows the drive-relative `C:x`
@@ -955,7 +970,7 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
         raise ResumeNotFound(f"not a session id: {requested!r}")
     candidate = sessions / requested
     try:
-        present = (candidate / TRANSCRIPT_NAME).is_file()
+        present = session_activity(candidate) is not None
     except OSError:
         # Same race the `@latest` scan guards, on the path a user reaches by
         # typing an id: a retention sweep unlinking the directory, or a
@@ -1141,6 +1156,11 @@ def _recent_sessions_with_origin(
     Private because the public pair is what every other caller wants and the
     CLI's recovery listing pins its shape.
     """
+    # Lazy and stdlib-only on the other side: ``retention`` imports nothing
+    # heavier than ``logging``, and the CLI startup guard measures this
+    # module's import, not this function's.
+    from local_operator.session.retention import session_activity
+
     rows: list[tuple[str, float, str]] = []
     try:
         scan = os.scandir(config_dir / "sessions")
@@ -1156,10 +1176,16 @@ def _recent_sessions_with_origin(
     seen: set[str] = set()
     with scan:
         for entry in scan:
-            try:
-                mtime = os.stat(os.path.join(entry.path, TRANSCRIPT_NAME)).st_mtime
-            except OSError:
+            # ONE ranking clock, shared with the cleanup policy
+            # (``session.retention.session_activity``): the picker's "most
+            # recent" and the policy's "most recent" must be the same
+            # directories, or the policy removes rows the picker shows
+            # (QA round 1 Q2, UX round 2 U11). A directory with no activity
+            # is not a resumable session and gets no row.
+            activity = session_activity(Path(entry.path))
+            if activity is None:
                 continue
+            mtime = activity
             # After the transcript stat, not before: the stat is what proves the
             # directory is a session at all, and an unreadable marker must not
             # cost a row.
@@ -1231,7 +1257,13 @@ def _recent_sessions_with_origin(
     # file on every open to persist nothing.
     if merged != cached:
         _save_origin_cache(cache_path, merged)
-    rows.sort(key=lambda row: row[1], reverse=True)
+    # Newest first; EQUAL stamps break on the id, ascending, so the order is
+    # a property of the store rather than of ``scandir`` on this filesystem.
+    # The cleanup policy sorts on the same key: with an unstable tie order
+    # the policy's "first page" and the picker's disagreed on a store of
+    # equal stamps, and each launch shaved one more session (QA round 2,
+    # Q10).
+    rows.sort(key=lambda row: (-row[1], row[0]))
     # Sliced only when a limit was actually asked for: ``rows[:None]`` would
     # also return everything, but spelling it out keeps "no limit" a decision
     # the code states rather than a property of slice syntax.

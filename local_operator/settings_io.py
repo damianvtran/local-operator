@@ -184,6 +184,13 @@ class Setting:
     #: anything — a preview must never reach a writer, which is exactly why the
     #: flag lives beside the write facade rather than inside it.
     preview: bool = False
+    #: The key of a BOOL master switch this setting is INERT without. The
+    #: settings page paints the value dim while the master is off (the same
+    #: ink as a READONLY row) and the row's detail says so, so a leftover
+    #: ``max_sessions: 200`` under a switched-off ``session.cleanup`` cannot
+    #: read as a cap in force (design round 1, D1). Presentational only: the
+    #: consumer of the gated key is responsible for honouring the master.
+    gated_by: str | None = None
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -729,7 +736,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         # `runtime.*`, matching the section it appears in and the other key in
         # it. Round 1 (R5): filing it under `session.*` while showing it in the
-        # Runtime section made the file teach two rules — `session.reap_unused`
+        # Runtime section made the file teach two rules — `session.cleanup.*`
         # stays in the Session section, so a user reading the Runtime page
         # could not predict which YAML key they were editing. The scope
         # argument for keeping it out of the Session SECTION (that section is
@@ -748,16 +755,81 @@ SETTINGS: tuple[Setting, ...] = (
             "stop the turn when you leave the session",
         ),
     ),
-    # -- subagents ----------------------------------------------------------
+    # -- session cleanup policy ---------------------------------------------
+    # The ONE way a session directory can be removed automatically, and it is
+    # OFF by default. Ordered master-switch first so the page reads as "a
+    # switch, then what it controls"; the sub-rows carry a `↳` prefix and say
+    # in their help that they are inert while the switch is off. Every row is
+    # a genuinely NESTED path under `session.cleanup`, and the consumer
+    # (`session/cleanup.py`) reads it back through
+    # `ConfigManager.get_nested_value` on the SAME tuple — the previous
+    # `session.reap_unused` toggle was written nested here and read flat
+    # there, so the opt-out never worked and the reaper it gated deleted 225
+    # named sessions. `test_settings_io.py` round-trips every nested setting
+    # through that reader to keep this from recurring.
+    # Help strings are budgeted: the detail row sheds the help before the
+    # key path, so each sub-row LEADS with the gate ("Needs cleanup on.") and
+    # stays under ~63 cells (design round 1, D3). The master's help fits the
+    # 94-cell budget at 100 cols and names what ON does and what is spared.
     Setting(
-        key="session.reap_unused",
-        path=("session", "reap_unused"),
+        key="session.cleanup.enabled",
+        path=("session", "cleanup", "enabled"),
         section="session",
-        label="Remove unused sessions",
+        label="Session cleanup",
         kind=Kind.BOOL,
-        default=True,
-        help="Delete old session directories that never received a message.",
-        choices=_bool_choices("remove them on startup", "keep every directory"),
+        default=False,
+        help=(
+            "Off: nothing is ever removed. "
+            "On: limits below run at launch, sparing the newest 10 + live."
+        ),
+        choices=_bool_choices(
+            "limits run at launch; newest 10 + live kept",
+            "nothing is ever removed",
+        ),
+    ),
+    Setting(
+        key="session.cleanup.max_sessions",
+        path=("session", "cleanup", "max_sessions"),
+        section="session",
+        label="↳ max sessions",
+        kind=Kind.INT,
+        default=0,
+        help="Needs cleanup on. Keep N newest /resume sessions; 0 = no cap.",
+        minimum=0,
+        gated_by="session.cleanup.enabled",
+    ),
+    Setting(
+        key="session.cleanup.max_inactive_days",
+        path=("session", "cleanup", "max_inactive_days"),
+        section="session",
+        label="↳ max inactive days",
+        kind=Kind.INT,
+        default=0,
+        help="Needs cleanup on. Remove sessions idle this many days; 0 = never.",
+        minimum=0,
+        gated_by="session.cleanup.enabled",
+    ),
+    Setting(
+        key="session.cleanup.max_total_bytes",
+        path=("session", "cleanup", "max_total_bytes"),
+        section="session",
+        label="↳ max total bytes",
+        kind=Kind.INT,
+        default=0,
+        help="Needs cleanup on. Trim oldest past this many bytes; 0 = no cap.",
+        minimum=0,
+        gated_by="session.cleanup.enabled",
+    ),
+    Setting(
+        key="session.cleanup.remove_empty",
+        path=("session", "cleanup", "remove_empty"),
+        section="session",
+        label="↳ remove empty",
+        kind=Kind.BOOL,
+        default=False,
+        help="Needs cleanup on. Remove dirs that never got a transcript.",
+        choices=_bool_choices("remove transcript-less directories", "keep them"),
+        gated_by="session.cleanup.enabled",
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -1118,33 +1190,6 @@ SETTINGS: tuple[Setting, ...] = (
     # these years ago needs to see that it is inert; removing the row would
     # leave them believing a ceiling is still in force.
     Setting(
-        key="session_retention_max_sessions",
-        path=("session_retention_max_sessions",),
-        section="retired",
-        label="Session retention: max sessions",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
-    Setting(
-        key="session_retention_max_bytes",
-        path=("session_retention_max_bytes",),
-        section="retired",
-        label="Session retention: max bytes",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
-    Setting(
-        key="session_retention_max_age_days",
-        path=("session_retention_max_age_days",),
-        section="retired",
-        label="Session retention: max age (days)",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
-    Setting(
         key="conversation_length",
         path=("conversation_length",),
         section="retired",
@@ -1229,11 +1274,44 @@ def _walk(values: Mapping[str, Any], path: Sequence[str]) -> Any:
     return current
 
 
+def strict_bool(value: Any, default: bool) -> bool:
+    """A REAL boolean or ``default`` — never ``bool(value)``.
+
+    ``enabled: "false"`` in a hand-edited YAML is a non-empty string, and
+    ``bool("false")`` is True. The cleanup policy parses its master switch
+    this way (review round 1, R1-6); the settings PAGE must read it the same
+    way, or the page paints ``on`` for a switch the policy treats as off
+    (review round 2, R2-4) — the incident's accessor-mismatch class again,
+    one level up. So this lives here, beside the reader every page read goes
+    through, and the consumer imports it rather than spelling its own.
+    Anything that is not literally true/false, 0/1, or the YAML 1.1 spellings
+    a human types (yes/no/on/off) reads as the default.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    return default
+
+
 def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
-    """The stored value for ``setting``, or its default when unset."""
+    """The stored value for ``setting``, or its default when unset.
+
+    A BOOL is normalised through :func:`strict_bool` so a hand-edited
+    ``"false"`` reads as the consumer reads it (off), and ``is_default`` /
+    the value ink / the toggle all agree with the policy about the state.
+    """
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
+    if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
+        return strict_bool(raw, setting.default)
     return raw
 
 

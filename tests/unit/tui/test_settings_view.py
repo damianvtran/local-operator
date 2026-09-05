@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 from rich.cells import cell_len
+from rich.style import Style
 from textual import events
 
 from local_operator import settings_io
@@ -4136,6 +4137,76 @@ async def test_the_detail_clause_sheds_whole_rather_than_clipping(
         assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
 
 
+def test_the_shed_ladder_is_one_rule_for_every_row() -> None:
+    """Design round 3, D12: `help · clause · key → help · clause → clause · key
+    → clause → help · key → help`. The key sheds first, the clause is never
+    shed while anything else remains, help sheds after the key. Driven
+    through ``_join_detail`` with the rung list the page builds, at widths
+    chosen to land on each rung in turn."""
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import SettingsView
+
+    faint = Style()
+    help_part: tuple[str, Style, bool] = (
+        "Keep N newest /resume sessions; 0 = no cap.",
+        faint,
+        False,
+    )
+    clause_part: tuple[str, Style, bool] = ("default: 0", faint, False)
+    key_part: tuple[str, Style, bool] = ("session.cleanup.max_sessions", faint, True)
+    rungs: list[list[tuple[str, Style, bool]]] = [
+        [help_part, clause_part, key_part],  # 43 + 3 + 10 + 3 + 28 = 87
+        [help_part, clause_part],  # 56
+        [clause_part, key_part],  # 41
+        [clause_part],  # 10
+        [help_part, key_part],  # 74
+        [help_part],  # 43
+    ]
+
+    def rendered_at(width: int) -> str:
+        for rung in rungs:
+            text = SettingsView._join_detail(rung)
+            if cell_len(text.plain) <= width or rung is rungs[-1]:
+                return text.plain
+        raise AssertionError
+
+    assert rendered_at(90) == (
+        "Keep N newest /resume sessions; 0 = no cap. · default: 0   session.cleanup.max_sessions"
+    )
+    # The key sheds FIRST: help and clause survive together at 60 cols (U12).
+    assert rendered_at(60) == "Keep N newest /resume sessions; 0 = no cap. · default: 0"
+    # Then help: the clause keeps the key while both fit.
+    assert rendered_at(45) == "default: 0   session.cleanup.max_sessions"
+    # Then the key: the clause alone.
+    assert rendered_at(12) == "default: 0"
+    # No clause: help · key, then help.
+    assert (
+        SettingsView._join_detail([help_part, key_part]).plain
+        == "Keep N newest /resume sessions; 0 = no cap.   session.cleanup.max_sessions"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_gated_child_at_non_default_keeps_its_help_at_110_cols(tmp_path: Path) -> None:
+    """UX round 2 U12 / design round 3 D12: with the master on and a child at
+    a non-default value, 110 cols shows the help AND `default: 0` — the key
+    path is what sheds, not the help — and `r` still names its target."""
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": True, "max_sessions": 5}}}
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.max_sessions")
+        await pilot.pause()
+        detail = view.render_lines_for_test()[-1]
+        assert "Keep N newest /resume sessions" in detail, detail
+        assert "default: 0" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+
+
 # ---------------------------------------------------------------------------
 # Click-selection frame suppression (Issue 1) and the provider/model
 # suggestion dropdowns with inline ghost text (Issue 2).
@@ -4744,3 +4815,142 @@ async def test_a_windowed_dropdown_shows_a_position_count() -> None:
 
         lines = view.render_lines_for_test()
         assert any("1/12" in line for line in lines), lines
+
+
+# ---------------------------------------------------------------------------
+# Session cleanup block: gating ink, clauses, declared bool descriptions
+# ---------------------------------------------------------------------------
+
+
+def _value_ink(view: SettingsView, key: str) -> str:
+    """The colour the VALUE column of ``key``'s row is painted in."""
+    from local_operator.tui.widgets.settings_view import _VALUE_COLUMN
+
+    index = _select(view, key)
+    text = view._row_text(view._rows[index], index, 100)
+    for span in text.spans:
+        style = span.style
+        if not isinstance(style, Style) or style.color is None:
+            continue
+        if span.start >= _VALUE_COLUMN:
+            return style.color.name.lower()
+    return ""
+
+
+@pytest.mark.asyncio
+async def test_cleanup_children_paint_dim_while_the_master_is_off(tmp_path: Path) -> None:
+    """Design round 1, D1 / UX U9 / QA Q6: a leftover ``max_sessions: 200``
+    under a switched-off master must read as inert, not as a cap in force —
+    the READONLY ink, whatever the value. Switching the master on restores
+    the ordinary changed/default ink."""
+    from local_operator.tui import theme as theme_mod
+
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": False, "max_sessions": 200}}}
+    )
+    dim = theme_mod.semantic_color("dim").lower()
+    fg = theme_mod.semantic_color("fg").lower()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        assert _value_ink(view, "session.cleanup.max_sessions") == dim
+        # The row says WHY on its detail line.
+        assert "inert: Session cleanup is off" in view.render_lines_for_test()[-1]
+        _select(view, "session.cleanup.enabled")
+        view.action_toggle_bool()
+        await pilot.pause()
+        assert _value_ink(view, "session.cleanup.max_sessions") == fg
+
+
+@pytest.mark.asyncio
+async def test_master_on_detail_says_no_limits_or_the_would_remove_count(
+    tmp_path: Path,
+) -> None:
+    """UX U1 / design D6: the page must show a NUMBER between "value saved"
+    and the next launch's removal, from the same dry-run path the CLI uses."""
+    from local_operator.session.cleanup import mark_store
+
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    import os
+    import time
+
+    old = time.time() - 40 * 86400
+    for index in range(15):
+        directory = sessions / f"s{index:02d}"
+        directory.mkdir()
+        (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+        os.utime(directory / "transcript.jsonl", (old + index, old + index))
+    ConfigManager(tmp_path).update_config({"session": {"cleanup": {"enabled": True}}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.enabled")
+        assert "on, but no limits set below" in view.render_lines_for_test()[-1]
+        _select(view, "session.cleanup.max_inactive_days")
+        await pilot.press("enter")
+        await pilot.press("7")
+        await pilot.press("enter")
+        await pilot.pause()
+        _select(view, "session.cleanup.enabled")
+        detail = view.render_lines_for_test()[-1]
+        # 15 sessions all 40 d idle; the 10 most recent are spared -> 5.
+        assert "would remove 5 at next launch" in detail and "--dry-run" in detail, detail
+
+
+@pytest.mark.asyncio
+async def test_a_bool_that_declares_choices_shows_their_descriptions(tmp_path: Path) -> None:
+    """Design round 1, D2 / UX U8: ``_bool_choices(...)`` descriptions were
+    dead text because every BOOL expanded into the synthesised on/off pair."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.enabled")
+        await pilot.press("enter")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        assert any("limits run at launch" in line for line in lines), lines
+        assert any("nothing is ever removed" in line for line in lines), lines
+        # An undeclared bool still expands into the plain pair.
+        await pilot.press("escape")
+        await pilot.pause()
+        _select(view, "display.shimmer")
+        await pilot.press("enter")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        assert any(line.strip().endswith(" on") or " on " in line for line in lines)
+
+
+def test_every_gated_setting_names_a_bool_master() -> None:
+    for setting in settings_io.SETTINGS:
+        if setting.gated_by is not None:
+            master = settings_io.BY_KEY[setting.gated_by]
+            assert master.kind is Kind.BOOL, setting.key
+            assert master.section == setting.section, setting.key
+
+
+@pytest.mark.asyncio
+async def test_page_reads_a_garbage_master_switch_the_way_the_policy_does(tmp_path: Path) -> None:
+    """Review round 2, R2-4: ``enabled: "banana"`` is OFF to the policy and
+    must be OFF on the page — value, ink, and the children's inert state —
+    or the page and the policy disagree about whether cleanup runs."""
+    from local_operator.session.cleanup import policy_from_config
+    from local_operator.tui import theme as theme_mod
+
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": "banana", "max_sessions": 5}}}
+    )
+    assert policy_from_config(ConfigManager(tmp_path)).enabled is False
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        index = _select(view, "session.cleanup.enabled")
+        assert " off" in view.render_lines_for_test()[index + 2]
+        assert _value_ink(view, "session.cleanup.max_sessions") == (
+            theme_mod.semantic_color("dim").lower()
+        )
+        assert "inert: Session cleanup is off" in view.render_lines_for_test()[-1]

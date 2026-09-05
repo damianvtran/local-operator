@@ -1376,6 +1376,11 @@ class NoticeBlock(TranscriptBlock):
         # 80-100 columns a transcript scrollbar over a two-block ledger. Seen
         # the moment the bare-`/model` notice moved onto ``ModelQueryOpened``.
         # Writing the height is itself a style-key change the cache honours.
+        # The same defect reached the startup-cleanup notice by the recheck
+        # timer: region 8 rows for 5 of content, and at 80x24 the dead rows
+        # scrolled the wordmark off the top (PR #645, design round 3 D11) —
+        # ``test_a_timer_delivered_notice_keeps_the_wordmark_in_frame`` pins
+        # the timer path so a future un-pin is caught there too.
         self._set_authored_height(len(rows))
         centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
