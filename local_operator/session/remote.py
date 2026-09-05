@@ -478,9 +478,16 @@ class RemoteSession:
             takeover_factory=takeover_factory,
         )
         await self._dial(record)
-        frontend = await self._await_frontend()
-        self._install_frontend(frontend.snapshot)
-        await self._load_history(frontend.live_cursor)
+        try:
+            frontend = await self._await_frontend()
+            self._install_frontend(frontend.snapshot)
+            await self._load_history(frontend.live_cursor)
+        except BaseException:
+            # The caller gets the error and no facade — so nothing would ever
+            # close the connection ``_dial`` just opened. See
+            # ``_discard_rejected_client`` for the leak this closes.
+            self._discard_rejected_client()
+            raise
         self._finish_sync()
         return self
 
@@ -596,12 +603,19 @@ class RemoteSession:
                 "todo panels start empty"
             )
             return self._restore_cold_subagents(state)
+        # A fork's transcript carries the PARENT's checkpoints verbatim (#573),
+        # and the parent's children are not this session's to list — the same
+        # reason ``fork.EXCLUDED_SIDECARS`` leaves the roster behind. The
+        # runtime applies the identical rule when it restores
+        # (``frontend_state._inherited_identity_fixups``), so the cold frame
+        # and the attached frame agree on what the fork has.
+        inherited = durable.session_id != self._session_id
         restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
                 # derive. The panel reads these directly, so restoring them is
                 # what puts the session's details on the FIRST frame.
-                "jobs": list(durable.jobs),
+                "jobs": [] if inherited else list(durable.jobs),
                 "todos": list(durable.todos),
                 "conversation_title": durable.conversation_title,
                 "conversation_title_user_set": durable.conversation_title_user_set,
@@ -1030,14 +1044,54 @@ class RemoteSession:
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
-            client, self._client = self._client, None
-            if client is not None:
-                client.close()
-            self._pending_frontend_updates = None
-            self._runtime_pid = None
+            self._discard_rejected_client()
             if not self._recovering:
                 self._owner_ready.set()
             raise
+
+    def _discard_rejected_client(self) -> None:
+        """Drop a client whose runtime dialled fine but whose state was refused.
+
+        ``_dial`` installs ``self._client`` the moment the socket authenticates,
+        BEFORE the canonical sync is awaited and checked — so when the sync is
+        rejected (``_install_frontend``'s identity guard, a malformed frame, the
+        15 s sync timeout) the facade was left half-bound: ``is_cold`` said
+        False because a connected client existed, every RPC still reached the
+        owner, yet no state had been installed and none ever would be. That is
+        the exact shape #573 produced on a switched-to fork: ``/model`` landed
+        on the owner's journal while the band never repainted and the context
+        segment stayed blank, so the switch read as "nothing happened".
+
+        Closing the client makes ``is_cold`` honest again — the next
+        ``_ensure_bound`` retries the whole engage and the TUI's own failure
+        path can say why — and it releases the runtime's attach slot. Without
+        the release each retry of ``_recover_owner`` opened another connection
+        on top of the last, and the runtime's LRU cap evicted them in a burst
+        (272 evictions logged in the minutes after one fork booted).
+
+        ``close()`` also cancels the pump, which is the one thing that must not
+        run on: with no state installed, the owner's next ``frontend_update``
+        would land on a store at the wrong epoch and fail as a sequence gap.
+        Cleared directly rather than through ``_on_disconnected`` because the
+        socket did not fail — the state did — and the recovery loop that hook
+        starts would redial the same runtime and be refused the same way.
+        """
+        client, self._client = self._client, None
+        self._frontend_future = None
+        self._runtime_pid = None
+        # The rejected dial's buffered suffix belongs to its refused epoch.
+        # connect, initial binding and recovery all share this discard boundary.
+        self._pending_frontend_updates = None
+        if client is None:
+            return
+        # ``abandon`` rather than ``close``: this closure is ours, not the
+        # owner's, so it must not read as owner loss — a bind that was refused
+        # would otherwise start a recovery that redials the same runtime and
+        # is refused again.
+        try:
+            client.abandon()
+        except Exception:  # noqa: BLE001 - teardown of a connection being abandoned
+            logger.debug("closing a rejected owner connection failed", exc_info=True)
 
     async def _dial(self, record: SessionRecord) -> None:
         # Freeze relay delivery until the canonical sync is installed ahead of
@@ -1792,6 +1846,29 @@ class RemoteSession:
                 ):
                     try:
                         await self._dial(record)
+                    except (ConnectionError, OSError, TimeoutError):
+                        # ``_dial`` closes the client it built on every raise
+                        # path and installs ``self._client`` only as its last
+                        # statement, so a failed redial leaks no socket. What it
+                        # DOES leave is the identity it stamped on entry:
+                        # ``_runtime_pid = record.pid`` (and a pending
+                        # ``_frontend_future``) for a runtime this viewer never
+                        # attached to. That outlives the pass — ``_go_cold``
+                        # does not clear it either — so a viewer that never
+                        # bound reports ``runtime_pid`` as a live pid where the
+                        # property promises None while cold, and
+                        # ``take_unannounced_cleanup`` reads that pid to decide
+                        # whether THIS viewer owns the cleanup notice: a stale
+                        # match claims another runtime's notice and blanks the
+                        # terminal that should have shown it (review round 1,
+                        # F3). Discarding here keeps the whole loop on one
+                        # rule — a pass that did not bind leaves no trace of
+                        # the runtime it tried.
+                        self._discard_rejected_client()
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 1.7, 0.5)
+                        continue
+                    try:
                         frontend = await self._await_frontend()
                         self._install_frontend(frontend.snapshot, publish=True)
                         # ONE threaded parse feeds both the gap replay and the
@@ -1819,7 +1896,13 @@ class RemoteSession:
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
-                        pass
+                        # The runtime answered but its state was refused (or
+                        # the sync never came). The dialled client must not
+                        # survive into the next pass: it would sit connected
+                        # on the runtime, make ``is_cold`` lie, and be joined
+                        # by another on every retry. See
+                        # ``_discard_rejected_client``.
+                        self._discard_rejected_client()
                 else:
                     try:
                         local = await self._takeover_factory()

@@ -8,6 +8,7 @@ import pytest
 
 from local_operator.agent_profiles import load_seed, resolve_profile
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.config import ConfigManager
 from local_operator.harness.types import ToolContext
 from local_operator.tools.agent_tool import AgentParams, build_agent_tool, execute_agent
 
@@ -15,6 +16,22 @@ from local_operator.tools.agent_tool import AgentParams, build_agent_tool, execu
 @pytest.fixture()
 def registry(tmp_path) -> AgentRegistry:
     return AgentRegistry(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def configured_tiers(tmp_path, monkeypatch) -> dict[str, str]:
+    """``lo`` and ``hi`` configured, ``med`` not.
+
+    ``effort`` is validated against the live ``subagents.models`` mapping and
+    the schema advertises only what is configured, so the tests that pin a
+    role to ``lo`` need it to exist. Autouse so the default state of this file
+    is "an operator who configured two tiers"; the schema tests that need the
+    zero-tier state clear the config themselves.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    tiers = {"lo": "openai/gpt-5-mini", "hi": "anthropic/claude-opus-5"}
+    ConfigManager(tmp_path / "config").set_config_value("subagents", {"models": tiers})
+    return tiers
 
 
 @pytest.fixture()
@@ -254,12 +271,52 @@ async def test_update_keeps_the_allowlist_it_was_not_asked_to_change(context, re
     assert "Read the diff first." in after.instructions
 
 
-def test_agent_schema_exposes_inherit_without_an_empty_enum_member() -> None:
-    effort = AgentParams.model_json_schema()["properties"]["effort"]
+def _effort_schema(context: ToolContext) -> dict[str, Any]:
+    tool = build_agent_tool(context)
+    assert tool is not None
+    return tool.parameters["properties"]["effort"]
+
+
+def test_agent_schema_exposes_inherit_without_an_empty_enum_member(context) -> None:
+    """The schema lists the CONFIGURED tiers plus the sentinel — not the
+    hard-coded ``lo|med|hi`` that used to invite a pin nothing could launch —
+    and names what each tier resolves to so the pin is chosen on information."""
+    effort = _effort_schema(context)
     enum = effort["anyOf"][0]["enum"]
 
-    assert enum == ["lo", "med", "hi", "inherit"]
+    assert enum == ["lo", "hi", "inherit"]
     assert "" not in enum
+    assert "lo → openai/gpt-5-mini" in effort["description"]
+    assert "hi → anthropic/claude-opus-5" in effort["description"]
+    # The raw params model stays permissive; the schema the model sees is the
+    # patched one, and validation is what closes it.
+    assert "enum" not in AgentParams.model_json_schema()["properties"]["effort"]["anyOf"][0]
+
+
+def test_agent_schema_with_no_tiers_offers_only_inherit(tmp_path, context) -> None:
+    """Zero configured tiers: ``inherit`` alone keeps the property alive (never
+    ``enum: []`` — Gemini rejects it) and the description says no tier exists."""
+    ConfigManager(tmp_path / "config").set_config_value("subagents", {})
+
+    effort = _effort_schema(context)
+
+    assert effort["anyOf"][0]["enum"] == ["inherit"]
+    assert "no model tiers are configured" in effort["description"]
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_tier_cannot_be_pinned(context) -> None:
+    """``med`` is a perfectly good tier NAME and is not configured, so a pin
+    on it would fail at every launch of the role; refuse it up front and say
+    which tiers would work."""
+    body = await call(
+        context, op="create", name="e2", description="d", instructions="i", effort="med"
+    )
+
+    assert "invalid arguments" in body
+    assert "effort tier 'med' is unavailable" in body
+    assert "lo → openai/gpt-5-mini" in body
+    assert "omit 'effort'" in body
 
 
 @pytest.mark.parametrize("effort", [None, "inherit"])

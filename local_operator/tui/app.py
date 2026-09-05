@@ -258,10 +258,15 @@ from local_operator.tui.widgets.welcome import (
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.herdr import HerdrReporter
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.skills.discovery import Skill
+    from local_operator.tui.widgets.session_panel import (
+        SessionDiagnostics,
+        SessionScreen,
+    )
 
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
@@ -1863,6 +1868,13 @@ class OperatorApp(App[None]):
         #: — all ordinary, none an error. Rebound on every session swap, since
         #: the pane's binding must name the conversation currently in it.
         self._multiplexer_broadcast: SessionBroadcast | None = None
+        #: Reports idle/working/blocked to the hosting Herdr pane's Agents row
+        #: (see :mod:`local_operator.herdr`). ``None`` outside Herdr, headless,
+        #: for a subagent's session, or under the kill switch — all ordinary.
+        #: Unlike the multiplexer binding this is NOT rebuilt on a session
+        #: swap: the row belongs to the PANE and the process, and a ``/new``
+        #: only changes the session-id metadata it carries.
+        self._herdr_reporter: HerdrReporter | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -2835,6 +2847,9 @@ class OperatorApp(App[None]):
         # to name the conversation now in it, and a swap (`/new`, `/resume`)
         # is exactly when the old one becomes wrong.
         self._start_multiplexer_broadcast()
+        # Same moment, same reason: the Herdr row's session-id metadata has to
+        # name the conversation now in the pane.
+        self._start_herdr_reporter()
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -11155,6 +11170,94 @@ class OperatorApp(App[None]):
         # withdraw simply lands whenever its worker finishes and the exit
         # drain still guarantees it lands at all.
 
+    def _start_herdr_reporter(self) -> None:
+        """Report this pane's lifecycle state to Herdr's Agents panel.
+
+        Called on every session adoption, like the multiplexer broadcast, but
+        the reporter is built ONCE per process and only re-labelled on a swap:
+        the Agents row is a property of the pane, and a ``/new`` that released
+        and re-reported would flash the row empty for one round trip. Only the
+        ``--agent-session-id`` metadata changes, and the reporter re-sends the
+        current state under the new id.
+
+        Everything below is best-effort and returns on the ordinary paths —
+        no Herdr, the kill switch, headless, a subagent's session — see
+        :mod:`local_operator.herdr`. Nothing here can raise into the boot
+        path, and no subprocess runs on this thread: the reporter owns a
+        worker thread so the event loop never waits on the ``herdr`` CLI.
+        """
+        # Headless means no pane, and this is the SECOND of two independent
+        # guards keeping the test suite off a developer's own Herdr pane: a
+        # pilot test run from inside Herdr would otherwise overwrite the Agents
+        # row of the session running the tests. `tests/conftest.py` scrubs
+        # `HERDR_*` (alongside `CMUX_*`, for the same reason and after the same
+        # class of incident), so detection already fails there — this gate is
+        # what holds if that scrub is ever narrowed, and it is verified on its
+        # own by `test_a_headless_app_reports_nothing` plus its lifted-gate
+        # control. Same hazard `_start_multiplexer_broadcast` documents.
+        if self.is_headless:
+            return
+        session = self._session
+        if session is None:
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        # Guarded even though `start_reporter` guards itself: the IMPORT is
+        # part of this path, and the feature can never be the reason a
+        # session fails to open.
+        try:
+            from local_operator.multiplexer.broadcast import is_user_owned_session
+
+            # A subagent's child session runs INSIDE its parent's pane, so
+            # reporting it would overwrite the user's own row with the
+            # child's state — `idle` while the parent is parked on an
+            # approval. The same gate as the resume binding, deliberately:
+            # one definition of "the user's own session".
+            if not is_user_owned_session(session_id):
+                return
+            reporter = self._herdr_reporter
+            if reporter is not None:
+                reporter.set_session_id(session_id)
+                if self._status is not None:
+                    # Re-attach so the current state goes out under the
+                    # new session id (the reporter cleared its de-dupe).
+                    self._status.set_herdr_reporter(reporter)
+                return
+            from local_operator.herdr import start_reporter
+
+            reporter = start_reporter(session_id)
+        except Exception:  # noqa: BLE001 — bookkeeping must not break a session
+            logger.debug("herdr reporter failed to start", exc_info=True)
+            reporter = None
+        self._herdr_reporter = reporter
+        if reporter is not None and self._status is not None:
+            # Attaching is what sends the initial report, with the band's
+            # actual state rather than an assumed `idle`.
+            self._status.set_herdr_reporter(reporter)
+
+    def _stop_herdr_reporter(self) -> None:
+        """Release the pane's Agents row (idempotent). Never blocks.
+
+        The release runs on the reporter's worker and the exit drain lands it
+        before the interpreter is gone; see ``herdr.reporter`` for why that is
+        ``atexit`` and not a join here (a join here would be on the loop).
+        """
+        reporter = self._herdr_reporter
+        if reporter is None:
+            return
+        # Cleared FIRST, so a failure below cannot leave the app holding a
+        # handle it believes is still reporting.
+        self._herdr_reporter = None
+        try:
+            if self._status is not None:
+                self._status.set_herdr_reporter(None)
+            from local_operator.herdr import release_reporter
+
+            release_reporter(reporter)
+        except Exception:  # noqa: BLE001 — never block an exit path
+            logger.debug("herdr reporter failed to stop", exc_info=True)
+
     def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> "SessionBroadcast | None":
         """Withdraw this pane's binding (idempotent), returning the handle.
 
@@ -11605,6 +11708,11 @@ class OperatorApp(App[None]):
         # closed. A crash never reaches this line, which is what leaves the
         # binding standing for the restore to find.
         self._stop_multiplexer_broadcast()
+        # And the Herdr row, for the same reason: a clean exit must not leave
+        # the Agents panel showing a session that is gone. Before the approval
+        # settling below so the release is queued ahead of anything that can
+        # await — the exit drain then lands it even if teardown throws.
+        self._stop_herdr_reporter()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
@@ -14600,8 +14708,66 @@ class OperatorApp(App[None]):
             # the whole point of the interaction (the old routing opened it in
             # the owner's process, invisible to the user who asked). Choosing a
             # row still routes the switch back to the owner.
+            #
+            # It sits ABOVE the stopped-follower answer below deliberately, so
+            # that answer only ever sees a command carrying an ARGUMENT. The
+            # picker is a local widget over this terminal's own catalogue and
+            # needs no owner, so a stopped session is no reason to refuse it:
+            # placing the guard first swallowed bare ``/model`` (and its
+            # ``/models`` alias) and painted no list, a regression against
+            # 51dc347cd that design D1, QA Q9 and review round 3 all found
+            # independently. Reading which model you are on, and `/model
+            # default`'s config write, both work with no runtime at all.
             if command == "/model" and not arg:
                 self._open_model_picker()
+                return
+            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+                # A viewer that `/stop` ended keeps the owner's LAST capability
+                # list (the sync that would clear it is never coming), so a
+                # routed command reaches `route_shared_slash` and is refused
+                # with "session is reconnecting; try /<cmd> again" — a wait for
+                # something the row above just said was stopped on purpose
+                # (QA round 2, Q5). Answered here with the stopped-state
+                # notice (`/resume <id>`), the same answer the prompt path and
+                # a second `/stop` give. Gated on `is_cold` as well: the id is
+                # recorded before the socket closes, and a still-connected
+                # facade must keep routing so the owner's own reply lands.
+                #
+                # COMMAND-AGNOSTIC BY DESIGN, not by accident of placement:
+                # this answers every routed command that REACHES it — `/goal`,
+                # `/rename`, `/effort`, `/compact` and the ~30 others the owner
+                # advertises — because `route_shared_slash` refuses all of them
+                # identically on `client is None`, with the same misleading
+                # "reconnecting" wording. A `/model`-only guard would have
+                # fixed one command and left every neighbour telling the user
+                # to wait for an owner that is not coming back (review round 3,
+                # MINOR-1; QA Q8 measured the breadth on `/goal`, `/rename`,
+                # `/effort`).
+                #
+                # THREE commands deliberately never reach it, and this branch
+                # does not try to take them back. `_needs_runtime_first` above
+                # routes `/team <name>`, `/agent <name>` and `/credential` into
+                # `_bind_then_dispatch` for any cold facade that can bind, a
+                # stopped one included: those three have no answer to give
+                # until a runtime exists (the credential store IS the runtime's
+                # memory, and an attach stamps the session that builds the next
+                # turn), so engaging one and retrying is a better answer than
+                # "/resume" — and `_bind_then_dispatch` still ends at the same
+                # honest refusal if the facade stays cold. Answering them here
+                # as well would be a second, contradictory answer to a case
+                # main already decides (UX U3). Verified by probe, not
+                # inferred: with a stopped id set, `_needs_runtime_first` is
+                # True for exactly those three argument-bearing forms and False
+                # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
+                # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
+                # The LOCAL pullbacks above are untouched by that breadth:
+                # `/model default`, bare `/mcp` and `/team chart` set
+                # `remote_capability = None` before this branch is entered, so
+                # they never reach it, and bare `/model` is pulled back just
+                # above for the same reason.
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
                 return
 
             route_session = self._session
@@ -14716,6 +14882,8 @@ class OperatorApp(App[None]):
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
             self._cmd_analytics(arg, notice)
+        elif command == "/session":
+            self._cmd_session(arg, notice)
         elif command == "/context":
             block = self._context_block()
             if block is not None:
@@ -15612,6 +15780,58 @@ class OperatorApp(App[None]):
         notice: NoticeFn,
     ) -> None:
         old_label = session.model_label
+        # The DESTINATION is derived from the spec this command resolved, never
+        # re-read from ``session.model_label`` after ``set_model``. On a local
+        # ``Session`` the two agree — ``set_model`` assigns synchronously — but
+        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # session) ``set_model`` only schedules the request as a task and
+        # ``model_label`` keeps reading the owner's frontend-state sync, which
+        # lands on a later tick. Re-reading there printed
+        # ``model: X → X (this session)`` for a switch that DID happen: the
+        # band and the incident were right and the receipt named the old
+        # model. The effort/fast-mode copies below change neither half of the
+        # identity, so this is the same pair ``set_model`` is asked for.
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if not persist_default and bool(getattr(session, "is_cold", False)):
+            # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
+            # viewer after `/stop`) is bound to no runtime, and
+            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # anything — the same silent drop its ``set_goal`` and
+            # ``set_conversation_name`` siblings perform, and deliberately not
+            # changed there: the facade cannot raise from a synchronous setter
+            # every caller treats as fire-and-forget. Now that the receipt is
+            # built from the resolved spec rather than a re-read label, that
+            # drop would print a confident ``old → new (this session)`` for a
+            # switch that never reached anything (QA round 1, Q4). ``is_cold``
+            # is exactly the predicate the facade drops on (no client, or one
+            # that is not connected), so it is asked HERE, before the receipt,
+            # and the answer names the lever that makes the switch possible —
+            # the same wording the `/credential` cold branch uses. The persist
+            # form is exempt: its config write is what the NEXT runtime boots
+            # on, and its receipt claims a saved default, not a switch.
+            if self._stopped_session_id:
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+            elif bool(getattr(session, "_recovering", False)):
+                # `is_cold` is a superset of the drop: it is also true while
+                # the facade is redialing an owner that died. There "send a
+                # message" is not the lever — the facade's own answer for the
+                # gap is `_unavailable_reason()` ("session owner is
+                # reconnecting"), the sentence the prompt path already uses
+                # (review round 2, R2-M1).
+                reason = getattr(session, "_unavailable_reason", None)
+                self._system_notice(
+                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    "try /model again in a moment",
+                    "warning",
+                )
+            else:
+                self._system_notice(
+                    "no runtime is running for this session; "
+                    "send a message to start one, then run /model again",
+                    "warning",
+                )
+            return
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
         # what makes "switches nothing" a true statement rather than a summary
@@ -15622,9 +15842,11 @@ class OperatorApp(App[None]):
         # cleared — so "make this my default" was silently also "drop the route
         # that is currently serving me". A user who wants the fallback withdrawn
         # has the plain `/model <p>/<id>` spelling for exactly that gesture.
-        # Compared on the joined label because that is what the elided form was
-        # derived from, so the two halves cannot disagree by case or spacing.
-        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        # Compared on the joined labels — the RESOLVED spec's against the
+        # session's, both `provider/model_id` — because that is what the elided
+        # form was derived from, so the two halves cannot disagree by case,
+        # spacing, or a hosting alias the spec canonicalises.
+        write_only = persist_default and new_label == old_label
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a
             # user who dropped to `low` for cost did not mean "until I switch
@@ -15748,10 +15970,7 @@ class OperatorApp(App[None]):
             # run-on. "(this session)" is the half that answers "for how long";
             # "from the next turn" answered "starting when", which nothing had
             # asked and which the very next receipt demonstrates anyway.
-            notice(
-                f"model: {old_label} → {session.model_label} "
-                f"(this session){suffix} — {PERSIST_HINT}"
-            )
+            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -15766,12 +15985,16 @@ class OperatorApp(App[None]):
         # new model. Every spelling that switches the session owes the same
         # answer to "starting when".
         #
-        # ``old_label != session.model_label`` because re-selecting the model
-        # already in force is a no-op, and promising that "this one finishes on
-        # the old model" describes a handover that will not happen (D4). The
-        # session layer already declines to re-derive anything for a same-model
-        # write; this is the UI half of that rule.
-        if session.is_streaming and old_label != session.model_label:
+        # ``old_label != new_label`` because re-selecting the model already in
+        # force is a no-op, and promising that "this one finishes on the old
+        # model" describes a handover that will not happen (D4). The session
+        # layer already declines to re-derive anything for a same-model write;
+        # this is the UI half of that rule. Compared against the RESOLVED
+        # label, not a re-read of ``session.model_label``: on a remote session
+        # the re-read still equals ``old_label`` (see ``new_label`` above), so
+        # the mid-turn row never printed for exactly the switches it exists to
+        # qualify.
+        if session.is_streaming and old_label != new_label:
             # ``info``, matching the receipt it qualifies, NOT ``note`` (design
             # review D3). Both rows answer one action, and at ``note`` the
             # subordinate half measured 8.62:1 against the receipt's 4.55:1 —
@@ -18209,6 +18432,57 @@ class OperatorApp(App[None]):
         self.push_screen(
             AnalyticsScreen(aggregate, daily=daily, monthly=monthly, window_totals=window_totals)
         )
+
+    def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
+        """Read only this session's ledger; never interpret arguments as a prompt."""
+        from local_operator.tui.widgets.session_panel import (
+            SessionDiagnostics,
+            SessionScreen,
+        )
+
+        if arg.strip():
+            self._system_notice(
+                "/session takes no arguments; it reports the current session", "warning"
+            )
+            return
+        session = self._session
+        if session is None:
+            self._system_notice("session is not ready yet", "warning")
+            return
+        # Capture mutable identity and model selection BEFORE yielding. A /new
+        # or /resume during the disk read must not put an old bill over a new
+        # conversation. Object identity also catches resuming the same ID.
+        runtime = SessionDiagnostics.capture(session)
+        # Own a visible, cancellable surface before starting IO. A late disk
+        # result must update this surface, never push over a user's new draft.
+        screen = SessionScreen(None, runtime)
+        self.push_screen(screen)
+        self.run_worker(
+            self._open_session_report_worker(session, runtime, screen),
+            thread=False,
+            group="session-report",
+            exclusive=True,
+        )
+
+    async def _open_session_report_worker(
+        self, session: SessionProtocol, runtime: SessionDiagnostics, screen: SessionScreen
+    ) -> None:
+        from local_operator.analytics import AnalyticsStore
+
+        report = await asyncio.to_thread(AnalyticsStore().session_report, runtime.session_id)
+        if screen.presentation_cancelled or screen not in self.screen_stack:
+            return
+        if self._session is not session or session.session_id != runtime.session_id:
+            screen.invalidate()
+            return
+        # A mirrored facade may survive an owner replacement for the SAME ID.
+        # Its public epoch, unlike the per-event sequence, changes only across
+        # that lifecycle boundary and must not invalidate ordinary live usage.
+        state = getattr(session, "frontend_state", None)
+        if runtime.epoch is not None and getattr(state, "epoch", None) != runtime.epoch:
+            screen.invalidate()
+            return
+        screen.set_report(report)
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
@@ -21247,6 +21521,10 @@ class OperatorApp(App[None]):
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
             )
         old_label = session.model_label
+        # Destination from the RESOLVED spec, not a re-read of the session's
+        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # ``set_model`` asynchronously and its label follows the owner's sync.
+        new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
             self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
             explicit=True,
@@ -21259,10 +21537,7 @@ class OperatorApp(App[None]):
         # repaints from the canonical update — the receipt below only has to
         # reach the invoker. Mid-turn timing is stated by the owner-side
         # notice path (the streamed turn's own events carry it).
-        text = (
-            f"model: {old_label} → {session.model_label} "
-            f"(this session){suffix} — {PERSIST_HINT}"
-        )
+        text = f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}"
         if warning:
             text = f"{text}\n{warning}"
         return SlashResult(kind="notice", text=text, style="info")

@@ -229,6 +229,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("context", "Show prompt, tool-schema and message token usage"),
+    SlashCommand("session", "Current-session usage, cost and request diagnostics"),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
     # OFFER — a bare `/analytics` opens the usage view rather than doing

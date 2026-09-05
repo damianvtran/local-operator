@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.harness.jobs import OUTPUT_TAIL_CHARS, AsyncJobManager
 from local_operator.harness.types import AgentTool, ToolContext, ToolResult
 from local_operator.tools import builtin
@@ -452,7 +453,13 @@ def test_wait_jobs_not_advertised_without_job_manager(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_path):
+async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_path, monkeypatch):
+    # ``effort`` is validated against the live config, so the tier this batch
+    # asks for has to exist; without one, "hi" is refused before launch.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents", {"models": {"hi": "anthropic/claude-opus-5"}}
+    )
     """One call, three jobs: the batch form is the fan-out economics — N
     independent slices cost N round trips when launched one per call and one
     when launched together. The shared context is prepended to every prompt

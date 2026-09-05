@@ -41,7 +41,7 @@ A registered profile is not automatically a live peer in the current process. In
 
 Use the `task` tool when the current job contains an independent, well-bounded slice that can run concurrently or needs isolated context. A task subagent:
 
-- inherits the parent model unless overridden, working directory, approval gate, and compaction budget
+- inherits the parent model and reasoning effort (unless `effort` names a tier the operator configured under `subagents.models` — the `task` schema lists only those), working directory, approval gate, and compaction budget
 - receives only the prompt passed to `task`; include every requirement and expected output
 - reports through the parent session's jobs/events
 - is one level deep and cannot spawn grandchildren

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 import pytest
+from pydantic import ValidationError
 
 from local_operator.evaluation.adapters.api import observation_content_id
 from local_operator.evaluation.protocol import (
@@ -51,25 +52,27 @@ def _budget(**caps: int) -> BudgetAuthorization:
     )
 
 
-def _observation(sequence: int, *, frame_digest: str | None = None) -> Observation:
-    frames: tuple[FrameRef, ...] = ()
-    if frame_digest is not None:
-        frames = (
-            FrameRef(
-                frame_id=f"frame-{sequence}",
-                artifact=ArtifactRef(sha256=frame_digest, media_type="image/png", byte_count=8),
-                geometry=FrameGeometry(
-                    native=FrameSize(width=1, height=1),
-                    model_visible=FrameSize(width=1, height=1),
-                ),
+def _observation(
+    sequence: int, *, frame_digest: str | tuple[str, ...] | None = None, text: str | None = "state"
+) -> Observation:
+    digests = (frame_digest,) if isinstance(frame_digest, str) else (frame_digest or ())
+    frames = tuple(
+        FrameRef(
+            frame_id=f"frame-{sequence}-{index}",
+            artifact=ArtifactRef(sha256=digest, media_type="image/png", byte_count=8),
+            geometry=FrameGeometry(
+                native=FrameSize(width=1, height=1),
+                model_visible=FrameSize(width=1, height=1),
             ),
         )
+        for index, digest in enumerate(digests)
+    )
     provisional = Observation(
         task_id="task-1",
         episode_id="episode-1",
         sequence=sequence,
         observation_id="provisional",
-        text=f"state-{sequence}",
+        text=text,
         frames=frames,
     )
     return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
@@ -91,18 +94,24 @@ def _batch(current: Observation, actions: Sequence[dict[str, Any]]) -> ActionBat
 WAIT = {"kind": "wait", "duration_ms": 5000}
 CLICK = {"kind": "click", "frame_id": "frame-0", "x": 1, "y": 1}
 TYPE = {"kind": "type", "text": "hello"}
+FORWARD = {"kind": "key", "keys": ["RIGHT"]}
 ASK = {"kind": "ask_user", "request_id": "ask-1", "question": "what?"}
 
 
 def _turns(
-    kinds: Sequence[Sequence[dict[str, Any]] | None], *, digests: Sequence[str] | None = None
-):
+    kinds: Sequence[Sequence[dict[str, Any]] | None],
+    *,
+    digests: Sequence[str | tuple[str, ...] | None] | None = None,
+    texts: Sequence[str | None] | None = None,
+) -> tuple[EpisodeTurn, ...]:
     """Turns oldest-first; ``None`` is the undecided current turn."""
 
     turns: list[EpisodeTurn] = []
     for index, actions in enumerate(kinds):
         digest = digests[index] if digests is not None else None
-        observation = _observation(index, frame_digest=digest)
+        observation = _observation(
+            index, frame_digest=digest, text=texts[index] if texts is not None else "state"
+        )
         batch = _batch(observation, actions) if actions is not None else None
         turns.append(EpisodeTurn(observation=observation, batch=batch))
     return tuple(turns)
@@ -166,7 +175,7 @@ def test_cost_rate_absolute_cap_fires_on_one_expensive_cycle() -> None:
     assert verdict.kind == "truncate" and verdict.code == "cost-spike"
 
 
-def test_repeated_batch_ignores_the_observation_id_and_the_undecided_turn() -> None:
+def test_repeated_batch_ignores_observation_ids_but_requires_unchanged_state() -> None:
     guard = RepeatedBatchGuard(repeats=3)
     same = _turns([[CLICK], [CLICK], [CLICK], None])
     verdict = guard.evaluate(_snapshot(recent_turns=same))
@@ -175,6 +184,13 @@ def test_repeated_batch_ignores_the_observation_id_and_the_undecided_turn() -> N
     assert guard.evaluate(_snapshot(recent_turns=varied)).kind == "continue"
     short = _turns([[CLICK], [CLICK], None])
     assert guard.evaluate(_snapshot(recent_turns=short)).kind == "continue"
+
+
+@pytest.mark.parametrize("digests", [["a", "b", "c", "d", "e"], ["a"] * 4 + ["b"]])
+def test_repeated_forward_input_with_visible_progress_continues(digests: list[str]) -> None:
+    # The newest, undecided observation contains the final forward input's result.
+    turns = _turns([[FORWARD]] * 4 + [None], digests=[digest * 64 for digest in digests])
+    assert RepeatedBatchGuard().evaluate(_snapshot(recent_turns=turns)).kind == "continue"
 
 
 def test_no_change_needs_identical_frames_after_non_empty_batches() -> None:
@@ -220,6 +236,90 @@ def test_waits_are_transparent_to_a_run_of_real_actions() -> None:
     # Two real actions plus waits is below a repeats=3 span.
     fewer = _turns([[CLICK], [WAIT], [WAIT], [CLICK], None], digests=static[:5])
     assert NoChangeGuard(repeats=3).evaluate(_snapshot(recent_turns=fewer)).kind == "continue"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+def test_loop_guards_allow_changed_text_beside_identical_frames(guard_type: Any) -> None:
+    turns = _turns(
+        [[FORWARD], [FORWARD], None],
+        digests=["a" * 64] * 3,
+        texts=["page 1", "page 1", "page 2"],
+    )
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+@pytest.mark.parametrize("missing_index", [0, 1, 2])
+def test_loop_guards_need_observable_state_throughout(guard_type: Any, missing_index: int) -> None:
+    digests: list[str | None] = ["a" * 64] * 3
+    texts: list[str | None] = ["state"] * 3
+    digests[missing_index] = None
+    texts[missing_index] = None
+    turns = _turns([[TYPE], [TYPE], None], digests=digests, texts=texts)
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+    blind = _turns([[TYPE], [TYPE], None], texts=[None] * 3)
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=blind)).kind == "continue"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+@pytest.mark.parametrize("final_frames", [("a", "c"), ("b", "a"), ("a",)])
+def test_loop_guards_compare_every_frame_in_order(
+    guard_type: Any, final_frames: tuple[str, ...]
+) -> None:
+    frames = ("a" * 64, "b" * 64)
+    turns = _turns(
+        [[TYPE], [TYPE], None],
+        digests=[frames, frames, tuple(digest * 64 for digest in final_frames)],
+    )
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+def test_loop_guards_ignore_capture_ids_but_stop_real_stationary_loops(guard_type: Any) -> None:
+    frames = ("a" * 64, "b" * 64)
+    turns = _turns([[FORWARD], [FORWARD], None], digests=[frames] * 3, texts=[None] * 3)
+    assert len({turn.observation.observation_id for turn in turns}) == 3
+    assert len({turn.observation.frames[0].frame_id for turn in turns}) == 3
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "truncate"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+@pytest.mark.parametrize("progress_index", [1, 2, 3])
+def test_waits_do_not_hide_observation_progress(guard_type: Any, progress_index: int) -> None:
+    # The view may move during a wait then return before the next action.
+    digests = ["a" * 64] * 4
+    digests[progress_index] = "b" * 64
+    turns = _turns([[TYPE], [WAIT], [TYPE], None], digests=digests)
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+
+
+@pytest.mark.parametrize("guard_type", [RepeatedBatchGuard, NoChangeGuard])
+def test_last_action_needs_its_result_observation(guard_type: Any) -> None:
+    turns = _turns([[TYPE]] * 3, digests=["a" * 64] * 3)
+    assert guard_type(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+
+
+@pytest.mark.parametrize("texts", [["state"] * 3, ["state", "state", None]])
+def test_repeated_batch_handles_text_only_state_conservatively(texts: list[str | None]) -> None:
+    turns = _turns([[TYPE], [TYPE], None], texts=texts)
+    verdict = RepeatedBatchGuard(repeats=2).evaluate(_snapshot(recent_turns=turns))
+    assert verdict.kind == ("truncate" if texts[-1] is not None else "continue")
+    assert NoChangeGuard(repeats=2).evaluate(_snapshot(recent_turns=turns)).kind == "continue"
+
+
+def test_repeated_batch_maximum_fits_completed_turns_plus_latest_observation() -> None:
+    # EpisodeRunner supplies the full completed-turn window PLUS the new result.
+    turns = _turns([[TYPE]] * RECENT_TURNS_WINDOW + [None])
+    verdict = RepeatedBatchGuard(repeats=RECENT_TURNS_WINDOW).evaluate(
+        _snapshot(recent_turns=turns)
+    )
+    assert verdict.code == "repeated-batch"
+
+
+@pytest.mark.parametrize("text", ["", " "])
+def test_empty_text_is_rejected_by_observation_contract(text: str) -> None:
+    with pytest.raises(ValidationError):
+        _observation(0, text=text)
 
 
 def test_ask_loop_counts_consecutive_ask_batches_only() -> None:

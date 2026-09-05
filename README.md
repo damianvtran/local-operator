@@ -207,6 +207,7 @@ current session's cost live).
 | `/btw` | Ask a side question off the record — it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
+| `/session` | Current-session recorded usage, combined cost, cache and request diagnostics |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>` puts a manager and roster on it |
@@ -659,7 +660,11 @@ lop config open        # open it in your editor
 Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), and `tui.theme` (any registered theme name — easier to set with
-`/theme`, which previews live).
+`/theme`, which previews live). `bash.shell` picks the interpreter the `bash`
+tool spawns: unset, it runs the first `bash` on `PATH` (Homebrew bash 5 when
+installed, else the system one) and falls back to `/bin/sh` only on a host
+with no bash — so process substitution and other bash syntax work as the
+tool's name promises. Every option is browsable in `/settings`.
 
 Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
@@ -720,6 +725,15 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
 submit bug reports and feature requests, set up a development environment,
 and open pull requests. `docs/` covers the architecture
 ([REWRITE.md](./docs/REWRITE.md)), benchmarks, and verification evidence.
+
+### Inside a multiplexer
+
+Run a column of `lop` sessions as panes and `lop` meets the host halfway:
+it publishes a per-pane crash-restore binding
+([multiplexer-resume.md](./docs/multiplexer-resume.md)) and, inside a
+[Herdr](https://herdr.dev) pane, reports its live state — `idle`, `working`,
+`blocked` on an approval — to the Agents panel
+([herdr-agents.md](./docs/herdr-agents.md)).
 
 ## 🙏 Credits and Acknowledgements
 

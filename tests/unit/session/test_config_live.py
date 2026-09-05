@@ -142,6 +142,14 @@ def _fetch_settings(watcher: ConfigWatcher):
     return load_fetch_settings(ConfigManager(watcher.config_dir))
 
 
+def _bash_shell(watcher: ConfigWatcher) -> str:
+    """What `execute_bash` resolves per call (it reads through `paths.config_dir()`,
+    which the probe points at the watcher's directory)."""
+    from local_operator.tools.builtin import _configured_bash_shell, resolve_bash_shell
+
+    return resolve_bash_shell(_configured_bash_shell())
+
+
 def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = None) -> str:
     """The subagent ModelSpec the session resolves for an effort tier.
 
@@ -289,6 +297,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.allow_private": (True, lambda s, w: _fetch_settings(w).allow_private),
     "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
     "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
+    "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
 }
 
 #: LIVE sections whose keys have no session-side apply because the TUI owns

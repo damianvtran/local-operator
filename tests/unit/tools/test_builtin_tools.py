@@ -333,6 +333,157 @@ async def test_bash_empty_command_is_error(tools, context) -> None:
     assert result.is_error is True
 
 
+# -- interpreter resolution (#629) ------------------------------------------
+#
+# The tool is NAMED bash, so models write bash; /bin/sh on macOS is bash 3.2 in
+# POSIX mode and rejects `<(...)` at parse time. These pin the resolution order
+# and prove the real spawn path runs bash syntax.
+
+
+def test_resolve_bash_shell_prefers_the_configured_value(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    assert builtin.resolve_bash_shell("/opt/custom/bash") == "/opt/custom/bash"
+    # Surrounding whitespace is a typo, not an interpreter.
+    assert builtin.resolve_bash_shell("  /opt/custom/bash \n") == "/opt/custom/bash"
+
+
+def test_resolve_bash_shell_falls_back_to_bash_on_path(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    assert builtin.resolve_bash_shell(None) == "/path/which/bash"
+    # Empty and blank both mean "unset": the registry's empty_unsets row and a
+    # hand-edited `shell: "  "` must resolve the same way.
+    assert builtin.resolve_bash_shell("") == "/path/which/bash"
+    assert builtin.resolve_bash_shell("   ") == "/path/which/bash"
+
+
+def test_resolve_bash_shell_last_resort_is_sh(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK == "/bin/sh"
+
+
+def test_resolve_bash_shell_expands_a_tilde(monkeypatch) -> None:
+    """`~/bin/bash` is a plausible thing to type into the Kind.TEXT settings
+    row, and nothing else on the read path expands it — unexpanded it would
+    reach execve verbatim and fail every call."""
+    monkeypatch.setenv("HOME", "/home/tester")
+    assert builtin.resolve_bash_shell("~/bin/bash") == "/home/tester/bin/bash"
+    assert builtin.resolve_bash_shell("  ~/bin/bash  ") == "/home/tester/bin/bash"
+
+
+def _set_configured_shell(monkeypatch, tmp_path, value: str):
+    """Point `bash.shell` at `value` in an isolated config dir."""
+    from local_operator.config import ConfigManager
+
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_home))
+    ConfigManager(config_home).set_config_value("bash", {"shell": value})
+
+
+@pytest.mark.asyncio
+async def test_bash_reports_a_missing_configured_shell_as_a_tool_error(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A `bash.shell` that does not exist must be a normal error result naming
+    the path and the key — not the generic boundary's `failed unexpectedly`
+    plus a traceback tail, which never said which key broke every call."""
+    _set_configured_shell(monkeypatch, tmp_path, "/nonexistent/qa-shell")
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "bash.shell" in result.text
+    assert "/nonexistent/qa-shell" in result.text
+    assert "failed unexpectedly" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_reports_a_non_executable_configured_shell_as_a_tool_error(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """The same misconfiguration arrives as PermissionError rather than
+    FileNotFoundError when the path exists but has no exec bit, which is why
+    the handler catches OSError rather than one subclass."""
+    not_executable = tmp_path / "not-executable"
+    not_executable.write_text("#!/bin/sh\necho nope\n")
+    not_executable.chmod(0o644)
+    _set_configured_shell(monkeypatch, tmp_path, str(not_executable))
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "bash.shell" in result.text
+    assert str(not_executable) in result.text
+    # `Traceback` cannot discriminate here: the boundary emits only the last
+    # 2000 chars of the formatted traceback, which cuts the header off, so the
+    # literal string is absent from the pre-fix output too.
+    assert "failed unexpectedly" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_blames_the_working_directory_not_bash_shell(tmp_path, monkeypatch) -> None:
+    """`create_subprocess_exec` raises the same OSError family for a deleted
+    `cwd=` as for a bad argv[0], so the handler must discriminate on
+    `exc.filename`. With `bash.shell` unset and the session directory gone —
+    an ordinary condition after a removed worktree or a reclaimed tmpdir — the
+    error must name the directory and never mention a key the operator never
+    set, whose two prescribed fixes cannot repair a missing directory."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))
+    gone = tmp_path / "deleted-cwd"
+    gone.mkdir()
+    gone_context = ToolContext(cwd=str(gone), session_id="unit-test")
+    gone_tools = {tool.name: tool for tool in create_tools(gone_context)}
+    gone.rmdir()
+
+    result = await _call(gone_tools, "bash", {"command": "echo hi"}, gone_context)
+
+    assert result.is_error is True
+    assert str(gone) in result.text
+    assert "bash.shell" not in result.text
+    assert "failed unexpectedly" not in result.text
+
+
+_HOST_BASH = builtin.shutil.which("bash")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_HOST_BASH is None, reason="no bash on this host")
+async def test_bash_runs_process_substitution(tools, context) -> None:
+    """The issue's own reproduction: `comm -12 <(echo a) <(echo a)` must print
+    `a` and exit 0 under the default (auto-resolved) interpreter."""
+    result = await _call(tools, "bash", {"command": "comm -12 <(echo a) <(echo a)"}, context)
+    assert result.is_error is False
+    assert "exit code: 0" in result.text
+    assert "--- stdout ---\na\n" in result.text
+    assert "syntax error" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_honours_configured_shell(tools, context, tmp_path, monkeypatch) -> None:
+    """`bash.shell` from config is what gets spawned, read at CALL time.
+
+    Pointed at a tiny script rather than /bin/sh so the assertion is a
+    positive marker rather than "process substitution failed", which would
+    also be true of a broken default."""
+    from local_operator.config import ConfigManager
+
+    marker = tmp_path / "marker-shell"
+    marker.write_text('#!/bin/sh\necho MARKER-SHELL "$@"\n')
+    marker.chmod(0o755)
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_home))
+    ConfigManager(config_home).set_config_value("bash", {"shell": str(marker)})
+
+    result = await _call(tools, "bash", {"command": "ignored"}, context)
+    assert result.is_error is False
+    assert "MARKER-SHELL -c ignored" in result.text
+
+    # Clearing the key on disk takes effect on the very next call: no cache.
+    ConfigManager(config_home).set_config_value("bash", {"shell": ""})
+    result = await _call(tools, "bash", {"command": "echo plain"}, context)
+    assert "MARKER-SHELL" not in result.text
+    assert "plain" in result.text
+
+
 @pytest.mark.asyncio
 async def test_bash_executes_without_tool_level_prompt(tmp_path) -> None:
     # The write/exec approval gate is the LOOP's (it fires after
