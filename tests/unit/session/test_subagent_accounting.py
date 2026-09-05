@@ -88,6 +88,24 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
     assert cost_summary([components[2]]) == (0, False)
     assert cost_summary([components[3]]) == (None, True)
 
+    from local_operator.session.session import _subagent_job_row
+
+    durable = _subagent_job_row(
+        AsyncJob(
+            start_time=0,
+            id="mixed",
+            type="task",
+            label="mixed",
+            model_label="test/m",
+            usage=Usage(cost_components=folded),
+        )
+    )
+    # RemoteSession's daemonless sidecar overlay uses this exact validation
+    # path, without an owner or any permission to discover model prices.
+    cold = JobState.model_validate(durable)
+    assert cold.usage is not None
+    assert cost_summary(cold.usage.cost_components, recorded_only=True) == (0.375, True)
+
 
 @pytest.mark.asyncio
 async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):

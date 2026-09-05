@@ -84,6 +84,18 @@ estimate separately from authoritative `usd_cost` receipts. Price partitions
 remain separate during bounded folding. Outer aggregates carry components, not
 an incomplete aggregate receipt. Optional canonical cost fields preserve legacy
 readers; absent knowledge uses legacy pricing, explicit unknown does not.
+Daemonless cold viewers reconstruct sidecar row summaries only from persisted
+receipts/estimates, retaining known lower bounds without provider discovery.
+The strict AsyncJob sidecar shape is unchanged.
+
+The standalone session-factory gate was independently run on unmodified main
+619ec60a and the accounting head: both report 18 failures and 93 passes, with
+identical failed node IDs ([comparison](baseline-factory-failures.txt)). These
+existing background-refactor factory contract failures were not silently waived
+or modified by the accounting patch. A narrow viewport landing test failed once
+in an integrated run, then passed isolated on both branches; the complete view
+file passed on main (130) and accounting (129, one existing skip). No viewport
+code was changed to mask it.
 
 The existing v1 roster sidecar gains an optional compact `accounting` checkpoint.
 Restore replaces row-derived accounting with it; it is never added to retained

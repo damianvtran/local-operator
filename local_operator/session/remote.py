@@ -659,6 +659,36 @@ class RemoteSession:
             )
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
+                if job.usage is not None:
+                    from local_operator.session.frontend_state import _cost_knowledge
+                    from local_operator.tui.costs import cost_summary
+
+                    # The strict AsyncJob sidecar cannot grow frontend-only
+                    # fields without breaking older owners. Reconstruct only
+                    # from persisted bills/estimates here: a daemonless viewer
+                    # must not need credentials or trigger model discovery.
+                    cost, unknown = cost_summary(
+                        job.usage.cost_components or [job.usage], recorded_only=True
+                    )
+                    previous = rows.get(str(job.id))
+                    if cost is not None or previous is None:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": cost,
+                                "direct_cost_knowledge": _cost_knowledge(cost, unknown),
+                            }
+                        )
+                    else:
+                        job = job.model_copy(
+                            update={
+                                "direct_cost": previous.direct_cost,
+                                "direct_cost_knowledge": (
+                                    _cost_knowledge(previous.direct_cost, True)
+                                    if unknown
+                                    else previous.direct_cost_knowledge
+                                ),
+                            }
+                        )
                 rows[str(job.id)] = job
         except Exception:  # noqa: BLE001 — a bad sidecar must not stop the open
             logger.debug("cold state could not read the roster sidecar", exc_info=True)

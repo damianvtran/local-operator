@@ -142,7 +142,9 @@ def _recorded_cost(usage: Any) -> float | None:
     return _usage_cost({"usd_cost": getattr(usage, "estimated_usd_cost", None)})
 
 
-def cost_summary(components: Any, *, model_label: str = "") -> tuple[float | None, bool]:
+def cost_summary(
+    components: Any, *, model_label: str = "", recorded_only: bool = False
+) -> tuple[float | None, bool]:
     """Known spend and whether any component is unknown; never lose a lower bound.
 
     Components, not aggregate tokens, own price provenance. A failed or offline
@@ -155,7 +157,7 @@ def cost_summary(components: Any, *, model_label: str = "") -> tuple[float | Non
         provider = getattr(component, "provider", None)
         model_id = getattr(component, "model_id", None)
         label = f"{provider}/{model_id}" if provider and model_id else model_label
-        cost = turn_cost(label, component)
+        cost = _recorded_cost(component) if recorded_only else turn_cost(label, component)
         if cost is None:
             unknown = True
         else:
