@@ -46,82 +46,191 @@ _APP = Path(__file__).resolve().parents[3] / "local_operator" / "tui" / "app.py"
 _OWNED = Path(__file__).resolve().parents[3] / "local_operator" / "session" / "runtime" / "owned.py"
 
 
-def _slash_result_payload_types(source: str) -> set[str]:
-    """Every ``type`` string a ``SlashResult(...)`` call can carry.
+def _slash_result_payloads(source: str) -> set[tuple[str, str]]:
+    """Every ``(kind, type)`` pair a ``SlashResult(...)`` call can carry.
 
     Matches the call by NAME rather than by enclosing function, because the
     producers are spread across ``_team_slash``, ``_agent_slash``,
     ``_team_slash_result`` and friends in two modules, and a list of function
     names is the kind of thing that goes stale silently — which is the failure
     mode this whole file exists to prevent.
+
+    Keyed on the PAIR, not the type alone (review round 1, R3). On the
+    unfixed tree the owner produced ``noop {"type": "agent_list"}`` while the
+    renderer consumed ``agent_list`` only under ``kind == "block"``; an audit
+    that pooled every string constant reported the type as covered and the
+    bare ``/agent`` stayed silent. A ``kind`` that is not a literal (never the
+    case today) is recorded as ``"?"`` so it can only ever widen the
+    orphan set, never hide one.
     """
     tree = ast.parse(source)
-    types: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
             continue
         if node.func.id != "SlashResult":
             continue
+        kind = "notice"
+        types: set[str] = set()
         for keyword in node.keywords:
+            if keyword.arg == "kind":
+                kind = (
+                    keyword.value.value
+                    if isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                    else "?"
+                )
             if keyword.arg != "data" or not isinstance(keyword.value, ast.Dict):
                 continue
             for key, value in zip(keyword.value.keys, keyword.value.values):
-                if (
-                    isinstance(key, ast.Constant)
-                    and key.value == "type"
-                    and isinstance(value, ast.Constant)
-                    and isinstance(value.value, str)
-                ):
+                if not (isinstance(key, ast.Constant) and key.value == "type"):
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     types.add(value.value)
                 # ``{"type": "agent_mutate" if arg else "agent_list"}`` — the
                 # conditional spelling, which is how one of the two silent
                 # types was actually written. Both branches count.
-                if isinstance(key, ast.Constant) and key.value == "type":
-                    if isinstance(value, ast.IfExp):
-                        for branch in (value.body, value.orelse):
-                            if isinstance(branch, ast.Constant) and isinstance(branch.value, str):
-                                types.add(branch.value)
-    return types
+                if isinstance(value, ast.IfExp):
+                    for branch in (value.body, value.orelse):
+                        if isinstance(branch, ast.Constant) and isinstance(branch.value, str):
+                            types.add(branch.value)
+        for payload_type in types:
+            pairs.add((kind, payload_type))
+    return pairs
+
+
+def _slash_result_payload_types(source: str) -> set[str]:
+    """The types alone — kept for the regression-by-name assertions below."""
+    return {payload_type for _kind, payload_type in _slash_result_payloads(source)}
 
 
 def _types_named_by_the_renderer(source: str) -> set[str]:
-    """Every payload type string ``_render_authoritative_slash`` mentions.
+    """Every payload type string ``_render_authoritative_slash`` mentions."""
+    return {payload_type for _kind, payload_type in _renderer_arms(source)}
 
-    Deliberately the whole function body rather than only its ``==``
+
+def _renderer_arms(source: str) -> set[tuple[str, str]]:
+    """Every ``(kind, type)`` the renderer has an arm for.
+
+    The renderer is structured as ``if kind == "<k>": ... ``type`` checks
+    ...`` per kind, and a trailing section (after the last ``kind ==`` guard)
+    that runs for any remaining kind. A type constant found inside a ``kind
+    ==`` guarded block belongs to THAT kind; one found after the guards is
+    reachable by every kind, so it is recorded under each known kind.
+
+    Deliberately every string constant inside the arm rather than only ``==``
     comparisons: the renderer dispatches on ``block_type ==`` in one place and
     on ``data.get("type") in (...)`` in another, and an audit keyed to one
     spelling would be blind to the other — the same mistake that let the
     original bug through a capability audit.
     """
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_render_authoritative_slash":
-            return {
-                sub.value
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-            }
-    raise AssertionError("_render_authoritative_slash not found in app.py")
+    renderer = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_authoritative_slash"
+        ),
+        None,
+    )
+    if renderer is None:
+        raise AssertionError("_render_authoritative_slash not found in app.py")
+
+    def _kind_guard(stmt: ast.stmt) -> str | None:
+        """The literal ``kind`` an ``if kind == "…":`` statement guards, else None."""
+        if not isinstance(stmt, ast.If):
+            return None
+        test = stmt.test
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "kind"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and isinstance(test.comparators[0].value, str)
+        ):
+            return test.comparators[0].value
+        return None
+
+    def _strings(nodes: list[ast.stmt]) -> set[str]:
+        return {
+            sub.value
+            for stmt in nodes
+            for sub in ast.walk(stmt)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        }
+
+    arms: set[tuple[str, str]] = set()
+    guarded_kinds: set[str] = set()
+    trailing: list[ast.stmt] = []
+    for stmt in renderer.body:
+        kind = _kind_guard(stmt)
+        if kind is None:
+            trailing.append(stmt)
+            continue
+        guarded_kinds.add(kind)
+        assert isinstance(stmt, ast.If)
+        for payload_type in _strings(stmt.body):
+            arms.add((kind, payload_type))
+    # Whatever follows the guards runs for every kind that did not return.
+    # ``noop`` and ``block`` both return inside their arms today; the audit
+    # does not assume that, so a trailing arm counts for all known kinds.
+    for kind in guarded_kinds | {"notice"}:
+        for payload_type in _strings(trailing):
+            arms.add((kind, payload_type))
+    return arms
 
 
 def test_every_routed_slash_payload_type_has_a_renderer() -> None:
     """The defect class, as an enforced property.
 
-    A producer emitting a ``data["type"]`` the renderer never names is a
-    command that runs on the owner and then evaporates: no output, no error,
-    nothing for the user to act on. If this fails, either give the type a
-    branch in ``_render_authoritative_slash`` or stop producing it.
+    A producer emitting a ``(kind, data["type"])`` the renderer has no arm for
+    under THAT kind is a command that runs on the owner and then evaporates:
+    no output, no error, nothing for the user to act on. If this fails, either
+    give the pair a branch in ``_render_authoritative_slash`` or stop
+    producing it.
     """
-    produced = _slash_result_payload_types(_APP.read_text()) | _slash_result_payload_types(
-        _OWNED.read_text()
-    )
-    rendered = _types_named_by_the_renderer(_APP.read_text())
-    orphaned = sorted(produced - rendered)
+    produced = _slash_result_payloads(_APP.read_text()) | _slash_result_payloads(_OWNED.read_text())
+    arms = _renderer_arms(_APP.read_text())
+    orphaned = sorted(pair for pair in produced if pair not in arms)
     assert not orphaned, (
-        "these routed slash payload types are produced but never rendered, so the "
-        f"command silently does nothing on a viewer: {orphaned}. Add a branch in "
-        "_render_authoritative_slash or stop emitting the type."
+        "these routed slash payloads are produced but never rendered under their "
+        f"kind, so the command silently does nothing on a viewer: {orphaned}. Add a "
+        "branch in _render_authoritative_slash or stop emitting the pair."
     )
+
+
+def test_the_audit_is_keyed_on_kind_not_type_alone() -> None:
+    """Mutation guard for R3: a ``noop`` type consumed only by a ``block`` arm
+    must be reported as orphaned.
+
+    This is the exact shape of the bare ``/agent`` bug: ``owned.py`` produced
+    ``noop {"type": "agent_list"}`` and the renderer knew ``agent_list`` only
+    under ``kind == "block"``. An audit pooling the strings said "covered".
+    """
+    producer = "def f():\n    return SlashResult(kind='noop', data={'type': 'agent_list'})\n"
+    renderer = (
+        "def _render_authoritative_slash(self, command, arg, outcome, attachments=None):\n"
+        "    kind = outcome.get('kind')\n"
+        "    data = outcome.get('data') or {}\n"
+        "    if kind == 'noop':\n"
+        "        return\n"
+        "    if kind == 'block':\n"
+        "        if data.get('type') == 'agent_list':\n"
+        "            return\n"
+    )
+    produced = _slash_result_payloads(producer)
+    assert produced == {("noop", "agent_list")}
+    arms = _renderer_arms(renderer)
+    assert ("block", "agent_list") in arms
+    assert ("noop", "agent_list") not in arms, "a block arm must not cover a noop producer"
+    # ...and the fix shape IS covered: the same type under a noop arm.
+    fixed = renderer.replace(
+        "    if kind == 'noop':\n        return\n",
+        "    if kind == 'noop':\n        if data.get('type') == 'agent_list':\n"
+        "            pass\n        return\n",
+    )
+    assert ("noop", "agent_list") in _renderer_arms(fixed)
 
 
 def test_the_two_types_that_shipped_broken_are_covered() -> None:
@@ -147,14 +256,21 @@ def test_the_extractor_sees_a_type_however_it_is_spelled() -> None:
     """The audit must survive the spellings the real code actually uses.
 
     Both forms below occur in production today; an extractor that saw only the
-    plain constant would have reported ``agent_mutate`` as covered.
+    plain constant would have reported ``agent_mutate`` as covered. A call
+    with no ``kind`` is a ``notice`` — the model's default.
     """
     source = (
         "def f():\n"
         "    a = SlashResult(kind='noop', data={'type': 'plain'})\n"
-        "    b = SlashResult(kind='noop', data={'type': 'yes' if x else 'no'})\n"
+        "    b = SlashResult(kind='block', data={'type': 'yes' if x else 'no'})\n"
+        "    c = SlashResult(data={'type': 'bare'})\n"
     )
-    assert _slash_result_payload_types(source) == {"plain", "yes", "no"}
+    assert _slash_result_payloads(source) == {
+        ("noop", "plain"),
+        ("block", "yes"),
+        ("block", "no"),
+        ("notice", "bare"),
+    }
 
 
 def test_the_credential_guard_does_not_promise_a_wait_that_never_ends() -> None:
