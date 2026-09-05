@@ -2680,14 +2680,17 @@ def agents_delete_command(
     elif getattr(args, "agent_id", None):
         # Delete from Radient by ID
         from local_operator.clients.radient import RadientClient
+        from local_operator.providers.radient_credentials import (
+            resolve_radient_credential_sync,
+        )
 
         credential_manager = CredentialManager(config_dir)
-        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        config_manager = ConfigManager(config_dir)
+        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
+        api_key = resolve_radient_credential_sync(credential_manager, base_url)
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
             return 1
-        config_manager = ConfigManager(config_dir)
-        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
         try:
             radient_client.delete_agent_from_marketplace(args.agent_id)
@@ -3629,18 +3632,21 @@ def main() -> int:
             elif args.agents_command == "push":
                 # Push agent to Radient
                 from local_operator.clients.radient import RadientClient  # lazy
+                from local_operator.providers.radient_credentials import (
+                    resolve_radient_credential_sync,
+                )
 
                 credential_manager = CredentialManager(base_dir)
-                api_key = credential_manager.get_credential("RADIENT_API_KEY")
+                config_manager = ConfigManager(base_dir)
+                base_url = config_manager.get_config_value(
+                    "radient_base_url", "https://api.radienthq.com"
+                )
+                api_key = resolve_radient_credential_sync(credential_manager, base_url)
                 if not api_key:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
                     )
                     return 1
-                config_manager = ConfigManager(base_dir)
-                base_url = config_manager.get_config_value(
-                    "radient_base_url", "https://api.radienthq.com"
-                )
                 radient_client = RadientClient(api_key=api_key, base_url=base_url)
                 # Support push by name or id
                 agent = None

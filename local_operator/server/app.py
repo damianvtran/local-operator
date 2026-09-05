@@ -34,6 +34,9 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    desktop_catalogues,
+    desktop_lifecycle,
+    desktop_radient,
     desktop_sessions,
     health,
     jobs,
@@ -130,6 +133,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if desktop_sessions_host is not None:
         await desktop_sessions_host.close()
         app.state.desktop_sessions = None
+    # Off-record panels belong to this HTTP lifetime, not the durable session.
+    app.state.desktop_asides = None
     app.state.desktop_receipts = None
     await app.state.scheduler_service.shutdown()
 
@@ -167,11 +172,22 @@ app = FastAPI(
 )
 
 
+def _legacy_desktop_control_path(path: str) -> bool:
+    return path in {
+        "/v1/config",
+        "/v1/config/system-prompt",
+        "/v1/credentials",
+        "/v1/models",
+        "/v1/tools/speech",
+        "/v1/transcriptions",
+    } or (path.startswith("/v1/agents/") and path.rsplit("/", 1)[-1] in {"upload", "speech"})
+
+
 @app.middleware("http")
 async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
     sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
-    legacy_control = path in {"/v1/config", "/v1/config/system-prompt", "/v1/credentials"}
+    legacy_control = _legacy_desktop_control_path(path)
     # Explicit desktop-token mode must close the old mutation bypass too. A
     # standalone legacy server remains wire-compatible unless opted into this
     # mode; Electron moves these calls through the same main-process proxy.
@@ -192,7 +208,7 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
     # protects model dumps, not failures before a model was constructed.
     if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
         os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN")
-        and request.url.path in {"/v1/config", "/v1/credentials", "/v1/config/system-prompt"}
+        and _legacy_desktop_control_path(request.url.path)
     ):
         return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
     return await request_validation_exception_handler(request, error)
@@ -202,6 +218,9 @@ app.include_router(capabilities.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
+app.include_router(desktop_catalogues.router)
+app.include_router(desktop_lifecycle.router)
+app.include_router(desktop_radient.router)
 
 # Add CORS middleware
 app.add_middleware(

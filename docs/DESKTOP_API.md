@@ -9,8 +9,10 @@ which controls a client may offer.
 
 `GET /v1/capabilities` is public and returns a `CRUDResponse` with
 `desktop_contract`, `desktop_available`, `desktop_auth`, and a versioned `features`
-map. Version 1 currently advertises `auth` and `settings`. Unadvertised features
-are not implemented by this contract. A missing route means an older backend;
+map. Version 1 advertises `auth`, `settings`, `commands`, `catalogues`, `lifecycle`,
+`mcp` and `radient`. These version backend HTTP subsystems, not renderer completion
+or third-party authorization. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for the
+all-command acceptance matrix and the new control routes. A missing route means an older backend;
 show an update/setup action rather than falling back to an unprotected write.
 
 Electron **main**, not the renderer, generates a random 32-byte token for each
@@ -30,7 +32,10 @@ In explicit desktop-token mode the legacy `/v1/config`,
 `/v1/config/system-prompt`, and `/v1/credentials` reads/writes also require that
 bearer. Otherwise they would bypass the new central-control boundary. Unmanaged
 legacy servers retain their old behavior; this is not a redesign of every legacy
-route's security. Legacy chat and SSE remain unchanged. Sensitive responses are
+route's security. Central Radient credential consumers (`/v1/models`, speech,
+transcription and agent ZIP upload) also require this boundary in managed mode;
+see DESKTOP_CONTROLS.md for their compatibility resolver and media-relay obligations.
+Legacy chat and SSE remain unchanged. Sensitive responses are
 `Cache-Control: no-store`; rejected input is not echoed by validation responses.
 
 ## Providers and accounts
@@ -133,10 +138,11 @@ maintain a second vocabulary.
 ## Canonical HTTP sessions (implementation checkpoint)
 
 These additive routes use the same bearer/Origin boundary and `no-store` policy
-as the adapters above. **The broad desktop `sessions`/`commands` capabilities are
-not advertised yet:** the full command/native-action, MCP, loop, attachment and
-Electron streaming surfaces are not complete. Do not enable the production
-composer merely because these routes exist. Legacy chat/SSE shapes are unchanged.
+as the adapters above. Command/native-action, MCP and lifecycle adapters are now
+specified in [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md). The Electron streaming,
+attachment and renderer surfaces still require their own acceptance gate. Do not
+enable the production composer merely because these routes exist. Legacy chat/SSE
+shapes are unchanged.
 
 `DesktopSessions` shares one `DesktopSessionBridge` per canonical 12-lowercase-hex
 session ID. An agent profile is not a session ID. Creation is explicit and writes
@@ -171,13 +177,12 @@ image, invalid base64 and slash text on `/messages` return422 before owner bindi
 The existing Electron request transport currently has a smaller262,144byte body
 budget: this checkpoint does not claim larger native image uploads work.
 
-The owner-only command endpoint currently accepts rename, model, effort, fast,
-context, goal, compact, approvals, team and agent (including shared aliases).
-It returns the actual owner result, including warnings and picker/noop metadata;
-it is **not** the complete35-command desktop dispatcher. In particular, native
-pickers/actions, provider/MCP controls, loop, fork, aside and explicit stop/abort
-still need the next adapter slice. On a `team_attached` or `agent_attached`
-result, the owner's `data.request` plus images is admitted **once by the bridge**
+The command endpoint now accepts every shared canonical command and alias.
+Owner controls return actual SlashResult data; native/interactive controls return
+typed destination, arguments and form/source/submit metadata, never fake execution
+success. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for all 35 rows and explicit
+frontend responsibilities. On a `team_attached` or `agent_attached` result, the
+owner's `data.request` plus images is admitted **once by the bridge**
 under the original request UUID; an added `result.admission` records that fact.
 The renderer must not independently re-submit that consumed request.
 

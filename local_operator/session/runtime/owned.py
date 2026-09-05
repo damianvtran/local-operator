@@ -97,6 +97,7 @@ class _PromptCommand:
     text: str
     images: list["ImageContent"]
     admitted: asyncio.Future[None]
+    completed: asyncio.Future[bool] | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -123,6 +124,20 @@ class OwnedSessionHandle(SessionHandle):
         auto_approve: bool = False,
     ) -> None:
         self._session = session
+        self._goal_loop: Any = None
+        self._loop_command_id: str | None = None
+        self._active_prompt_command_id: str | None = None
+        self._desktop_mcp: Any = None
+        self._desktop_cwd = cwd
+        store = getattr(session, "_frontend_state_store", None)
+        if (
+            store is not None
+            and store.state.loop
+            and store.state.loop.get("status") in {"running", "judging"}
+        ):
+            # Checkpoint state is not an instruction to spend more tokens. A
+            # replaced owner reports interrupted work rather than resuming it.
+            store.mutate(loop={**store.state.loop, "status": "interrupted"})
         self._loop = loop
         # When the owner's saved default is full-auto (``tool_approval_mode:
         # auto``), the phone must not park a card the TUI would never show —
@@ -328,6 +343,8 @@ class OwnedSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        if self._goal_loop is not None:
+            await self._goal_loop.cancel()
         drain = self._prompt_drain_task
         if drain is not None and not drain.done():
             drain.cancel()
@@ -378,6 +395,10 @@ class OwnedSessionHandle(SessionHandle):
             # teardown now; stale provider streaming flags must not wedge exit.
             return False
         session = self._session
+        if self._goal_loop is not None and self._goal_loop.running:
+            return True
+        if any(not task.done() for task in self._mcp_grant_tasks | self._mcp_reload_tasks):
+            return True
         if getattr(session, "is_streaming", False):
             return True
         if getattr(session, "_compacting", False):
@@ -689,6 +710,8 @@ class OwnedSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
+        *,
+        wait_complete: bool = False,
     ) -> str:
         self._check_loop_thread()
         if not command_id:
@@ -711,7 +734,8 @@ class OwnedSessionHandle(SessionHandle):
             )
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
-        command = _PromptCommand(command_id, text, _image_blocks(images), admitted)
+        completed = self._loop.create_future() if wait_complete else None
+        command = _PromptCommand(command_id, text, _image_blocks(images), admitted, completed)
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -727,9 +751,59 @@ class OwnedSessionHandle(SessionHandle):
         # ACK is the durable transcript append, never insertion into this queue.
         await admitted
         self._command_reservations.accept(command_id)
+        if completed is not None and not await asyncio.shield(completed):
+            raise RuntimeError("The admitted loop turn did not complete")
         if legacy_prompt and position > 1:
             return f"prompt queued ({position})"
         return "prompt admitted"
+
+    def _loop_driver(self):
+        from local_operator.session.goal_loop import GoalLoop
+
+        if self._goal_loop is None:
+
+            async def prompt(text: str) -> None:
+                self._loop_command_id = str(uuid.uuid4())
+                try:
+                    await self.prompt(text, command_id=self._loop_command_id, wait_complete=True)
+                finally:
+                    self._loop_command_id = None
+
+            async def judge(text: str) -> str:
+                from local_operator.harness.types import Message
+
+                return await self._session.complete_aside([Message.user(text)])
+
+            def changed(state: dict[str, Any]) -> None:
+                store = getattr(self._session, "_frontend_state_store", None)
+                if store is not None:
+                    store.mutate(loop=state)
+                self._notify()
+
+            self._goal_loop = GoalLoop(prompt, judge, self._cancel_loop_turn, changed)
+            store = getattr(self._session, "_frontend_state_store", None)
+            if store is not None and store.state.loop:
+                self._goal_loop.state = dict(store.state.loop)
+        return self._goal_loop
+
+    def _cancel_loop_turn(self) -> None:
+        # Another frontend may have queued a manual turn before this iteration.
+        # Cancelling automation must not abort that unrelated turn or leave its
+        # own queued iteration behind to run after the cancelled driver exits.
+        for command in list(self._prompt_queue):
+            if command.command_id != self._loop_command_id:
+                continue
+            if command.command_id == self._active_prompt_command_id:
+                self._session.abort()
+            else:
+                self._prompt_queue.remove(command)
+                self._prompt_commands.pop(command.command_id, None)
+                self._command_reservations.reject(command.command_id)
+                if not command.admitted.done():
+                    command.admitted.set_result(None)
+                if command.completed is not None and not command.completed.done():
+                    command.completed.set_result(False)
+            return
 
     def _observe_prompt_drain(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
@@ -820,6 +894,8 @@ class OwnedSessionHandle(SessionHandle):
         """
         while self._prompt_queue:
             command = self._prompt_queue[0]
+            self._active_prompt_command_id = command.command_id
+            succeeded = False
             try:
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
@@ -837,6 +913,7 @@ class OwnedSessionHandle(SessionHandle):
                     if not command.admitted.done():
                         command.admitted.set_result(None)
                     await self._session.prompt(command.text, command.images)
+                succeeded = True
             except asyncio.CancelledError:
                 if not command.admitted.done():
                     command.admitted.set_exception(
@@ -871,6 +948,9 @@ class OwnedSessionHandle(SessionHandle):
                 logger.critical("mobile prompt drain terminated", exc_info=True)
                 raise
             finally:
+                if command.completed is not None and not command.completed.done():
+                    command.completed.set_result(succeeded)
+                self._active_prompt_command_id = None
                 self._prompt_queue.popleft()
                 self._prompt_commands.pop(command.command_id, None)
 
@@ -945,6 +1025,8 @@ class OwnedSessionHandle(SessionHandle):
 
     async def abort(self) -> str:
         self._check_loop_thread()
+        if self._goal_loop is not None:
+            await self._goal_loop.cancel()
         self._session.abort("stopped from mobile")
         return "stopping"
 
@@ -1604,6 +1686,46 @@ class OwnedSessionHandle(SessionHandle):
         this runtime does not implement needs to know what to do instead.
         """
         session = self._session
+        if command == "desktop_mcp":
+            from local_operator.mcp.config import MCPConfigWriteError
+            from local_operator.mcp.desktop import MCPControl, MCPDesktop
+
+            if self._desktop_mcp is None:
+                self._desktop_mcp = MCPDesktop(session, self._mcp_grant_tasks, self._desktop_cwd)
+            try:
+                data = await self._desktop_mcp.execute(MCPControl.model_validate_json(args))
+            except (ValueError, MCPConfigWriteError):
+                # Refusals are protocol data, not socket outages. Config errors
+                # can quote credentials, so only a bounded code crosses back.
+                return SlashResult(kind="error", data={"code": "mcp_control_refused"})
+            return SlashResult(kind="block", data=data)
+        if command == "fork":
+            from local_operator.fork import fork_session
+            from local_operator.paths import config_dir
+
+            if getattr(session, "_compacting", False):
+                raise ValueError("Wait for compaction to finish before forking")
+            if getattr(session, "is_streaming", False):
+                if session.has_pending_fork():
+                    raise ValueError("A fork is already waiting for a safe boundary")
+                settled: asyncio.Future[str] = self._loop.create_future()
+
+                def complete(fork_id: str, error: str) -> None:
+                    if not settled.done():
+                        if error:
+                            settled.set_exception(RuntimeError("The fork could not be created"))
+                        else:
+                            settled.set_result(fork_id)
+
+                session.request_fork(config_dir(), on_complete=complete)
+                try:
+                    fork_id = await settled
+                except BaseException:
+                    session.cancel_fork()
+                    raise
+            else:
+                fork_id = await asyncio.to_thread(fork_session, config_dir(), session.session_id)
+            return SlashResult(kind="block", data={"type": "forked", "session_id": fork_id})
         if command == "context":
             return self._context_slash(session, SlashResult)
         if command == "team":
@@ -1627,17 +1749,19 @@ class OwnedSessionHandle(SessionHandle):
         if command == "compact":
             return self._compact_slash(session, SlashResult)
         if command == "loop":
-            # The goal loop is an OperatorApp worker; a detached runtime has
-            # no loop to stop, so saying "no loop is running" is the truth
-            # rather than a stub. A loop started in a viewer is stopped there.
+            driver = self._loop_driver()
             if args.lower() in ("stop", "cancel", "abort"):
-                return SlashResult(kind="notice", text="no loop is running", style="info")
-            return SlashResult(
-                kind="notice",
-                text="/loop is driven by the terminal that starts it — run /loop in "
-                "the terminal you want to watch it from",
-                style="warning",
-            )
+                await driver.cancel()
+            elif args.lower() != "status":
+                if driver.running:
+                    return SlashResult(
+                        kind="error", text="A loop is already running", data={"code": "loop_busy"}
+                    )
+                try:
+                    driver.start(args.strip(), str(getattr(session, "goal", "")))
+                except ValueError as error:
+                    return SlashResult(kind="error", text=str(error), data={"code": "loop_invalid"})
+            return SlashResult(kind="block", data={"type": "loop", **driver.state})
         # NEVER TELL AN ATTACHED USER TO REATTACH. Every session on this
         # release is detached, and the viewer routes these before its own
         # local handling — so a user sitting at a terminal was told to take an
