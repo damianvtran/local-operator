@@ -1,10 +1,43 @@
-"""Root conftest: cap xdist's ``-n auto`` worker count to what the machine can afford.
+"""Root conftest: cap xdist's ``-n auto`` worker count, and guard the
+operator's real session store against the suite.
 
-This file exists for exactly one hook. It has to live at the **rootdir** rather
-than in ``tests/``: ``pytest_xdist_auto_num_workers`` is consulted while the
-controller is deciding how many workers to spawn, which happens before the
-``tests/`` package conftest is loaded, so a copy under ``tests/`` is never
-called.
+Two unrelated jobs live here because both need the **rootdir**:
+
+1. ``pytest_xdist_auto_num_workers`` is consulted while the controller is
+   deciding how many workers to spawn, which happens before the ``tests/``
+   package conftest is loaded, so a copy under ``tests/`` is never called.
+2. The real-store guard (:func:`_guard_real_session_store`) has to capture
+   the developer's ORIGINAL ``HOME`` before any fixture redirects it, and has
+   to be installed before any test module is imported — a test that sets its
+   own ``HOME=`` or bypasses ``isolate_environment`` is exactly the case it
+   exists for.
+
+THE REAL-STORE GUARD
+--------------------
+225 of an operator's 244 named sessions vanished from ``~/.local-operator/
+sessions`` during a period when several whole-suite ``pytest tests/unit``
+runs were executing session-retention tests under heavy load. No
+local-operator reaper could account for the loss, and the suite's own
+isolation (``tests/conftest.py::isolate_environment``) redirects ``HOME``
+per test — but a redirect is only as good as the test that honours it, and
+nothing verified afterwards that the real store was untouched. So, from the
+original ``HOME`` captured at import:
+
+* ``shutil.rmtree``, ``os.rmdir``, ``os.removedirs``, ``os.rename``,
+  ``os.replace``, ``os.renames``, ``shutil.move``, ``pathlib.Path.rmdir``,
+  ``pathlib.Path.rename`` and ``pathlib.Path.replace`` are WRAPPED for the
+  whole session to raise :class:`RealStoreTouched` on any argument that
+  resolves under the real store, whatever ``HOME`` says at the time.
+* At session start the store's entry NAMES are snapshotted (read-only, one
+  ``scandir``); at session end the snapshot must still be a subset of the
+  live listing. Entries may be ADDED by the operator's own sessions running
+  alongside; none may vanish. A shrink fails the run with the missing ids.
+* If the real store does not exist (CI, a fresh machine) both are no-ops.
+
+This is defence against ANY actor in the process — a fixture teardown, a
+``tmp_path`` computed from a stale ``HOME``, a test's own ``rmtree`` — not
+only against the harness's own code, which the AST test in
+``tests/unit/session/test_no_session_deletion.py`` covers separately.
 
 WHY A CAP AT ALL
 ----------------
@@ -60,13 +93,136 @@ WHAT THIS DOES NOT AFFECT
 
 from __future__ import annotations
 
+import functools
 import os
+import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import warnings
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Real-store guard
+# ---------------------------------------------------------------------------
+
+#: The developer's real store, resolved from the ORIGINAL environment at
+#: import time — before ``isolate_environment`` or any test can move HOME.
+#: ``LOCAL_OPERATOR_CONFIG_DIR`` is honoured if the developer runs with one;
+#: otherwise ``~/.local-operator``. ``None`` when there is no such store.
+_REAL_STORE: pathlib.Path | None = None
+_REAL_STORE_ENTRIES: frozenset[str] | None = None
+
+
+def _resolve_real_store() -> pathlib.Path | None:
+    override = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+    base = (
+        pathlib.Path(override)
+        if override
+        else pathlib.Path(os.path.expanduser("~")) / ".local-operator"
+    )
+    store = base / "sessions"
+    try:
+        return store.resolve(strict=True) if store.is_dir() else None
+    except OSError:
+        return None
+
+
+class RealStoreTouched(RuntimeError):
+    """A test tried to remove, rename or replace something under the real store."""
+
+
+def _under_real_store(candidate: object) -> bool:
+    if _REAL_STORE is None:
+        return False
+    try:
+        if isinstance(candidate, pathlib.Path):
+            path = candidate
+        elif isinstance(candidate, (str, bytes, os.PathLike)):
+            path = pathlib.Path(os.fsdecode(candidate))
+        else:
+            return False
+        resolved = path.resolve()
+    except (TypeError, ValueError, OSError):
+        return False
+    return resolved == _REAL_STORE or _REAL_STORE in resolved.parents
+
+
+def _guarded(original, *, positions: tuple[int, ...]):
+    """Wrap ``original`` so the arguments at ``positions`` are checked first."""
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        for index in positions:
+            if index < len(args) and _under_real_store(args[index]):
+                raise RealStoreTouched(
+                    f"refusing {original.__module__}.{original.__name__} on {args[index]!s}: "
+                    f"it is under the operator's real session store {_REAL_STORE}. "
+                    "Tests must never touch it; fix the test's isolation."
+                )
+        return original(*args, **kwargs)
+
+    return wrapper
+
+
+def _install_real_store_guard() -> None:
+    global _REAL_STORE, _REAL_STORE_ENTRIES
+    _REAL_STORE = _resolve_real_store()
+    if _REAL_STORE is None:
+        return
+    try:
+        with os.scandir(_REAL_STORE) as entries:
+            _REAL_STORE_ENTRIES = frozenset(entry.name for entry in entries)
+    except OSError:
+        _REAL_STORE_ENTRIES = None
+    # Both the source (a session directory being moved away) and the target
+    # (something being moved onto it) are checked for the two-argument forms.
+    shutil.rmtree = _guarded(shutil.rmtree, positions=(0,))
+    shutil.move = _guarded(shutil.move, positions=(0, 1))
+    os.rmdir = _guarded(os.rmdir, positions=(0,))
+    os.removedirs = _guarded(os.removedirs, positions=(0,))
+    os.rename = _guarded(os.rename, positions=(0, 1))
+    os.replace = _guarded(os.replace, positions=(0, 1))
+    os.renames = _guarded(os.renames, positions=(0, 1))
+    # ``Path`` methods take ``self`` at position 0 and the target at 1.
+    pathlib.Path.rmdir = _guarded(pathlib.Path.rmdir, positions=(0,))
+    pathlib.Path.rename = _guarded(pathlib.Path.rename, positions=(0, 1))
+    pathlib.Path.replace = _guarded(pathlib.Path.replace, positions=(0, 1))
+
+
+_install_real_store_guard()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail the run if any pre-existing entry of the real store is gone."""
+    if _REAL_STORE is None or _REAL_STORE_ENTRIES is None:
+        return
+    try:
+        with os.scandir(_REAL_STORE) as entries:
+            now = frozenset(entry.name for entry in entries)
+    except OSError as exc:
+        # The store became unreadable during the run. Loud, not silent — but
+        # a directory that cannot be listed is not proof of loss, so warn.
+        warnings.warn(f"real-store tripwire: cannot re-list {_REAL_STORE}: {exc}", stacklevel=1)
+        return
+    missing = sorted(_REAL_STORE_ENTRIES - now)
+    if missing:
+        message = (
+            f"REAL SESSION STORE SHRANK DURING THIS TEST RUN: {len(missing)} entr"
+            f"{'y' if len(missing) == 1 else 'ies'} of {_REAL_STORE} vanished: "
+            f"{', '.join(missing[:20])}{' ...' if len(missing) > 20 else ''}. "
+            "Something in this run (or running alongside it) removed them."
+        )
+        # ``pytest.exit`` is the one exception ``wrap_session`` catches around
+        # this hook and turns into the exit status; anything else is reported
+        # as an internal error and the message is buried. Runs on the xdist
+        # controller AND every worker (each imports this conftest), so a
+        # shrink is reported by whichever process notices it first.
+        print(f"\n{message}", file=sys.stderr)
+        pytest.exit(message, returncode=pytest.ExitCode.TESTS_FAILED)
+
 
 #: Divisor for the memory budget. This is a deliberately CONSERVATIVE ENVELOPE,
 #: not the measured per-worker RSS - do not "correct" it to the measured figure.

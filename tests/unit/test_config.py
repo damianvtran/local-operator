@@ -354,3 +354,118 @@ def test_config_dir_created_0700(tmp_path):
     manager = ConfigManager(fresh)
     manager._write_config(vars(manager.config))
     assert fresh.stat().st_mode & 0o077 == 0
+
+
+# --- the one-time session-cleanup migration ----------------------------------
+
+
+def _write_config(config_dir: Path, values: dict[str, object]) -> Path:
+    path = config_dir / "config.yml"
+    metadata = {"created_at": "x", "last_modified": "x", "description": "d"}
+    path.write_text(yaml.safe_dump({"version": "0.1.0", "metadata": metadata, "values": values}))
+    return path
+
+
+def test_migration_removes_retired_reaper_keys_in_both_spellings(tmp_path, caplog):
+    """The operator's actual config shape after the incident: the retired
+    ceilings, the nested reap_unused ``/settings`` wrote AND the flat one the
+    reaper read. All four go, an explicit ``enabled: false`` arrives, and a
+    backup of the pre-migration file sits beside config.yml."""
+    import logging
+
+    _write_config(
+        tmp_path,
+        {
+            "hosting": "anthropic",
+            "session_retention_max_sessions": 200,
+            "session_retention_max_bytes": 0,
+            "session_retention_max_age_days": 0,
+            "session.reap_unused": False,
+            "session": {"reap_unused": False},
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.config"):
+        manager = ConfigManager(tmp_path)
+
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    for gone in (
+        "session_retention_max_sessions",
+        "session_retention_max_bytes",
+        "session_retention_max_age_days",
+        "session.reap_unused",
+    ):
+        assert gone not in stored, gone
+    assert "reap_unused" not in stored["session"]
+    assert stored["session"]["cleanup"]["enabled"] is False
+    assert stored["hosting"] == "anthropic", "unrelated keys survive"
+    assert manager.get_nested_value(("session", "cleanup", "enabled")) is False
+
+    backups = sorted(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
+    assert len(backups) == 1
+    original = yaml.safe_load(backups[0].read_text())["values"]
+    assert original["session.reap_unused"] is False
+    assert original["session_retention_max_sessions"] == 200
+
+    messages = [r.message for r in caplog.records]
+    assert any("config migration" in m and "session.reap_unused" in m for m in messages), messages
+
+
+def test_migration_is_a_no_op_on_a_clean_config(tmp_path):
+    _write_config(tmp_path, {"hosting": "anthropic"})
+    before = (tmp_path / "config.yml").read_text()
+    ConfigManager(tmp_path)
+    assert (tmp_path / "config.yml").read_text() == before
+    assert not list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
+
+
+def test_migration_runs_once(tmp_path):
+    _write_config(tmp_path, {"session": {"reap_unused": True}})
+    ConfigManager(tmp_path)
+    ConfigManager(tmp_path)
+    assert len(list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))) == 1
+
+
+def test_migration_merges_into_an_existing_cleanup_block(tmp_path):
+    """A user who already set cleanup limits keeps them; only the retired key
+    goes and ``enabled`` is pinned to false only if it was absent."""
+    _write_config(
+        tmp_path,
+        {
+            "session.reap_unused": True,
+            "session": {"cleanup": {"enabled": True, "max_sessions": 50}},
+        },
+    )
+    ConfigManager(tmp_path)
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["session"]["cleanup"] == {"enabled": True, "max_sessions": 50}
+
+
+def test_migration_marks_an_existing_store(tmp_path):
+    from local_operator.session.cleanup import STORE_MARKER_NAME
+
+    (tmp_path / "sessions" / "abc").mkdir(parents=True)
+    _write_config(tmp_path, {"session.reap_unused": False})
+    ConfigManager(tmp_path)
+    assert (tmp_path / "sessions" / STORE_MARKER_NAME).is_file()
+    assert (tmp_path / "sessions" / "abc").is_dir()
+
+
+def test_default_config_has_cleanup_disabled():
+    cleanup = DEFAULT_CONFIG.values["session"]["cleanup"]
+    assert cleanup == {
+        "enabled": False,
+        "max_sessions": 0,
+        "max_inactive_days": 0,
+        "max_total_bytes": 0,
+        "remove_empty": False,
+    }
+    assert "session_retention_max_sessions" not in DEFAULT_CONFIG.values
+
+
+def test_get_nested_value_walks_and_falls_back(tmp_path):
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"session": {"cleanup": {"max_sessions": 3}}, "flat": "yes"})
+    assert manager.get_nested_value(("session", "cleanup", "max_sessions")) == 3
+    assert manager.get_nested_value(("session", "cleanup", "nope"), "d") == "d"
+    assert manager.get_nested_value(("flat", "deeper"), "d") == "d"
+    assert manager.get_nested_value(("flat",)) == "yes"

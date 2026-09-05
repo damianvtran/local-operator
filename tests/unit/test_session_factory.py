@@ -1211,19 +1211,20 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
 
     The bug this guards against is an ORDERING defect: ``_prepare`` must claim
     its session directory BEFORE anything creates it empty, so that a
-    concurrent session's startup sweep — which reaps empty directories — cannot
-    delete it in the window before the first turn is written. A regression that
-    reordered the claim after the ``mkdir``/sweep would leave a real
-    ``claim_session`` intact and still reintroduce the bug, so testing
-    ``claim_session`` alone would not catch it. We therefore drive the real
-    ``_prepare`` with ``sweep_from_config`` patched to behave like the
-    aggressive concurrent sweep, and assert the directory survives.
+    concurrent scanner that removes empty unclaimed directories — today that
+    is only the user-enabled ``session.cleanup.remove_empty`` policy running
+    in a sibling process — cannot take it in the window before the first turn
+    is written. A regression that reordered the claim after the ``mkdir``
+    would leave a real ``claim_session`` intact and still reintroduce the bug,
+    so testing ``claim_session`` alone would not catch it. We therefore drive
+    the real ``_prepare`` with ``cleanup_from_config`` patched to behave like
+    an aggressive concurrent reaper, and assert the directory survives.
 
     Two co-resident reaps are modelled, because they pin two different
     regression shapes:
 
-    * ``reaping_sweep`` (patched onto ``sweep_from_config``) fires at the sweep
-      point ``_prepare`` reaches AFTER both its claim and its ``mkdir``. It
+    * ``reaping_sweep`` (patched onto ``cleanup_from_config``) fires at the
+      maintenance point ``_prepare`` reaches AFTER both its claim and ``mkdir``. It
       catches the claim removed ENTIRELY — with no marker written the sweep
       reaps the empty dir — but by then a claim-after-``mkdir`` dir is already
       claimed, so this reap alone cannot see an ordering defect.
@@ -1239,7 +1240,8 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
     Both reaps reap only EMPTY, UNCLAIMED directories under ``sessions/``,
     mirroring the real sweep's guard so a claimed dir is always left alone.
     """
-    from local_operator.session.retention import _is_claimed, sweep_sessions
+    from local_operator.session.cleanup import CleanupResult
+    from local_operator.session.retention import _is_claimed
     from local_operator.session_factory import (
         _prepare,
         _start_store_maintenance,
@@ -1253,7 +1255,7 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
 
     captured: dict[str, object] = {}
 
-    def reaping_sweep(cfg_mgr, config_dir, live_dir):
+    def reaping_sweep(cfg_mgr, config_dir, *, live_dir=None):
         # Stand in for a co-resident session's startup sweep: reap every empty,
         # unclaimed directory, and DO NOT honour ``live_dir`` — that belt only
         # protects the sweeping session's OWN directory, and here the starting
@@ -1282,8 +1284,7 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
         # claim-after (reaped here, recreated later). ``live_dir`` is the
         # session's own directory the same object ``_prepare`` claims.
         captured["survived_the_sweep"] = live_dir is not None and live_dir.exists()
-        # Also run the genuine sweep so the test exercises the real signature.
-        return sweep_sessions(sessions_dir, live_dir=live_dir)
+        return CleanupResult(skipped="test stand-in")
 
     sessions_dir = tmp_config_dir / "sessions"
 
@@ -1319,10 +1320,10 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
             captured["reaped_at_mkdir"] = True
         return original_mkdir(self, *args, **kwargs)
 
-    from local_operator.session import retention as retention_mod
+    from local_operator.session import cleanup as cleanup_mod
 
-    original = retention_mod.sweep_from_config
-    retention_mod.sweep_from_config = reaping_sweep
+    original = cleanup_mod.cleanup_from_config
+    cleanup_mod.cleanup_from_config = reaping_sweep
     monkeypatch.setattr(Path, "mkdir", mkdir_with_concurrent_reap)
     try:
         plan = await _prepare(
@@ -1342,7 +1343,7 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
         )
         await await_store_maintenance_for_tests()
     finally:
-        retention_mod.sweep_from_config = original
+        cleanup_mod.cleanup_from_config = original
 
     transcript_dir = captured["transcript_dir"]
     assert transcript_dir is not None
@@ -2675,7 +2676,7 @@ async def test_store_maintenance_does_not_block_session_construction(
     regression. A live task at return proves the same contract without holding
     a worker.
     """
-    from local_operator.session import retention as retention_mod
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
     started = asyncio.Event()
@@ -2684,7 +2685,7 @@ async def test_store_maintenance_does_not_block_session_construction(
     async def blocking_pass(*_a: Any, **_k: Any) -> Any:
         started.set()
         await release.wait()
-        return retention_mod.SweepResult()
+        return cleanup_mod.CleanupResult()
 
     # Patch the coroutine the dispatcher schedules, not the inner sweep: a
     # regression that awaits it in create_session hangs on ``wait_for`` rather
@@ -2733,7 +2734,7 @@ async def test_store_maintenance_waits_until_create_session_can_return(
     """
     from local_operator import resume as resume_mod
     from local_operator.model import configure as configure_mod
-    from local_operator.session import retention as retention_mod
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
     delay_entered = asyncio.Event()
@@ -2747,7 +2748,7 @@ async def test_store_maintenance_waits_until_create_session_can_return(
 
     def note_filesystem_callback(*_a: Any, **_k: Any) -> Any:
         callback_started.set()
-        return retention_mod.SweepResult()
+        return cleanup_mod.CleanupResult()
 
     real_configure_model = configure_mod.configure_model
 
@@ -2759,7 +2760,7 @@ async def test_store_maintenance_waits_until_create_session_can_return(
     monkeypatch.setattr(
         session_factory, "_wait_for_store_maintenance_idle_window", controlled_idle_window
     )
-    monkeypatch.setattr(retention_mod, "sweep_from_config", note_filesystem_callback)
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", note_filesystem_callback)
     monkeypatch.setattr(configure_mod, "configure_model", note_model_work)
     monkeypatch.setattr(resume_mod, "backfill_session_origins", lambda *_a, **_k: 0)
     monkeypatch.setattr(resume_mod, "backfill_session_titles", lambda *_a, **_k: 0)
@@ -2807,16 +2808,16 @@ async def test_store_maintenance_runs_once_per_process(
     STORE, and the store does not become dirty because the user pressed
     ``/resume``.
     """
-    from local_operator.session import retention as retention_mod
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
     calls: list[int] = []
 
     def counting_sweep(*_a: Any, **_k: Any) -> Any:
         calls.append(1)
-        return retention_mod.SweepResult()
+        return cleanup_mod.CleanupResult()
 
-    monkeypatch.setattr(retention_mod, "sweep_from_config", counting_sweep)
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", counting_sweep)
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
@@ -2849,7 +2850,7 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
     and the later passes still run. The contract these carried when they were
     awaited inline survives the move to a background task."""
     from local_operator import resume as resume_mod
-    from local_operator.session import retention as retention_mod
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
     def exploding_sweep(*_a: Any, **_k: Any) -> Any:
@@ -2861,7 +2862,7 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
         ran.append("titles")
         return 0
 
-    monkeypatch.setattr(retention_mod, "sweep_from_config", exploding_sweep)
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", exploding_sweep)
     monkeypatch.setattr(resume_mod, "backfill_session_titles", note_titles)
 
     from local_operator.agents import AgentRegistry

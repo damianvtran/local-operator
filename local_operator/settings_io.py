@@ -729,7 +729,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         # `runtime.*`, matching the section it appears in and the other key in
         # it. Round 1 (R5): filing it under `session.*` while showing it in the
-        # Runtime section made the file teach two rules — `session.reap_unused`
+        # Runtime section made the file teach two rules — `session.cleanup.*`
         # stays in the Session section, so a user reading the Runtime page
         # could not predict which YAML key they were editing. The scope
         # argument for keeping it out of the Session SECTION (that section is
@@ -748,16 +748,70 @@ SETTINGS: tuple[Setting, ...] = (
             "stop the turn when you leave the session",
         ),
     ),
-    # -- subagents ----------------------------------------------------------
+    # -- session cleanup policy ---------------------------------------------
+    # The ONE way a session directory can be removed automatically, and it is
+    # OFF by default. Ordered master-switch first so the page reads as "a
+    # switch, then what it controls"; the sub-rows carry a `↳` prefix and say
+    # in their help that they are inert while the switch is off. Every row is
+    # a genuinely NESTED path under `session.cleanup`, and the consumer
+    # (`session/cleanup.py`) reads it back through
+    # `ConfigManager.get_nested_value` on the SAME tuple — the previous
+    # `session.reap_unused` toggle was written nested here and read flat
+    # there, so the opt-out never worked and the reaper it gated deleted 225
+    # named sessions. `test_settings_io.py` round-trips every nested setting
+    # through that reader to keep this from recurring.
     Setting(
-        key="session.reap_unused",
-        path=("session", "reap_unused"),
+        key="session.cleanup.enabled",
+        path=("session", "cleanup", "enabled"),
         section="session",
-        label="Remove unused sessions",
+        label="Session cleanup",
         kind=Kind.BOOL,
-        default=True,
-        help="Delete old session directories that never received a message.",
-        choices=_bool_choices("remove them on startup", "keep every directory"),
+        default=False,
+        help="Master switch. Off: nothing ever removes a session directory automatically.",
+        choices=_bool_choices(
+            "apply the limits below on startup",
+            "never remove sessions automatically",
+        ),
+    ),
+    Setting(
+        key="session.cleanup.max_sessions",
+        path=("session", "cleanup", "max_sessions"),
+        section="session",
+        label="↳ Cleanup: max sessions",
+        kind=Kind.INT,
+        default=0,
+        help="Keep only the N most recently active sessions. 0 = unlimited. Needs cleanup on.",
+        minimum=0,
+    ),
+    Setting(
+        key="session.cleanup.max_inactive_days",
+        path=("session", "cleanup", "max_inactive_days"),
+        section="session",
+        label="↳ Cleanup: max inactive days",
+        kind=Kind.INT,
+        default=0,
+        help="Remove sessions idle longer than this (last activity). 0 = never. Needs cleanup on.",
+        minimum=0,
+    ),
+    Setting(
+        key="session.cleanup.max_total_bytes",
+        path=("session", "cleanup", "max_total_bytes"),
+        section="session",
+        label="↳ Cleanup: max total bytes",
+        kind=Kind.INT,
+        default=0,
+        help="Trim least recently active sessions past this size. 0 = unlimited. Needs cleanup on.",
+        minimum=0,
+    ),
+    Setting(
+        key="session.cleanup.remove_empty",
+        path=("session", "cleanup", "remove_empty"),
+        section="session",
+        label="↳ Cleanup: remove empty",
+        kind=Kind.BOOL,
+        default=False,
+        help="Remove directories that never got a transcript. Needs cleanup on.",
+        choices=_bool_choices("remove transcript-less directories", "keep them"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -1117,33 +1171,6 @@ SETTINGS: tuple[Setting, ...] = (
     # Kept VISIBLE and read-only rather than hidden. A user who set one of
     # these years ago needs to see that it is inert; removing the row would
     # leave them believing a ceiling is still in force.
-    Setting(
-        key="session_retention_max_sessions",
-        path=("session_retention_max_sessions",),
-        section="retired",
-        label="Session retention: max sessions",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
-    Setting(
-        key="session_retention_max_bytes",
-        path=("session_retention_max_bytes",),
-        section="retired",
-        label="Session retention: max bytes",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
-    Setting(
-        key="session_retention_max_age_days",
-        path=("session_retention_max_age_days",),
-        section="retired",
-        label="Session retention: max age (days)",
-        kind=Kind.READONLY,
-        default=0,
-        help="Retired. Transcripts are never deleted automatically at any value.",
-    ),
     Setting(
         key="conversation_length",
         path=("conversation_length",),

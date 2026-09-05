@@ -495,6 +495,48 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    # `lop sessions cleanup`: the explicit, previewable way to run the session
+    # cleanup policy. An optional sub-subcommand (dest defaults to None) so
+    # bare `lop sessions` keeps listing. Running it by hand is the user's
+    # consent, so `session.cleanup.enabled` is not required — but every hard
+    # guard (live claim/lease, armed wake, unread mail, the 10 most recent)
+    # still applies, and `--dry-run` shows the decisions without acting.
+    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
+    cleanup_parser = sessions_subparsers.add_parser(
+        "cleanup",
+        help="Run the session cleanup policy now (use --dry-run to preview)",
+        parents=[parent_parser],
+    )
+    cleanup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be removed and why, without removing anything",
+    )
+    cleanup_parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=None,
+        help="keep only the N most recently active sessions (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--max-inactive-days",
+        type=int,
+        default=None,
+        help="remove sessions idle longer than N days (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=None,
+        help="trim the least recently active sessions past this store size (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--remove-empty",
+        action="store_true",
+        default=None,
+        help="remove directories that never got a transcript (overrides config)",
+    )
+    cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -1181,12 +1223,8 @@ def config_list_command() -> int:
         "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
         "replaces conversation_length/detail_length",
         "tui": "TUI settings (theme)",
-        "session_retention_max_sessions": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
-        "session_retention_max_bytes": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
-        "session_retention_max_age_days": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
+        "session": "Session settings; session.cleanup.* is the opt-in cleanup policy "
+        "(off by default: nothing removes a session directory unless enabled)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
@@ -1689,6 +1727,82 @@ def send_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_cleanup_command(args: argparse.Namespace) -> int:
+    """``lop sessions cleanup [--dry-run]`` — run the cleanup policy explicitly.
+
+    The limits come from ``session.cleanup.*`` in config, each overridable on
+    the command line for a one-off run. ``enabled`` is NOT consulted: typing
+    the command is the consent. With no limit configured or given there is
+    nothing to apply, and the command says so rather than inventing one.
+    """
+    import dataclasses
+    import json as _json
+
+    from local_operator.session.cleanup import (
+        CLEANUP_LOG_NAME,
+        policy_from_config,
+        run_cleanup,
+    )
+
+    root = config_dir()
+    policy = policy_from_config(ConfigManager(root))
+    overrides = {
+        name: value
+        for name, value in (
+            ("max_sessions", args.max_sessions),
+            ("max_inactive_days", args.max_inactive_days),
+            ("max_total_bytes", args.max_total_bytes),
+            ("remove_empty", args.remove_empty),
+        )
+        if value is not None
+    }
+    policy = dataclasses.replace(policy, **overrides)
+    if not policy.has_any_limit:
+        print(
+            "no cleanup limits configured: set session.cleanup.* in /settings "
+            "or pass --max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty",
+            file=sys.stderr,
+        )
+        return 1
+
+    result = run_cleanup(root, policy, dry_run=bool(args.dry_run), explicit=True)
+    verb = "would remove" if args.dry_run else "removed"
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "dry_run": result.dry_run,
+                    "scanned": result.scanned,
+                    "removed": [dataclasses.asdict(c) for c in result.removed],
+                    "protected": [
+                        {"session": name, "guard": guard} for name, guard in result.protected
+                    ],
+                    "errors": result.errors,
+                    "skipped": result.skipped,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if result.skipped:
+        print(f"nothing to do: {result.skipped}")
+        return 0
+    print(
+        f"policy: max_sessions={policy.max_sessions} max_inactive_days={policy.max_inactive_days} "
+        f"max_total_bytes={policy.max_total_bytes} remove_empty={policy.remove_empty}"
+    )
+    print(f"scanned {result.scanned} sessions; {verb} {len(result.removed)}")
+    for candidate in result.removed:
+        print(f"  {verb:<12} {candidate.session}  [{candidate.policy}] {candidate.reason}")
+    for name, guard in result.protected:
+        print(f"  kept         {name}  ({guard})")
+    if result.errors:
+        print(f"  {result.errors} error(s); see the log", file=sys.stderr)
+    if not args.dry_run and result.removed:
+        print(f"record: {root / 'sessions' / CLEANUP_LOG_NAME}")
+    return 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -1697,6 +1811,9 @@ def sessions_command(args: argparse.Namespace) -> int:
     otherwise. HEARTBEAT_AGE surfaces wedged-ness numerically so counts can be
     eyeballed against reality."""
     import json as _json
+
+    if getattr(args, "sessions_command", None) == "cleanup":
+        return sessions_cleanup_command(args)
 
     from local_operator.mobile.resources import session_resource_usage
     from local_operator.session.runtime import registry
