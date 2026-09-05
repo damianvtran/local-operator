@@ -14942,15 +14942,33 @@ class OperatorApp(App[None]):
                 # facade must keep routing so the owner's own reply lands.
                 #
                 # COMMAND-AGNOSTIC BY DESIGN, not by accident of placement:
-                # this answers EVERY routed command a stopped follower can
-                # reach — `/goal`, `/rename`, `/effort`, `/compact` and the
-                # ~35 others the owner advertises — because
-                # `route_shared_slash` refuses all of them identically on
-                # `client is None`, with the same misleading "reconnecting"
-                # wording. A `/model`-only guard would have fixed one command
-                # and left every neighbour telling the user to wait for an
-                # owner that is not coming back (review round 3, MINOR-1; QA
-                # Q8 measured the breadth on `/goal`, `/rename`, `/effort`).
+                # this answers every routed command that REACHES it — `/goal`,
+                # `/rename`, `/effort`, `/compact` and the ~30 others the owner
+                # advertises — because `route_shared_slash` refuses all of them
+                # identically on `client is None`, with the same misleading
+                # "reconnecting" wording. A `/model`-only guard would have
+                # fixed one command and left every neighbour telling the user
+                # to wait for an owner that is not coming back (review round 3,
+                # MINOR-1; QA Q8 measured the breadth on `/goal`, `/rename`,
+                # `/effort`).
+                #
+                # THREE commands deliberately never reach it, and this branch
+                # does not try to take them back. `_needs_runtime_first` above
+                # routes `/team <name>`, `/agent <name>` and `/credential` into
+                # `_bind_then_dispatch` for any cold facade that can bind, a
+                # stopped one included: those three have no answer to give
+                # until a runtime exists (the credential store IS the runtime's
+                # memory, and an attach stamps the session that builds the next
+                # turn), so engaging one and retrying is a better answer than
+                # "/resume" — and `_bind_then_dispatch` still ends at the same
+                # honest refusal if the facade stays cold. Answering them here
+                # as well would be a second, contradictory answer to a case
+                # main already decides (UX U3). Verified by probe, not
+                # inferred: with a stopped id set, `_needs_runtime_first` is
+                # True for exactly those three argument-bearing forms and False
+                # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
+                # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
                 # The LOCAL pullbacks above are untouched by that breadth:
                 # `/model default`, bare `/mcp` and `/team chart` set
                 # `remote_capability = None` before this branch is entered, so
