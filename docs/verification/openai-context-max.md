@@ -145,6 +145,26 @@ The resulting 234.4% reading is intentionally not clamped. Both PNGs were viewed
 | --- | --- |
 | ![Online cold maximum](../assets/openai-context-max/cold-online.png) | ![Conservative offline cold limit](../assets/openai-context-max/cold-offline.png) |
 
+## Remediation gate results
+
+The full unit gate integrating main `3b100234` and the unified context
+remediation completed with **13,109 passed, 15 skipped** in 1204.62 seconds.
+Q1 was discovered while that run was in flight: its final thread-ownership
+delta was additionally validated by 32 focused context/remote tests and the
+independent repeated-cold-view HTTP/app sequence (20 passing observations).
+Full-tree flake8, Black, isort and pyright passed after Q1.
+
+Then integrated `a517f229` (#632): the only production delta is the GPT-6
+reasoning-effort policy in `model/effort.py`; context resolution continues to
+preserve effort fields and provider-listing precedence. Version advanced to
+0.46.18 to avoid downgrading the concurrently released 0.46.17. The final
+narrow integration is covered by the effort/session/context/remote matrix and
+E2E rather than claiming the earlier full-unit run includes later source.
+The final focused matrix passed **191 tests** in 7.41 seconds; E2E passed
+**9 tests** in 18.43 seconds. The installed candidate reports version 0.46.18
+and imports from its own worktree. Its tracked HTTP reproduction was rerun
+successfully after this integration.
+
 ## Regression coverage
 
 `tests/unit/model/test_openai_context.py` covers default/max parsing and cache
