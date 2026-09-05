@@ -255,6 +255,7 @@ async def test_a_provider_refusal_takes_the_dial_off_the_band_and_the_memory() -
         session = app._session
         assert session is not None
         session.set_model(session.model.model_copy(update={"fast_mode": False}))
+        assert app._status is not None
         app._status.update(fast=_fast_label_for_test(session))
         app._pending_frontend_state = _State(session.model)
         app._apply_pending_frontend_state(getattr(app, "_frontend_session_generation", 0))

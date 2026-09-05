@@ -421,8 +421,8 @@ async def test_bare_stream_fn_degrades_to_the_selected_model(tmp_path):
 class FastRoutedStream(RoutedStream):
     """A stream fn that also exposes the fast-mode refusal bridge."""
 
-    def __init__(self, turns=None) -> None:
-        super().__init__(turns)
+    def __init__(self, turns: Any = None) -> None:
+        super().__init__(turns or [[StreamEndEvent(stop_reason="stop")]])
         self.fast_refused_handler: Any = None
 
     def set_fast_refused_handler(self, handler) -> None:
