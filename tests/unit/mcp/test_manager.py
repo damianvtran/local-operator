@@ -2261,6 +2261,49 @@ class TestMcpAuthRecoveryHint:
             mcp_server_name_in("MCP authorization failed for minerva-qa", servers) == "minerva-qa"
         )
 
+    def test_a_name_inside_the_hostname_IS_a_match(self) -> None:
+        """R9/U9: the URL-shaped message is the ONLY one the field produces.
+
+        The R6 boundary put ``.`` in the non-name class, which reads as
+        harmless — names may contain a dot — but a dot is exactly what a
+        hostname puts on both sides of the name. That made the loose pass, whose
+        documented job is "the fallback for the URL-shaped messages", match
+        NOTHING: ``linear``, ``notion``, ``sentry`` and ``minerva-qa`` all went
+        from resolved to ``None``, and every actionable ``run /mcp reauth
+        linear`` silently became the generic referral.
+
+        Both existing layers missed it because the quoted form asserted above is
+        emitted NOWHERE in the product for this path and the app-level stub
+        bypasses the matcher, so this drives the REAL exceptions' own
+        ``__str__`` — a hand-written string is what let the gap open.
+        """
+        from local_operator.mcp.auth import McpAuthChallengeError, McpAuthRequiredError
+        from local_operator.mcp.manager import mcp_server_name_in
+
+        servers = ["linear", "minerva-qa", "notion", "sentry", "git"]
+        hosts = {
+            "linear": "https://mcp.linear.app/sse",
+            "notion": "https://mcp.notion.com/mcp",
+            "sentry": "https://mcp.sentry.dev/mcp",
+            "minerva-qa": "https://minerva-qa.gominerva.com/mcp",
+        }
+        for name, url in hosts.items():
+            challenge = McpAuthChallengeError(
+                url, status_code=401, oauth_available=True, has_stored_grant=True
+            )
+            assert mcp_server_name_in(str(challenge), servers) == name
+            assert mcp_server_name_in(str(McpAuthRequiredError(url)), servers) == name
+
+        # And the R6 case stays closed, because what blocks it is the `-`, not
+        # the `.` — including when the decoy sits in the hostname rather than
+        # the path, which is where dropping `.` could plausibly have re-opened it.
+        assert (
+            mcp_server_name_in(
+                str(McpAuthRequiredError("https://git-things.example.com/mcp")), servers
+            )
+            is None
+        )
+
 
 class TestTheManagerDerivesTheAuthRemedy:
     """R5: which command fixes a server is decided from STATE, not guessed.

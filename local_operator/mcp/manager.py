@@ -210,10 +210,20 @@ def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str
     unanchored substring matched inside a URL path, so a server named ``git``
     was named out of ``https://example.com/git-things`` and reported as the
     unambiguous answer (review R6). Short generic names — ``git``, ``api``,
-    ``db`` — are exactly the plausible ones. ``-`` and ``.`` are common in
-    server names and are NOT word characters, so the boundary is built from an
-    explicit non-name-character class rather than ``\\b``, which would fire
-    inside ``minerva-qa``.
+    ``db`` — are exactly the plausible ones. ``-`` is common in server names
+    and is NOT a word character, so the boundary is built from an explicit
+    non-name-character class rather than ``\\b``, which would fire inside
+    ``minerva-qa``.
+
+    ``.`` is deliberately EXCLUDED from that class even though names may
+    contain it, because a dot is what a hostname puts on both sides of the
+    name this pass exists to find. Every real auth failure here is URL-shaped
+    — ``McpAuthChallengeError`` renders the URL, never the configured name —
+    so treating ``.`` as name-internal made ``linear`` unmatchable inside
+    ``mcp.linear.app`` and the loose pass resolved NOTHING, silently
+    downgrading every actionable ``run /mcp reauth linear`` to the generic
+    referral (review R9/U9). R6 stays closed without it: the ``/git-things``
+    case is blocked by the ``-``, not by the ``.``.
 
     AMBIGUITY YIELDS None, deliberately: naming the wrong server is the exact
     failure this whole remediation is about, so two candidates means the
@@ -231,11 +241,13 @@ def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str
     return None
 
 
-#: What may NOT abut a server name for a loose match to count. Everything a
-#: name itself can contain, so a match inside a longer identifier or URL
-#: segment (``git`` in ``/git-things``) is rejected while ``minerva-qa`` still
-#: matches its own hyphen.
-_NAME_CHAR = re.compile(r"[0-9a-z_.-]")
+#: What may NOT abut a server name for a loose match to count, so a match
+#: inside a longer identifier or URL segment (``git`` in ``/git-things``) is
+#: rejected while ``minerva-qa`` still matches its own hyphen. ``.`` is
+#: omitted on purpose: it is the hostname separator these messages are built
+#: from, so counting it here makes a name unmatchable in the very URL that
+#: carries it (see :func:`mcp_server_name_in`).
+_NAME_CHAR = re.compile(r"[0-9a-z_-]")
 
 
 def _names_server(haystack: str, name: str) -> bool:
