@@ -15,8 +15,10 @@ decision and no score existed at that point. The dated observations under
 [Status and honest limitations](#status-and-honest-limitations) preserve that
 baseline, not the current episode count. See [the matched-model pilot ledger](MODEL_PILOT.md)
 for subsequent attempts, current apparatus validation and reference caveats.
-Neither an individual score nor the offline checks below establish a full-suite
-benchmark result.
+See the [ten-task developmental pilot](PILOT10_2026_09_05.md) for the frozen
+sample, all ten first attempts, confirmed completion, costs, and apparatus
+amendments. Neither an individual score nor the offline checks below establish
+a full-suite benchmark result.
 
 ## 1. The benchmark
 
@@ -24,8 +26,9 @@ OSWorld 2.0 (`osworld-v2-2026.08.08`) is a computer-use benchmark of **108
 long-horizon workflows** on a real Ubuntu desktop. Upstream reports a median
 human completion time of about 1.6 hours per task and an average of ~318 tool
 calls for a frontier model, against about 30 in OSWorld 1.0; its headline
-figures are quoted **under a binary-completion metric at 500 steps**, where
-the best reported model completes 20.6% of tasks (54.8% partial). Tasks are
+figures in the original paper are quoted **under a binary-completion metric at
+500 steps**, with 20.6% completion (54.8% partial) for its best reported
+configuration. That historical paper result is not a current frontier claim. Tasks are
 scored by per-task Python evaluators shipped with the corpus, averaging 27.25
 scoring checkpoints per task.
 
@@ -128,6 +131,10 @@ neither creates nor repairs one — and it must allow inbound TCP from the
   (`chromium_port`, default 9222).
 - **5910** — noVNC web access, optional, for a human watching a guest.
   Upstream logs a `http://<ip>:5910/vnc.html` URL for AWS instances.
+- **3000 and 8000** — V2 task services, explicitly required in the pinned
+  upstream README in addition to the standard backend/control ports. The
+  ten-task pilot's dated report records when the staged group was corrected;
+  do not imply those ports were open for every earlier attempt.
 
 These are unauthenticated services on a public IP. A `0.0.0.0/0` rule on 5000
 hands anyone on the internet full control of a desktop that is executing a
