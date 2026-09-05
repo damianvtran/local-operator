@@ -6871,24 +6871,16 @@ class OperatorApp(App[None]):
             # asymmetry between the two (that one returned and this one did
             # not) is what let the silent path ship.
             #
-            # NO RETRY ADVICE, and NO "yet" (R1, D3). The obvious next step —
-            # "send a message first, then run /team again" — is FALSE and lands
-            # the user somewhere worse than here. Sending a message BINDS the
-            # viewer, and a bound viewer adopts the owner's
-            # `slash_capabilities`, where `team` is scoped
-            # `authoritative_session`. The retry therefore never reaches this
-            # method: it routes to the owner's `_team_slash_result`, which
-            # returns `noop {"type": "team_mutate"}` for the mutating form, and
-            # `_render_authoritative_slash` returns without printing on a noop.
-            # Measured on a bound viewer: routed to owner, 0 prompts sent, 0
-            # transcript rows, no notice — total silence.
-            #
-            # "Run it in the session's own terminal" is false too, and "yet"
-            # promises a wait that never ends: `attach_team` exists only on
-            # `Session`, which `lop` no longer builds at all, so this is
-            # unfollowable BY CONSTRUCTION rather than merely unavailable
-            # today. So the notice names what this session CAN do — list and
-            # chart — instead of gesturing at a capability that is not coming.
+            # RARELY REACHED NOW. A viewer's `/team <name> …` is routed to the
+            # runtime by `_run_slash_command` — and on a COLD viewer the
+            # dispatch engages a runtime first (`_needs_runtime_first`), which
+            # is the retry the old copy here rightly refused to promise back
+            # when the routed form answered with an unconsumed noop. What
+            # remains for this branch is a session that can neither attach
+            # locally nor route (a reduced or version-skewed owner), for which
+            # "list and chart" is still exactly what it can do. NO "yet" and
+            # no retry advice for the same reason as before: nothing about this
+            # session is going to change by waiting.
             self._system_notice(
                 "this session can list and chart teams, but not run one. "
                 "/team chart <name> shows a roster",
@@ -7215,12 +7207,12 @@ class OperatorApp(App[None]):
             # for `/team`, and the registry fix is what made this copy wrong.
             #
             # What is missing is the attach seam, not the agents, so the notice
-            # names what this session CAN do — and, per R1/D3, promises no
-            # retry and says no "yet": `agent` is scoped
-            # `authoritative_session`, so a retry after binding routes to the
-            # owner and answers with `agent_mutate` silence, and
-            # `attach_agent_profile` exists only on the `Session` that `lop`
-            # no longer builds.
+            # names what this session CAN do. Rarely reached now, for the same
+            # reason as the `/team` guard: a viewer's `/agent <name>` routes to
+            # the runtime, and a cold viewer engages one first
+            # (`_needs_runtime_first`). What is left is a session that can
+            # neither attach nor route, so — as before — no "yet" and no retry
+            # advice: waiting changes nothing about it.
             self._system_notice(
                 "this session can list agents, but not attach one. /agent shows the roster",
                 "warning",
@@ -8480,6 +8472,92 @@ class OperatorApp(App[None]):
                 self._set_starting(False)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _needs_runtime_first(self, command: str, arg: str) -> bool:
+        """Whether ``command`` must engage a runtime before it can be dispatched.
+
+        True only on a COLD viewer (``is_cold`` on a facade that can bind), and
+        only for the commands whose effect lives on the runtime rather than in
+        this terminal:
+
+        - ``/team <name> …`` and ``/agent <name>`` — the attach stamps the
+          roster and briefs onto the session that builds the next turn, which
+          does not exist yet on a cold viewer. The bare LISTINGS and ``/team
+          chart`` read local config and stay local; engaging a runtime to list
+          teams would make opening `lop` and pressing `/team` cost a process.
+        - ``/credential`` — every verb. The store is the runtime's in-memory
+          dict (the `bash` tool reads it there), so even ``list`` has nothing
+          to answer from until one exists, and the STORE verb must have a
+          destination BEFORE the masked paste opens: accepting a secret and
+          then reporting nowhere to put it was the worst shape in the round
+          (UX U3).
+
+        Every other slash either runs locally or is already refused honestly
+        when cold; this list is deliberately the three the round measured.
+        """
+        session = self._session
+        if session is None or not getattr(session, "is_cold", False):
+            return False
+        if not callable(getattr(session, "_ensure_bound", None)):
+            return False
+        head = arg.partition(" ")[0].strip()
+        if command == "/credential":
+            return True
+        if command == "/team":
+            return bool(head) and head.casefold() != "chart"
+        if command == "/agent":
+            return bool(head)
+        return False
+
+    def _bind_then_dispatch(
+        self, text: str, attachments: Mapping[int, Marked] | None = None
+    ) -> None:
+        """Engage the cold viewer's runtime, then run ``text`` as if freshly typed.
+
+        Shares ``_warm_runtime_for_draft``'s band state so the user sees the
+        same ``starting…`` the first keystroke shows, and the same engage lock
+        on the facade (``_ensure_bound`` is idempotent and serialised) so a
+        command racing the speculative warm engage waits for THAT runtime
+        rather than starting a second one.
+
+        A failed engage is reported with the failure itself — not the local
+        handler's "cannot run one" copy, which described a capability gap
+        that no longer exists.
+        """
+        session = self._session
+        ensure = getattr(session, "_ensure_bound", None)
+        if not callable(ensure):
+            return
+        self._set_starting(True)
+
+        async def run() -> None:
+            try:
+                await cast(Callable[[], Awaitable[None]], ensure)()
+            except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+                logger.debug("engaging a runtime for a slash command failed", exc_info=True)
+                self._system_notice(
+                    f"could not start a runtime for this session: {error}", "warning"
+                )
+                return
+            finally:
+                self._set_starting(False)
+            # The session may have been swapped by /new or /resume while the
+            # engage ran; the command belonged to the one that was cold.
+            if self._session is not session:
+                return
+            if getattr(session, "is_cold", False):
+                # `_ensure_bound` is a no-op on a facade that cannot bind (the
+                # legacy attach path keeps its own recovery contract), so a
+                # still-cold session here would re-enter this seam forever.
+                # Say what is true and stop.
+                self._system_notice(
+                    "no runtime is running for this session; send a message to start one",
+                    "warning",
+                )
+                return
+            self._run_slash_command(text, attachments)
+
+        self.run_worker(run(), thread=False, group="session")
 
     def _set_starting(self, starting: bool) -> None:
         """Show or clear the band's "starting…" state.
@@ -14160,6 +14238,26 @@ class OperatorApp(App[None]):
         # (talk to a team named ``chart``) still routes.
         if command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart":
             remote_capability = None
+        if self._needs_runtime_first(command, arg):
+            # BIND, THEN ROUTE. A COLD viewer — every fresh `lop`, and every
+            # viewer after `/stop` — advertises no capabilities at all, so the
+            # branches below would fall through to the LOCAL handler, whose
+            # attach seam does not exist on a `RemoteSession`, and refuse with
+            # copy that reads as permanent. Measured: engaging takes 1.1–2.8 s,
+            # and a paste-and-Enter at t=0, or Enter typed faster than the warm
+            # engage the first keystroke started, lost the command every time
+            # (review round 1 R2, QA Q2, UX U1/U3).
+            #
+            # The rule is the one a PROMPT already follows: `RemoteSession.
+            # prompt()` calls `_ensure_bound()` first and the runtime it needs
+            # comes into existence. A slash that needs the same runtime gets
+            # the same treatment — engage, then dispatch again against the
+            # capabilities the bound viewer just adopted. Re-entering
+            # `_run_slash_command` rather than calling the routed branch
+            # directly keeps ONE dispatch, so the pullbacks above (`chart`,
+            # `default`, bare `/mcp`) apply identically on the second pass.
+            self._bind_then_dispatch(text, attachments)
+            return
         if (
             callable(remote_route)
             and remote_capability is not None
