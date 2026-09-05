@@ -100,9 +100,18 @@ _ANTHROPIC_FULL = EffortSupport(("low", "medium", "high", "xhigh", "max"), defau
 _ANTHROPIC_NO_XHIGH = EffortSupport(("low", "medium", "high", "max"), default="high")
 _ANTHROPIC_BASE = EffortSupport(("low", "medium", "high"), default="high")
 
-# OpenAI. `gpt-5.4`'s model page is the transcribed set; the o-series predates
-# `none`/`minimal`/`xhigh` and takes the classic three.
+# OpenAI. The GPT-5 and GPT-6 ladders are not interchangeable: choosing the
+# cheapest rung for a naming errand sent `none` to GPT-6 and got HTTP 400,
+# while the user's high-effort turn on the same model worked. GPT-6's model
+# page and the live rejection both list low/medium/high/xhigh/max:
+# https://developers.openai.com/api/docs/models/gpt-6-astra
+# Keep this in the capability policy, not the naming caller, so effort
+# selection, failover and every wire route agree. A provider listing still
+# outranks this offline fallback in build_model_spec. Later generations inherit
+# the newest known family policy, not a claim of verified future API support.
+# The o-series predates none/minimal/xhigh and takes the classic three.
 _OPENAI_GPT5 = EffortSupport(("none", "low", "medium", "high", "xhigh"))
+_OPENAI_GPT6 = EffortSupport(("low", "medium", "high", "xhigh", "max"))
 _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 
 #: First match wins, so the narrower Anthropic generations are listed before the
@@ -144,7 +153,8 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # generous for a generation number and cannot swallow a date.
     (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
-    (re.compile(r"gpt-(?:[5-9]|\d{2,})"), _OPENAI_GPT5),
+    (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),
+    (re.compile(r"gpt-(?:[6-9]|\d{2,})"), _OPENAI_GPT6),
     (re.compile(r"(?:^|[/:-])o[1-9](?:-|$)"), _OPENAI_O_SERIES),
 )
 
