@@ -70,7 +70,7 @@ from local_operator.harness.jobs import (
     AsyncJobManager,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
-from local_operator.harness.subagent import run_subagent
+from local_operator.harness.subagent import SubagentModelUnavailable, run_subagent
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -5985,10 +5985,25 @@ class Session:
         effort resolves through ``values.subagents.models`` (``lo``/``med``/
         ``hi`` -> ``provider/model-id``), so a scout or a cheap bulk task runs
         on the model the operator picked for that job, not the session's
-        default. An unresolvable tier falls back to the parent's model with a
-        warning — a delegation must not fail because a config key is stale.
+        default.
+
+        A tier that was ASKED FOR and cannot be honoured fails the launch
+        (``SubagentModelUnavailable``) rather than silently inheriting the
+        parent's model. The failure mode this closes was observed live: a
+        reviewer role pinned to a cross-family model via its ``effort`` tier
+        launched, the pinned model 403'd, the author retried at a DIFFERENT
+        tier that resolved to nothing, and the "independent" review ran on
+        the author's own model and approved a wrong fix. Independence that
+        can silently collapse into self-review is not independence. The
+        parent gets the reason in the tool result, and
+        :class:`SubagentStartEvent` names the model the child really runs on,
+        so nothing downstream has to infer it.
+
+        Only an EXPLICIT tier is strict. ``effort=None`` on a plain ``task``
+        child still means "inherit the parent", which is the ordinary case
+        and must keep working with no config at all.
         """
-        model_spec = self._resolve_subagent_model(agent, effort)
+        model_spec = self._resolve_subagent_model(agent, effort, strict=True)
         return run_subagent(
             label=label,
             prompt=prompt,
@@ -6002,7 +6017,9 @@ class Session:
             effort=effort,
         )
 
-    def _resolve_subagent_model(self, agent: str, effort: str | None) -> ModelSpec | None:
+    def _resolve_subagent_model(
+        self, agent: str, effort: str | None, *, strict: bool = False
+    ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
         Precedence: an explicit ``effort`` on the launch beats the role's own
@@ -6013,6 +6030,13 @@ class Session:
         inherits the session's model unless the OPERATOR chose a tier — a
         shipped default that silently downgraded review quality could not be
         traced to anything the operator decided.
+
+        ``strict`` (the launch path) turns "tier named but unresolvable" from a
+        warning-and-inherit into :class:`SubagentModelUnavailable`. The
+        lenient default stays for callers that merely PREFER a tier and have
+        a sound fallback of their own — session naming on ``lo`` is one — and
+        for whom failing would be worse than inheriting. See
+        :meth:`_launch_subagent` for the incident that made the launch strict.
         """
         wanted = effort
         if wanted is None and agent and agent != "task":
@@ -6026,6 +6050,15 @@ class Session:
                 wanted = profile.effort
         if wanted is None:
             return None
+
+        def _unavailable(reason: str) -> ModelSpec | None:
+            # One exit for every "asked for a tier, cannot honour it" branch so
+            # strict and lenient callers differ in exactly one place.
+            if strict:
+                raise SubagentModelUnavailable(wanted, reason)
+            logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
+            return None
+
         try:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
@@ -6033,20 +6066,19 @@ class Session:
             raw = ConfigManager(config_dir()).get_config_value("subagents", None)
             models = raw.get("models", {}) if isinstance(raw, dict) else {}
             selector = models.get(wanted)
-            if not selector:
-                return None
-            provider, _, model_id = str(selector).partition("/")
-            if not model_id:
-                logger.warning("subagents.models.%s=%r lacks provider/model", wanted, selector)
-                return None
+        except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
+            return _unavailable(f"config could not be read ({exc})")
+        if not selector:
+            return _unavailable(f"no model configured at subagents.models.{wanted}")
+        provider, _, model_id = str(selector).partition("/")
+        if not model_id:
+            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+        try:
             from local_operator.model.configure import build_model_spec
 
             return build_model_spec(provider, model_id)
-        except Exception:  # noqa: BLE001 — stale config must not fail a spawn
-            logger.warning(
-                "subagent model tier %r could not be resolved; using session model", wanted
-            )
-            return None
+        except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
+            return _unavailable(f"{selector!r} could not be resolved ({exc})")
 
     def _append_or_park_journal(self, message: CustomMessage) -> None:
         """Put a journal notice on the live context, or park it for a boundary.

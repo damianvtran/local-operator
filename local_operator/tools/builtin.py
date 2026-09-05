@@ -8028,7 +8028,24 @@ async def execute_task(
         try:
             job_id = launcher(item.label, _full_prompt(item), agent=item.agent, effort=item.effort)
         except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
-            failures.append(f"{item.label}: {exc}")
+            # An unavailable tier is the one launch failure the model is
+            # tempted to "fix" by retrying at another tier, which is how a
+            # pinned reviewer ends up running on the author's own model. Say
+            # so in the result, so the correct next step (report the tier as
+            # broken, or launch with NO effort and disclose that the child
+            # inherits the parent's model) is in front of it rather than
+            # something it has to infer from a bare exception string.
+            tier = getattr(exc, "tier", None)
+            if tier is not None:
+                failures.append(
+                    f"{item.label}: {exc}. Do NOT retry at a different effort tier — "
+                    f"that runs the child on a different model than {tier!r} was "
+                    f"chosen for. Either fix subagents.models.{tier} or launch "
+                    f"without 'effort' and state that the child inherits this "
+                    f"session's model."
+                )
+            else:
+                failures.append(f"{item.label}: {exc}")
             continue
         launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
     if not launched:

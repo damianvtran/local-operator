@@ -143,6 +143,28 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
+
+class SubagentModelUnavailable(RuntimeError):
+    """A launch asked for an effort tier that cannot be honoured.
+
+    Raised BEFORE a child is registered, so the ``task`` tool reports it as
+    "could not launch" with the tier and the reason, and no job row ever
+    exists for a child that would have run on the wrong model. Deliberately
+    not a subclass of ``ValueError``: the tool's argument validation has its
+    own error shape, and this is a configuration/availability fact about the
+    machine, not a malformed call.
+
+    ``tier`` and ``reason`` are attributes as well as message text so a
+    caller that wants to react (retry on another tier, tell the operator
+    which key to fix) does not have to parse the string.
+    """
+
+    def __init__(self, tier: str, reason: str) -> None:
+        super().__init__(f"effort tier {tier!r} is unavailable: {reason}")
+        self.tier = tier
+        self.reason = reason
+
+
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
     from local_operator.harness.comms import SubagentComms
@@ -521,7 +543,20 @@ def _make_runner(
                         schedule_persist()
                     except Exception:  # noqa: BLE001 - persistence is not load-bearing here
                         logger.warning("could not persist roster after attach", exc_info=True)
-            await emit(SubagentStartEvent(job_id=job_id, label=label, agent_id=child.agent_id))
+            # ``model`` is the child's EFFECTIVE selector, read off the built
+            # child exactly as ``job.model_label`` is above. A consumer of the
+            # event stream (the Axis runner, a UI) can then state which model
+            # a review actually ran on without cross-referencing the job row —
+            # the fact that was missing when a pinned reviewer silently ran on
+            # the author's model.
+            await emit(
+                SubagentStartEvent(
+                    job_id=job_id,
+                    label=label,
+                    agent_id=child.agent_id,
+                    model=str(getattr(child, "effective_model_label", "") or child.model_label),
+                )
+            )
             unsubscribe = child.subscribe(
                 _make_relay(
                     job_id,
@@ -548,7 +583,7 @@ def _make_runner(
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial
                 # text.
-                raise RuntimeError(str(final["error"]))
+                raise RuntimeError(_describe_child_failure(str(final["error"]), child, model_spec))
             result_text = final["text"]
             # Recorded on the comms record, not just the job row: the manager
             # sweeps settled rows after its retention window while comms
@@ -633,6 +668,47 @@ def _make_runner(
                             job.child_jobs = None
 
     return runner
+
+
+def _describe_child_failure(
+    error: str, child: "Session | None", model_spec: ModelSpec | None
+) -> str:
+    """The error a failed child settles with, naming the model when that is the point.
+
+    A pinned child (``model_spec`` given) that dies on an auth/availability
+    error is not a generic failure: the operator chose that model for this
+    child, and the only correct responses are to fix the model's access or to
+    consciously run the child elsewhere. Left as the provider's bare text
+    (``authentication failed (HTTP 403): ...``), the parent model read it as
+    a transient launch problem and retried on another tier \u2014 the observed
+    path to a self-review. Naming the pinned model and saying what NOT to do
+    is the cheapest intervention that changes that decision.
+
+    Only the auth kind gets the suffix: a pinned child that fails on a
+    transient 5xx should be retried on the SAME model, and the suffix would
+    argue against exactly that.
+    """
+    if model_spec is None:
+        return error
+    from local_operator.providers.failover import is_rendered_auth_error
+
+    # ``final["error"]`` is the loop's RENDERED text, not an exception, so the
+    # kind is read the way the display layer reads it (``with_auth_hint``):
+    # by the stable "authentication failed" label the failover module puts in
+    # front of every auth-kind error. ``classify_provider_error`` is
+    # deliberately not used here — it refuses to read kinds out of text, and
+    # this text is the harness's own rendering, which is the one case where
+    # the prefix is authoritative.
+    if not is_rendered_auth_error(error):
+        return error
+    pinned = f"{model_spec.provider}/{model_spec.model_id}"
+    return (
+        f"{error} [pinned model {pinned} is unavailable to this credential. This "
+        f"child was pinned to it on purpose; do not re-run it at another effort "
+        f"tier, which would silently substitute a different model. Fix access to "
+        f"{pinned} or launch without 'effort' and disclose that the child inherits "
+        f"the parent's model.]"
+    )
 
 
 async def _abort_bridge(signal: Any, child: "Session") -> None:
