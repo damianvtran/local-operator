@@ -85,6 +85,24 @@ class AsideSession(FakeSession):
         self._history.extend(messages)
 
 
+async def _settle_boot(pilot, app: OperatorApp, session: FakeSession) -> None:
+    """Wait for the boot worker to ADOPT the session and paint its history.
+
+    Boot is a worker; one ``pause()`` is a bet that it has finished, and on a
+    loaded CI runner it loses (~850 ms seen for the first app in a process).
+    A test that reads the transcript's block count before adoption sees 0,
+    then blames the aside for the 2 rows the replayed history paints. Wait on
+    the adoption edge the way ``test_app_pilot`` does, never on the clock.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is session and len(app.query_one(TranscriptView).blocks()) >= len(
+            session.history()
+        ):
+            return
+    raise AssertionError("the boot worker never adopted the session")
+
+
 async def _open_with_question(pilot, app: OperatorApp, question: str) -> AsidePanel:
     """Type ``/btw <question>`` the way a user does, and settle the answer."""
     app.query_one(Editor).focus()
@@ -251,10 +269,11 @@ async def test_a_turn_taken_inside_the_aside_stays_inside_the_aside() -> None:
     session = AsideSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         # The fake boots with a replayed history, so the transcript is not
         # empty — the claim is that the aside adds nothing to it.
         before = len(app.query_one(TranscriptView).blocks())
+        assert before == len(session.history()), "read before the history was painted"
         panel = await _open_with_question(pilot, app, "first?")
 
         app.query_one(Editor).load_text("second?")
@@ -308,7 +327,7 @@ async def test_a_slash_command_typed_inside_the_aside_is_a_question() -> None:
     session = AsideSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         before = len(app.query_one(TranscriptView).blocks())
         panel = await _open_with_question(pilot, app, "first?")
 

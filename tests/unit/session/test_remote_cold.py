@@ -1,14 +1,19 @@
 """The cold viewer: a session you are looking at but not running.
 
-``lop`` boots into this state. There is no runtime, deliberately none is
-started, and the first message is what brings one into existence. These tests
-pin the three properties that makes safe:
+``lop`` boots into this state, and the TUI engages a runtime from it as soon
+as the session is adopted (``OperatorApp._engage_runtime_eagerly``) so the
+band is complete before anything is typed. The viewer FACADE itself still
+starts nothing: these tests pin the three properties that keep the cold state
+safe for every caller that is not the TUI, and for the TUI between mount and
+the engage landing:
 
-1. Opening a session creates NOTHING — no process, no directory, no lease.
+1. Constructing a cold viewer creates NOTHING — no process, no directory, no
+   lease. Only an engage does, and an unused one is handed back
+   (``tests/unit/session/runtime/test_eager_runtime.py``).
 2. A cold viewer still renders: durable history, the configured model, and any
    scheduled wakes come from disk rather than from an owner.
-3. The first mutating call engages a runtime and attaches to it, once, even
-   when several arrive together.
+3. A mutating call engages a runtime and attaches to it, once, even when
+   several arrive together — and again after a failed engage.
 """
 
 from __future__ import annotations
@@ -24,6 +29,9 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
 
+#: Upper bound on an awaited event, never a budget to sleep through.
+DEADLOCK_GUARD_S = 30.0
+
 SESSION_ID = "coldviewer01"
 
 
@@ -36,6 +44,21 @@ def _seed_transcript(config_dir: Path, session_id: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "transcript.jsonl").write_text("", encoding="utf-8")
     return directory
+
+
+def _configure_provider(config_dir: Path) -> None:
+    """Name a provider and model, the way a real machine's config does.
+
+    The TUI's engage is gated on the viewer having a resolvable model (a
+    first-run screen with an empty config must not spawn a runtime that
+    exits rc=2), so any test that expects the app to ENGAGE has to look like
+    a configured machine, not an empty temp dir.
+    """
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=config_dir).update_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-5"}
+    )
 
 
 @pytest.mark.asyncio
@@ -235,7 +258,7 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
 async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The speculative engage, driven through the REAL composer.
+    """The draft engage RETRIES after a failed mount engage.
 
     The seam is ``Editor.edit`` — the documented funnel every buffer mutation
     passes through — and NOT a key handler on the App. An earlier attempt
@@ -243,14 +266,22 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
     key handling in 190 tests across settings, todo, analytics and selection,
     because intercepting there stops the widgets that bind their own keys from
     ever seeing them.
+
+    The app now also engages at MOUNT (see the eager-start test below), so this
+    no longer asserts that an idle viewer stays cold — it asserts the property
+    the keystroke path still owns: ``engage_runtime`` here always raises, which
+    clears the latch, and the first keystroke must then try AGAIN rather than
+    leaving the viewer stranded on a failed start.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_transcript(tmp_path, "s1")
+    _configure_provider(tmp_path)
 
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.editor import Editor
 
     engaged = asyncio.Event()
+    settled = asyncio.Event()
 
     async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
         engaged.set()
@@ -266,6 +297,17 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
         return viewer
 
     app = OperatorApp(factory)
+    # `_set_starting(False)` is the worker's `finally`; it is the observable
+    # edge for "the failed engage has fully unwound", which is when the latch
+    # is guaranteed clear again.
+    real_set_starting = app._set_starting
+
+    def observed_set_starting(starting: bool) -> None:
+        real_set_starting(starting)
+        if not starting:
+            settled.set()
+
+    monkeypatch.setattr(app, "_set_starting", observed_set_starting)
     try:
         async with app.run_test(size=(100, 30)) as pilot:
             # Let the boot worker adopt the viewer: the app only holds it after
@@ -273,7 +315,20 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
             for _ in range(30):
                 await pilot.pause()
             assert app._session is viewer, "the app never adopted the cold viewer"
-            assert app._warm_engage_started is False, "an idle viewer must not engage"
+            # The MOUNT engage already ran and failed (the stub always raises),
+            # which is what leaves the latch clear for the keystroke below to
+            # retry. Waiting for that failure to land first is what makes the
+            # retry assertion mean something rather than passing on the mount
+            # attempt's own event.
+            await asyncio.wait_for(engaged.wait(), timeout=DEADLOCK_GUARD_S)
+            # The latch is cleared by the worker's `except`, which runs after
+            # the stub raised — a later loop turn than the event. Wait for
+            # THAT edge too, through the band state the same `finally` clears.
+            await asyncio.wait_for(settled.wait(), timeout=DEADLOCK_GUARD_S)
+            await pilot.pause()
+            assert app._warm_engage_started is False, "a failed engage must clear the latch"
+            engaged.clear()
+            settled.clear()
 
             editor = app.query_one(Editor)
             editor.focus()
@@ -283,11 +338,8 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
             # deliberately self-clearing: a warm-up that fails must leave the
             # next real message free to try again, so asserting on the flag
             # would be asserting on a value the failure path correctly resets.
-            for _ in range(100):
-                await pilot.pause()
-                if engaged.is_set():
-                    break
-            assert engaged.is_set(), "the first keystroke never engaged a runtime"
+            await asyncio.wait_for(engaged.wait(), timeout=DEADLOCK_GUARD_S)
+            await pilot.pause()
 
             # And the failure is SILENT: a speculative warm-up the user did not
             # ask for must not paint an error over their draft.

@@ -1,6 +1,0 @@
-[worktree assert OK] manager=/private/tmp/lop-codex-auth/local_operator/mcp/manager.py
-  gitlab (codex import: url only, no auth block)   /mcp login -> ACCEPTED -> runs the grant
-  launchdarkly (codex import)                      /mcp login -> ACCEPTED -> runs the grant
-  openaiDeveloperDocs (public, no auth needed)     /mcp login -> ACCEPTED -> runs the grant
-  lop-native oauth (explicit auth block)           /mcp login -> ACCEPTED -> runs the grant
-  stdio server (no transport for a token)          /mcp login -> refused: 'does not use OAuth login.'

@@ -459,14 +459,15 @@ never dropped (582-583).
 
 **Before slice 3 is written**, run a raw-mode PTY probe for
 `ctrl+pageup`/`ctrl+pagedown` on **Ghostty, iTerm2, Terminal.app and cmux**,
-reusing the existing harness at `docs/evidence/cmd-chords/` (`probe2.py.txt`,
-`run.sh`, `rung.sh`) and its two load-bearing properties: `select()` rather than
+reusing the existing harness from `docs/evidence/cmd-chords/` (`probe2.py.txt`,
+`run.sh`, `rung.sh` — now only in history: `git show f3ae0441:docs/evidence/cmd-chords/run.sh`) and its two load-bearing properties: `select()` rather than
 non-blocking polling, and a **typed-character control run first** so a zero-byte
 result means "the terminal sent nothing", not "the harness missed it"
 (`MEASURED.md:9-19`).
 
-Record the byte captures in `docs/evidence/aside-scroll/MEASURED.md` in the same
-table format. **If a target terminal delivers nothing, slice 3 changes key
+Record the byte captures on the PR, in the same table format `MEASURED.md`
+used (evidence is not committed to the tree; see AGENTS.md, "Evidence goes on
+the PR"). **If a target terminal delivers nothing, slice 3 changes key
 rather than shipping a chord that silently does not exist there** — which is
 precisely the conclusion the `Cmd+V` probe forced (`editor.py:989-1001`: "With
 an image-only pasteboard, Terminal.app delivers ZERO bytes on `Cmd+V` and

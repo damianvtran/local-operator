@@ -1,4 +1,0 @@
-screen_size=Size(width=118, height=38) screen_virtual=Size(width=118, height=38) screen_scrollbar=False
-body_size=Size(width=116, height=22) body_virtual=Size(width=115, height=140) max_scroll=118 scroll_y=40.0
-loaded=140 state='transcript start · read-only'
-footer='↑↓ scroll · esc back to conversation · transcript start · read-only' state_region_width=31

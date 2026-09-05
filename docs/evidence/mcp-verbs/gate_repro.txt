@@ -1,9 +1,0 @@
-servers on disk BEFORE : ['filesystem', 'grafana']
-typed buffer           : '/mcp remove fsy'
-picker rows            : ['remove filesystem']
-editor says destructive: False
-buffer AFTER enter     : ''
-servers on disk AFTER  : ['grafana']
-
-RESULT: DATA LOSS — 'filesystem' was deleted by the fuzzy query 'fsy'.
-        Enter FIRED the row instead of filling it.
