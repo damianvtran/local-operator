@@ -1542,3 +1542,63 @@ async def test_a_followers_held_turn_settles_when_the_owner_dies() -> None:
         assert "interrupted" in notices, notices
     assert _titles(writes)[-1].startswith("lo ›"), _titles(writes)
     assert notifier.kinds == [], "an owner-death abort is not announced"
+
+
+@pytest.mark.asyncio
+async def test_a_followers_loop_turn_holds_working_between_iterations() -> None:
+    """Review round 1, MAJOR-1/U1: the `/loop` surface takes the same gate.
+
+    The band gate first shipped inlined at the composer's worker only, on the
+    premise that `/loop` always routes to the owner. It does not on a COLD
+    viewer: `_synthesise_cold_state` advertises no `slash_capabilities`, so
+    `_run_slash_command`'s routing branch (which needs a matching capability)
+    is not taken, `/loop` is not in `_needs_runtime_first`, and the LOCAL loop
+    worker drives the `RemoteSession` — whose `prompt()` returns on the
+    owner's ACK, mid-turn. The loop workers' bare `update(streaming=False)`
+    then wrote `lo ›` between every iteration with the owner still live:
+    `⣾ → › → ⣾ → ›`, D-1 verbatim on the one surface the issue calls out as
+    unattended (`/loop 20` overnight).
+
+    Driven through the real slash dispatch rather than by calling the worker,
+    because the dispatch is half of what the finding is about.
+    """
+
+    class CapabilitylessFollowerSession(JobsSession):
+        """A follower whose owner advertised nothing — every cold viewer."""
+
+        is_remote = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.local_prompts: list[str] = []
+
+        async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
+            self.local_prompts.append(text)
+            self.streaming = True
+            return None
+
+    session = CapabilitylessFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        writes = await _spy_title(pilot, app)
+
+        app._run_slash_command("/goal ship the audit")
+        await pilot.pause()
+        app._run_slash_command("/loop 2")
+        for _ in range(30):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        # The premise of the finding: this really is the LOCAL worker driving a
+        # follower, not a routed command. Without this the test could pass by
+        # never running a loop at all.
+        assert session.local_prompts, "the local loop worker never drove the session"
+        assert session.is_streaming is True, "the owner is no longer live; nothing to hold"
+        assert app._status is not None and app._status._streaming is True
+
+    titles = _titles(writes)
+    assert not any(
+        t.startswith("lo ›") for t in titles
+    ), f"flashed 'finished cleanly' between loop iterations: {titles}"

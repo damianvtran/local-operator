@@ -1456,7 +1456,14 @@ class RemoteSession:
         self._deliver(event)
 
     def _deliver(self, event: AgentEvent[Any]) -> None:
-        """Hand ``event`` to every subscribed handler now, buffering nothing."""
+        """Hand ``event`` to every subscribed handler now, buffering nothing.
+
+        With NO subscriber the event is DROPPED, not parked — that is the
+        contract, not an omission. Callers reach for this instead of
+        ``_emit_or_buffer`` precisely when a deferred delivery would land on a
+        LATER runtime's turn (see ``_end_turn_locally``), and parking the event
+        for a future subscriber recreates exactly that hazard one seam over.
+        """
         for handler in list(self._handlers):
             result = handler(event)
             if inspect.isawaitable(result):
@@ -1617,17 +1624,30 @@ class RemoteSession:
         caller needs this: a failed successor ``_dial`` leaves
         ``_ready_for_events`` False, so a BUFFERED end would sit until the
         NEXT bind's ``_finish_sync`` drained it — behind that bind's seeded
-        ``AgentStartEvent``, and stamped with a generation the fresh runtime
-        does not necessarily exceed (the controller drops only ``gen <
-        current``). Delivered late it would tear down the new turn it never
-        belonged to; delivered now it ends the one it does. A handler-less
-        drop is correct on that path too: with nobody subscribed there is no
-        spinner to stop, and parking the end for a later subscriber recreates
-        the same stale-end hazard one seam over.
+        ``AgentStartEvent`` — and would tear down the new turn it never
+        belonged to. Delivered now it ends the one it does.
+
+        UNSTAMPED (``generation=0``), never ``self._generation`` — review
+        round 1, BLOCKER-1. That field is not this viewer's own turn counter:
+        ``_apply_frontend_facades`` overwrites it from whatever snapshot last
+        arrived, and a SUCCESSOR is a fresh runtime whose counter restarts
+        (``Session.__init__`` sets 0, so its first turn is 1) while the app's
+        ``EventController`` has adopted the PREVIOUS owner's generation — 6,
+        or any long session's turn count. Stamping the synthesised end with
+        the successor's number therefore made ``_handle_agent_end`` drop it as
+        ``gen < current`` (``tui/events.py``), so the end reached the handler
+        and died one layer below it: no ``TurnEnded``, and — with edit 1's
+        hold in place and no wall-clock timeout by design — a band and tab
+        title asserting ``working`` for the rest of the process's life. ``0``
+        is the field's default and the established "unstamped: belongs to
+        whatever turn is open" encoding that the controller's ``if gen:``
+        branch reads, which is exactly the semantics a locally synthesised end
+        wants. It applies to the buffered path for the same reason: neither
+        delivery has standing to speak for the successor's numbering.
         """
         if not self._streaming:
             return
-        end = AgentEndEvent(aborted=True, generation=self._generation, error=None)
+        end = AgentEndEvent(aborted=True, generation=0, error=None)
         if direct:
             self._deliver(end)
         else:
@@ -1706,7 +1726,16 @@ class RemoteSession:
                 client.close()
             except Exception:  # noqa: BLE001 — teardown of a dead socket
                 logger.debug("closing the lost owner connection failed", exc_info=True)
-        self._end_turn_locally(direct=True)
+        # Guarded like the two teardown steps that bracket it (the client
+        # close above, the went-cold callback below): a handler that raises —
+        # `EventController._handle_agent_end` flushes, prices usage and sums
+        # cost — must not propagate out of teardown and skip `_owner_ready`,
+        # which would leave the prompt path waiting on an event nothing else
+        # will set (review round 1, MINOR-1).
+        try:
+            self._end_turn_locally(direct=True)
+        except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
+            logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
         self._owner_ready.set()
         callback = self._went_cold_callback
         if callback is None:

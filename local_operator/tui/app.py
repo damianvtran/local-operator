@@ -12532,11 +12532,10 @@ class OperatorApp(App[None]):
                 # working blip bounded by the owner's prompt preparation, not by
                 # the relay of the OUTCOME. That is not the flash this closes.
                 knows_outcome = not bool(getattr(session, "is_remote", False))
-                if knows_outcome or not bool(getattr(session, "is_streaming", False)):
-                    self._status.update(
-                        streaming=False,
-                        failed=(bool(error_text) and not aborted) if knows_outcome else None,
-                    )
+                self._retire_turn_band(
+                    session,
+                    failed=(bool(error_text) and not aborted) if knows_outcome else None,
+                )
                 # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
                 # `prompt()` returns only after the pipeline's `finally` has
                 # flushed the held end, which `_emit`s `agent_end`
@@ -12550,6 +12549,42 @@ class OperatorApp(App[None]):
                 self._post_turn_abandoned(aborted=aborted, error=error_text)
 
         self.run_worker(run_prompt(), thread=False, group="turns")
+
+    def _retire_turn_band(self, session: Any, *, failed: bool | None = None) -> None:
+        """Clear the status band for a turn whose worker is done with it.
+
+        ONE helper for the same reason `_post_turn_abandoned` is one: THREE
+        places drive `session.prompt()` — `_start_turn` and both `/loop`
+        workers — and "a follower never publishes an outcome it was not told"
+        has to hold at all of them. It did not: the loop workers wrote a bare
+        `update(streaming=False)`, so a `/loop` on a follower reproduced D-1
+        verbatim, `⣾ → › → ⣾ → ›` with the owner live throughout, on the most
+        unattended surface in the app (review round 1, MAJOR-1/U1). The gate
+        was originally inlined at the composer's path only, on the incorrect
+        premise that `/loop` always routes to the owner; it does not on a COLD
+        viewer, whose `_synthesise_cold_state` advertises no
+        `slash_capabilities`, so the `route_shared_slash` branch is not taken
+        and the LOCAL worker drives the `RemoteSession` (see the corrected
+        note in `_run_slash_command`'s routing branch).
+
+        WITHHELD on a follower whose owner is still streaming: that worker
+        returned on the owner's ACK, mid-turn, so `streaming=False` there
+        resolves the title to `idle` — "finished cleanly" — for a turn whose
+        outcome this viewer has not been told. The band is released by the
+        relayed `agent_end` through `_finalize_turn`, or by a locally
+        synthesised one (owner death, `/stop`, go-cold). In-process
+        (`is_remote` False) the write is unconditional and unchanged.
+
+        ``failed`` carries the outcome where the caller HAS it (the composer's
+        worker does, in-process); `None` means "leave the mark alone".
+        """
+        if self._status is None:
+            return
+        if bool(getattr(session, "is_remote", False)) and bool(
+            getattr(session, "is_streaming", False)
+        ):
+            return
+        self._status.update(streaming=False, failed=failed)
 
     def _post_turn_abandoned(self, *, aborted: bool, error: str | None) -> None:
         """Offer the fallback retirement for the turn this worker just left.
@@ -17726,8 +17761,11 @@ class OperatorApp(App[None]):
                     crashed = True
                     break
                 finally:
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    # Through the shared gate, not a bare write: on a follower
+                    # this `finally` runs on the owner's ACK, mid-turn, and the
+                    # bare write published `lo ›` for a turn still running (see
+                    # `_retire_turn_band`).
+                    self._retire_turn_band(session)
                     # The SAME retirement the composer's turn gets. A loop
                     # iteration is an ordinary turn as far as the transcript is
                     # concerned — it mounts a working line and opens the latch —
@@ -17844,8 +17882,7 @@ class OperatorApp(App[None]):
                 try:
                     await session.prompt(prompt, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    self._retire_turn_band(session)
                     # Same helper, same reason as the numeric worker: a held
                     # goal loop is the MOST unattended surface in the app, and
                     # it was printing a bare `str(error)` (review U6).
@@ -17870,8 +17907,7 @@ class OperatorApp(App[None]):
                 completed += 1
                 # --- yield boundary reached: judge the settled turn ---
                 if self._loop_cancelled or session is not self._session:
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    self._retire_turn_band(session)
                     break
                 # Keep the status in a working state ACROSS the judge call. The
                 # judge is a real `complete_aside` network round-trip that can
@@ -17879,8 +17915,7 @@ class OperatorApp(App[None]):
                 # `loop N` and `loop N+1` while it is in fact spending tokens on
                 # the verdict. Cleared once the verdict is in hand (below).
                 achieved, reason = await self._judge_goal(session, goal)
-                if self._status is not None:
-                    self._status.update(streaming=False)
+                self._retire_turn_band(session)
                 if achieved is True:
                     released = True
                     break
