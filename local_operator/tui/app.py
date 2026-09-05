@@ -3329,10 +3329,16 @@ class OperatorApp(App[None]):
         if self._status is None or state is None:
             return
         cost = getattr(state, "cumulative_cost", None)
-        knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
+        knowledge = getattr(
+            getattr(
+                state, "cumulative_cost_knowledge", getattr(state, "cost_knowledge", "unknown")
+            ),
+            "value",
+            "unknown",
+        )
         if cost is not None:
             self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
-            self._subagent_costs = dict(getattr(state, "child_costs", {}) or {})
+            self._subagent_costs = self._frontend_child_costs(state)
             self._spend_is_floor = knowledge in {"floor", "partial"}
         usage = getattr(state, "last_usage", None)
         billed_unknown = bool(
@@ -3555,10 +3561,16 @@ class OperatorApp(App[None]):
             parent_cost = getattr(frontend, "cumulative_parent_cost", None)
             if parent_cost is not None:
                 knowledge = getattr(
-                    getattr(frontend, "cost_knowledge", "unknown"), "value", "unknown"
+                    getattr(
+                        frontend,
+                        "cumulative_cost_knowledge",
+                        getattr(frontend, "cost_knowledge", "unknown"),
+                    ),
+                    "value",
+                    "unknown",
                 )
                 self._total_cost = float(parent_cost or 0.0)
-                self._subagent_costs = dict(getattr(frontend, "child_costs", {}) or {})
+                self._subagent_costs = self._frontend_child_costs(frontend)
                 self._spend_is_floor = knowledge in {"floor", "partial"}
                 self._status.update(cost=self._spend_text())
             context_tokens = getattr(frontend, "context_tokens", None)
@@ -13661,7 +13673,7 @@ class OperatorApp(App[None]):
         # know of. `billed` carries that distinction off the same reading, so
         # the job is not probed a second time on a repeating timer.
         if stats.cost is not None:
-            cost = format_cost(stats.cost)
+            cost = format_cost(stats.cost) + ("+" if stats.cost_partial else "")
         elif stats.billed:
             cost = "$—"
         else:
@@ -21589,6 +21601,16 @@ class OperatorApp(App[None]):
         if not spend:
             return ""
         return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+
+    @staticmethod
+    def _frontend_child_costs(state: Any) -> dict[str, float]:
+        # The legacy app ledger is also carried through reload. Feed that one
+        # consumer the owner ledger as a SINGLE contribution, never alongside
+        # compatibility row costs (which omit swept work and live descendants).
+        if getattr(state, "subagent_cost_knowledge", None) is not None:
+            cost = getattr(state, "subagent_cost", None)
+            return {"owner-ledger": cost} if cost is not None else {}
+        return dict(getattr(state, "child_costs", {}) or {})
 
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns plus its children's.

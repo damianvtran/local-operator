@@ -308,6 +308,7 @@ class JobStats:
     context_tokens: int = 0
     context_window: int = 0
     cost: float | None = None
+    cost_partial: bool = False
     #: Whether the child has reported ANY usage. ``cost is None`` conflates
     #: two facts — "no price exists for this model" and "nothing has been
     #: reported yet" — and only the first of them is worth an ``$—``.
@@ -358,6 +359,7 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     window = 0
     cost: float | None = None
     billed = False
+    partial = False
     try:
         model_label = str(getattr(job, "model_label", "") or default_model_label or "")
         usage = getattr(job, "usage", None)
@@ -367,7 +369,14 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
                 getattr(usage, "context_tokens", None) or getattr(usage, "input_tokens", 0)
             )
         window = int(getattr(job, "context_window", 0) or 0)
-        cost = job_cost(job, default_model_label=default_model_label or None)
+        knowledge = getattr(job, "direct_cost_knowledge", None)
+        if knowledge is not None:
+            # The runtime resolved the serving model; this background viewer
+            # must not redo discovery with its unrelated cache/credentials.
+            cost = getattr(job, "direct_cost", None)
+            partial = knowledge in {"partial", "floor"}
+        else:
+            cost = job_cost(job, default_model_label=default_model_label or None)
     except Exception:
         # A job the panel cannot read is a row with fewer numbers on it, never
         # a broken frame: this is observability, and it runs against embedder
@@ -381,6 +390,7 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
         context_tokens=max(tokens, 0),
         context_window=max(window, 0),
         cost=cost,
+        cost_partial=partial,
         billed=billed,
     )
 
@@ -767,7 +777,9 @@ def _lay_out(
     if not keep_cost:
         cost = ""
     elif stats.cost is not None:
-        cost = truncate_cells(format_cost(stats.cost), COST_CEILING)
+        cost = truncate_cells(
+            format_cost(stats.cost) + ("+" if stats.cost_partial else ""), COST_CEILING
+        )
     else:
         # The band's own vocabulary for "billed, and nobody can price it".
         # Safe on a row now that the whole column sheds at one rung: at a rung

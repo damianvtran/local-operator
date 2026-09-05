@@ -857,6 +857,17 @@ async def test_cancel_hands_off_final_descendant_usage_after_disposal(tmp_path, 
     assert sum(item.input_tokens for item in row.descendant_usage) == 6
     assert child_managers[0].list() == []
     assert sum(item.input_tokens for item in parent.jobs.accounting_components()) == 6
+    # The finalizer must finish before the durable ledger snapshot too, not just
+    # before the retained row is painted. A restart must own the final six once.
+    await parent._await_subagent_roster_writer()
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+
+    checkpoint = json.loads((parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR).read_text())
+    restored_manager = AsyncJobManager()
+    restored_manager.restore_accounting(
+        [Usage.model_validate(row) for row in checkpoint["accounting"]]
+    )
+    assert sum(item.input_tokens for item in restored_manager.accounting_components()) == 6
 
     # The probe kept the manager only to inspect zero-retention settlement; drop
     # that artificial reference before proving the production parent edge is gone.
