@@ -53,7 +53,10 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
         raise ValueError("unsupported model reply version")
     notes = value["public_observations"]
     if not isinstance(notes, str) or len(notes) > MAX_PUBLIC_OBSERVATIONS_CHARS:
-        raise ValueError("public_observations must be a string of at most 2000 characters")
+        raise ValueError(
+            "public_observations must be a string of at most "
+            f"{MAX_PUBLIC_OBSERVATIONS_CHARS} characters"
+        )
     try:
         notes.encode("utf-8")
     except UnicodeEncodeError as error:

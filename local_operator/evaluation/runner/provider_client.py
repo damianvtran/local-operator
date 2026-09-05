@@ -46,6 +46,7 @@ from local_operator.evaluation.runner.model import (
     ModelUsage,
 )
 from local_operator.evaluation.runner.public_reply import (
+    MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     REPLY_VERSION,
     decode_public_reply,
@@ -280,7 +281,8 @@ fence:
 
 This is a MODEL-REPLY envelope, not the adapter protocol. Use exactly these
 three keys; action_batch contains only actions. public_observations is a string
-of at most 2000 characters; empty is valid. Record only concise NEW factual data
+of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters; empty is valid.
+Record only concise NEW factual data
 or visible progress observed on the CURRENT screen that may be needed later,
 because old screenshots are removed before text summarization. Do not repeat
 prior notes, invent facts, record credentials/secrets, or provide deliberation,
