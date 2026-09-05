@@ -273,6 +273,22 @@ def test_a_missing_marker_is_not_memoised_as_a_verdict(tmp_path, monkeypatch) ->
 
     directory = tmp_path / "sessions" / "abcabcabcabc"
     directory.mkdir(parents=True)
+
+    # The PARTIAL state, which a plain absent->complete step walks straight
+    # past: ``mark_session_origin`` writes with ``write_text``, which truncates
+    # and then writes, so a reader landing between the two sees an empty or
+    # half-written file. That window is reachable for a child between
+    # ``claim_session`` and its stamp, and caching the parse failure pinned
+    # such a child as unusable for the life of the process (round 2, R2-2).
+    (directory / "origin.json").write_text("", encoding="utf-8")
+    comms.replace([job])
+    assert comms.session_dir_of("starting") is None
+
+    # Half-written JSON is the same class of transient, not a decided answer.
+    (directory / "origin.json").write_text('{"origin": "suba', encoding="utf-8")
+    comms.replace([job])
+    assert comms.session_dir_of("starting") is None
+
     (directory / "origin.json").write_text(
         json.dumps({"origin": "subagent", "label": "w", "agent": "coder"}),
         encoding="utf-8",
@@ -280,6 +296,88 @@ def test_a_missing_marker_is_not_memoised_as_a_verdict(tmp_path, monkeypatch) ->
     # A later frame re-projects the node; the answer must now be the directory.
     comms.replace([job])
     assert comms.session_dir_of("starting") == directory
+
+
+def test_a_marker_that_cannot_name_its_child_authorises_nobody(tmp_path, monkeypatch) -> None:
+    """Absent identity in the marker means NOT PROVEN, never proven.
+
+    ``resume.backfill_session_origins`` stamps
+    ``{"origin": "subagent", "backfilled": true}`` — no label, no agent — over
+    the operator's existing store at startup (``cli.py`` calls it on boot), so
+    these markers are real rather than hypothetical. Under a "match only the
+    fields present" rule such a marker satisfied every node, which handed any
+    child a directory it had not earned (round 2, R2-1).
+
+    Refusing genuinely backfilled old sessions is the deliberate trade: a
+    marker that cannot say WHICH child it belongs to cannot answer the only
+    question being asked, and those sessions degrade to the existing
+    "no saved transcript" note rather than showing the wrong conversation.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+
+    def resolve(session_id: str, marker: dict[str, Any], label: str, agent_role: str):
+        directory = sessions / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "origin.json").write_text(json.dumps(marker), encoding="utf-8")
+        job = JobState(
+            id=f"j-{session_id}",
+            type="task",
+            session_id=session_id,
+            label=label,
+            agent_role=agent_role,
+        )
+        return SnapshotSubagentComms([job]).session_dir_of(f"j-{session_id}")
+
+    backfilled = {"origin": "subagent", "backfilled": True}
+    assert resolve("aaaaaaaaaaaa", backfilled, "any-child", "reviewer") is None
+
+    # Label-only: the agent mismatch must still be fatal.
+    assert resolve("bbbbbbbbbbbb", {"origin": "subagent", "label": "w"}, "w", "coder") is None
+    # Agent-only, mirrored.
+    assert resolve("cccccccccccc", {"origin": "subagent", "agent": "coder"}, "w", "coder") is None
+
+    # A node carrying no identity of its own cannot be proven to own anything.
+    full = {"origin": "subagent", "label": "w", "agent": "coder"}
+    assert resolve("dddddddddddd", full, "", "") is None
+    assert resolve("eeeeeeeeeeee", full, "w", "") is None
+
+    # The genuine article still resolves.
+    assert resolve("ffffffffffff", full, "w", "coder") == sessions / "ffffffffffff"
+
+
+def test_the_ownership_memo_is_bounded(tmp_path, monkeypatch) -> None:
+    """The memo outlives any single roster, so it needs its own cap.
+
+    ``SubagentComms._records`` is capped at ``MAX_RECORDS``, but that bounds
+    the roster at an INSTANT: eviction there does not clear entries here, so
+    the key space is every distinct (directory, label, agent) triple the
+    process has ever seen. Bounded first-seen-first-out; re-deciding an
+    evicted entry costs one stat.
+    """
+    from local_operator.session import frontend_state as module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(module, "_DERIVED_OWNERSHIP", {})
+    monkeypatch.setattr(module, "_DERIVED_OWNERSHIP_MAX", 8)
+    sessions = tmp_path / "sessions"
+    for index in range(20):
+        session_id = f"s{index:011d}"
+        directory = sessions / session_id
+        directory.mkdir(parents=True)
+        (directory / "origin.json").write_text(
+            json.dumps({"origin": "subagent", "label": f"L{index}", "agent": "coder"}),
+            encoding="utf-8",
+        )
+        job = JobState(
+            id=f"j{index}",
+            type="task",
+            session_id=session_id,
+            label=f"L{index}",
+            agent_role="coder",
+        )
+        assert SnapshotSubagentComms([job]).session_dir_of(f"j{index}") == directory
+    assert len(module._DERIVED_OWNERSHIP) <= 8
 
 
 def test_lineage_stamps_the_child_session_dir_as_a_string() -> None:

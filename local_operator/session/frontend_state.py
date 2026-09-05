@@ -1439,11 +1439,24 @@ class SnapshotSubagentComms:
 #: transcript's presence, which the view deliberately re-probes because it can
 #: appear later.
 #:
-#: Only NEGATIVE-able facts are cached: an ``OSError`` (a transient EMFILE, a
-#: volume blip) yields no entry, so a moment's failure cannot pin a wrong
+#: Only facts about well-formed CONTENT are cached. A read that failed
+#: (``OSError`` — a transient EMFILE, a volume blip) or a marker that did not
+#: parse (the truncate-then-write window of ``mark_session_origin``, reachable
+#: while a child is still starting) is a fact about the MOMENT and yields no
+#: entry, so it is re-asked on the next frame instead of pinning a wrong
 #: verdict for the life of the process — the same distinction
 #: ``resume._session_origin_read`` draws with its ``readable`` flag.
+#:
+#: A node that never resolves therefore re-reads once per frame. That is the
+#: honest cost of not deciding early, it is bounded by one stat, and it is not
+#: a regression: before this check the same node simply resolved to ``None``
+#: without reading at all.
 _DERIVED_OWNERSHIP: dict[tuple[str, str, str], bool] = {}
+
+#: Cap on the memo above. Generous beside the 256 live records a roster may
+#: hold, because the point is only to stop unbounded growth across a long
+#: session, never to keep the working set small.
+_DERIVED_OWNERSHIP_MAX = 2048
 
 
 def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> bool:
@@ -1460,18 +1473,32 @@ def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> boo
 
     ``origin.json`` is the proof already on disk: ``run_subagent`` stamps it
     with ``{"origin": "subagent", "label": ..., "agent": ...}`` at creation.
-    The predicate is therefore "this is a subagent session AND it is the one
-    the node describes": origin must be ``subagent``, and whichever of
-    label/agent the marker recorded must match the node. Matching only the
-    fields present keeps a marker written by an older release (which may
-    predate one of the details) usable, while still refusing a directory that
-    positively disagrees.
+    The predicate is "this is a subagent session AND the marker POSITIVELY
+    identifies the child the node describes": origin must be ``subagent``, and
+    the marker's label and agent must both be present and both equal the
+    node's.
 
-    A missing or unreadable marker is NOT ownership. That is the safe
-    direction and costs nothing real: failing closed degrades to the existing
-    "no saved transcript" note, which is exactly what a follower saw before
-    the derivation existed, whereas failing open renders another session's
-    conversation under this child's name.
+    **An absent identity field means NOT PROVEN, never proven** (review round
+    2, R2-1). The earlier "match only the fields present" rule degenerated to
+    ``True`` for a marker carrying neither, and such markers are real rather
+    than hypothetical: ``resume.backfill_session_origins`` stamps
+    ``{"origin": "subagent", "backfilled": true}`` — no label, no agent — over
+    the operator's existing store at startup, so one of those would have
+    authorised ANY child's derived path. The same hole let a label-only marker
+    ignore an agent mismatch, and let a node with no identity of its own match
+    every marker.
+
+    That refuses genuinely backfilled OLD sessions, and refusing them is the
+    right trade: a marker that cannot say WHICH child it belongs to cannot
+    discharge the only question being asked. Those sessions degrade to the
+    existing "no saved transcript" note — exactly what a follower saw before
+    this derivation existed — whereas trusting them renders somebody else's
+    conversation under this child's name. Nothing is lost that the wire path
+    does not already cover: an owner that stamps ``session_dir`` never reaches
+    this check at all.
+
+    Neither is a missing, unreadable, or malformed marker ownership, and the
+    two failure kinds are cached differently — see the call below.
     """
     from local_operator.resume import ORIGIN_NAME, ORIGIN_SUBAGENT
 
@@ -1484,17 +1511,47 @@ def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> boo
     except OSError:
         # A fact about this MOMENT, not about the file: do not memoise it.
         return False
-    verdict = False
     try:
         payload = json.loads(raw)
     except ValueError:
-        payload = None
+        # Also a fact about the moment, for a reason that is easy to miss:
+        # ``mark_session_origin`` writes with ``write_text``, which TRUNCATES
+        # and then writes, so a reader that lands between the two sees an
+        # empty or half-written file. That window is reachable for a child
+        # that is still starting — between ``claim_session`` and the stamp —
+        # which is precisely the case the memo must not decide early. Caching
+        # this ``False`` pinned a starting child as unusable for the life of
+        # the process (review round 2, R2-2). Same distinction the ``OSError``
+        # arm above draws, and the one ``resume._session_origin_read`` draws
+        # with its ``readable`` flag: only facts about CONTENT are memoised.
+        return False
+    verdict = False
     if isinstance(payload, dict) and payload.get("origin") == ORIGIN_SUBAGENT:
         marked_label = payload.get("label")
         marked_agent = payload.get("agent")
-        verdict = (not isinstance(marked_label, str) or not label or marked_label == label) and (
-            not isinstance(marked_agent, str) or not agent_role or marked_agent == agent_role
+        # Both sides must be non-empty and equal. A node missing its own
+        # identity cannot be proven to own anything either, so it is refused
+        # by the same conjunction rather than by a separate branch.
+        verdict = bool(
+            label
+            and agent_role
+            and isinstance(marked_label, str)
+            and isinstance(marked_agent, str)
+            and marked_label == label
+            and marked_agent == agent_role
         )
+    # Only a decided verdict about well-formed CONTENT reaches the memo.
+    #
+    # Bounded explicitly rather than leaning on the roster's own cap. The live
+    # roster is capped (``SubagentComms.MAX_RECORDS`` = 256) but that bounds it
+    # at an INSTANT: eviction there does not clear entries here, so over a long
+    # session the key space is the number of distinct (directory, label, agent)
+    # triples ever SEEN, which keeps growing. The cap is generous next to 256
+    # live records — a session would have to churn through eight full rosters
+    # to evict anything — and re-deciding an evicted entry costs one stat.
+    if len(_DERIVED_OWNERSHIP) >= _DERIVED_OWNERSHIP_MAX:
+        # First-seen insertion order, so the oldest verdict goes first.
+        _DERIVED_OWNERSHIP.pop(next(iter(_DERIVED_OWNERSHIP)))
     _DERIVED_OWNERSHIP[key] = verdict
     return verdict
 
