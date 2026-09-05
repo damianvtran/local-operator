@@ -31,6 +31,10 @@ sys.path.insert(0, str(REPO_ROOT))
 os.environ.setdefault("LOCAL_OPERATOR_NO_SHIMMER", "1")
 os.environ.pop("NO_COLOR", None)
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
@@ -94,7 +98,7 @@ async def _render(names: list[str], outdir: Path) -> None:
             await pilot.pause()
             await pilot.pause()
             target = outdir / f"{name}.svg"
-            app.save_screenshot(str(target))
+            save_capture(app, str(target))
             print(f"wrote {target}")
 
 

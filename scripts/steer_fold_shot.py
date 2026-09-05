@@ -38,6 +38,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.harness.comms import (  # noqa: E402
     HUB_COMMUNICATION_CUSTOM_TYPE,
     SubagentComms,
@@ -194,7 +198,7 @@ async def capture(output: Path, size: tuple[int, int], seed_dir: Path) -> None:
                 break
         for _ in range(4):
             await pilot.pause()
-        app.save_screenshot(str(output))
+        save_capture(app, str(output))
         rows = view.rendered_rows()
         folded = [(entry.kind, entry.text) for entry in view._history_entries]
         print(f"size={size[0]}x{size[1]} entries={len(folded)}")

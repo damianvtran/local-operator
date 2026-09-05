@@ -127,6 +127,16 @@ def _agent_fields(name: str):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runtime_adoption(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Daemon-launched agent shells inherit these viewer-runtime flags. They
+    # deliberately turn strict CLI resume into first-engage adoption, so letting
+    # them reach this composition-root suite tests a different contract (and
+    # makes @latest a literal directory). Tests of adoption may opt in explicitly.
+    monkeypatch.delenv("LOP_RUNTIME_ADOPT_SESSION", raising=False)
+    monkeypatch.delenv("LOP_RUNTIME_DEFER_MATERIALISE", raising=False)
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolated config dir + home so no test touches ~/.local-operator."""

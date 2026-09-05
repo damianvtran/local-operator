@@ -32,6 +32,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.providers.auth_store import AuthStore  # noqa: E402
 from local_operator.providers.controller import ProviderController  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
@@ -67,7 +71,7 @@ async def main() -> None:
             for _ in range(10):
                 await pilot.pause()
                 await asyncio.sleep(0.05)
-            app.save_screenshot(out)
+            save_capture(app, out)
             print(f"wrote {out}")
 
 

@@ -18,6 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
@@ -66,7 +70,7 @@ async def main() -> None:
             for _ in range(4):
                 await pilot.pause()
 
-        app.save_screenshot(out)
+        save_capture(app, out)
         task.cancel()
         try:
             await task

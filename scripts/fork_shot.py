@@ -34,15 +34,14 @@ show ordering or the receipt-destruction the UX round found.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-_SCRATCH = tempfile.mkdtemp(prefix="lo-fork-shot-")
-os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
 
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
@@ -88,7 +87,7 @@ async def main() -> None:
             # the tail. D1 lives in that row, so the frame has to contain it.
             app._transcript_view().scroll_home(animate=False)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             rows = [
                 line
                 for line in _help_lines(app)
@@ -108,7 +107,7 @@ async def main() -> None:
             )
             app._flush_fork_receipt(FORK_ID)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "replaced":
             app._append_block(UserBlock("/fork try the streaming parser"))
             app._append_block(NoticeBlock("forking at the next safe boundary…", "info"))
@@ -121,13 +120,13 @@ async def main() -> None:
                 )
             )
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "cancelled":
             app._append_block(UserBlock("/fork try the streaming parser"))
             app._append_block(NoticeBlock("forking at the next safe boundary…", "info"))
             app._append_block(NoticeBlock("fork cancelled", "note"))
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "opened":
             app._append_block(NoticeBlock("forking…", "info"))
             app._append_block(
@@ -152,7 +151,7 @@ async def main() -> None:
             )
 
         await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
 
         screen = app.screen
         print(

@@ -20,6 +20,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.events import EffectiveModelChanged, NoticePosted  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -87,7 +91,7 @@ async def main() -> None:
             )
         await pilot.pause()
         await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
 
 
 asyncio.run(main())

@@ -35,6 +35,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.model.configure import build_model_spec  # noqa: E402
 from local_operator.model.discovery import _row_from_openai_entry  # noqa: E402
 from local_operator.providers.controller import _price  # noqa: E402
@@ -164,7 +168,7 @@ async def main() -> None:
         # only the assembled row shows that.
         for line in picker.render_rows(picker.size.width):
             print(f"  |{line.plain}|", file=sys.stderr)
-        app.save_screenshot(out)
+        save_capture(app, out)
 
 
 if __name__ == "__main__":

@@ -39,13 +39,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-_SCRATCH = tempfile.mkdtemp(prefix="lo-suggest-shot-")
-os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+_SCRATCH = os.environ["LOCAL_OPERATOR_CONFIG_DIR"]
 
 from local_operator.config import ConfigManager  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
@@ -195,7 +196,7 @@ async def main() -> None:
             raise SystemExit(f"unknown state {state}")
 
         await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
         print(
             f"state={state} buffer={view._buffer!r} "
             f"suggestions={view.suggestion_labels_for_test()!r} "
