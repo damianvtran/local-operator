@@ -1217,7 +1217,11 @@ def test_a_resume_carries_the_childs_role_and_tier_forward(tmp_path, monkeypatch
     # a second launch and has to perform the same resolution, or the child
     # comes back on the parent's model while the panel still says `hi`.
     resolved = comms_mod.ModelSpec(provider="anthropic", model_id="claude-opus-5")
-    parent._resolve_subagent_model = lambda agent, effort: resolved  # type: ignore[attr-defined]
+    # ``strict`` is what the resume passes now: a tier that broke since launch
+    # refuses the resume rather than inheriting (test_pinned_subagent_model).
+    parent._resolve_subagent_model = (  # type: ignore[attr-defined]
+        lambda agent, effort, strict=False: resolved
+    )
     comms = SubagentComms(parent)  # type: ignore[arg-type]
     jobs.add("job-1", status="cancelled")
     comms.record_launch("job-1", "review-301-r2", agent_role="reviewer", effort="hi")

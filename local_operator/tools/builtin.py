@@ -7965,8 +7965,21 @@ class JobsParams(BaseModel):
 #: payload.  A child report can dwarf an ordinary tool result, so it uses the
 #: same bounded, lossless spill path as every other verbose tool.
 def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dict[str, Any] | None]:
-    """Return a context-bounded handoff while keeping the full report readable."""
+    """Return a context-bounded handoff while keeping the full report readable.
+
+    A task job's header names the model the child ran on, as recorded by the
+    harness (``job.model_label``, set from the child's own model-change event),
+    so the parent can STATE which model produced a delegated result rather
+    than assume it. This is the parent-visible half of the pinned-tier work:
+    ``subagent_start.model`` tells a stream consumer, this tells the model
+    that launched the child. It is deliberately the harness's record and not
+    anything the child said about itself, which is what makes it evidence
+    when the question is whether a review was independent.
+    """
     text = f"job {job.id} ({job.label}) [{job.status}]"
+    model_label = str(getattr(job, "model_label", "") or "").strip()
+    if getattr(job, "type", None) == "task" and model_label:
+        text += f" model={model_label}"
     if job.status == "completed" and job.result_text:
         text += f"\n{job.result_text}"
     if job.status == "failed" and job.error_text:
@@ -8028,7 +8041,24 @@ async def execute_task(
         try:
             job_id = launcher(item.label, _full_prompt(item), agent=item.agent, effort=item.effort)
         except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
-            failures.append(f"{item.label}: {exc}")
+            # An unavailable tier is the one launch failure the model is
+            # tempted to "fix" by retrying at another tier, which is how a
+            # pinned reviewer ends up running on the author's own model. Say
+            # so in the result, so the correct next step (report the tier as
+            # broken, or launch with NO effort and disclose that the child
+            # inherits the parent's model) is in front of it rather than
+            # something it has to infer from a bare exception string.
+            tier = getattr(exc, "tier", None)
+            if tier is not None:
+                failures.append(
+                    f"{item.label}: {exc}. Do NOT retry at a different effort tier — "
+                    f"that runs the child on a different model than {tier!r} was "
+                    f"chosen for. Either fix subagents.models.{tier} or launch "
+                    f"without 'effort' and state that the child inherits this "
+                    f"session's model."
+                )
+            else:
+                failures.append(f"{item.label}: {exc}")
             continue
         launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
     if not launched:

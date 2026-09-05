@@ -467,6 +467,13 @@ async def test_role_and_effort_survive_a_resume(tmp_path, monkeypatch):
     process launched must come back saying what kind it was and at what effort —
     exactly what the panel/model/usage fields already promise."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    # An explicit tier now fails the launch when nothing is configured for it
+    # (``test_pinned_subagent_model``), so the tier under test is configured —
+    # to the parent's own selector, so the child still runs on OneShotStream.
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "config.yml").write_text(
+        f"values:\n  subagents:\n    models:\n      hi: {MODEL.provider}/{MODEL.model_id}\n"
+    )
 
     parent = _session(tmp_path, OneShotStream())
     await parent.async_init()

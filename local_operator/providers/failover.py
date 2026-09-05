@@ -759,11 +759,23 @@ def append_auth_recovery(rendered_error: str, provider: str | None) -> str:
     ``is_image_rejection`` string-form convention rather than requiring the
     original exception at the display site.
     """
-    if not rendered_error:
-        return rendered_error
-    if not rendered_error.lower().startswith(_KIND_LABELS["auth"]):
+    if not is_rendered_auth_error(rendered_error):
         return rendered_error
     return f"{rendered_error}\n{auth_recovery_hint(provider)}"
+
+
+def is_rendered_auth_error(rendered_error: str) -> bool:
+    """Whether a RENDERED error string is the auth kind.
+
+    The one sanctioned way to read a kind back out of text: the failover
+    module itself put ``_KIND_LABELS["auth"]`` at the front of every auth-kind
+    error it rendered, so the prefix is its own statement rather than a guess
+    about a provider's wording. This is the predicate :func:`append_auth_recovery`
+    already applied inline; it is named so a second caller (the subagent
+    runner, deciding whether a pinned child died of access) shares it instead
+    of re-deriving the prefix and drifting from it.
+    """
+    return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["auth"])
 
 
 def is_usage_limit_error(error: BaseException) -> bool:
