@@ -98,3 +98,34 @@ without inline credentials/query parameters; secrets need their own masked
 credential flow. A broken config returns 409 without renaming/replacing it. The
 single-process write lock serializes this HTTP server's merge/write operations;
 it is not a cross-process compare-and-swap guarantee.
+
+## Canonical viewer protocol
+
+The existing runtime attach protocol remains `client: "attach"`; desktop
+adapters additionally send `surface: "desktop"` only after discovering
+`desktop-watch-v1` in the runtime record's capabilities. An old owner is refused
+before dialing, since it would otherwise mistake the HTTP proxy for a person at
+a terminal. Terminal and phone handshakes retain their existing defaults.
+
+`desktop_watch` renews the connection's `{visible, can_notify}` lease for 45
+seconds. Visible means the selected conversation is actually in a focused,
+visible window. Delivery capability is separate: a background Electron main
+process can notify without making the model believe a person is watching. Main
+must not set `can_notify` when native notifications are unavailable or denied.
+Expired desktop leases count neither as interactivity nor as idle-runtime
+residency. The runtime's existing heartbeat re-evaluates expired leases and
+restores parked-gate OS fallback. A valid desktop notification lease suppresses
+that fallback, so one gate does not produce both an Electron and runtime toast.
+
+`RemoteSession(surface="desktop")` carries this metadata through its existing
+owner binding/recovery path. It goes cold rather than taking over an owner in
+the HTTP process; reconnect does not resurrect an expired desktop lease. Its
+`bind_runtime`, `update_desktop_watch`, and identity-checked `answer_gate` helpers
+are host adapters, not another session daemon. Detach still closes only the
+viewer, never the canonical runtime.
+
+The command registry and resolver now live in `local_operator/slash_commands.py`.
+The TUI imports that same registry; canonical frontend capabilities derive from
+it without importing the Textual application. A desktop command UI must consume
+these names, aliases, argument and prompt-consumption semantics rather than
+maintain a second vocabulary.

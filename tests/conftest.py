@@ -36,6 +36,8 @@ import pytest
 #: change what the code under test does.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     "LOCAL_OPERATOR_DEBUG",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.

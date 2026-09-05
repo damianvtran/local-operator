@@ -1089,10 +1089,10 @@ class OwnedSessionHandle(SessionHandle):
             # because the policy stopped reading it.
             return PENDING_REQUEST_TIMEOUT_S
         parked = self._parked_timeout_s()
-        if self._watching_surfaces():
-            # A terminal OR the phone is watching: the card is on a screen
-            # somebody has. Note this is deliberately kind-agnostic — the
-            # question is "can this reach a person", and both surfaces can.
+        if self._watching_surfaces() or self._desktop_notification_available():
+            # A visible terminal/phone or a notification-capable desktop can
+            # reach a person. This is not the interactivity probe: background
+            # delivery earns a parked wait, never an assertion somebody is here.
             return parked
         # Nothing is presenting the card. A parked gate is still preferable to
         # a denial when the user has an out-of-band way to be told about it
@@ -1161,6 +1161,15 @@ class OwnedSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._watching_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _desktop_notification_available(self) -> bool:
+        reader = getattr(self._registrant, "notification_surfaces", None)
+        if callable(reader):
+            try:
+                return "desktop" in cast("frozenset[str]", reader())
+            except Exception:  # noqa: BLE001 — an unknown lease restores OS fallback
+                logger.debug("could not read desktop notification reachability", exc_info=True)
+        return False
 
     def _watching_surfaces(self) -> frozenset[str]:
         """Which kinds of surface are watching, for notification routing.
@@ -1290,6 +1299,11 @@ class OwnedSessionHandle(SessionHandle):
         # is why this is a routing decision and not a new transport.
         surfaces = self._watching_surfaces()
         if surfaces:
+            return
+        if self._desktop_notification_available():
+            # A background window is not interactive, but its main process
+            # owns notification delivery while leased. Falling through would
+            # post both Electron and detached-runtime OS toasts.
             return
         try:
             from local_operator.tui.notify import (
