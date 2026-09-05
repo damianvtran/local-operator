@@ -1075,6 +1075,45 @@ async def test_child_starts_with_the_tools_the_parent_already_activated(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_child_activation_keeps_the_rebuilt_effort_tier_tools(tmp_path, monkeypatch):
+    """F3: the child's MCP activation used to refresh from a base snapshotted
+    at ``attach`` — so a config-watcher effort-tier rebuild (which swaps in
+    fresh ``task``/``agent`` objects) was silently reverted the first time the
+    child activated an MCP tool. The base is now derived from the live
+    inventory on each activation."""
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import ConfigWatcher
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    manager = FakeMcpManager({"linear": ["list_teams"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+
+    child = await build_child(parent)
+    # What the process watcher does when a tier is configured mid-run: swap
+    # the ``task``/``agent`` objects in place with freshly rebuilt schemas.
+    child_watcher = ConfigWatcher(tmp_path / "config")
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents", {"models": {"med": "anthropic/claude-sonnet-4-5"}}
+    )
+    change = child_watcher.poll_now()
+    assert change is not None
+    child._apply_config_change(change)
+    rebuilt = next(t for t in child._tools if t.name == "task")
+    assert rebuilt.parameters["properties"]["effort"]["anyOf"][0]["enum"] == ["med"]
+
+    # Activating an MCP tool must refresh AROUND the rebuilt tools, not
+    # reinstate the pre-rebuild objects the attach-time snapshot held.
+    # Driven through the same ``mcp://`` URL the model would read.
+    rendered = resolve(child, "mcp://linear/list_teams")
+    assert rendered is not None and "mcp__linear_list_teams" in rendered
+    assert next(t for t in child._tools if t.name == "task") is rebuilt
+    assert "mcp__linear_list_teams" in {t.name for t in child._tools}
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_child_activation_lands_on_the_child_not_the_parent(tmp_path, monkeypatch):
     """``read mcp://linear/list_issues`` inside a child must enable that schema
     on the CHILD. The parent's own resolver chain ends in an activate() bound to
