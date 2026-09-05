@@ -12,12 +12,16 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+import regex
 from rich.cells import cell_len
 
 _NS = "http://www.w3.org/2000/svg"
@@ -55,6 +59,8 @@ class CaptureProfile:
             raise ValueError("font size must not exceed cell height")
         if not re.fullmatch(r"[\w ,.-]+", self.font_family):
             raise ValueError("font family must be a plain CSS font list")
+        if "monospace" not in [name.strip().casefold() for name in self.font_family.split(",")]:
+            raise ValueError("font family must include a generic monospace fallback")
 
     @classmethod
     def from_env(cls) -> CaptureProfile:
@@ -71,8 +77,9 @@ def terminal_svg(svg: str, columns: int, rows: int, profile: CaptureProfile) -> 
 
     Fail loudly if the upstream SVG contract changes. In particular, silently
     keeping a new translation would create plausible but false evidence again.
-    Explicit glyph x positions avoid depending on SVG textLength support (librsvg
-    does not implement it); combining marks share their preceding cell position.
+    Explicit cluster x positions avoid depending on SVG textLength support
+    (librsvg does not implement it). Grapheme clusters stay whole so ZWJ emoji,
+    variation selectors and combining accents can still be shaped by the font.
     """
     root = ET.fromstring(svg)
     style = root.find(f"{{{_NS}}}style")
@@ -104,7 +111,9 @@ def terminal_svg(svg: str, columns: int, rows: int, profile: CaptureProfile) -> 
     css = re.sub(r"font-size:[^;]+;", f"font-size: {profile.font_size}px;", css)
     css = re.sub(r"line-height:[^;]+;", f"line-height: {profile.cell_height}px;", css)
     style.text = css
-    for element in root.iter():
+    # Snapshot before adding tspans: they already carry native coordinates and
+    # must not be visited (and scaled a second time) by this projection pass.
+    for element in list(root.iter()):
         if element is root:
             continue
         for attr, scale in (("x", sx), ("y", sy), ("width", sx), ("height", sy)):
@@ -112,17 +121,75 @@ def terminal_svg(svg: str, columns: int, rows: int, profile: CaptureProfile) -> 
                 element.set(attr, f"{float(element.attrib[attr]) * scale:g}")
         if element.tag == f"{{{_NS}}}text":
             start = float(element.get("x", "0"))
-            positions: list[str] = []
+            text = element.text or ""
+            element.text = None
             offset = 0
-            for char in element.text or "":
-                cells = cell_len(char)
-                column = offset if cells else max(0, offset - 1)
-                positions.append(f"{start + column * profile.cell_width:g}")
-                offset += cells
-            element.set("x", " ".join(positions))
+            for cluster in regex.findall(r"\X", text):
+                span = ET.SubElement(element, f"{{{_NS}}}tspan")
+                span.set("x", f"{start + offset * profile.cell_width:g}")
+                span.text = cluster
+                offset += cell_len(cluster)
             element.attrib.pop("textLength", None)
             element.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
     return ET.tostring(root, encoding="unicode")
+
+
+@lru_cache(maxsize=16)
+def font_provenance(profile: CaptureProfile) -> dict[str, Any]:
+    """Measure fontconfig's local selection, used by the librsvg gallery path.
+
+    A browser/other rasterizer may resolve differently. Do not call CSS evidence
+    of a font being installed, and do not silently label a fallback as Menlo.
+    """
+    matcher = shutil.which("fc-match")
+    result: dict[str, Any] = {"requested": profile.font_family, "scope": "fontconfig/librsvg"}
+    if matcher is None:
+        return {**result, "status": "unresolved: fc-match unavailable"}
+    faces = []
+    for style in ("Regular", "Bold", "Italic"):
+        try:
+            match = subprocess.run(
+                [
+                    matcher,
+                    "-f",
+                    "%{family}\\n%{style}\\n%{file}\\n%{index}\\n",
+                    f"{profile.font_family}:style={style}",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout.splitlines()
+            family, resolved_style, filename, index = match[:4]
+            face: dict[str, Any] = {
+                "requested_style": style,
+                "family": family,
+                "style": resolved_style,
+                "file": filename,
+                "index": index,
+            }
+            try:
+                from PIL import ImageFont
+
+                font = ImageFont.truetype(filename, size=profile.font_size, index=int(index))
+                face["ascii_advances"] = {c: font.getlength(c) for c in "iW01"}
+                face["ascent_descent"] = list(font.getmetrics())
+                advances = list(face["ascii_advances"].values())
+                face["monospace_ascii"] = max(advances) - min(advances) < 0.01
+                face["measurement"] = "Pillow/FreeType; rasterizer hinting may differ"
+            except (ImportError, OSError, ValueError) as exc:
+                face["measurement"] = f"unavailable: {type(exc).__name__}"
+            faces.append(face)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return {**result, "status": "unresolved: fontconfig query failed", "faces": faces}
+    first_requested = profile.font_family.split(",")[0].strip().casefold()
+    result.update(
+        status="resolved" if first_requested in faces[0]["family"].casefold() else "fallback",
+        faces=faces,
+    )
+    if any(face.get("monospace_ascii") is False for face in faces):
+        result["warning"] = "Resolved font has variable ASCII advances; not monospace fidelity"
+    return result
 
 
 def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | None = None) -> str:
@@ -131,6 +198,8 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
         raise ValueError("visual evidence requires a real app with its production CSS")
     profile = profile or CaptureProfile.from_env()
     path = Path(filename)
+    if path.suffix.lower() != ".svg":
+        raise ValueError("capture destination must end in .svg; rasterize separately")
     path.parent.mkdir(parents=True, exist_ok=True)
     columns, rows = app.size
     path.write_text(terminal_svg(app.export_screenshot(), columns, rows, profile))
@@ -155,8 +224,21 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
                 "grid": [columns, rows],
                 "native_pixels": [columns * profile.cell_width, rows * profile.cell_height],
                 "profile": asdict(profile),
+                "font": font_provenance(profile),
                 "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
-                "css_path": [str(p) for p in app.CSS_PATH],
+                "css_path": [
+                    str(p)
+                    for p in ([app.CSS_PATH] if isinstance(app.CSS_PATH, str) else app.CSS_PATH)
+                ],
+                "screen": {
+                    "size": list(app.screen.size),
+                    "virtual_size": list(app.screen.virtual_size),
+                    "region": list(app.screen.region),
+                    "scrollbar": [
+                        app.screen.show_horizontal_scrollbar,
+                        app.screen.show_vertical_scrollbar,
+                    ],
+                },
                 "widgets": widgets,
             },
             indent=2,

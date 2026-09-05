@@ -34,8 +34,23 @@ def test_geometry_and_local_fonts_preserve_cells() -> None:
     assert root.find("s:g", NS).get("transform") is None  # type: ignore[union-attr]
     text = root.find(".//s:g/s:g/s:text", NS)
     assert text is not None
-    assert text.get("x") == "0 8 16 24 40 48 48"
+    assert [s.get("x") for s in text] == ["0", "8", "16", "24", "40", "48"]
+    assert [s.text for s in text][-1] == "e\u0301"
     assert "Menlo, DejaVu Sans Mono, monospace" in svg
+
+
+@pytest.mark.parametrize("cluster", ["👩‍💻", "👨‍👩‍👧‍👦", "界\u0301", "❤️"])
+def test_grapheme_shaping_and_following_ascii_origin(cluster: str) -> None:
+    from rich.cells import cell_len
+
+    console = Console(width=10, height=1, record=True)
+    console.print(cluster + "X", end="")
+    root = ET.fromstring(terminal_svg(console.export_svg(), 10, 1, CaptureProfile()))
+    spans = root.findall(".//s:tspan", NS)
+    assert spans[0].text == cluster
+    assert spans[0].get("x") == "0"
+    assert spans[1].text == "X"
+    assert spans[1].get("x") == str(8 * cell_len(cluster))
 
 
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])

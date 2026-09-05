@@ -151,6 +151,8 @@ dev = [
     # CPU work unchanged. See the `-n auto` note on `addopts` below.
     "pytest-xdist",
     "pytest-textual-snapshot",
+    # Capture glyph origins must follow grapheme clusters, not codepoints.
+    "regex>=2024.11.6",
     "pip-audit",
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",

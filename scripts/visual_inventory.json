@@ -1,0 +1,284 @@
+{
+  "base": "619ec60a52efc11e3257d5439ace31dd4bcec22f",
+  "capture_scripts": {
+    "approval_shot.py": [
+      "default",
+      "focus"
+    ],
+    "ask_long_shot.py": [
+      "row0",
+      "row1",
+      "row2",
+      "row3",
+      "row0-reveal",
+      "row1-reveal",
+      "row2-reveal",
+      "row3-reveal"
+    ],
+    "ask_scroll_shot.py": [
+      "top",
+      "bottom-down",
+      "pagedown",
+      "reveal"
+    ],
+    "ask_shot.py": [
+      "default"
+    ],
+    "ask_user_repro.py": [
+      "row0",
+      "row1",
+      "row2",
+      "row3",
+      "row0-reveal",
+      "row1-reveal",
+      "row2-reveal",
+      "row3-reveal"
+    ],
+    "bad_hosting_shot.py": [
+      "invalid-hosting"
+    ],
+    "copy_shot.py": [
+      "short",
+      "code",
+      "long",
+      "mixed"
+    ],
+    "fallback_shot.py": [
+      "before",
+      "after"
+    ],
+    "fork_shot.py": [
+      "help",
+      "switch",
+      "replaced",
+      "cancelled",
+      "opened",
+      "deferred",
+      "fallback",
+      "failed"
+    ],
+    "help_keys_shot.py": [
+      "default"
+    ],
+    "model_picker_shot.py": [
+      "default"
+    ],
+    "nerd_glyph_shot.py": [
+      "nerd",
+      "plain"
+    ],
+    "org_chart_shot.py": [
+      "one-agent",
+      "empty",
+      "flat-multi",
+      "nested",
+      "count",
+      "zoom",
+      "org-within-org",
+      "cycle",
+      "deep",
+      "missing-refs",
+      "wide",
+      "picker-team",
+      "picker-ch",
+      "picker-chart",
+      "nested-tier0",
+      "nested-tier2",
+      "nested-expanded",
+      "nested-legend"
+    ],
+    "settings_shot.py": [
+      "overview",
+      "boot",
+      "frames",
+      "fork",
+      "fork-open",
+      "fork-placement",
+      "fork-placement-open",
+      "enum",
+      "error",
+      "cascade",
+      "cascade-corrupt",
+      "cascade-row",
+      "confirm-long",
+      "confirm",
+      "teams",
+      "agents",
+      "theme",
+      "reset-default",
+      "bool-open",
+      "choosing",
+      "preview",
+      "reset-offered",
+      "retired",
+      "top"
+    ],
+    "settings_suggest_shot.py": [
+      "provider",
+      "provider-empty",
+      "model",
+      "model-empty",
+      "custom",
+      "provider-windowed"
+    ],
+    "shot_login.py": [
+      "prompt",
+      "empty-submit",
+      "cancel",
+      "synthetic-key-submit"
+    ],
+    "sibling_shot.py": [
+      "subagent",
+      "org-chart"
+    ],
+    "steer_fold_shot.py": [
+      "default"
+    ],
+    "steer_receipt_probe.py": [
+      "52",
+      "53"
+    ],
+    "stop_ladder_shot.py": [
+      "offer",
+      "stopped",
+      "nochildren",
+      "expired",
+      "late",
+      "finished",
+      "spared",
+      "draft",
+      "cleared"
+    ],
+    "subagent_viewport_shot.py": [
+      "default"
+    ],
+    "theme_preview.py": [
+      "all-registered-themes"
+    ],
+    "tui_lag_shot.py": [
+      "default"
+    ]
+  },
+  "pages": {
+    "welcome": [
+      "empty-boot"
+    ],
+    "parent-transcript": [
+      "populated-markdown-code-tools",
+      "streaming-loading",
+      "error-notice",
+      "long-scroll"
+    ],
+    "composer-command-picker": [
+      "slash-and-arguments",
+      "multiline"
+    ],
+    "ask-approval": [
+      "short",
+      "long-revealed",
+      "overflow-scroll",
+      "approval"
+    ],
+    "help": [
+      "keys"
+    ],
+    "model-picker": [
+      "populated",
+      "empty-search"
+    ],
+    "session-resume-picker": [
+      "populated",
+      "empty"
+    ],
+    "copy-picker": [
+      "populated",
+      "empty"
+    ],
+    "login-key-prompt": [
+      "prompt",
+      "invalid-empty",
+      "cancelled",
+      "synthetic-success"
+    ],
+    "settings": [
+      "overview",
+      "inline-invalid",
+      "expanded-choices",
+      "boot-return"
+    ],
+    "org-chart": [
+      "populated",
+      "empty",
+      "nested-overflow"
+    ],
+    "subagent-page": [
+      "populated",
+      "running",
+      "empty"
+    ],
+    "sibling-navigation": [
+      "subagent",
+      "org-chart"
+    ],
+    "usage-panel": [
+      "loading",
+      "empty",
+      "error",
+      "populated"
+    ],
+    "analytics-panel": [
+      "empty",
+      "populated"
+    ],
+    "aside-panel": [
+      "empty",
+      "loading",
+      "error",
+      "populated"
+    ],
+    "todo-panel": [
+      "empty",
+      "populated",
+      "overflow"
+    ],
+    "wake-panel": [
+      "empty",
+      "populated",
+      "overflow"
+    ],
+    "roster-status-stop": [
+      "running",
+      "stop-offer",
+      "stopped"
+    ],
+    "fork-receipts": [
+      "opened",
+      "failed"
+    ]
+  },
+  "reference_provenance": {
+    "158x44": "estimated Terminal reference viewport from parent/designer; originals not viewed by QA",
+    "208x54": "estimated Ghostty reference viewport from parent/designer; originals not viewed by QA",
+    "8x17": "explicit reproducible preset; not measured terminal universal default"
+  },
+  "specimens": [
+    "ASCII baseline and descenders",
+    "Unicode box drawing",
+    "wide and combining glyphs",
+    "plain and Nerd glyph fallback"
+  ],
+  "settling_focus": [
+    "welcome",
+    "settings",
+    "deferred-steer"
+  ],
+  "frozen_scope": {
+    "documented_variants": 111,
+    "native_script_compatibility": 23,
+    "active_matrix_rows": 189,
+    "superseded_rows": 580,
+    "no_cartesian_product": true,
+    "size_adapters": "Not planned; only if required to exercise actual helper",
+    "original_references": "Only parent has viewed embedded originals; QA uses supplied measured/estimated context"
+  }
+}
