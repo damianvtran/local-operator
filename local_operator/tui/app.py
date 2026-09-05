@@ -2130,6 +2130,8 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state = False
+        self._model_activation_generation = 0
+        self._model_activation_pending: int | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -5978,7 +5980,7 @@ class OperatorApp(App[None]):
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
-        return self._session_transition_pending
+        return self._session_transition_pending or self._model_activation_pending is not None
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -8762,7 +8764,7 @@ class OperatorApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
-        if self._session_transition_pending:
+        if self.composer_submission_blocked():
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
             # already have been posted, so return the draft rather than routing
@@ -15256,11 +15258,67 @@ class OperatorApp(App[None]):
         if self._providers.provider(provider) is None:
             self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
+        if getattr(self._providers.provider(provider), "local_setup", False):
+            self._model_activation_pending = generation
+            # This is a user-command receipt, not background infrastructure.
+            # Retire the splash before the wait so completion cannot move the
+            # composer underneath a draft typed while capacity is being checked.
+            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            self.run_worker(
+                self._resolve_local_model_activation(
+                    session, provider, model_id, persist_default, notice, generation
+                ),
+                group="local-model-resolution",
+                exclusive=True,
+            )
+            return
         try:
             spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
+        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+
+    async def _resolve_local_model_activation(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        persist_default: bool,
+        notice: NoticeFn,
+        generation: int,
+    ) -> None:
+        providers = self._providers
+        if providers is None:
+            return
+        try:
+            spec = await asyncio.to_thread(providers.resolve_model, provider, model_id)
+            # A slow probe cannot overtake a newer choice or apply to a different
+            # session. Enter stays behind the existing composer boundary until
+            # selection settles, so a fast next prompt cannot reach the old model.
+            if self._session is session and generation == self._model_activation_generation:
+                self._activate_resolved_model(
+                    session, provider, model_id, spec, persist_default, notice
+                )
+        except Exception as error:
+            self._system_notice(f"cannot resolve {provider}: {error}", "error")
+        finally:
+            if self._model_activation_pending == generation:
+                self._model_activation_pending = None
+
+    def _activate_resolved_model(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        spec: Any,
+        persist_default: bool,
+        notice: NoticeFn,
+    ) -> None:
         old_label = session.model_label
         # The chosen effort rides along when the new model accepts it: a user
         # who dropped to `low` for cost did not mean "until I switch models".
@@ -20013,7 +20071,7 @@ class OperatorApp(App[None]):
         the standard vocabulary. ``kind`` is ``notice`` for a printed line,
         ``block`` for a renderable payload, ``noop`` when the follower opens
         its own picker. Async because the MCP grant path starts a browser
-        round trip; every other producer is synchronous work.
+        round trip, and local model activation refreshes capacity off the UI loop.
 
         ``locality`` is the invoking client's declared position (see
         ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
@@ -20054,7 +20112,7 @@ class OperatorApp(App[None]):
                 # follower hosts the widget. A selector is a mutation: it is
                 # applied here, on the authoritative session.
                 return SlashResult(kind="noop")
-            return self._model_slash_result(args, SlashResult)
+            return await self._model_slash_result(args, SlashResult)
         if command == "loop":
             return self._loop_slash_result(args, SlashResult)
         if command == "compact":
@@ -20387,7 +20445,7 @@ class OperatorApp(App[None]):
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
         return SlashResult(kind="noop", data={"type": "agent_mutate", "args": arg})
 
-    def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """The routed, non-bare ``/model``: a REAL switch on the owner session.
 
         ``_cmd_model`` cannot be reused here — it prints through the local
@@ -20433,8 +20491,31 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice", text=f"unknown provider: {provider} — see /provider", style="warning"
             )
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
         try:
-            spec = self._providers.resolve_model(provider, model_id)
+            if getattr(self._providers.provider(provider), "local_setup", False):
+                self._model_activation_pending = generation
+                try:
+                    spec = await asyncio.to_thread(
+                        self._providers.resolve_model, provider, model_id
+                    )
+                finally:
+                    if self._model_activation_pending == generation:
+                        self._model_activation_pending = None
+                if self._session is not session or generation != self._model_activation_generation:
+                    return SlashResult(
+                        kind="notice",
+                        text=(
+                            "The session or model choice changed during lookup. "
+                            "Select the model again."
+                        ),
+                        style="warning",
+                    )
+            else:
+                spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:
             return SlashResult(
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"

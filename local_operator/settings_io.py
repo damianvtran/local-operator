@@ -1153,9 +1153,7 @@ SETTINGS: tuple[Setting, ...] = (
                 f"{name} model overrides",
                 Kind.TEXT,
                 DEFAULT_MODEL_OVERRIDES,
-                "JSON keyed by exact model ID: "
-                '{"my-model":{"context_window":8192,"supports_tools":true}}. '
-                "Active server limits cap context overrides; this does not resize the server.",
+                'JSON: {"model-id":{"context_window":8192}}; server limits still apply.',
                 validate_value=model_overrides,
             ),
         )

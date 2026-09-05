@@ -430,7 +430,9 @@ def test_openai_compat_reads_the_legacy_modality_string() -> None:
 
 def test_openai_compat_accepts_a_models_envelope() -> None:
     body = {"models": [{"id": "local-model", "context_window": 32_768}]}
-    rows = fetch_models("vllm", api_key=None, client=_StubClient([_Response(200, body)]))
+    rows = fetch_models(
+        "deepseek", api_key="fixture-key", client=_StubClient([_Response(200, body)])
+    )
 
     assert rows is not None
     assert [(row.id, row.context_window) for row in rows] == [("local-model", 32_768)]
@@ -984,7 +986,7 @@ def test_no_listing_providers_is_derived_from_the_provider_registry() -> None:
     expected = {
         definition.id
         for definition in PROVIDER_REGISTRY
-        if definition.wire == "mock" or not definition.base_url
+        if definition.wire == "mock" or (not definition.base_url and not definition.local_setup)
     }
 
     # Derived, not hardcoded: with a literal id list, the provider added next is

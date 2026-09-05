@@ -25,6 +25,11 @@ selects an exact model for this session; `/model default` persists the selection
 Model IDs retain their slashes, colons, and case. There is no fabricated model
 default and no inference request merely to test the connection.
 
+A replacement token becomes the endpoint's sole active credential, not another
+member of a rotating key pool. Older entries remain credential history. The
+`-` token action deactivates saved entries for that endpoint without reviving
+an older token; it does not erase credential history.
+
 | Preset | Default API root | Metadata beyond `/v1/models` |
 | --- | --- | --- |
 | `lmstudio` | `http://localhost:1234/v1` | `/api/v1/models`: loaded instance IDs, active context, tool/vision/reasoning support |
@@ -34,7 +39,9 @@ default and no inference request merely to test the connection.
 | `openai-compatible` | Explicit URL required | Compatible list; manual metadata for MLX, LocalAI, proxies, and similar servers |
 
 A stopped server stays visible in the provider list so it can be configured.
-A cached model list is not proof a server is currently running. Optional native
+A cached model list is not proof a server is currently running. Explicit model
+activation/reselection refreshes capacity under a bounded deadline; ordinary
+picker reads keep using the catalogue cache. Optional native
 metadata endpoints may be absent; the compatible listing still works. Known
 embedding-only entries are excluded, but a server that does not identify their
 type may require you to select the correct chat model yourself.
@@ -99,8 +106,12 @@ runtime's TUI Settings/setup flow.
 
 ## Comparison and boundaries
 
-Like OMP and OpenCode, Local Operator uses the compatible Chat Completions wire
-for user-operated servers rather than maintaining a second inference engine.
+Local Operator deliberately keeps Chat Completions as its compatibility baseline
+across these servers. This is not OMP's default: the audited OMP revision
+`78c2f2e` uses Responses for implicit Ollama/llama.cpp connections. OpenCode also
+offers configurable compatible providers; these integrations need not choose
+identical protocol defaults to cover the same setup use case.
+
 This integration adds in-app endpoint/token setup, endpoint-scoped discovery,
 native local context metadata, exact-model overrides, and scoped reasoning
 replay. It is not a claim of complete configuration or runtime-management parity.

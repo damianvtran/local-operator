@@ -1379,13 +1379,26 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # HTTP 400 from the provider — and the two failures differ only in which
         # side reports them. Closing it would mean trusting a local count at
         # exactly the occupancy where being wrong is most expensive.
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+        advice = "Compact the conversation or start a new session."
+        if request.model.provider in LOCAL_PROVIDER_IDS:
+            history = any(message.role == "assistant" for message in request.messages)
+            advice = (
+                ("Compact the conversation, or increase " if history else "Increase ")
+                + "the model's loaded server context where supported, or choose a "
+                "larger-context model. Then reselect it with /model or restart. "
+                "Check the model's context override in /settings; if the server "
+                "cannot report capacity, set it to the server's actual capacity. "
+                "Client context overrides do not resize the server."
+            )
         raise ProviderError(
             None,
             (
                 f"prompt is too large for {request.model.model_id}: about "
                 f"{measured_prompt:,} tokens of input against a {window:,}-token "
                 f"context window leaves under {reserve:,} tokens for the "
-                f"reply. Compact the conversation or start a new session."
+                f"reply. {advice}"
             ),
             kind="request",
         )
@@ -2246,14 +2259,16 @@ class OpenAICompatClient:
             return
         from local_operator.providers.local import (
             LOCAL_PROVIDER_IDS,
-            provider_settings,
+            normalize_base_url,
             resolve_base_url,
         )
 
-        if request.model.provider in LOCAL_PROVIDER_IDS and provider_settings(
-            request.model.provider
-        ).get("base_url"):
-            if resolve_base_url(request.model.provider) != self._base_url:
+        if request.model.provider in LOCAL_PROVIDER_IDS:
+            actual_endpoint = normalize_base_url(self._base_url)
+            bound_endpoint = getattr(oauth_access, "api_endpoint", None)
+            if resolve_base_url(request.model.provider) != actual_endpoint or (
+                bound_endpoint is not None and normalize_base_url(bound_endpoint) != actual_endpoint
+            ):
                 # Sessions retain their selected endpoint. The credential store
                 # follows current configuration, so fail before sending either
                 # conversation or bearer when those two identities diverge.

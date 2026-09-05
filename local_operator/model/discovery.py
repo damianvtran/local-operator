@@ -1332,15 +1332,16 @@ _WIRE_TRANSPORTS: dict[WireFormat, _Transport | None] = {
 def _build_transports() -> dict[str, _Transport | None]:
     """Provider id to transport, derived from the registry at import time.
 
-    A provider with no ``base_url`` maps to ``None``: no host means no listing
-    endpoint. That is the shape the credential-brokered providers take (Vertex,
+    A provider with no ``base_url`` maps to ``None`` unless local setup supplies
+    its endpoint at runtime: an unconfigured generic server is not permanently
+    unlistable. That is the shape the credential-brokered providers take (Vertex,
     Bedrock and Azure, none of which exist in this tree today), so adding one
     later gets the correct "registry only" behaviour instead of a request to the
     empty string.
     """
     transports: dict[str, _Transport | None] = {}
     for definition in PROVIDER_REGISTRY:
-        if not definition.base_url:
+        if not definition.base_url and not definition.local_setup:
             transports[definition.id] = None
             continue
         transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
@@ -1798,6 +1799,7 @@ def cached_available_models(
     provider_id: str,
     *,
     cache_dir: Path | None = None,
+    base_url: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
@@ -1821,7 +1823,7 @@ def cached_available_models(
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
 
-        key = endpoint_cache_key(key, resolve_base_url(definition.id))
+        key = endpoint_cache_key(key, resolve_base_url(definition.id, override=base_url))
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)

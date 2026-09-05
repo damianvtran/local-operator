@@ -34,6 +34,7 @@ from local_operator.providers.local import (
     LOCAL_PROVIDER_IDS,
     local_api_key,
     local_model_info,
+    resolve_base_url,
 )
 from local_operator.server.dependencies import get_credential_manager, get_env_config
 from local_operator.server.models.schemas import (
@@ -269,10 +270,23 @@ async def list_models(
             elif provider_detail.id in LOCAL_PROVIDER_IDS:
 
                 def local_entries(provider: str) -> list[ModelEntry]:
-                    rows, _ = available_models(provider, api_key=local_api_key(provider))
+                    try:
+                        endpoint = resolve_base_url(provider)
+                    except ValueError:
+                        logger.warning(
+                            "Invalid endpoint configuration for local provider %s", provider
+                        )
+                        return []
+                    if not endpoint:
+                        return []
+                    rows, _ = available_models(
+                        provider,
+                        api_key=local_api_key(provider, endpoint=endpoint),
+                        base_url=endpoint,
+                    )
                     result = []
                     for row in rows:
-                        info = local_model_info(provider, row.id).model_copy(
+                        info = local_model_info(provider, row.id, base_url=endpoint).model_copy(
                             update={"name": row.name or row.id}
                         )
                         result.append(

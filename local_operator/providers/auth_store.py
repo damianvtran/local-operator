@@ -488,6 +488,19 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def active_local_credential(self, provider: str, endpoint: str) -> StoredCredential | None:
+        """The last configured token for this endpoint, without reviving history.
+
+        Cloud keys form a rotation pool. A local setup form instead edits ONE
+        connection: a replacement token must not alternate with its predecessor.
+        Inspect disabled rows too, so clearing/rejecting the latest token does
+        not silently fall back to an older token the operator replaced.
+        """
+        for row in reversed(self.list_credentials(provider, include_disabled=True)):
+            if row.credential_type == "api_key" and row.data.get("endpoint") == endpoint:
+                return row if row.disabled_cause is None else None
+        return None
+
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Insert, or update the row for the same identity (org scope ⇒ rows).
 
@@ -1334,21 +1347,21 @@ class AuthStore:
         # ``model_id`` scopes the block filter: an account blocked only for a
         # model family (a spent scoped weekly cap) still serves every other
         # family, so a resolve that names a different model must see the row.
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
+        if provider in LOCAL_PROVIDER_IDS:
+            selected = self.active_local_credential(provider, resolve_base_url(provider))
+            candidates = [selected] if selected is not None else []
+        else:
+            candidates = self.list_credentials(provider)
         rows = [
             r
-            for r in self.list_credentials(provider)
+            for r in candidates
             if r.credential_type == credential_type
             and not self.is_blocked_for_model(r.id, provider, model_id)
         ]
         if source is not None:
             rows = [r for r in rows if r.data.get("source") == source]
-        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
-
-        if provider in LOCAL_PROVIDER_IDS:
-            endpoint = resolve_base_url(provider)
-            # A settings edit must not turn a saved bearer into a credential
-            # for an unrelated server. Reconfigure explicitly to bind it anew.
-            rows = [r for r in rows if r.data.get("endpoint") == endpoint]
         # Drop demoted rows from the TIER, not merely sort them last, when some
         # other credential is still reachable.
         #
@@ -1495,8 +1508,18 @@ class AuthStore:
                 kind="oauth",
                 raw=data,
             )
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+        # Carry the endpoint with the selected key. Re-reading configuration at
+        # dispatch alone cannot detect a change between selection and dispatch.
+        endpoint = (
+            row.data.get("endpoint") if row is not None and provider in LOCAL_PROVIDER_IDS else None
+        )
         return OAuthAccess(
-            access_token=key, credential_id=row.id if row is not None else 0, kind="api_key"
+            access_token=key,
+            credential_id=row.id if row is not None else 0,
+            kind="api_key",
+            api_endpoint=endpoint if isinstance(endpoint, str) else None,
         )
 
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:

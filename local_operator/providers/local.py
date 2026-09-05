@@ -144,22 +144,25 @@ def model_overrides(value: object) -> dict[str, dict[str, Any]]:
     return value
 
 
-def local_api_key(provider: str) -> str | None:
+def local_api_key(provider: str, *, endpoint: str | None = None) -> str | None:
     from local_operator.providers.auth_store import AuthStore
 
     store = AuthStore()
     try:
-        endpoint = resolve_base_url(provider)
-        for row in reversed(store.list_credentials(provider)):
-            if row.data.get("endpoint") == endpoint and row.credential_type == "api_key":
-                return str(row.data.get("key") or "") or None
-        return None
+        endpoint = endpoint if endpoint is not None else resolve_base_url(provider)
+        row = store.active_local_credential(provider, endpoint)
+        return (str(row.data.get("key") or "") or None) if row is not None else None
     finally:
         store.close()
 
 
 def local_model_spec(
-    provider: str, model_id: str, *, api_key: str | None = None, cached_only: bool = False
+    provider: str,
+    model_id: str,
+    *,
+    api_key: str | None = None,
+    cached_only: bool = False,
+    base_url: str | None = None,
 ):
     """Resolve only server evidence and explicit overrides, never cloud-name heuristics.
 
@@ -167,23 +170,41 @@ def local_model_spec(
     An active server limit always caps overrides: changing a client budget does
     not resize the model loaded in the inference process.
     """
+    import dataclasses
+
     from local_operator.harness.types import ModelSpec
     from local_operator.model.discovery import available_models, cached_available_models
 
-    endpoint = resolve_base_url(provider)
+    endpoint = resolve_base_url(provider, override=base_url)
     if not endpoint:
         raise ValueError(
             "Configure the server URL with /login openai-compatible before choosing a model."
         )
     if cached_only:
-        rows, _ = cached_available_models(provider)
+        rows, _ = cached_available_models(provider, base_url=endpoint)
     else:
-        rows, _ = available_models(
+        # Explicit activation is a capacity boundary: a loaded model may have
+        # shrunk since the catalogue was cached. Normal picker reads retain
+        # their cache; only activation spends this bounded foreground refresh.
+        rows, status = available_models(
             provider,
-            api_key=api_key or local_api_key(provider),
+            api_key=api_key or local_api_key(provider, endpoint=endpoint),
             base_url=endpoint,
             want_id=model_id,
+            ttl_s=0,
+            timeout=5.0,
         )
+        if status != "ok":
+            rows = [
+                dataclasses.replace(
+                    row,
+                    active_context_window=None,
+                    context_window=min(
+                        DEFAULT_LOCAL_CONTEXT, row.max_context_window or DEFAULT_LOCAL_CONTEXT
+                    ),
+                )
+                for row in rows
+            ]
     row = next((r for r in rows if r.id == model_id), None)
     overrides = model_overrides(
         provider_settings(provider).get("models", DEFAULT_MODEL_OVERRIDES)
@@ -209,7 +230,7 @@ def local_model_spec(
         context_window=context,
         max_output_tokens=output,
         context_metadata_resolved=True,
-        max_context_window=active,
+        max_context_window=(row.max_context_window if row else None) or active,
         default_context_window=row.context_window if row and row.context_window else None,
         supports_tools=overrides.get(
             "supports_tools", row.supports_tools is not False if row else True
@@ -224,12 +245,14 @@ def local_model_spec(
     )
 
 
-def local_model_info(provider: str, model_id: str):
+def local_model_info(provider: str, model_id: str, *, spec=None, base_url: str | None = None):
     from local_operator.model.discovery import cached_available_models
     from local_operator.model.registry import ModelInfo
 
-    spec = local_model_spec(provider, model_id, cached_only=True)
-    rows, _ = cached_available_models(provider)
+    # The activation spec wins over a stale listing retained for model names
+    # and prices when a live capacity refresh could not be completed.
+    spec = spec or local_model_spec(provider, model_id, cached_only=True, base_url=base_url)
+    rows, _ = cached_available_models(provider, base_url=spec.base_url)
     row = next((row for row in rows if row.id == model_id), None)
     free = provider != "openai-compatible" or bool(row and row.free)
     return ModelInfo(
@@ -239,7 +262,12 @@ def local_model_info(provider: str, model_id: str):
         max_tokens=spec.max_output_tokens,
         supports_images=spec.supports_images,
         supports_prompt_cache=False,
-        input_price=0.0 if free else row.input_price if row and row.input_price > 0 else -1.0,
-        output_price=0.0 if free else row.output_price if row and row.output_price > 0 else -1.0,
+        # Legacy ModelInfo uses zero-valued slots for unpriced rows and rejects
+        # negatives. The picker distinguishes free/unknown via the preset and
+        # DiscoveredModel.free; the legacy cost fallback treats unpriced zero
+        # slots as unknown rather than blindly displaying a free request.
+        # Using the picker's -1 display sentinel here breaks the desktop schema.
+        input_price=0.0 if free else row.input_price if row and row.input_price > 0 else 0.0,
+        output_price=0.0 if free else row.output_price if row and row.output_price > 0 else 0.0,
         description="User-operated model; limits use server metadata or explicit overrides.",
     )

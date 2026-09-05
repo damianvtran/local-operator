@@ -162,6 +162,12 @@ class ControllerAuthStore(Protocol):
         self, provider: str, disabled_cause: str = ...
     ) -> int: ...  # pragma: no cover
 
+    def disable_credential(self, credential_id: int, cause: str) -> None: ...  # pragma: no cover
+
+    def active_local_credential(
+        self, provider: str, endpoint: str
+    ) -> "StoredCredential | None": ...  # pragma: no cover
+
     async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
 
     async def list_oauth_accesses(
@@ -386,6 +392,11 @@ class ProviderController:
                     f"Server returned HTTP {error.response.status_code}. "
                     "Check the API root and server logs; nothing changed."
                 ) from None
+        except ValueError:
+            raise ValueError(
+                "The server returned an invalid model list. Check that the URL "
+                "serves an OpenAI-compatible API, then retry /login; nothing changed."
+            ) from None
         except httpx.HTTPError:
             raise ValueError(
                 "Cannot reach the server. Start it in its own app, check the URL "
@@ -418,6 +429,8 @@ class ProviderController:
                 "That model is not in the server's list. Refresh /login or choose "
                 "one of the listed IDs; nothing changed."
             )
+        if callbacks.on_progress:
+            callbacks.on_progress(f"Selected model: {model_id}\nServer: {endpoint}")
         confirm = await prompt("Activate and save as default? (yes/no)", "yes", False)
         if confirm is None or confirm.strip().lower() != "yes":
             raise LoginCancelledError("Setup cancelled; previous configuration kept.")
@@ -433,7 +446,12 @@ class ProviderController:
                 {"key": token, "source": "login", "type": "api_key", "endpoint": endpoint},
             )
         elif clear_token:
-            self.auth_store.delete_credentials_for_provider(definition.id)
+            # Clearing a connection is not erasing its credential history. The
+            # store's latest-token policy treats this tombstone as authoritative
+            # instead of reviving a previously replaced key on the next lookup.
+            for row in self.auth_store.list_credentials(definition.id):
+                if row.data.get("endpoint") == endpoint:
+                    self.auth_store.disable_credential(row.id, "local-token-cleared")
         manager.update_config(
             {"providers": providers, "hosting": definition.id, "model_name": model_id}
         )
@@ -1455,7 +1473,19 @@ class ProviderController:
             api_key: str | None = None
             is_oauth = False
             account_id: str | None = None
-            if connected:
+            endpoint: str | None = None
+            if definition.local_setup:
+                from local_operator.providers.local import resolve_base_url
+
+                try:
+                    endpoint = resolve_base_url(definition.id)
+                except ValueError:
+                    return definition, False, [], "static"
+                if not endpoint:
+                    return definition, False, [], "static"
+                active = self.auth_store.active_local_credential(definition.id, endpoint)
+                api_key = str(active.data.get("key") or "") if active else None
+            elif connected:
                 try:
                     api_key, is_oauth, account_id = await self._listing_credential(definition.id)
                 except Exception:  # noqa: BLE001 — one provider's auth is not fatal
@@ -1467,6 +1497,8 @@ class ProviderController:
             }
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
+            if endpoint is not None:
+                kwargs["base_url"] = endpoint
             # Off the event loop: discovery is synchronous httpx by design (it is
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.

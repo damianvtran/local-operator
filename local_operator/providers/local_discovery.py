@@ -57,10 +57,18 @@ def discover_local(
             continue
         row = _row_from_openai_entry(entry, provider)
         if row is not None:
+            active = _positive(entry.get("max_model_len"))
+            maximum = _positive(entry.get("max_context_length")) or row.max_context_window
+            # A model's advertised/training maximum is not its loaded runtime
+            # allocation. Only a serving limit (vLLM) or native active metadata
+            # can seed that budget; retain maxima separately for inspection.
+            context = active or min(DEFAULT_LOCAL_CONTEXT, maximum or DEFAULT_LOCAL_CONTEXT)
             rows[row.id] = dataclasses.replace(
                 row,
+                context_window=context,
+                max_context_window=maximum,
                 free=provider != "openai-compatible" or row.free,
-                active_context_window=_positive(entry.get("max_model_len")),
+                active_context_window=active,
                 supports_tools=_boolean(entry.get("supports_tools")),
                 supports_images=(
                     _boolean(entry.get("supports_images"))
@@ -143,7 +151,7 @@ def discover_local(
         )
         # Only a bounded prefix gets optional detail. Cached listings and /ps
         # still describe the rest; a large local library cannot block the TUI.
-        for index, (model_id, row) in enumerate(rows.items()):
+        for index, (model_id, row) in enumerate(list(rows.items())):
             detail = (
                 get(root + "/api/show", {"model": model_id}, optional=True) if index < 8 else None
             )
@@ -155,16 +163,21 @@ def discover_local(
                 default=0,
             )
             caps = detail.get("capabilities")
+            if isinstance(caps, list) and "embedding" in caps and "completion" not in caps:
+                rows.pop(model_id)
+                continue
             active_context = active_by_id.get(model_id)
             rows[model_id] = dataclasses.replace(
                 row,
                 context_window=active_context
                 or min(trained or DEFAULT_LOCAL_CONTEXT, DEFAULT_LOCAL_CONTEXT),
-                max_context_window=trained or None,
+                max_context_window=trained or row.max_context_window,
                 active_context_window=active_context,
-                supports_tools=("tools" in caps) if isinstance(caps, list) else None,
-                supports_images=("vision" in caps) if isinstance(caps, list) else None,
-                reasoning=("thinking" in caps) if isinstance(caps, list) else None,
+                supports_tools=("tools" in caps) if isinstance(caps, list) else row.supports_tools,
+                supports_images=(
+                    ("vision" in caps) if isinstance(caps, list) else row.supports_images
+                ),
+                reasoning=("thinking" in caps) if isinstance(caps, list) else row.reasoning,
             )
     elif provider == "llamacpp":
         props = get(root + "/props", optional=True)

@@ -491,7 +491,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
 
     if canonical in LOCAL_PROVIDER_IDS:
-        return local_model_spec(canonical, model_name, api_key=_catalogue_api_key(canonical))
+        return local_model_spec(canonical, model_name)
     if info is None:
         try:
             info = resolve_model_info(canonical, model_name)
@@ -2266,7 +2266,7 @@ def configure_model(
     if definition.local_setup:
         from local_operator.providers.local import local_model_info
 
-        model_info = local_model_info(canonical, model_name)
+        model_info = local_model_info(canonical, model_name, spec=spec)
     # Sampling rides on the ModelSpec: the loop builds its ChatRequest without
     # temperature/top_p, so the wire clients fall back to ``request.model.*``.
     # Without this copy an agent's stored temperature (and the server's
