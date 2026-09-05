@@ -1514,3 +1514,37 @@ def test_an_undisclosed_infra_value_is_never_stamped() -> None:
     assert run_episode._infra_disclosure_metadata(
         ["AWS_INSTANCE_TYPE=m5.xlarge", "AWS_ROOT_VOLUME_SIZE=120", "OSWORLD_TTL_SECONDS=900"]
     ) == {"aws_instance_type_override": "m5.xlarge", "aws_root_volume_size_override": "120"}
+
+
+@pytest.mark.asyncio
+async def test_host_refusal_does_not_publish_supplied_answer(
+    tmp_path: Path, episode_id: str
+) -> None:
+    from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    original = adapter._call_raw
+
+    async def refusing(method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
+        if method == "ask_user_exchange":
+            adapter.calls.append(method)
+            return AskUserExchangeResult(
+                ask_id=params.ask_id, request_digest=params.request_digest, accepted=False
+            )
+        return await original(method, params, result_type, timeout=timeout)
+
+    adapter._call_raw = refusing
+    model = ScriptedModel(["ask", "finish"])
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=model,
+        responder=RecordingResponder("must not publish"),
+    ).run()
+    assert outcome.status == "cancelled", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "unscored"
+    assert model.calls == 1
+    assert outcome.bundle_root is not None
+    assert "user_simulator_exchange" not in _kinds(outcome.bundle_root)
+    assert "execute" not in adapter.calls and "score" not in adapter.calls

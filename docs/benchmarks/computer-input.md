@@ -67,8 +67,8 @@ phase can be re-read, without reapplying input.
 
 ## Negotiation, evidence, and compatibility
 
-Adapter RPC **1.5** explicitly negotiates clipboard support and native text
-restrictions. Exact version checks refuse mixed workers before allocation.
+Adapter RPC **1.6** retains 1.5's explicit clipboard support and native text
+restrictions and adds explicit host/adapter ownership of ask-user answers. Exact version checks refuse mixed workers before allocation.
 Supervisor admission and adapter compilation independently enforce the surface;
 known model admission failures use existing bounded corrective decisions and do
 not enter ambiguous-mutation poisoning.
@@ -82,7 +82,7 @@ of the episode ID; capability changes alter it. Unsupported kinds are not
 advertised in the generated prompt.
 
 Adapter 0.1.2 is a new artifact identity, not a replacement of frozen 0.1.1
-wheels. Build/pin a new worker environment and selector for RPC 1.5. Keep frozen
+wheels. Build/pin a new worker environment and selector for RPC 1.6. Keep frozen
 older environments and their rescue launch paths intact until their episodes
 and descriptors are settled; do not rewrite historical bundles, selectors,
 attestations or rescue descriptors to make them look compatible. Root harness

@@ -68,7 +68,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.5",
+        schema_version="1.6",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -90,7 +90,7 @@ def metadata() -> AdapterMetadata:
         entry_point="tiny_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.5",
+        schema_version="1.6",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=True),
     )
 
@@ -122,7 +122,7 @@ def plan() -> CleanupPlan:
 
 def descriptor(tmp_path: Path) -> RescueDescriptor:
     return RescueDescriptor(
-        schema_version="1.5",
+        schema_version="1.6",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id="episode",
@@ -198,7 +198,7 @@ def test_ask_exchange_requires_expected_episode_and_preserves_pending_on_error(
         prompt="Question?",
         answer="Answer",
     )
-    result = AskUserExchangeResult(ask_id="ask", accepted=True)
+    result = AskUserExchangeResult(ask_id="ask", request_digest=begin.request_digest, accepted=True)
     with pytest.raises(SupervisionError, match="stale, unsolicited, or mismatched"):
         verifier.finish_ask(wrong_finish, result)
     changed_prompt = wrong_finish.model_copy(
@@ -276,7 +276,7 @@ def test_score_missing_artifact_can_retry_after_file_appears(tmp_path: Path) -> 
 
 def test_changed_ask_prompt_is_rejected_without_dispatch(tmp_path: Path) -> None:
     verifier = HostVerifier("task", "episode", tmp_path)
-    raw = RawSupervisor([AskUserExchangeResult(ask_id="ask", accepted=True)])
+    raw = RawSupervisor([])
     session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
     begin = AskUserExchangeParams(
         operation_id="begin", episode_id="episode", ask_id="ask", prompt="Original?"
@@ -694,7 +694,8 @@ def test_only_a_declared_observation_phase_escapes_the_poison(tmp_path: Path, ph
     assert rescue_required == ([True] if poisoned else [])
 
 
-def test_a_timeout_never_claims_the_observation_phase(tmp_path: Path) -> None:
+@pytest.mark.parametrize("method", ["execute", "ask_user_exchange"])
+def test_a_timeout_never_claims_the_observation_phase(tmp_path: Path, method: str) -> None:
     """A call that was never ANSWERED is ambiguous whatever its phase would be.
 
     A timeout is the case where the worker may still be mid-mutation, so it
@@ -710,13 +711,76 @@ def test_a_timeout_never_claims_the_observation_phase(tmp_path: Path) -> None:
         raw,  # pyright: ignore[reportArgumentType]
         verifier,
         rescue_required=lambda: rescue_required.append(True),
+        answer_owner="adapter",
     )
+    begin = AskUserExchangeParams(
+        operation_id="begin", episode_id="episode", ask_id="ask", prompt="Question?"
+    )
+    if method == "ask_user_exchange":
+        session.begin_ask(begin)
+
+    async def call() -> None:
+        if method == "ask_user_exchange":
+            await session.finish_ask(begin, timeout=1)
+        else:
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
 
     async def run() -> None:
         with pytest.raises(TimeoutError):
-            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+            await call()
+        # An explicit second attempt must also fail locally: a simulator may
+        # have generated before the connection died, even without a reply.
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await call()
+        assert raw.calls == [method]
 
     import asyncio
 
     asyncio.run(run())
     assert raw.terminated and rescue_required == [True]
+
+
+@pytest.mark.parametrize("owner", ["host", "adapter"])
+def test_ask_completion_binds_public_request_and_completes_once(tmp_path: Path, owner: str) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    begin = AskUserExchangeParams(
+        operation_id="begin", episode_id="episode", ask_id="ask", prompt="Original?"
+    )
+    verifier.begin_ask(begin)
+    finish = begin if owner == "adapter" else begin.model_copy(update={"answer": "host answer"})
+    result = AskUserExchangeResult(
+        ask_id="ask",
+        request_digest=begin.request_digest,
+        accepted=True,
+        answer="public answer" if owner == "adapter" else None,
+    )
+    for update in ({"ask_id": "wrong"}, {"request_digest": "f" * 64}):
+        with pytest.raises(SupervisionError, match="mismatched"):
+            verifier.finish_ask(finish, result.model_copy(update=update), answer_owner=owner)
+    for update in ({"prompt": "Changed?"}, {"episode_id": "wrong"}, {"ask_id": "wrong"}):
+        with pytest.raises(SupervisionError, match="mismatched"):
+            verifier.finish_ask(finish.model_copy(update=update), result, answer_owner=owner)
+    verifier.finish_ask(finish, result, answer_owner=owner)
+    with pytest.raises(SupervisionError, match="mismatched"):
+        verifier.finish_ask(finish, result, answer_owner=owner)
+    with pytest.raises(SupervisionError, match="begin once"):
+        verifier.begin_ask(begin)
+
+
+@pytest.mark.parametrize(
+    "owner,accepted,answer", [("adapter", True, None), ("host", True, "unexpected")]
+)
+def test_completion_rejects_incompatible_ownership(
+    tmp_path: Path, owner: str, accepted: bool, answer: str | None
+) -> None:
+    verifier = HostVerifier("task", "episode", tmp_path)
+    begin = AskUserExchangeParams(
+        operation_id="begin", episode_id="episode", ask_id="ask", prompt="Question?"
+    )
+    verifier.begin_ask(begin)
+    params = begin if owner == "adapter" else begin.model_copy(update={"answer": "host"})
+    result = AskUserExchangeResult(
+        ask_id="ask", request_digest=begin.request_digest, accepted=accepted, answer=answer
+    )
+    with pytest.raises(SupervisionError, match="answer"):
+        verifier.finish_ask(params, result, answer_owner=owner)

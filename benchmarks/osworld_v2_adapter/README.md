@@ -19,13 +19,36 @@ wheel + digest + isolated worker, not from the source's location.
 
 ## Computer input capability
 
-Adapter 0.1.2 uses RPC 1.5 and explicitly advertises clipboard `paste_text`
+The current source uses RPC 1.6 and explicitly advertises clipboard `paste_text`
 with caller-chosen keys and overwrite policy. Native `type` remains ASCII-only
 on this backend; Unicode requires the explicit paste action, never an automatic
 fallback. See [the negotiated computer-input contract](../../docs/benchmarks/computer-input.md)
 for limits, clipboard ownership, application semantics and frozen-environment
 compatibility. Historical 0.1.1 environment examples below are not migration
 instructions: new proofs need a newly built wheel and exact selector pins.
+
+## Simulator answer ownership
+
+RPC 1.6 advertises
+`ask_user_answer_owner="adapter"` separately from `ask_user` support. The runner
+locally registers the question, sends one existing `ask_user_exchange` request
+with `answer=null`, and the adapter calls `provider.respond(prompt)` once. Only
+the bounded, nonempty public reply returns, bound by `ask_id` and a canonical
+request digest (episode, ask identity, exact prompt). Simulator profiles and
+evaluator state never enter host model context. A missing simulator or provider
+refusal cancels unscored, without publishing an answer. Explicit host responder
+overrides are rejected before prepare; there is no host finish RPC or second
+generation. Ambiguous generation timeouts poison the worker and require rescue,
+never automatic regeneration.
+Generic migrated adapters default to `ask_user_answer_owner="host"`; their
+existing responder path is preserved, but refusal cannot publish a supplied
+answer. Accepted exchanges still produce the ordinary public response artifact,
+asking-turn `ask_answer`, and next model input before executing the ask batch.
+RPC 1.5/1.6 mixtures fail negotiation before allocation. Build and pin a new
+wheel/selector together; do not modify frozen environments or rescue pins.
+This source change does not itself bump the distribution or publish an artifact.
+See [offline answer-path verification](../../docs/benchmarks/adapter-user-answers.md)
+for the baseline reproduction, installed-worker proofs, and release limitations.
 
 ## Prerequisite: the gated inputs, in a DURABLE root
 
@@ -490,9 +513,6 @@ it must print `[]`.**
 - **Screenshot-only observations.** The a11y tree is not shipped as a frame
   (a geometry for an XML document is a fiction). Its presence is recorded in
   observation metadata; shipping it is a protocol addition, not a fake frame.
-- **`user_simulator` is one-sided.** The harness's own responder supplies the
-  answer the model sees; the benchmark's simulator is notified for the record.
-  Faithful two-sided wiring is a later PR. Pilot tasks declare no simulator.
 - **Temporary security groups and IP-drift repair are not automated.** The
   operator supplies a pre-existing group (`AWS_SECURITY_GROUP_ID`); a
   per-episode group with a `CleanupActionKind` of its own is a later PR.

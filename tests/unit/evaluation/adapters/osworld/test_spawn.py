@@ -349,3 +349,38 @@ def test_a_1_1_selector_cannot_even_be_built_against_a_1_2_parent(tmp_path: Path
             workspace_digest="c" * 64,
             route_capability="computer",
         )
+
+
+@pytest.mark.asyncio
+async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_request(
+    tmp_path: Path, episode_id: str, adapter_wheel: Path
+) -> None:
+    import hashlib
+
+    from local_operator.evaluation.evidence.models import UserSimulatorExchangePayload
+    from tests.unit.evaluation.runner.test_episode_subprocess import _offline_ask_client
+
+    selector = spawn_helpers.build_spawnable_adapter(
+        tmp_path,
+        adapter_wheel,
+        {"task_plain": fixtures.SCRIPTED_SIMULATOR},
+        provider={"provider": "fake", "has_user_simulator": True},
+    )
+    config = spawn_helpers.spawn_config(tmp_path)
+    model, stream = _offline_ask_client(config.artifact_root)
+    outcome = await EpisodeRunner(
+        _spec_for_spawn(episode_id), config, selector=selector, model=model, synthetic_model=True
+    ).run()
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    report = verify_bundle(outcome.bundle_root)
+    assert report.valid, report.issues
+    exchanges = payloads(outcome.bundle_root, UserSimulatorExchangePayload)
+    assert len(exchanges) == 1
+    answer = b"simulated user answer"
+    assert exchanges[0].response_artifact.sha256 == hashlib.sha256(answer).hexdigest()
+    assert len(stream.requests) == 2
+    assert (
+        "Answer from the user: simulated user answer"
+        in stream.requests[1].messages[-1].content[0].text
+    )
