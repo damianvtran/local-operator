@@ -86,6 +86,7 @@ _ALLOWED: dict[str, str] = {
     "local_operator/multiplexer/markers.py::_FileBackend.publish": "temp FILE -> pane marker",
     "local_operator/skills/index.py::SkillIndex._persist_cache": "temp FILEs -> index cache",
     "local_operator/tools/spill.py::_atomic_write_bytes": "temp FILE -> spill",
+    "local_operator/tunnels/config.py::private_write": "temp FILE -> tunnels/ config",
     "local_operator/wakes/store.py::write_entry": "temp FILE -> wakes/<id>.json",
     "local_operator/session/runtime/registry.py::publish": "temp FILE -> runtime/<pid>.json",
     "local_operator/session/runtime/inbox.py::_replace_remainder": (
