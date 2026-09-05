@@ -73,6 +73,10 @@ from local_operator.agent_profiles import (
     seed_origin,
     seed_tags,
 )
+from local_operator.harness.subagent import (
+    configured_effort_tiers,
+    describe_effort_tiers,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -81,9 +85,11 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.tools.builtin import (
+    _advertise_effort_tiers,
     _error,
     _guard,
     _text,
+    _validate_effort_tier,
     _validation_error,
     spill_truncate,
 )
@@ -136,7 +142,12 @@ class AgentParams(BaseModel):
         default=None,
         description="create/update: restrict the profile to these tools. Omit for all.",
     )
-    effort: Literal["lo", "med", "hi", "inherit"] | None = Field(
+    # A free string rather than a Literal for the same reason as the ``task``
+    # tool's field: a role can only be pinned to a tier the operator has
+    # configured, and that set is live config, not something to freeze at
+    # import. ``_advertise_effort_tiers`` rewrites the schema to ``inherit``
+    # plus the configured tiers; ``_effort_is_configured`` refuses the rest.
+    effort: str | None = Field(
         default=None,
         description="create/update: default model tier. 'inherit' clears it.",
     )
@@ -148,11 +159,25 @@ class AgentParams(BaseModel):
 
         Empty enum strings are rejected by Gemini function declarations. Older
         callers may still send ``""`` to clear a pin, so normalize that legacy
-        wire value before the closed Literal validates while exposing the
+        wire value before the tier check validates while exposing the
         explicit ``inherit`` spelling to models and providers.
         """
 
         return "inherit" if value == "" else value
+
+    @field_validator("effort")
+    @classmethod
+    def _effort_is_configured(cls, value: str | None) -> str | None:
+        """A pin must name a tier a launch could honour TODAY.
+
+        Before this, any of ``lo|med|hi`` was accepted and stored, and the pin
+        then failed at every launch of the role once the strict path refused
+        the unconfigured tier. Refusing here keeps a stale pin from ever being
+        written; the launch path still catches one that went stale later.
+        """
+        if value == "inherit":
+            return value
+        return _validate_effort_tier(value)
 
     delegate: bool | None = Field(
         default=None,
@@ -1178,6 +1203,25 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
+def _effort_pin_description() -> str:
+    """The ``effort`` description for create/update, matching the live schema.
+
+    With tiers configured it names what each resolves to so a role is pinned
+    on information; with none it says so and that ``inherit`` (the only
+    member left in the enum) is the whole choice. Short: billed every turn.
+    """
+    tiers = configured_effort_tiers()
+    if not tiers:
+        return (
+            "create/update: no model tiers are configured (values.subagents.models); "
+            "'inherit' clears a pin and every role inherits the launching session's model."
+        )
+    return (
+        f"create/update: default model tier ({describe_effort_tiers(tiers)}). "
+        "'inherit' clears it."
+    )
+
+
 def build_agent_tool(context: ToolContext) -> AgentTool | None:
     """createIf: the tool exists only where a registry can back it.
 
@@ -1200,7 +1244,11 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             "specialist is the reusable base a team layers collaboration and "
             "project briefs on top of."
         ),
-        parameters=AgentParams.model_json_schema(),
+        parameters=_advertise_effort_tiers(
+            AgentParams.model_json_schema(),
+            description=_effort_pin_description(),
+            extra=("inherit",),
+        ),
         # Writes land in the user's own configuration directory, never in the
         # workspace, and are trivially reversible by editing the profile back.
         # Gating them behind an approval prompt would make an agent improving
