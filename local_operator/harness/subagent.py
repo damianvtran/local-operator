@@ -891,7 +891,7 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     components = []
     for item in usage.cost_components or [usage]:
         component = item.model_copy(deep=True)
-        provider, _, model_id = (job.model_label or "").partition("/")
+        provider, _, model_id = (getattr(job, "model_label", None) or "").partition("/")
         component.provider = component.provider or provider or None
         component.model_id = component.model_id or model_id or None
         if component.usd_cost is None and component.estimated_usd_cost is None:
