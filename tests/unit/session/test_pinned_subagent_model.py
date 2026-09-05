@@ -175,6 +175,13 @@ SELECTOR_CLASSIFICATIONS: list[tuple[object, str]] = [
     (["openrouter/kimi"], "malformed"),
     ({"provider": "openrouter", "model": "kimi"}, "malformed"),
     ("no-provider-here", "malformed"),
+    # The two half-selectors, which are the same defect on opposite sides of
+    # the separator and must not be classified differently (review R3-F11).
+    # ``"/kimi"`` is the one that escaped the table's own promise to enumerate
+    # every shape: the launch checked only the model half, so it accepted a
+    # selector the schema refused and built ``ModelSpec(provider='')``.
+    ("/kimi", "malformed"),
+    ("anthropic/", "malformed"),
     (None, "unconfigured"),
     ("", "unconfigured"),
     ("   ", "unconfigured"),

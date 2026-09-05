@@ -6128,7 +6128,14 @@ class Session:
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
         provider, _, model_id = selector.partition("/")
-        if not model_id:
+        # BOTH halves, to the same standard ``configured_effort_tiers`` applies
+        # (review R3-F11). Checking only the model let a leading-slash selector
+        # (``hi: "/kimi"``) through here while the schema surface refused it —
+        # the same schema-vs-launch drift this change exists to close, and the
+        # worse direction of it: the launch built ``ModelSpec(provider='',
+        # model_id='kimi')`` and the child died at its first provider call
+        # instead of at launch, where the tier is still named.
+        if not provider or not model_id:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         try:
             from local_operator.model.configure import build_model_spec
