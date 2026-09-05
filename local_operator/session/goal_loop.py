@@ -93,6 +93,22 @@ class GoalLoop:
             self.publish(status="failed", reason="The loop turn failed")
 
 
+#: Upper bound on the judge's free-text reason, which is the ONLY unbounded
+#: value in the loop state.
+#:
+#: That state rides the attach frame, and an oversized frame is a DROPPED LINE
+#: rather than an error anybody reports -- a session that simply cannot be
+#: attached to. Every other key the loop publishes is a scalar with a fixed
+#: name, so clipping here is what lets the frame guard classify the whole field
+#: as bounded rather than having to cap it at the wire.
+#:
+#: Clipped at the parse, not at the publish, because this is the one place the
+#: model's text enters the state: a later writer cannot forget to do it. One
+#: sentence of explanation is the whole purpose of the value, and the bound
+#: matches ``JOB_PROMPT_WIRE_CHARS`` so two frontends do not disagree about how
+#: much explanatory text is "a preview".
+LOOP_REASON_CHARS = 1_000
+
 _BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")
 
 _NEGATION_TOKEN_RE = re.compile(r"[A-Z0-9_]+(?:['\u2019][A-Z]+)?")
@@ -157,7 +173,7 @@ def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
             continue
         # The first non-empty line after a readable verdict is the reason.
         if achieved is not None and not reason:
-            reason = stripped
+            reason = stripped[:LOOP_REASON_CHARS]
     return achieved, reason
 
 
