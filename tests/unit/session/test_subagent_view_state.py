@@ -146,6 +146,7 @@ async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_r
     from local_operator.session.runtime.owned import OwnedSessionHandle
     from local_operator.session.transcript import Transcript
     from local_operator.tools.builtin import TODO_STORE
+    from local_operator.tui.widgets.subagent_panel import job_elapsed, job_seconds
     from tests.unit.harness.test_comms import ScriptedProvider, make_parent
 
     root = make_parent(tmp_path, ScriptedProvider())
@@ -173,6 +174,8 @@ async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_r
     root._frontend_state_store.refresh_jobs(root)
     manager = next(job for job in root.frontend_state.jobs if job.id == "manager")
     assert manager.todos is None  # absent process store is not an empty saved plan
+    assert job_seconds(manager) == 0.0
+    assert job_elapsed(manager) == ""  # no invented multi-day age or zero-second receipt
     assert (
         next(job for job in root.frontend_state.jobs if job.id == "leaf").parent_job_id == "manager"
     )

@@ -273,6 +273,8 @@ def job_seconds(job: Any) -> float:
     """
     try:
         start = float(getattr(job, "start_time", 0.0) or 0.0)
+        if start <= 0:
+            return 0.0
         settled = getattr(job, "settled_at", None)
         end = float(settled) if settled else time.time()
         return max(end - start, 0.0)
@@ -287,6 +289,10 @@ def job_elapsed(job: Any) -> str:
     NUMBER — its duration segment does its own formatting and compares against
     zero to decide whether the segment exists at all.
     """
+    # Cold presentation-only rows have identity/outcome but no trustworthy
+    # clock. Epoch zero is not a launch time, and "0s" would invent a duration.
+    if not getattr(job, "start_time", None):
+        return ""
     return format_duration(job_seconds(job))
 
 

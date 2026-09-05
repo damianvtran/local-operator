@@ -2378,7 +2378,7 @@ async def test_the_page_renders_the_childs_messages_and_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_attempt_opens_and_selects_the_current_visible_row() -> None:
+async def test_historical_attempt_opens_current_identity_and_restores_root_row() -> None:
     session = FakeSession()
     manager = AsyncJobManager()
     current = AsyncJob(
@@ -2421,8 +2421,11 @@ async def test_historical_attempt_opens_and_selects_the_current_visible_row() ->
         panel = app._subagent_panel
         assert view.job_id == "current"
         assert panel is not None
+        assert not panel._rows  # a viewed child is not its own descendant
+        await pilot.press("escape")
+        await pilot.pause()
         assert list(panel._rows) == ["current"]
-        assert panel._rows["current"].current is True
+        assert panel._rows["current"].current is False
 
 
 @pytest.mark.asyncio
@@ -4040,7 +4043,7 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
 
 
 def _long_error_notice() -> dict[str, Any]:
-    """An error that wraps past a 62x24 body's viewport.
+    """An error that wraps past a 62x22 body's viewport.
 
     A two-line wrap still fits above the working line on a 9-row body, so
     sticky-tail following never bisects it. The glyph only sits above the
@@ -4088,7 +4091,7 @@ async def test_the_truncation_note_stays_in_the_viewport_when_the_body_scrolls()
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 22)) as pilot:
         view = await _open(pilot, app, job)
         for _ in range(8):
             await pilot.pause()
@@ -4139,7 +4142,11 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     monkeypatch: pytest.MonkeyPatch,
     late_batch_landing: bool,
 ) -> None:
-    """At 62x24 the first visible transcript line must be a row HEAD.
+    """At 62x22 the first visible transcript line must be a row HEAD.
+
+    Compact detail mode reclaims the disabled composer. At the former 24-row
+    fixture its larger viewport lands on the deliberate gap before the notice,
+    so use 22 rows to keep exercising a bisected notice rather than that gap.
 
     Sticky-tail following can bisect a wrapping notice so the glyph sits
     above the fold and the first glance is a hanging-indented continuation
@@ -4196,7 +4203,7 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 22)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)
@@ -4243,7 +4250,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
     ``main``, because the sibling test above asserts the landing and then stops
     looking.
 
-    This is that missing half. It opens the same 62x24 page, waits for the same
+    This is that missing half. It opens the same 62x22 page, waits for the same
     landing, then appends one live row — the ordinary thing a running child
     does — and requires the first visible line to still be a row head.
 
@@ -4275,7 +4282,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 22)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)
