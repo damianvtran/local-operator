@@ -150,6 +150,12 @@ JOB_TEXT_FLOOR_CHARS = 200
 #: so the most recently collapsed launch rows are the ones a reader loads first
 #: and the oldest are the least likely to be on screen at all.
 #:
+#: The emitted value is at most ``cap + 1`` characters: the ellipsis is appended
+#: after the slice, exactly as the neighbouring text bounds do it (round-1
+#: finding 4). The budget arithmetic below is computed against the cap itself,
+#: which is why the one extra marker character is called out rather than folded
+#: into the constant.
+#:
 #: 200 chars is the same "legible preview" floor :data:`JOB_TEXT_FLOOR_CHARS`
 #: sets, and it is sufficient for what this field is FOR: the viewer replaces
 #: the durable row wholesale, so a truncated concise prompt still prevents the
@@ -170,13 +176,60 @@ JOB_LAUNCH_PROMPTS_MAX = 8
 #:
 #: Shared across the rows that actually carry collapsed attempts rather than
 #: across the whole roster, because the common row contributes nothing and
-#: dividing by it would starve the few rows that do. Rows past the budget keep
-#: their launch IDENTITIES and lose only the prior attempts' text: identity is
-#: what suppresses the duplicate preamble, so the fix still holds everywhere and
-#: only the concise re-labelling of an old attempt degrades. 20,000 chars is
-#: ~2% of the line limit and covers 100 collapsed attempts at the per-entry cap
-#: — two orders of magnitude past the deepest resume chain observed.
-JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS = 20_000
+#: dividing by it would starve the few rows that do. A starved row keeps its
+#: KEYS and loses only their text (see
+#: :data:`LAUNCH_PROMPT_ELIDED_PLACEHOLDER`), so reconciliation still fires for
+#: every collapsed attempt at any roster depth. 20,000 chars is ~2% of the line
+#: limit and covers 100 collapsed attempts at the per-entry cap — two orders of
+#: 2,000 chars is deliberately SMALL, and it can be: the budget governs only how
+#: much concise prompt TEXT rides, never whether a row reconciles. A starved row
+#: keeps its keys (tier 2) or has them rebuilt from ``attempt_aliases`` (tier 3),
+#: so the duplicate-preamble fix holds at every depth and the budget trades only
+#: informational richness. It is sized to the frame's REAL residual headroom:
+#: the ``ran all year`` guard passes with 3,316 bytes spare over 200 rows, i.e.
+#: ~16 B/row for anything new, and a budget that ignored that would reintroduce
+#: the round-1 blocker in a different field.
+JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS = 2_000
+
+#: Aggregate budget for launch IDENTITIES that cannot be elided, per frame.
+#:
+#: Round-1 blocker, second half. ``launch_message_id`` is normally omitted
+#: because it derives from the job id, but a row whose recorded identity belongs
+#: to an EARLIER attempt (rebuilt from a persisted comms row) has to carry the
+#: literal string, and nothing bounded how many such rows a frame could hold.
+#: The guard's worst case — 200 rows of non-derivable ids — measured 5,600 B
+#: against a frame with 3,316 B of headroom.
+#:
+#: A row past this budget drops the string and keeps NOTHING, because unlike the
+#: prompts map there is no alias to rebuild from: the whole point of a literal
+#: id is that it is not reconstructible. Such a row falls back to exactly the
+#: pre-#681 behaviour — the synthetic head plus an unreconciled durable row —
+#: which is a bounded, visible degradation rather than an unopenable session.
+#:
+#: 600 chars covers ~16 non-derivable rows, against a realistic roster where the
+#: count is ZERO: every producer verified (launch, #314 resume-fold, and the
+#: persist/restore round trip) emits the derivable form, which costs nothing.
+#: Sized to the same residual headroom as the prompts budget above.
+JOB_LAUNCH_IDS_FRAME_BUDGET_CHARS = 600
+
+#: What a starved row's collapsed-attempt prompts are replaced WITH.
+#:
+#: Round-1 review MAJOR, reproduced independently by QA on a realistic 45-child
+#: roster: emptying a starved row's map re-introduced the exact duplicate this
+#: change exists to remove. The original reasoning ("the view re-derives the
+#: current launch from ``prompt``") held only for the CURRENT attempt — a
+#: COLLAPSED PRIOR attempt has no other source, so its durable row fell back to
+#: a plain user row carrying the full role/team/system preamble.
+#:
+#: Keeping the key with a placeholder reconciles that row to a bare ellipsis
+#: instead. It MUST be a visible character: ``SubagentView.show`` drops an entry
+#: whose text is falsy after ``strip_control_sequences(...).strip()``, so an
+#: empty string would be discarded and leak exactly as before.
+#:
+#: It also cuts a starved entry from ~249 to ~49 bytes, which is why this and
+#: the identity bound are one change: the cheaper entry buys back part of the
+#: frame headroom the blocker needed.
+LAUNCH_PROMPT_ELIDED_PLACEHOLDER = "…"
 
 
 def _folded_components(components: Sequence[Any]) -> list[Any]:
@@ -742,28 +795,180 @@ def _bound_launch_prompts_across_jobs(jobs: list[Any]) -> None:
     """Spend one frame's collapsed-attempt text budget across the roster.
 
     See :data:`JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS`. Rows are served in roster
-    order until the budget is gone, then later rows keep their identities and
-    drop the prior attempts' TEXT — the current launch is unaffected either way,
-    because the view derives its concise prompt from the job's own ``prompt``
-    field, so the duplicate this whole change exists to remove stays fixed for
-    every row at any depth.
+    order until the budget is gone, then later rows keep every KEY and replace
+    its text with :data:`LAUNCH_PROMPT_ELIDED_PLACEHOLDER`.
 
-    A whole row's map is dropped rather than part of it: a half-served map would
+    Keeping the keys is load-bearing, not tidiness. Emptying the map was the
+    round-1 MAJOR: reconciliation matches a durable row BY KEY, so a starved
+    row's collapsed attempts fell back to plain user rows carrying the full
+    preamble — the very duplicate this change exists to remove. The CURRENT
+    launch survived either way, because the view re-derives it from the job's
+    own ``prompt``, which is exactly why the original reasoning looked sound and
+    the defect only appeared on a resumed child.
+
+    A whole row's map is elided rather than part of it: a half-served map would
     reconcile some of a child's collapsed attempts and leak the others' preamble,
     which reads as a bug rather than as a bounded preview.
     """
     spent = 0
+    # Degradation is MONOTONIC: once the budget cannot afford a row's full text,
+    # no later row gets full text either. Deciding each row independently let a
+    # cheap row after an expensive one pass at tier 1 while its predecessors
+    # were elided, so two children with the same history rendered differently
+    # depending on roster position — and, because a tier-3 row frees no budget,
+    # a starved row could be followed by an unstarved one. Order-independence
+    # matters more than squeezing the last row in.
+    degraded = False
     for job in jobs:
         if not isinstance(job, dict):
             continue
         prompts = job.get("launch_prompts")
         if not isinstance(prompts, dict) or not prompts:
             continue
-        cost = sum(len(str(key)) + len(str(value)) for key, value in prompts.items())
-        if spent + cost > JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS:
+        # Re-bounded HERE as well as in ``_with_lineage``. A ``JobState`` can be
+        # built directly — a restored reader row, a test, an owner that never
+        # went through the comms path — so the wire boundary cannot assume the
+        # construction-time bound ran. Cheap: the common row has no entries.
+        prompts = _wire_launch_prompts(prompts)
+        if not prompts:
             job["launch_prompts"] = {}
             continue
-        spent += cost
+        job["launch_prompts"] = prompts
+        cost = sum(len(str(key)) + len(str(value)) for key, value in prompts.items())
+        if not degraded and spent + cost <= JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS:
+            spent += cost
+            continue
+        degraded = True
+        # Tier 2: keep the KEYS, elide the text. This is what preserves
+        # reconciliation for collapsed attempts (the round-1 MAJOR), and it is
+        # ~49 bytes an entry rather than ~249.
+        elided = dict.fromkeys(prompts, LAUNCH_PROMPT_ELIDED_PLACEHOLDER)
+        elided_cost = sum(len(str(key)) + len(LAUNCH_PROMPT_ELIDED_PLACEHOLDER) for key in elided)
+        if spent + elided_cost <= JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS:
+            job["launch_prompts"] = elided
+            # Charged, because keys are not free: leaving an elided map
+            # unbilled would let a long tail of starved rows spend unbounded key
+            # bytes after the budget is nominally gone — the same "bounded per
+            # row, unbounded in total" defect one level down.
+            spent += elided_cost
+            continue
+        # Tier 3: not even the keys fit, so the map goes — but WITHOUT losing
+        # reconciliation, because the keys are themselves derivable. Every
+        # collapsed attempt's identity is ``subagent-launch:<alias>`` over
+        # ``attempt_aliases``, which already rides this row and is already
+        # bounded (one short id per attempt). The follower rebuilds the elided
+        # entries from it in ``SnapshotSubagentComms._node_for``, so a tier-3
+        # row still folds every attempt to a placeholder rather than leaking the
+        # preamble. Dropping the map here therefore costs presentation detail,
+        # never the fix.
+        job["launch_prompts"] = {}
+
+
+#: The deterministic launch-row identity ``run_subagent`` mints for a child.
+#:
+#: ``harness/subagent.py`` builds BOTH the recorded ``job.launch_message_id``
+#: and the ``message_id`` it prompts the child under from this one f-string, so
+#: for every child launched by this runtime the identity is a pure function of
+#: the job id.
+LAUNCH_MESSAGE_ID_PREFIX = "subagent-launch:"
+
+
+def _derived_launch_message_id(job_id: str) -> str:
+    """The launch identity a job id implies, or ``""`` without one."""
+    return f"{LAUNCH_MESSAGE_ID_PREFIX}{job_id}" if job_id else ""
+
+
+def _restore_elided_launch_prompts(job: JobState) -> dict[str, str]:
+    """A follower's launch map, with budget-elided attempts restored.
+
+    The wire map is authoritative for everything it carries. What it may be
+    missing is whole ENTRIES for collapsed attempts, dropped when the roster's
+    shared text budget could not even afford their keys
+    (:func:`_bound_launch_prompts_across_jobs`, tier 3).
+
+    Those keys are recoverable rather than lost: an attempt's launch identity is
+    ``subagent-launch:<its job id>``, and ``attempt_aliases`` — already on this
+    row, already bounded at one short id per attempt — lists exactly the ids
+    #314 collapsed into this record. Rebuilding them keeps reconciliation
+    matching every durable launch row, which is the whole point of the mapping:
+    a missing key renders that attempt's full role/team/system preamble.
+
+    The value is the same placeholder tier 2 sends, because the text really is
+    gone; only the identity is reconstructible. The current launch is not
+    handled here — ``SubagentView.show`` re-derives it from the job's own
+    ``prompt``, which is richer than a placeholder.
+    """
+    restored = dict(job.launch_prompts or {})
+    for alias in job.attempt_aliases:
+        identity = _derived_launch_message_id(str(alias or ""))
+        # Never overwrite: a wire entry carries real text, this only fills gaps.
+        if identity and identity not in restored:
+            restored[identity] = LAUNCH_PROMPT_ELIDED_PLACEHOLDER
+    return restored
+
+
+def _bound_launch_ids_across_jobs(jobs: list[Any]) -> None:
+    """Spend one frame's non-derivable-identity budget across the roster.
+
+    Run AFTER :func:`_elide_derivable_launch_id_in_place`, so it only ever sees
+    the ids that genuinely have to ride the wire. See
+    :data:`JOB_LAUNCH_IDS_FRAME_BUDGET_CHARS`: the derivable case is free, but
+    the literal case was unbounded, and a per-row scalar times roster depth is
+    what cost 43 rows of attach headroom in round 1.
+
+    Truncation is not an option — a clipped identity matches no durable row and
+    silently stops reconciling — so a row past the budget loses the field
+    entirely and degrades to pre-#681 behaviour for that one child.
+    """
+    spent = 0
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        value = job.get("launch_message_id")
+        if not isinstance(value, str) or not value:
+            continue
+        if spent + len(value) > JOB_LAUNCH_IDS_FRAME_BUDGET_CHARS:
+            del job["launch_message_id"]
+            continue
+        spent += len(value)
+
+
+def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
+    """Drop ``launch_message_id`` when the job id already implies it.
+
+    Round-1 BLOCKER. Unlike the prompts, this field is a per-row SCALAR that
+    every task child carries, so nothing bounded it and nothing could: an
+    identity must never be truncated — a clipped key matches no durable row and
+    would silently stop reconciling. QA measured the cost at 46.7 B/row, which
+    dropped the maximum attachable roster from 812 rows on v0.49.2 to 769 on the
+    first version of this change: a session that attaches on the shipped release
+    and does not attach here, which is the exact failure the wire stripping
+    exists to prevent.
+
+    Omission rather than truncation is what makes it safe. The value is
+    reconstructible (:func:`_derived_launch_message_id`), so the follower
+    rebuilds the identical string in :meth:`SnapshotSubagentComms._node_for` and
+    reconciliation is byte-for-byte unchanged — this trades ~47 bytes a row for
+    one f-string per node rebuild.
+
+    Only an EQUAL value is dropped. A row whose id is not the derived one — a
+    resumed child rebuilt from a persisted comms row, where the recorded
+    identity belongs to an earlier attempt — keeps its literal value, because
+    there the id genuinely carries information the job id does not.
+    """
+    value = job.get("launch_message_id")
+    if isinstance(value, str) and value == _derived_launch_message_id(str(job.get("id") or "")):
+        # Deleted outright, with NO replacement marker. An earlier revision
+        # stamped a ``launch_id_derived`` bool here so the follower could tell
+        # "elided" from "never had one" — but that bool was itself 28 B on every
+        # row, which is the same per-row cost the elision exists to remove, and
+        # it cost 17 rows of attach ceiling.
+        #
+        # The distinction is already free: only ``type == "task"`` jobs ever get
+        # a launch turn (``run_subagent`` is the sole minting site; bash and
+        # eval jobs register as ``"bash"``), so the follower re-derives for task
+        # rows only and a bash row keeps the empty string it always had.
+        del job["launch_message_id"]
 
 
 def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
@@ -1333,6 +1538,11 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_prompts_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
+                    _elide_derivable_launch_id_in_place(job)
+            # After elision, so only ids that must ride the wire are charged.
+            _bound_launch_ids_across_jobs(jobs)
+            for job in jobs:
+                if isinstance(job, dict):
                     _drop_absent_launch_fields_in_place(job)
     return payload
 
@@ -1555,11 +1765,35 @@ class SnapshotSubagentComms:
             # rather than conditional: an older owner sends neither field, and
             # the empty values are what the view already tolerates (it keeps the
             # synthetic head and leaves the durable row unreconciled).
-            launch_message_id=job.launch_message_id or "",
+            #
+            # RE-DERIVED only when the owner SAID it elided a derivable value
+            # (``launch_id_derived``). At 46.7 B on every task row the literal
+            # string cost 43 rows of attach headroom, and an identity cannot be
+            # truncated, so it is omitted where it is reconstructible instead.
+            #
+            # Gated on the job TYPE rather than on a marker field: only a
+            # ``task`` row can have a launch turn at all (``run_subagent`` is
+            # the sole minting site; bash and eval jobs register as ``"bash"``),
+            # so a bash row keeps the empty string it always had and no marker
+            # has to ride the wire to say so. A v0.49.2 owner's task rows are
+            # derived here too — the id is right whenever the child was launched
+            # by this runtime, and a wrong-shaped guess simply matches no
+            # durable row, which is the pre-#681 behaviour.
+            launch_message_id=(
+                job.launch_message_id
+                or (_derived_launch_message_id(job.id) if job.type == "task" else "")
+            ),
             # Copied out of the (possibly frozen) wire value into a plain dict:
             # the view iterates and indexes it, and a follower must never be
             # handed a container whose identity is shared with canonical state.
-            launch_prompts=dict(job.launch_prompts or {}),
+            #
+            # Backfilled from ``attempt_aliases`` for any collapsed attempt the
+            # frame budget elided (tier 3). Reconciliation matches BY KEY, so a
+            # missing key means that attempt's durable row renders its full
+            # preamble; the alias list names exactly those attempts and is
+            # already on the row, so the entry is rebuilt with the same
+            # placeholder tier 2 would have sent.
+            launch_prompts=_restore_elided_launch_prompts(job),
         )
 
     def node(self, job_id: str) -> Any | None:
@@ -2022,6 +2256,9 @@ class FrontendStateStore:
             # a bound placed only at the snapshot boundary holds for the first
             # frame and leaks on every one after it.
             _bound_launch_prompts_across_jobs(summaries)
+            for summary in summaries:
+                _elide_derivable_launch_id_in_place(summary)
+            _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
                 _drop_absent_launch_fields_in_place(summary)
             wire_changes["jobs"] = summaries
@@ -2708,7 +2945,12 @@ def _wire_launch_prompts(value: Any) -> dict[str, str]:
     items = list(value.items())
     for key, prompt in items[-JOB_LAUNCH_PROMPTS_MAX:]:
         identity = str(key or "").strip()
-        text = str(prompt or "")
+        # Stripped before the falsy check, like ``identity`` above (round-1
+        # finding 3): a whitespace-only prompt otherwise rode the wire verbatim
+        # and was then discarded by the view's own strip, spending bytes for an
+        # entry that could never reconcile. The drop decision belongs here,
+        # owner-side, where it is made once.
+        text = str(prompt or "").strip()
         if not identity or not text:
             continue
         if len(text) > JOB_LAUNCH_PROMPT_WIRE_CHARS:
