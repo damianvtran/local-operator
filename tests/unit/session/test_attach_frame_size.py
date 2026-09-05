@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import ModelSpec, Usage
+from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     USAGE_COMPONENT_CAP,
     FrontendSessionState,
@@ -295,6 +297,9 @@ def test_a_restored_fat_checkpoint_is_capped_on_the_way_in() -> None:
 #: "bounded" fields are bounded by something that is not conversation length or
 #: child count — config, the code, the user's own hand, or an explicit fold.
 _BOUNDED_COLLECTION_FIELDS = {
+    # One replacement snapshot, never a per-turn receipt/history collection:
+    # bounded conversation/token/anchor/kind plus a two-integer SQLite watermark.
+    "attention": "fixed-shape latest outcome and read watermark, not accumulated history",
     "context_breakdown": "one entry per tool; bounded by the tool inventory",
     "child_costs": "one float per job; O(1) bytes each",
     "queued_steering": "drains every turn",
@@ -356,7 +361,7 @@ def test_every_collection_field_is_classified() -> None:
     assert not stale, f"stale entries for fields that no longer exist: {sorted(stale)}"
 
 
-def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
+def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -> None:
     """The class guard: EVERY collection field maxed at once, still under the cap.
 
     Populated from ``_collection_fields()`` rather than by hand, so a field
@@ -383,8 +388,27 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
         )
         for job in _jobs(200, 500)
     ]
+    # Exercise the real authority's complete, non-empty snapshot: an earlier
+    # read plus a newer unread outcome. A new attention payload field must get
+    # an explicit size-policy review instead of hiding behind dict[str, Any].
+    attention_store = AttentionStore(tmp_path / "attention.db")
+    read_token = str(uuid.uuid4())
+    attention_store.publish("session/s1", read_token, "old-result", "complete")
+    attention_store.acknowledge("session/s1", read_token)
+    attention = attention_store.publish("session/s1", str(uuid.uuid4()), "new-result", "complete")
+    assert set(attention) == {
+        "conversation_id",
+        "completion_token",
+        "anchor_id",
+        "kind",
+        "unseen",
+        "revision",
+    }
+    assert attention["unseen"] and attention["revision"] == [2, 1]
+
     # Every collection field, filled past anything a real session reaches.
     populated: dict[str, Any] = {
+        "attention": attention,
         "jobs": jobs,
         "usage_components": [
             FrontendUsage.model_validate(_receipt(index).model_dump(mode="json"))
@@ -431,6 +455,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
         "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
     }
 
+    assert frame["data"]["snapshot"]["attention"] == attention
     size = _line_bytes(frame)
     assert size < _MAX_LINE_BYTES, (
         f"the attach frame is {size:,} bytes, over the {_MAX_LINE_BYTES:,} limit. "
