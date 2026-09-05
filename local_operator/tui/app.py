@@ -257,6 +257,7 @@ from local_operator.tui.widgets.welcome import (
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.herdr import HerdrReporter
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
@@ -2217,6 +2218,13 @@ class OperatorApp(App[None]):
         #: — all ordinary, none an error. Rebound on every session swap, since
         #: the pane's binding must name the conversation currently in it.
         self._multiplexer_broadcast: SessionBroadcast | None = None
+        #: Reports idle/working/blocked to the hosting Herdr pane's Agents row
+        #: (see :mod:`local_operator.herdr`). ``None`` outside Herdr, headless,
+        #: for a subagent's session, or under the kill switch — all ordinary.
+        #: Unlike the multiplexer binding this is NOT rebuilt on a session
+        #: swap: the row belongs to the PANE and the process, and a ``/new``
+        #: only changes the session-id metadata it carries.
+        self._herdr_reporter: HerdrReporter | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -3188,6 +3196,9 @@ class OperatorApp(App[None]):
         # to name the conversation now in it, and a swap (`/new`, `/resume`)
         # is exactly when the old one becomes wrong.
         self._start_multiplexer_broadcast()
+        # Same moment, same reason: the Herdr row's session-id metadata has to
+        # name the conversation now in the pane.
+        self._start_herdr_reporter()
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -11475,6 +11486,94 @@ class OperatorApp(App[None]):
         # withdraw simply lands whenever its worker finishes and the exit
         # drain still guarantees it lands at all.
 
+    def _start_herdr_reporter(self) -> None:
+        """Report this pane's lifecycle state to Herdr's Agents panel.
+
+        Called on every session adoption, like the multiplexer broadcast, but
+        the reporter is built ONCE per process and only re-labelled on a swap:
+        the Agents row is a property of the pane, and a ``/new`` that released
+        and re-reported would flash the row empty for one round trip. Only the
+        ``--agent-session-id`` metadata changes, and the reporter re-sends the
+        current state under the new id.
+
+        Everything below is best-effort and returns on the ordinary paths —
+        no Herdr, the kill switch, headless, a subagent's session — see
+        :mod:`local_operator.herdr`. Nothing here can raise into the boot
+        path, and no subprocess runs on this thread: the reporter owns a
+        worker thread so the event loop never waits on the ``herdr`` CLI.
+        """
+        # Headless means no pane, and this is the SECOND of two independent
+        # guards keeping the test suite off a developer's own Herdr pane: a
+        # pilot test run from inside Herdr would otherwise overwrite the Agents
+        # row of the session running the tests. `tests/conftest.py` scrubs
+        # `HERDR_*` (alongside `CMUX_*`, for the same reason and after the same
+        # class of incident), so detection already fails there — this gate is
+        # what holds if that scrub is ever narrowed, and it is verified on its
+        # own by `test_a_headless_app_reports_nothing` plus its lifted-gate
+        # control. Same hazard `_start_multiplexer_broadcast` documents.
+        if self.is_headless:
+            return
+        session = self._session
+        if session is None:
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        # Guarded even though `start_reporter` guards itself: the IMPORT is
+        # part of this path, and the feature can never be the reason a
+        # session fails to open.
+        try:
+            from local_operator.multiplexer.broadcast import is_user_owned_session
+
+            # A subagent's child session runs INSIDE its parent's pane, so
+            # reporting it would overwrite the user's own row with the
+            # child's state — `idle` while the parent is parked on an
+            # approval. The same gate as the resume binding, deliberately:
+            # one definition of "the user's own session".
+            if not is_user_owned_session(session_id):
+                return
+            reporter = self._herdr_reporter
+            if reporter is not None:
+                reporter.set_session_id(session_id)
+                if self._status is not None:
+                    # Re-attach so the current state goes out under the
+                    # new session id (the reporter cleared its de-dupe).
+                    self._status.set_herdr_reporter(reporter)
+                return
+            from local_operator.herdr import start_reporter
+
+            reporter = start_reporter(session_id)
+        except Exception:  # noqa: BLE001 — bookkeeping must not break a session
+            logger.debug("herdr reporter failed to start", exc_info=True)
+            reporter = None
+        self._herdr_reporter = reporter
+        if reporter is not None and self._status is not None:
+            # Attaching is what sends the initial report, with the band's
+            # actual state rather than an assumed `idle`.
+            self._status.set_herdr_reporter(reporter)
+
+    def _stop_herdr_reporter(self) -> None:
+        """Release the pane's Agents row (idempotent). Never blocks.
+
+        The release runs on the reporter's worker and the exit drain lands it
+        before the interpreter is gone; see ``herdr.reporter`` for why that is
+        ``atexit`` and not a join here (a join here would be on the loop).
+        """
+        reporter = self._herdr_reporter
+        if reporter is None:
+            return
+        # Cleared FIRST, so a failure below cannot leave the app holding a
+        # handle it believes is still reporting.
+        self._herdr_reporter = None
+        try:
+            if self._status is not None:
+                self._status.set_herdr_reporter(None)
+            from local_operator.herdr import release_reporter
+
+            release_reporter(reporter)
+        except Exception:  # noqa: BLE001 — never block an exit path
+            logger.debug("herdr reporter failed to stop", exc_info=True)
+
     def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> "SessionBroadcast | None":
         """Withdraw this pane's binding (idempotent), returning the handle.
 
@@ -11925,6 +12024,11 @@ class OperatorApp(App[None]):
         # closed. A crash never reaches this line, which is what leaves the
         # binding standing for the restore to find.
         self._stop_multiplexer_broadcast()
+        # And the Herdr row, for the same reason: a clean exit must not leave
+        # the Agents panel showing a session that is gone. Before the approval
+        # settling below so the release is queued ahead of anything that can
+        # await — the exit drain then lands it even if teardown throws.
+        self._stop_herdr_reporter()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()

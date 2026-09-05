@@ -181,6 +181,7 @@ Mirrors `LOCAL_OPERATOR_NO_TERMINAL_TITLE`. Useful for a recording, a CI job, or
 a session opened to read someone else's transcript in a pane that already holds
 a real one.
 
+
 ## Troubleshooting
 
 **`cmux --json surface resume show` returns `resume_binding: null`.** The
