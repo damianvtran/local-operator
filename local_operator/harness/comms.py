@@ -1699,7 +1699,19 @@ class SubagentComms:
         model_spec: ModelSpec | None = None
         resolve = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve):
-            resolved = resolve(agent, effort)
+            # Strict, exactly like the first launch: a tier that broke between
+            # launch and resume must fail the resume with the reason, not
+            # bring the child back on the parent's model while the panel still
+            # says ``hi`` — the same silent substitution the launch path
+            # refuses. ``SubagentModelUnavailable`` is the only expected raise;
+            # it lands in the ``(None, reason)`` slot every other refusal here
+            # already uses.
+            from local_operator.harness.subagent import SubagentModelUnavailable
+
+            try:
+                resolved = resolve(agent, effort, strict=True)
+            except SubagentModelUnavailable as exc:
+                return None, f"cannot resume {record.label}: {exc}"
             if isinstance(resolved, ModelSpec):
                 model_spec = resolved
         new_job_id = run_subagent(

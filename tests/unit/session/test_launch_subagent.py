@@ -857,6 +857,17 @@ async def test_cancel_hands_off_final_descendant_usage_after_disposal(tmp_path, 
     assert sum(item.input_tokens for item in row.descendant_usage) == 6
     assert child_managers[0].list() == []
     assert sum(item.input_tokens for item in parent.jobs.accounting_components()) == 6
+    # The finalizer must finish before the durable ledger snapshot too, not just
+    # before the retained row is painted. A restart must own the final six once.
+    await parent._await_subagent_roster_writer()
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+
+    checkpoint = json.loads((parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR).read_text())
+    restored_manager = AsyncJobManager()
+    restored_manager.restore_accounting(
+        [Usage.model_validate(row) for row in checkpoint["accounting"]]
+    )
+    assert sum(item.input_tokens for item in restored_manager.accounting_components()) == 6
 
     # The probe kept the manager only to inspect zero-retention settlement; drop
     # that artificial reference before proving the production parent edge is gone.
@@ -2044,8 +2055,19 @@ async def test_the_launch_role_and_effort_are_recorded_on_the_job(tmp_path, monk
     both. Effort is recorded here rather than derived from the resolved model
     spec because a tier does not survive that resolution — two tiers can point
     at one model, and a child on the parent's own model still ran at a chosen
-    level the band should name."""
+    level the band should name.
+
+    The tier is CONFIGURED here because a launch that names a tier now fails
+    closed when nothing is configured for it (see
+    ``test_pinned_subagent_model``): an ``effort="hi"`` that silently ran on
+    the parent's model is the incident that rule exists to prevent, so this
+    test can no longer rely on it. The parent's own selector is used so the
+    child still runs through the same ``OneShotStream``."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "config.yml").write_text(
+        f"values:\n  subagents:\n    models:\n      hi: {MODEL.provider}/{MODEL.model_id}\n"
+    )
     parent = make_session(tmp_path, OneShotStream())
 
     job_id = parent._launch_subagent(

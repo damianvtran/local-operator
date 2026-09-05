@@ -25,6 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
+
 def _seed_env(mode: str) -> None:
     """Force the process env into the terminal we want the gate to detect.
 
@@ -102,7 +107,7 @@ async def main() -> None:
         # Settle so every row paints its final icon before the capture.
         for _ in range(6):
             await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
 
 
 asyncio.run(main())

@@ -217,6 +217,83 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
 )
 
 
+#: Substrings by which a provider says "this ACCOUNT may not use fast mode",
+#: as distinct from "this account has run out".
+#:
+#: Anthropic answers an unentitled fast-mode request with
+#: ``HTTP 429 {'type': 'rate_limit_error', 'message': 'Usage credits are
+#: required for fast mode.'}`` — measured 2026-09-04 on a live Claude
+#: subscription that serves the very same model at standard speed without
+#: complaint. Every signal a 429 normally carries is therefore WRONG here: the
+#: account has quota, waiting will not help, and rotating to a sibling account
+#: reproduces it (the entitlement is per-account, and the next account is no
+#: more entitled than the first). Left unclassified, one ``/fast`` on an
+#: unentitled account would walk the whole cascade marking healthy credentials
+#: quota-blocked and cooling down routes that were never exhausted — spending
+#: the user's actual capacity to discover a permission answer.
+#:
+#: Matched on the provider's own words because the status cannot distinguish
+#: them, which is the same reasoning \:data:`_USAGE_LIMIT_MARKERS` records for
+#: reading bodies rather than statuses. Deliberately narrow: "fast mode" must
+#: appear, so a genuine credit exhaustion that merely mentions credits is still
+#: read as the exhaustion it is.
+_FAST_MODE_REFUSAL_MARKERS = (
+    "required for fast mode",
+    "fast mode is not available",
+    "fast mode is not supported",
+    # The OpenAI-shaped rejection, measured on the Codex backend. Anchored on
+    # the verb rather than the bare field name: a quota body that merely
+    # NAMES `service_tier` (a priority-tier rate limit, say) is still a quota
+    # body, and a bare-field marker reclassified it as transient (review F2).
+    "unsupported service_tier",
+    "invalid service_tier",
+)
+
+
+def is_fast_mode_refusal(status: int | None, message: str) -> bool:
+    """Whether this failure is the provider refusing FAST MODE specifically.
+
+    True means the request would have succeeded at standard speed, so the honest
+    recovery is to drop the speed dial and re-ask — never to blame the
+    credential. See :data:`_FAST_MODE_REFUSAL_MARKERS`.
+
+    Marker-based on purpose, and consulted by :func:`_is_usage_limit` for
+    EVERY error regardless of whether the dial is on, so the markers must be
+    unambiguous. The driver applies a second, wider test when it KNOWS the
+    request asked for fast mode — see :func:`is_fast_mode_refusal_for`.
+    """
+    if status is not None and status >= 500:
+        return False
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _FAST_MODE_REFUSAL_MARKERS)
+
+
+def is_fast_mode_refusal_for(exc: "ProviderError", *, fast_requested: bool) -> bool:
+    """The driver's test: should THIS failure be answered by retrying at standard speed?
+
+    Wider than :func:`is_fast_mode_refusal`, because the driver knows what the
+    request asked for. Anthropic documents that fast mode has a DEDICATED rate
+    limit, answered with a plain 429 (``retry-after``, no distinguishing
+    text), and recommends "fall back to standard speed" on it. That body
+    carries none of the markers, so by text alone it is a quota exhaustion —
+    and treating it as one spends the same-credential wait budget on the fast
+    tier and then rotates through siblings, the exact walk the dial must not
+    cause, while standard capacity was available throughout (review F5).
+
+    So when the request asked for fast mode, ANY 429 is answered by dropping
+    the dial first. The cost of being wrong is one extra request at standard
+    speed against a genuinely exhausted account, which then fails the same
+    way it would have and takes the ordinary quota path from there. The
+    marker test still applies to the 4xx rejections (400/422) whose status
+    alone says nothing.
+    """
+    if not fast_requested:
+        return False
+    if exc.status == 429:
+        return True
+    return is_fast_mode_refusal(exc.status, str(exc))
+
+
 def _is_usage_limit(status: int | None, message: str) -> bool:
     """429, or a body that SAYS it ran out.
 
@@ -240,6 +317,13 @@ def _is_usage_limit(status: int | None, message: str) -> bool:
       :func:`is_direct_credential_rotation_error`, without claiming that its
       credential is worth staying on.
     """
+    if is_fast_mode_refusal(status, message):
+        # A fast-mode entitlement refusal wears a 429 but is a PERMISSION
+        # answer: the same credential serves this model fine at standard speed.
+        # Classifying it as quota would block a healthy account and send the
+        # user to wait out a window that is not closed. See
+        # :data:`_FAST_MODE_REFUSAL_MARKERS`.
+        return False
     if status == 429:
         return True
     if status is not None and status >= 500:
@@ -675,11 +759,23 @@ def append_auth_recovery(rendered_error: str, provider: str | None) -> str:
     ``is_image_rejection`` string-form convention rather than requiring the
     original exception at the display site.
     """
-    if not rendered_error:
-        return rendered_error
-    if not rendered_error.lower().startswith(_KIND_LABELS["auth"]):
+    if not is_rendered_auth_error(rendered_error):
         return rendered_error
     return f"{rendered_error}\n{auth_recovery_hint(provider)}"
+
+
+def is_rendered_auth_error(rendered_error: str) -> bool:
+    """Whether a RENDERED error string is the auth kind.
+
+    The one sanctioned way to read a kind back out of text: the failover
+    module itself put ``_KIND_LABELS["auth"]`` at the front of every auth-kind
+    error it rendered, so the prefix is its own statement rather than a guess
+    about a provider's wording. This is the predicate :func:`append_auth_recovery`
+    already applied inline; it is named so a second caller (the subagent
+    runner, deciding whether a pinned child died of access) shares it instead
+    of re-deriving the prefix and drifting from it.
+    """
+    return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["auth"])
 
 
 def is_usage_limit_error(error: BaseException) -> bool:
@@ -1633,6 +1729,45 @@ class FailoverRouteState:
     #: benched targets before any turn is declared exhausted, so it can delay
     #: a target but never remove the last route to a served turn.
     target_retry_at_ms: dict[tuple[str, str | None], int] = dataclasses.field(default_factory=dict)
+    #: Selectors whose provider REFUSED fast mode for this session's
+    #: credential (``provider/model_id``). Written by the stream driver the
+    #: first time a fast request is refused and served at standard speed;
+    #: consulted before every later request so the session stops paying a
+    #: doomed fast attempt plus a 429 round-trip at every tool-batch boundary
+    #: (review F1 — on an unentitled account that was the steady state, not
+    #: an edge). The refusal is a fact about the ACCOUNT's entitlement on that
+    #: route, so it outlives the turn; a ``/model`` switch does not clear it
+    #: either, since the memory is keyed by selector. It IS cleared when the
+    #: user turns the dial off and on again (``forget_fast_refusal``): an
+    #: explicit re-ask is the one signal that the entitlement may have
+    #: changed.
+    fast_refused: set[str] = dataclasses.field(default_factory=set)
+    #: Called ONCE per selector when the driver first records a refusal, with
+    #: ``(selector, provider_message)``. The session bridges it to a warning
+    #: notice and to switching its own dial off, so the band stops asserting
+    #: ``fast`` over requests that are being served standard.
+    on_fast_refused: Callable[[str, str], Awaitable[None] | None] | None = None
+
+    def fast_refused_for(self, selector: str) -> bool:
+        return selector in self.fast_refused
+
+    async def record_fast_refusal(self, selector: str, message: str) -> bool:
+        """Latch ``selector`` and announce it; True when this is the FIRST time."""
+        if selector in self.fast_refused:
+            return False
+        self.fast_refused.add(selector)
+        if self.on_fast_refused is not None:
+            result = self.on_fast_refused(selector, message)
+            if inspect.isawaitable(result):
+                await result
+        return True
+
+    def forget_fast_refusal(self, selector: str | None = None) -> None:
+        """Let the user re-ask: one selector, or every one when ``None``."""
+        if selector is None:
+            self.fast_refused.clear()
+        else:
+            self.fast_refused.discard(selector)
 
     async def activate(
         self,
@@ -1894,6 +2029,19 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
                     _carried_effort(base, provider) or target_spec.reasoning_effort,
                 )
             ),
+            # Fast mode carries as a session PREFERENCE but is clamped by what
+            # the target can actually do — the same shape as the effort clamp
+            # above, and for the same reason. "Serve this fast" is a wish about
+            # latency that stays true across a hop, so dropping it would
+            # silently cost the user the dial they set; but the target's own
+            # `supports_fast_mode` is authoritative about whether the key may
+            # be sent at all, since a route that does not sell the tier rejects
+            # it with a 400 on the request meant to RESCUE the turn.
+            #
+            # `and` rather than a carry: False on either side means off. The
+            # target spec is freshly built above, so its support flag is the
+            # route's own answer, never the primary's.
+            "fast_mode": bool(base.fast_mode and target_spec.supports_fast_mode),
         }
     )
 
@@ -2228,6 +2376,17 @@ async def stream_with_failover(
         current_request = (
             request if target == primary_target else request.model_copy(update={"model": spec})
         )
+        if (
+            route_state is not None
+            and getattr(current_request.model, "fast_mode", False)
+            and route_state.fast_refused_for(f"{spec.provider}/{spec.model_id}")
+        ):
+            # This route already refused fast mode for this session's account
+            # (see `FailoverRouteState.fast_refused`). Ask at standard speed
+            # from the start rather than paying the refused attempt again.
+            current_request = current_request.model_copy(
+                update={"model": current_request.model.model_copy(update={"fast_mode": False})}
+            )
         if route_state is not None and target != primary_target:
             cooldown_ms = max(60_000, reported.retry_after_ms or 0) if reported else 60_000
             # A pin placed on quota evidence (a 429 walk, not a transport
@@ -2432,13 +2591,27 @@ async def stream_with_failover(
 
                 # Resolve after EVERY account selection, even when the selector
                 # is unchanged. Metadata is local budget, not a provider wire flag.
-                resolved = await asyncio.to_thread(context_spec_for_access, spec, access, settings)
+                #
+                # Resolved from the REQUEST's model, not the route `spec`, and
+                # the difference is a hang. The loop clamps knobs onto
+                # `current_request.model` as it goes — the fast-mode latch above
+                # and the refusal retry below both rewrite `fast_mode` there —
+                # while `spec` stays the unclamped route. Rebinding from `spec`
+                # restored `fast_mode=True` on every attempt, so a refused fast
+                # request re-asked for fast on its "standard" retry, was
+                # refused again, and spun with no attempt counter and no sleep
+                # (15,592 attempts in 8 s, review round 5 F15). The budget
+                # comparison keeps reading `spec` because that is what a change
+                # in budget is a change FROM.
+                resolved = await asyncio.to_thread(
+                    context_spec_for_access, current_request.model, access, settings
+                )
                 changed_budget = any(
                     getattr(resolved, key) != getattr(spec, key)
                     for key in ("context_window", "default_context_window", "max_context_window")
                 )
                 spec = resolved
-                current_request = current_request.model_copy(update={"model": spec})
+                current_request = current_request.model_copy(update={"model": resolved})
                 # An API request whose budget did not move remains a transparent
                 # stream. OAuth still publishes unknown-resolution provenance.
                 if changed_budget or access.kind == "oauth":
@@ -2509,6 +2682,48 @@ async def stream_with_failover(
                     # `is_mid_stream_connectivity_loss`).
                     _mark_mid_stream_connectivity(exc)
                     raise
+                if is_fast_mode_refusal_for(
+                    exc, fast_requested=bool(getattr(current_request.model, "fast_mode", False))
+                ):
+                    # The provider sells this model but will not serve THIS
+                    # account fast — Anthropic's "Usage credits are required
+                    # for fast mode", its documented fast-tier rate limit (a
+                    # bare 429), a backend that rejects the tier outright. The
+                    # request is otherwise perfectly good, so drop the speed
+                    # dial and re-ask on the SAME credential rather than
+                    # rotating: nothing about the account is wrong, and the
+                    # next one is no more entitled.
+                    #
+                    # BEFORE `record()`, deliberately: a refusal being recovered
+                    # from must not occupy the reported-error slot, or a turn
+                    # that later dies of something lower-ranked is reported as
+                    # "Usage credits are required for fast mode" (review nit).
+                    #
+                    # The clone is scoped to THIS attempt's request, so the
+                    # session's own preference is untouched here; the LATCH on
+                    # the route state is what stops later requests re-paying
+                    # the refusal, and its handler is what tells the user.
+                    # Guarded by the flag actually being on, so it cannot loop.
+                    current_request = current_request.model_copy(
+                        update={
+                            "model": current_request.model.model_copy(update={"fast_mode": False})
+                        }
+                    )
+                    refused_selector = f"{spec.provider}/{spec.model_id}"
+                    logger.info(
+                        "fast mode refused by %s (%s); retrying at standard speed",
+                        refused_selector,
+                        exc.status,
+                    )
+                    if route_state is not None and not request.isolated:
+                        # Isolated errands (naming, compaction) must not move
+                        # session state — the same rule the cascade applies to
+                        # them everywhere else — so the latch and the notice
+                        # are the turn's to record. An errand that hits the
+                        # refusal simply retries at standard speed silently.
+                        await route_state.record_fast_refusal(refused_selector, exc.message)
+                    retry_same_key = True
+                    continue
                 record(exc, primary=is_primary)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 # A pre-wrapped connectivity loss (a client that turns httpx into

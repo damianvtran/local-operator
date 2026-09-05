@@ -7765,18 +7765,34 @@ async def test_a_swap_onto_an_empty_session_still_lands_on_the_splash(tmp_path) 
     current = FakeSession()
     current._history = [SimpleNamespace(role="user", text="something", tool_calls=None)]
 
-    async def new_factory(_resume_id: str | None):
-        return FakeSession()  # no history: this is what /new asks for
+    boot_ready = asyncio.Event()
 
-    app = OperatorApp(lambda: _factory(current), resume_factory=new_factory)
+    async def initial_factory():
+        await boot_ready.wait()
+        return current
+
+    empty = FakeSession()
+
+    async def new_factory(_resume_id: str | None):
+        return empty  # no history: this is what /new asks for
+
+    app = OperatorApp(initial_factory, resume_factory=new_factory)
     async with app.run_test(size=(80, 24)) as pilot:
+        # Boot is a separate worker: an idle frame does not prove adoption.
+        # Hold the factory to exercise that ordering on every run, not only
+        # when CI is loaded, then use the existing readiness predicate.
         await pilot.pause()
+        assert app._session is None
+        boot_ready.set()
+        await _await_session(app, pilot)
+        assert app._session is current, "the initial session was never adopted"
         assert app.query_one(WelcomeView).display is False
 
         app._session_factory = lambda: new_factory(None)  # type: ignore[assignment]
         await app._reload_session()
         await pilot.pause()
 
+        assert app._session is empty, "the empty destination was never adopted"
         assert app.query_one(WelcomeView).display is True
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert app.query_one(TranscriptView).blocks() == []

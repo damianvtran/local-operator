@@ -50,6 +50,7 @@ from local_operator.model.registry import (
     get_model_info,
     unknown_model_info,
 )
+from local_operator.model.speed import supports_fast_mode
 from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
@@ -750,6 +751,18 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # diverge as soon as the user picks a level, which is precisely when
         # `/effort auto` needs the original still recorded somewhere.
         reasoning_default_effort=reasoning_effort,
+        # Derived from the CANONICAL provider and the model together, because
+        # the fast-mode dialect belongs to the route rather than to the model
+        # (`model.speed` opens with why). `canonical` and not `hosting`: the
+        # same normalisation the rest of this function runs on, so an alias
+        # spelling of a provider cannot silently lose the dial.
+        #
+        # Only the AVAILABILITY is seeded. `fast_mode` stays False until the
+        # user turns it on, and that asymmetry is deliberate: fast mode is
+        # billed at a premium (Anthropic and OpenAI both charge roughly double),
+        # so it is the one dial that must never arrive switched on by
+        # inference. `/fast` is an explicit, session-scoped opt-in.
+        supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
 
@@ -2473,9 +2486,14 @@ class SessionStreamFn:
         # notice handler above — the stream owns routing, the session owns
         # ordered event delivery.
         self._route_handler: Callable[[Any, str], Awaitable[None] | None] | None = None
+        # The fast-mode refusal bridge, installed by the owning Session like
+        # the two above. Called once per selector, the first time a provider
+        # refuses a fast request and the driver serves it at standard speed.
+        self._fast_refused_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         self._route_state = FailoverRouteState(
             on_change=self._on_route_change,
             on_settle=self._on_route_settle,
+            on_fast_refused=self._on_fast_refused,
         )
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
@@ -2690,6 +2708,46 @@ class SessionStreamFn:
         # the grace, the ordinary boundary probe reclaims a recovered primary.
         self._route_state.primary_retry_at_ms = int(time.time() * 1000) + 60_000
         self._primary_selector = primary_selector
+
+    def set_fast_refused_handler(
+        self, handler: Callable[[str, str], Awaitable[None] | None] | None
+    ) -> None:
+        """Install the owning session's fast-mode refusal bridge.
+
+        Called with ``(selector, provider_message)`` the FIRST time a route
+        refuses fast mode for this session's account. The session uses it to
+        tell the user and to switch its own dial off, so the band stops
+        asserting ``fast`` over requests being served at standard speed.
+        """
+        self._fast_refused_handler = handler
+
+    def forget_fast_refusal(self) -> None:
+        """The user turned fast mode on again: let the next request re-ask.
+
+        Every selector, not just the current one: the entitlement is an
+        account fact, and a user who re-arms the dial after buying credits
+        expects it to work on whichever model they switch to next.
+        """
+        self._route_state.forget_fast_refusal()
+
+    async def _on_fast_refused(self, selector: str, message: str) -> None:
+        # The provider's own words are the useful half ("Usage credits are
+        # required for fast mode."); the clause after names what the session
+        # did about it. Warning, not error: the turn is being served. Opens
+        # with the feature's `fast mode:` subject like every other line of
+        # it, and the fixed text is kept short (design D7): with Anthropic's
+        # measured message the line is 129 cells, inside the 140-cell notice
+        # budget at the 150-cell reference frame.
+        await self._notice(
+            f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
+            "switched off, serving at standard speed",
+            "warning",
+        )
+        if self._fast_refused_handler is None:
+            return
+        result = self._fast_refused_handler(selector, message)
+        if inspect.isawaitable(result):
+            await result
 
     def withdraw_fallback(self) -> None:
         """The user explicitly re-selected a model; drop the pinned fallback route.

@@ -5091,3 +5091,111 @@ def test_the_refusal_keeps_its_cushion_above_the_trigger(window: int) -> None:
     cushion = (window - reserve - margin) - trigger
 
     assert cushion > window // 100, (window, cushion)
+
+
+# ---------------------------------------------------------------------------
+# Fast mode — the SPEED dial, orthogonal to reasoning effort
+# ---------------------------------------------------------------------------
+
+
+def _fast_spec(provider: str, model_id: str, *, on: bool = True, **kw) -> ModelSpec:
+    """A spec with the fast dial resolved, as ``build_model_spec`` would leave it."""
+    return ModelSpec(
+        provider=provider,
+        model_id=model_id,
+        supports_fast_mode=True,
+        fast_mode=on,
+        **kw,
+    )
+
+
+def test_fast_mode_sends_service_tier_priority_on_openai_shaped_routes() -> None:
+    """Both OpenAI bodies carry the key top-level, and the value is `priority`.
+
+    NEVER `fast`: measured 2026-09-04 the Codex backend answers HTTP 400
+    `Unsupported service_tier: fast` and xAI HTTP 422 for that value.
+    """
+    spec = _fast_spec("openai", "gpt-5.4", supports_sampling_params=False)
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    client = OpenAICompatClient("https://api.openai.com/v1")
+
+    assert client._build_body(request)["service_tier"] == "priority"
+    assert client._build_responses_body(request)["service_tier"] == "priority"
+
+
+def test_fast_mode_sends_speed_and_its_beta_header_on_anthropic() -> None:
+    """The key and the header travel together — the key alone is a 400."""
+    spec = _fast_spec("anthropic", "claude-opus-5", supports_sampling_params=False)
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    client = AnthropicClient()
+
+    assert client._build_body(request)["speed"] == "fast"
+    headers = client._headers("key", fast_beta="fast-mode-2026-02-01")
+    assert "fast-mode-2026-02-01" in headers["anthropic-beta"]
+
+
+def test_fast_mode_beta_header_composes_with_the_effort_beta() -> None:
+    """Two betas on one request must both survive, comma-joined."""
+    headers = AnthropicClient()._headers("key", effort="high", fast_beta="fast-mode-2026-02-01")
+    beta = headers["anthropic-beta"]
+    assert "effort-2025-11-24" in beta
+    assert "fast-mode-2026-02-01" in beta
+
+
+def test_fast_mode_key_is_omitted_when_the_dial_is_off() -> None:
+    """The default path must be byte-identical to one from before this feature."""
+    spec = _fast_spec("openai", "gpt-5.4", on=False, supports_sampling_params=False)
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    client = OpenAICompatClient("https://api.openai.com/v1")
+
+    assert "service_tier" not in client._build_body(request)
+    assert "service_tier" not in client._build_responses_body(request)
+
+    anthropic_spec = ModelSpec(
+        provider="anthropic", model_id="claude-opus-5", supports_fast_mode=True, fast_mode=False
+    )
+    body = AnthropicClient()._build_body(
+        ChatRequest(model=anthropic_spec, messages=[Message.user("hi")])
+    )
+    assert "speed" not in body
+    assert "anthropic-beta" not in AnthropicClient()._headers("key")
+
+
+def test_fast_mode_key_is_dropped_when_the_route_cannot_serve_it() -> None:
+    """A stale `fast_mode=True` against an unsupporting route sends NOTHING.
+
+    The spec is mutable at runtime — `/fast` writes it and a fallback can swap
+    the model underneath it — so the client re-checks rather than trusting, the
+    same rule `_reasoning_effort` follows. Sending the key here would be a
+    guaranteed 400 on every turn.
+    """
+    spec = ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-reasoner",
+        supports_fast_mode=False,
+        fast_mode=True,
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    assert "service_tier" not in OpenAICompatClient("https://x")._build_body(request)
+
+
+def test_fast_mode_is_independent_of_reasoning_effort() -> None:
+    """The two dials are orthogonal: speed must not depend on the effort branch.
+
+    A model on a fast tier with no effort ladder must still get its tier — the
+    regression a nested implementation would have shipped.
+    """
+    spec = _fast_spec("anthropic", "claude-opus-5")  # no effort ladder declared
+    body = AnthropicClient()._build_body(ChatRequest(model=spec, messages=[Message.user("hi")]))
+    assert body["speed"] == "fast"
+    assert "output_config" not in body
+
+
+def test_fast_mode_on_openrouter_uses_the_aggregator_dialect() -> None:
+    """The same Claude model takes `service_tier` through OpenRouter."""
+    spec = _fast_spec("openrouter", "anthropic/claude-opus-5")
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(
+        ChatRequest(model=spec, messages=[Message.user("hi")])
+    )
+    assert body["service_tier"] == "priority"
+    assert "speed" not in body
