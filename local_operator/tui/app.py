@@ -12478,27 +12478,65 @@ class OperatorApp(App[None]):
                 # `streaming=True` above and no `TurnStarted` ever arrived, so
                 # `_turn_open` is False and nothing else would clear the band.
                 #
-                # CARRIES THE OUTCOME, and that is what closes the title flash
-                # structurally. This is the EARLIER of the two writes that retire
-                # a turn's band — `_finalize_turn`'s is the other — so writing
-                # only `streaming=False` here published `lo ›` ("finished
-                # cleanly") for a turn this very `except` had just caught, and
-                # `lo ✗` landed one write later (review D6/U8). The fact is
-                # already in hand; sending it with the write that needs it means
-                # there is no interval in which the title is wrong, rather than a
-                # short one. `_finalize_turn` then writes the same pair and the
-                # title dedupes on the rendered string.
+                # IN-PROCESS, CARRIES THE OUTCOME, and that is what closes the
+                # title flash structurally on that path. This is the EARLIER of
+                # the two writes that retire a turn's band — `_finalize_turn`'s
+                # is the other — so writing only `streaming=False` here
+                # published `lo ›` ("finished cleanly") for a turn this very
+                # `except` had just caught, and `lo ✗` landed one write later
+                # (review D6/U8). The fact is already in hand; sending it with
+                # the write that needs it means there is no interval in which
+                # the title is wrong. `_finalize_turn` then writes the same pair
+                # and the title dedupes on the rendered string.
                 #
-                # `None` (leave alone) when this worker cannot know the outcome —
-                # a FOLLOWER's `prompt()` returns on the owner's ACK, mid-turn,
-                # so its `error_text` is None because nothing was reported here,
-                # not because the turn succeeded. Same reasoning as
-                # `_post_turn_abandoned`'s `outcome_known`.
+                # ON A FOLLOWER, WITHHELD WHILE THE OWNER IS LIVE (#642). A
+                # follower's `prompt()` returns on the owner's ACK, mid-turn, so
+                # this worker cannot know the outcome: its `error_text` is None
+                # because nothing was reported here, not because the turn
+                # succeeded (same reasoning as `_post_turn_abandoned`'s
+                # `outcome_known`). Carrying the fact into this write — the fix
+                # that worked in-process — is therefore unavailable, and writing
+                # `streaming=False` with `failed=None` resolved the title to
+                # `idle`: `lo ›` for exactly the owner's relay latency (measured
+                # 501.7 ms at a 0.5 s relay, 2011 ms at 2 s — the window IS the
+                # relay), then `lo ✗`. "Ignorant" must not render as "finished
+                # cleanly": `idle` is a positive claim that the turn is over and
+                # the user's attention is free, and a viewer that has not been
+                # told has no standing to make it. So while `is_streaming` is
+                # still True the band HOLDS `working` — honest, because the turn
+                # IS still running as far as this viewer knows — and the
+                # outcome lands through `_finalize_turn` when the owner's end
+                # arrives. This is the same predicate `on_turn_abandoned`'s
+                # guard 2 applies at dispatch, read here at worker time.
+                #
+                # A follower whose `prompt()` refused BEFORE any `agent_start`
+                # has `is_streaming` False and still takes the write: that is
+                # the "KEPT" case above, and it survives unchanged.
+                #
+                # NO WALL-CLOCK TIMEOUT ON THE HOLD, deliberately. Every way the
+                # outcome can fail to arrive is a socket event that ends the
+                # turn locally: the relayed `agent_end`; EOF/reset →
+                # `_on_disconnected` → `_end_turn_locally`; a slow-follower drop
+                # (the owner's `_send_to` timeout closes the socket → EOF); and
+                # the cold fallback (`_go_cold` → `_end_turn_locally`). A timer
+                # could only fire while the socket is alive and silent — i.e.
+                # while the owner IS still working, and turns legitimately run
+                # for hours — and every terminal it could pick (`›`, `✗`,
+                # "interrupted") would be a false claim. The bound is
+                # event-driven, not timed.
+                #
+                # Accepted residual: the owner ACKs on the durable append BEFORE
+                # `agent_start` (`runtime/owned.py` `prompt` vs `harness/loop.py`
+                # `_run_turn`), so a `finally` that runs inside that gap reads
+                # `is_streaming` False and clears the band — a working→idle→
+                # working blip bounded by the owner's prompt preparation, not by
+                # the relay of the OUTCOME. That is not the flash this closes.
                 knows_outcome = not bool(getattr(session, "is_remote", False))
-                self._status.update(
-                    streaming=False,
-                    failed=(bool(error_text) and not aborted) if knows_outcome else None,
-                )
+                if knows_outcome or not bool(getattr(session, "is_streaming", False)):
+                    self._status.update(
+                        streaming=False,
+                        failed=(bool(error_text) and not aborted) if knows_outcome else None,
+                    )
                 # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
                 # `prompt()` returns only after the pipeline's `finally` has
                 # flushed the held end, which `_emit`s `agent_end`
@@ -22500,8 +22538,11 @@ class OperatorApp(App[None]):
         #    in-process `Session` this is already False when `prompt()` returns
         #    (`_run_turn`'s finally clears it before the pipeline flushes the
         #    held end), so it never suppresses a genuine fallback — and a
-        #    follower needs none, since an owner death or a `/stop` synthesises
-        #    a real aborted `AgentEndEvent` locally.
+        #    follower needs none, since an owner death, a `/stop`, or the
+        #    viewer going cold (`_go_cold`, #642) each synthesise a real
+        #    aborted `AgentEndEvent` locally. The turn worker's own band write
+        #    applies this SAME predicate at worker time, so the band holds
+        #    `working` exactly as long as this guard keeps the turn open.
         if self._session is not None and getattr(self._session, "is_streaming", False):
             return
         # 3. NOTHING TO FALL BACK FOR. A fallback is only meaningful for a turn
@@ -22788,8 +22829,9 @@ class OperatorApp(App[None]):
         # same turn (review R4). The turn is fully retired by the work above;
         # only the announcement waits for the route that knows.
         #
-        # NOT a silence hole: a follower whose owner dies or is stopped gets a
-        # real aborted `AgentEndEvent` synthesised locally
+        # NOT a silence hole: a follower whose owner dies, is stopped, or whose
+        # viewer goes cold with no successor (`_go_cold`, #642) gets a real
+        # aborted `AgentEndEvent` synthesised locally
         # (`RemoteSession._end_turn_locally`), which reaches this method through
         # `on_turn_ended` and settles the ladder. The abandoned route is the
         # fallback for a turn NOBODY ends, and on a follower that is precisely
