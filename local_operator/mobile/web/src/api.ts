@@ -96,7 +96,7 @@ export function startSession(input: {
 	cwd: string;
 	provider?: string;
 	model_id?: string;
-}): Promise<{ ok: boolean; pid: number }> {
+}): Promise<{ ok: boolean; pid: number; session_id: string }> {
 	return request("/api/sessions/start", {
 		method: "POST",
 		headers: { "content-type": "application/json" },

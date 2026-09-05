@@ -459,7 +459,7 @@ async def test_typing_filters_to_the_matches() -> None:
         await pilot.pause()
         picker = app.editor.picker
         assert picker.is_open()
-        assert [name for name, _ in picker.suggestions()] == ["model"]
+        assert [name for name, _ in picker.suggestions()] == ["model", "mobile"]
 
 
 @pytest.mark.asyncio
@@ -851,7 +851,7 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # a registry move.
         ("c", ["clear", "copy", "config", "context", "compact", "credential"]),
         ("lo", ["loop", "login", "logout"]),
-        ("mo", ["model"]),
+        ("mo", ["model", "mobile"]),
     ],
 )
 def test_short_queries_keep_only_prefix_matches(query: str, expected: list[str]) -> None:
@@ -968,7 +968,7 @@ async def test_tab_never_sends_however_unambiguous() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         app.editor.focus()
         await pilot.pause()
-        await pilot.press("slash", "m", "o")
+        await pilot.press("slash", "m", "o", "d")
         await pilot.press("tab")
         await pilot.pause()
         assert app.submissions == []

@@ -58,7 +58,7 @@ export function PastSessionsScreen() {
 		setResumeError("");
 		try {
 			const r = await resumeSession(id);
-			navigate(`/s/${r.pid}`);
+			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
 			setResumeError(String((e as Error).message ?? e));
 			setResumingId("");
