@@ -186,6 +186,11 @@ class Gateway:
     def headers(self, incoming: Any, host: str, harness: dict[str, Any]) -> dict[str, str]:
         headers = {k: v for k, v in incoming.items() if k in _REQUEST_HEADERS}
         headers["host"] = host
+        # OpenCode 1.18.5 requires this explicit request marker to issue its
+        # short-lived PTY WebSocket ticket. Preserve only its defined value for
+        # that harness; never synthesize it or relax Origin/proof verification.
+        if harness["id"] == "opencode" and incoming.get("x-opencode-ticket") == "1":
+            headers["x-opencode-ticket"] = "1"
         if harness["id"] == "local-operator":
             if not self.mobile_password:
                 raise ValueError("Mobile relay is not installed.")

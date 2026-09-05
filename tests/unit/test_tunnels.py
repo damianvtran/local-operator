@@ -113,6 +113,7 @@ async def test_real_proof_authenticates_relay_without_leaking_cloud_headers(
                     "authorization": "Bearer cloud-secret",
                     "x-forwarded-host": "attacker.invalid",
                     "cf-access-jwt-assertion": "forged",
+                    "x-opencode-ticket": "1",
                 },
             )
     assert response.status_code == 200
@@ -125,7 +126,13 @@ async def test_real_proof_authenticates_relay_without_leaking_cloud_headers(
     assert verify_cookie(
         request.headers["cookie"].removeprefix(COOKIE_NAME + "="), "private-local-password"
     )
-    for name in (PROOF_HEADER, "authorization", "cf-access-jwt-assertion", "x-forwarded-host"):
+    for name in (
+        PROOF_HEADER,
+        "authorization",
+        "cf-access-jwt-assertion",
+        "x-forwarded-host",
+        "x-opencode-ticket",
+    ):
         assert name not in request.headers
 
 

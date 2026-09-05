@@ -68,6 +68,7 @@ async def server(app):
 async def test_real_http_sse_websocket_proxy_and_header_isolation():
     seen = []
     streaming = asyncio.Event()
+    ticket = None
 
     async def api(request):
         seen.append(dict(request.headers))
@@ -89,17 +90,52 @@ async def test_real_http_sse_websocket_proxy_and_header_isolation():
         await ws.send_text(await ws.receive_text())
         await ws.close()
 
+    async def connect_token(request):
+        nonlocal ticket
+        # OpenCode 1.18.5 requires this explicit browser marker as well as the
+        # checked Origin before issuing a directory-bound, one-use PTY ticket.
+        if (
+            request.headers.get("x-opencode-ticket") != "1"
+            or request.headers.get("origin") != "https://" + host
+            or request.headers.get("authorization") != expected
+            or request.query_params.get("directory") != "/qa"
+        ):
+            return JSONResponse({"error": "ticket request denied"}, status_code=403)
+        seen.append(dict(request.headers))
+        ticket = str(uuid.uuid4())
+        return JSONResponse({"ticket": ticket, "expires_in": 60})
+
+    async def pty_connect(ws):
+        nonlocal ticket
+        if (
+            not ticket
+            or ws.query_params.get("ticket") != ticket
+            or ws.query_params.get("directory") != "/qa"
+            or ws.headers.get("origin") != "https://" + host
+            or ws.headers.get("authorization") != expected
+        ):
+            await ws.close(code=1008)
+            return
+        ticket = None
+        seen.append(dict(ws.headers))
+        await ws.accept()
+        await ws.send_text(await ws.receive_text())
+        await ws.close()
+
     origin = Starlette(
         routes=[
             Route("/api", api, methods=["POST"]),
             Route("/events", events),
             WebSocketRoute("/ws", websocket),
+            Route("/pty/qa/connect-token", connect_token, methods=["POST"]),
+            WebSocketRoute("/pty/qa/connect", pty_connect),
         ]
     )
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public = json.loads(RSAAlgorithm.to_jwk(key.public_key()))
     public.update(kid="edge-1", alg="RS256")
     host = "abc123-oc.radienthq.com"
+    expected = "Basic " + base64.b64encode(b"opencode:private-test-origin").decode()
 
     def signed(method, target, body=b""):
         now = int(time.time())
@@ -190,6 +226,33 @@ async def test_real_http_sse_websocket_proxy_and_header_isolation():
                     ) as ws:
                         await ws.send("phone steering")
                         assert await ws.recv() == "phone steering"
+                    target = "/pty/qa/connect-token?directory=%2Fqa"
+                    # Absence/other values must not synthesize the browser's
+                    # request marker, even for an otherwise signed request.
+                    for marker in (None, "anything-else", "1"):
+                        headers = {
+                            "host": host,
+                            "origin": "https://" + host,
+                            "authorization": "Bearer cloud-secret",
+                            "cookie": "__Host-radient-grant=cloud-secret",
+                            PROOF_HEADER: signed("POST", target),
+                        }
+                        if marker is not None:
+                            headers["x-opencode-ticket"] = marker
+                        reply = await client.post(target, headers=headers)
+                        assert reply.status_code == (200 if marker == "1" else 403)
+                    assert reply.json()["expires_in"] == 60
+                    target = "/pty/qa/connect?directory=%2Fqa&ticket=" + reply.json()["ticket"]
+                    async with connect(
+                        "ws://" + host + target,
+                        host="127.0.0.1",
+                        port=gateway_port,
+                        proxy=None,
+                        origin=Origin("https://" + host),
+                        additional_headers={PROOF_HEADER: signed("GET", target)},
+                    ) as ws:
+                        await ws.send("phone PTY input")
+                        assert await ws.recv() == "phone PTY input"
                     streaming.clear()
                     async with asyncio.timeout(10):
                         async with client.stream(
@@ -203,8 +266,7 @@ async def test_real_http_sse_websocket_proxy_and_header_isolation():
                             gateway.revoked = True
                             streaming.set()
                             assert "data: second" not in [line async for line in lines]
-    assert len(seen) == 2
-    expected = "Basic " + base64.b64encode(b"opencode:private-test-origin").decode()
+    assert len(seen) == 4
     for headers in seen:
         assert headers["authorization"] == expected
         assert PROOF_HEADER not in headers

@@ -2333,44 +2333,88 @@ def _list_models() -> list[dict[str, Any]]:
     the legacy CredentialManager file, and ``/login`` writes the providers
     AuthStore (auth.db) — a picker reading only the first would hide every
     OAuth-logged-in provider, which on a current install is most of them.
-    Runs in a thread: catalogue reads are file I/O."""
+    Runs in a thread: catalogue reads, OAuth refresh, and cold live discovery
+    must never block the relay's event loop or its session event streams.
+
+    Aggregators deliberately have no bundled models. Use the same bounded,
+    cached discovery/parser as the desktop picker for those providers; reading
+    only the static registry makes a fresh Radient login appear to own none.
+    Only persisted credentials authorize discovery here: a service manager's
+    unrelated environment must not silently add accounts to a remote picker.
+    """
+    from contextlib import closing
+
     from local_operator.credentials import CredentialManager
+    from local_operator.model.discovery import available_models
     from local_operator.model.registry import SupportedHostingProviders, static_models
     from local_operator.paths import config_dir
     from local_operator.providers.auth_store import AuthStore
 
     credential_manager = CredentialManager(config_dir=config_dir())
-    store = AuthStore()
-    try:
-        authed_providers = {c.provider for c in store.list_credentials()}
-    finally:
-        store.close()
-
     rows: list[dict[str, Any]] = []
-    for provider in SupportedHostingProviders:
-        required = provider.requiredCredentials
-        has_key = bool(required) and any(
-            credential_manager.get_credential(key).get_secret_value() for key in required
-        )
-        # AuthStore login aliases: the oauth flavour of a provider logs in
-        # under its own id (e.g. ``alibaba-token-plan-oauth``); the catalogue
-        # key is the base id, so prefix matching covers both spellings.
-        has_login = provider.id in authed_providers or any(
-            p.startswith(f"{provider.id}-") for p in authed_providers
-        )
-        if required and not has_key and not has_login:
-            continue
-        if not required and not has_login:
-            continue
-        for model_id, info in static_models(provider.id).items():
-            rows.append(
+    unavailable: list[str] = []
+    persisted_keys = credential_manager.get_credentials()
+    with closing(AuthStore()) as store:
+        for provider in SupportedHostingProviders:
+            key = next(
+                (
+                    persisted_keys[name].get_secret_value()
+                    for name in provider.requiredCredentials
+                    if name in persisted_keys and persisted_keys[name].get_secret_value()
+                ),
+                None,
+            )
+            # AuthStore resolves the registry's exact storage aliases. Prefix
+            # guessing could lend an unrelated plan's credentials to a host.
+            logins = store.list_credentials(provider=provider.id)
+            if not key and not logins:
+                continue
+            models = static_models(provider.id)
+            names = [(model_id, getattr(info, "name", "")) for model_id, info in models.items()]
+            if not models:
+                is_oauth = False
+                account_id = None
+                if not key:
+                    # Refresh a specific stored row without the inference
+                    # cascade's rotation, quota blocks, or sticky-account writes.
+                    # asyncio.run is safe here because api_models offloads this
+                    # whole synchronous helper to its worker thread.
+                    for login in reversed(logins):
+                        is_oauth = login.credential_type == "oauth"
+                        data = (
+                            asyncio.run(store.ensure_oauth_fresh(login.id))
+                            if is_oauth
+                            else login.data
+                        )
+                        if data:
+                            key = data.get("access" if is_oauth else "key")
+                            account_id = data.get("account_id") or data.get("org_id")
+                        if key:
+                            break
+                if not key:
+                    unavailable.append(provider.name)
+                    continue
+                discovered, status = available_models(
+                    provider.id, api_key=key, is_oauth=is_oauth, account_id=account_id
+                )
+                names = [(model.id, model.name) for model in discovered]
+                if not names and status != "empty":
+                    unavailable.append(provider.name)
+            rows.extend(
                 {
                     "selector": f"{provider.id}/{model_id}",
                     "provider": provider.id,
                     "model_id": model_id,
-                    "name": getattr(info, "name", "") or model_id,
+                    "name": name or model_id,
                 }
+                for model_id, name in names
             )
+    if not rows and unavailable:
+        # A failed cold fetch is not an authoritative empty inventory. Keep the
+        # message credential-free while making a retry/re-login actionable.
+        raise RuntimeError(
+            f"Model catalogue unavailable for {', '.join(unavailable)}; retry or log in again"
+        )
     return rows
 
 
