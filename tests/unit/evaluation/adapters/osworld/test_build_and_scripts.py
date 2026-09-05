@@ -564,7 +564,19 @@ def stubbed_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
         "scheduler", region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="y"
     )
     with Stubber(ec2) as ec2_stub, Stubber(scheduler) as sched_stub:
-        yield _Clients(ec2=ec2, scheduler=scheduler, http_get=lambda u, t: 0), ec2_stub, sched_stub
+        # ``audit`` is a teardown-only surface and never posts to a guest; the
+        # poster raises so a test that unexpectedly reached it fails loudly
+        # rather than silently exercising a no-op.
+        def _no_guest(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            raise AssertionError("the audit path must not talk to a guest")
+
+        yield (
+            _Clients(
+                ec2=ec2, scheduler=scheduler, http_get=lambda u, t: 0, http_post_json=_no_guest
+            ),
+            ec2_stub,
+            sched_stub,
+        )
 
 
 def test_audit_prints_empty_list_and_exits_zero_when_clean(
