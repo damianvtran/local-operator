@@ -5235,12 +5235,17 @@ async def test_loop_goal_suppresses_turn_ended_toast() -> None:
         app._notify = _record_notify  # type: ignore[assignment]
         # Held loop: a per-turn settle must not notify.
         app._loop_suppress_completion = True
+        # Turn OPENED first, both times: retirement is at-most-once per turn, so
+        # a `TurnEnded` for a turn nothing started is correctly a no-op and this
+        # seam would be asserted against a state the product cannot reach.
+        app.post_message(TurnStarted())
         app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
         await pilot.pause()
         await pilot.pause()
         assert completion_notifies == []
         # Not held: the same event notifies as usual (numeric mode / normal turns).
         app._loop_suppress_completion = False
+        app.post_message(TurnStarted())
         app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
         await pilot.pause()
         await pilot.pause()
