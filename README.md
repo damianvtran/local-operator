@@ -493,8 +493,15 @@ Exit code 0 on success — pipeline-friendly.
 
 ```bash
 pip install "local-operator[server]"
-lop serve                 # http://localhost:1111, docs at /docs
+lop serve                 # http://127.0.0.1:1111, docs at /docs
 ```
+
+The legacy HTTP API has no authentication and defaults to loopback. Keep it
+away from untrusted clients; an explicit `--host` can widen the bind only when
+you provide access controls in front. This is separate from the authenticated
+mobile relay. See [API filesystem boundaries](./docs/API_FILESYSTEM_BOUNDARIES.md)
+for fresh-ID profile imports, workspace-confined edit reads and live editor
+buffers.
 
 **Phone access** — an optional session daemon lets you watch and steer
 your sessions from your phone. See

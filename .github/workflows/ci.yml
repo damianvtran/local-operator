@@ -138,12 +138,35 @@ jobs:
         # the paths-gated extension workflow does not run.
         run: python -m local_operator.browser_bridge.gen_ts --check
         
+  filesystem-boundaries-windows:
+    # Canonical containment must use native Windows drive/junction semantics,
+    # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import
+    # contract rather than claiming the complete interactive suite is portable.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Verify native filesystem boundaries
+        shell: pwsh
+        run: |
+          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-boundary-home"
+          $env:USERPROFILE = $env:HOME
+          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
+          New-Item -ItemType Directory -Force $env:HOME | Out-Null
+          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py -n0 -q
+
   test:
     runs-on: ubuntu-latest
-    # Sharded across 5 parallel jobs to bring individual test runner execution
-    # time safely within the 7-9 minute window while staying well within the
-    # 20-job concurrency budget. Timeout set to 15m.
-    timeout-minutes: 15
+    # Keep five shards within the 20-job concurrency budget. PR #643 job
+    # 101250352578 reached 97% before GitHub cancelled it at the 15-minute
+    # limit, so allow 20 minutes for setup and the long tail without dropping
+    # tests, coverage, or the independent per-test/e2e watchdogs.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
