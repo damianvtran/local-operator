@@ -304,10 +304,15 @@ async def test_the_chosen_level_survives_a_session_rebuild() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_level_the_next_model_cannot_take_is_forgotten_not_hidden() -> None:
+async def test_a_level_the_next_model_cannot_take_is_forgotten_not_hidden(
+    monkeypatch, tmp_path
+) -> None:
     """Carrying `max` onto a model whose ladder stops at `high` would be a 400
     on the next turn; keeping it in the wings to reappear two switches later
     would be spookier than making the user re-pick."""
+    # The status band includes cwd; a checkout named context-max must not be
+    # mistaken for a remembered effort level.
+    monkeypatch.chdir(tmp_path)
     sessions = [EffortSession(), EffortSession("openai", "gpt-4.1")]
     app = OperatorApp(lambda: _factory(sessions.pop(0)))
     async with app.run_test(size=(120, 40)) as pilot:

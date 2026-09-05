@@ -433,6 +433,18 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- providers ----------------------------------------------------------
     Setting(
+        key="providers.openai.use_max_context_window",
+        path=("providers", "openai", "use_max_context_window"),
+        section="providers",
+        label="Use maximum OpenAI context",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Off: provider default. On: supported max. "
+            "Applies next request; compaction unchanged."
+        ),
+    ),
+    Setting(
         key="providers.openai.api",
         path=("providers", "openai", "api"),
         section="providers",
@@ -648,6 +660,16 @@ SETTINGS: tuple[Setting, ...] = (
             Choice(True, "on", "force glyphs on"),
             Choice(False, "off", "force plain icons"),
         ),
+    ),
+    Setting(
+        key="display.heading_markers",
+        path=("display.heading_markers",),
+        section="appearance",
+        label="Heading markers",
+        kind=Kind.BOOL,
+        default=False,
+        help="Show the literal ### before a heading, as the markdown source writes it.",
+        choices=_bool_choices("show ### markers", "colour and weight only"),
     ),
     Setting(
         key="display.terminal_title",

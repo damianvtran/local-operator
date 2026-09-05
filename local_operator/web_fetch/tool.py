@@ -346,7 +346,16 @@ async def run_fetch(
     # The cache key folds in the render-affecting params (M3): a raw fetch and a
     # rendered fetch of the same URL are different renditions and must not share
     # an entry, and a byte-capped fetch must not satisfy a full-ceiling request.
-    variant = cache_variant(raw=raw, max_bytes=max_bytes)
+    base_variant = cache_variant(raw=raw, max_bytes=max_bytes)
+    variant = base_variant
+    # Configuration changes can alter the actual ceiling, rendition or trust
+    # policy even when the call arguments are unchanged. Never reuse a private
+    # fetch after private access is disabled, or a truncated old default after
+    # the configured ceiling grows.
+    variant += (
+        f"|ceiling={settings.max_bytes}|private={int(settings.allow_private)}"
+        f"|enrich={int(settings.enrich)}|render={settings.render_backend}"
+    )
 
     # Cache lookup first (unless refreshing). A hit that still stats against the
     # spill store returns with zero network calls (requirement #3 / test 8).
@@ -354,7 +363,7 @@ async def run_fetch(
         entry = read_cache_entry(normalized, variant)
         if entry is not None:
             hit = _cache_hit_result(
-                entry, settings.cache_ttl_seconds, tool_name, context, variant=variant
+                entry, settings.cache_ttl_seconds, tool_name, context, variant=base_variant
             )
             if hit is not None:
                 preview, details = hit
@@ -363,15 +372,36 @@ async def run_fetch(
     # ``transport`` is a TEST-ONLY seam (httpx MockTransport): production callers
     # leave it None and the service opens real connections. Mirrors the
     # injectable transport WebSearchService uses for deterministic provider tests.
-    service = WebFetchService(settings, transport=transport)
+    io = context.web_io if context is not None else None
+    service = WebFetchService(settings, transport=transport, io=io)
+
+    async def fetch() -> FetchResult:
+        return await service.fetch(
+            normalized, raw=raw, max_bytes=max_bytes, timeout_seconds=timeout_seconds
+        )
+
     try:
+        # A refresh promises a new request, so it does not join an earlier
+        # in-flight read. Normal duplicate reads share bytes/rendering while
+        # retaining each subscriber's own abort and result/spill metadata.
+        work = (
+            io.singleflight(
+                (
+                    "fetch",
+                    normalized,
+                    settings.model_dump_json(),
+                    raw,
+                    max_bytes,
+                    timeout_seconds,
+                    id(transport),
+                ),
+                fetch,
+            )
+            if io is not None and not refresh
+            else fetch()
+        )
         result: FetchResult = await _fetch_or_abort(
-            service.fetch(
-                normalized,
-                raw=raw,
-                max_bytes=max_bytes,
-                timeout_seconds=timeout_seconds,
-            ),
+            work,
             signal,
         )
     except asyncio.CancelledError:
@@ -400,7 +430,7 @@ async def run_fetch(
         "http_error": not http_ok,
     }
     preview, details, handle = _shape_from_content(
-        result_like, result.content, tool_name, context, variant=variant
+        result_like, result.content, tool_name, context, variant=base_variant
     )
 
     # Record the cache entry pointing at the spill handle (metadata only). Only

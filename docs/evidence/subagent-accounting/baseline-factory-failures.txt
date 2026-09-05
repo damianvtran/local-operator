@@ -1,0 +1,25 @@
+Compared unmodified main 619ec60a to accounting head c2ed4ce6.
+Same owned worktree Python 3.12, independent isolated HOME/config per run.
+Command: python -m pytest tests/unit/test_session_factory.py -n 2 -q
+Baseline: 18 failed, 93 passed (7.11s)
+Head: 18 failed, 93 passed (6.13s)
+Exact failed node-id sets equal: True
+
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[../../etc]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[..]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[.]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[/etc/passwd]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[C:]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[C:sessions]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[a\\b]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[nope]
+tests/unit/test_session_factory.py::test_resume_id_must_be_a_single_path_component[sub/dir]
+tests/unit/test_session_factory.py::test_resume_latest_picks_the_newest_transcript
+tests/unit/test_session_factory.py::test_resume_latest_skips_a_subagent_that_finished_last
+tests/unit/test_session_factory.py::test_resume_latest_with_no_sessions_is_an_honest_error
+tests/unit/test_session_factory.py::test_resume_refuses_a_session_it_cannot_verify[../../etc]
+tests/unit/test_session_factory.py::test_resume_refuses_a_session_it_cannot_verify[..]
+tests/unit/test_session_factory.py::test_resume_refuses_a_session_it_cannot_verify[]
+tests/unit/test_session_factory.py::test_resume_refuses_a_session_it_cannot_verify[nope]
+tests/unit/test_session_factory.py::test_resume_refuses_a_session_it_cannot_verify[sub/dir]

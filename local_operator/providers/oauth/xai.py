@@ -21,6 +21,7 @@ from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
     maybe_await,
+    raise_for_refresh_failure,
 )
 from local_operator.providers.oauth.device_code import (
     DevicePollResult,
@@ -201,7 +202,7 @@ async def refresh_xai_token(
         if owns_client:
             await http.aclose()
     if response.status_code != 200:
-        raise LoginError(f"xAI refresh failed ({response.status_code}): {response.text}")
+        raise_for_refresh_failure("xAI", response.status_code, response.text)
     merged = dict(creds)
     merged.update(
         _credentials_from_token(

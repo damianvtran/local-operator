@@ -206,6 +206,18 @@ class CallSnapshot:
     # ``None`` is "not reported"; a real ``0.0`` is billed-as-free and must
     # survive as a known $0, not collapse into ``$—``.
     usd_cost: float | None = None
+    # Request diagnostics are scalar and forward-filled. -1 denotes unknown
+    # timing, never a zero-latency historical request. Duration is observed
+    # stream-consumption wall time (including retries and consumer backpressure),
+    # not a claim about the provider's internal compute time.
+    request_id: str = ""
+    parent_session_id: str = ""
+    purpose: str = "unknown"
+    duration_ms: float = -1
+    ttft_ms: float = -1
+    preparation_ms: float = -1
+    outcome: str = "unknown"
+    usage_reported: bool = True
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
@@ -298,6 +310,20 @@ def snapshot_component_chars(request: Any) -> dict[str, int]:
     for message in getattr(request, "messages", []) or []:
         role = getattr(message, "role", "")
         text_chars, msg_image_chars = _content_chars(message)
+        # Assistant function arguments are prompt input on every continuation,
+        # often the largest part of a code-writing turn. Ignoring them shifts
+        # their share onto unrelated components and hides tool-loop growth.
+        for call in getattr(message, "tool_calls", []) or []:
+            raw = getattr(call, "raw_arguments", None)
+            if raw:
+                text_chars += len(raw)
+            else:
+                try:
+                    text_chars += len(
+                        json.dumps(getattr(call, "arguments", {}), separators=(",", ":"))
+                    )
+                except (TypeError, ValueError):
+                    pass
         # CRITICAL: image chars are pulled OUT of the text buckets and summed
         # into ``images``, NEVER added alongside. Apportionment splits the fixed
         # ``context_tokens`` proportionally to total chars, so counting an

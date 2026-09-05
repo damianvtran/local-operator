@@ -857,6 +857,17 @@ async def test_cancel_hands_off_final_descendant_usage_after_disposal(tmp_path, 
     assert sum(item.input_tokens for item in row.descendant_usage) == 6
     assert child_managers[0].list() == []
     assert sum(item.input_tokens for item in parent.jobs.accounting_components()) == 6
+    # The finalizer must finish before the durable ledger snapshot too, not just
+    # before the retained row is painted. A restart must own the final six once.
+    await parent._await_subagent_roster_writer()
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+
+    checkpoint = json.loads((parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR).read_text())
+    restored_manager = AsyncJobManager()
+    restored_manager.restore_accounting(
+        [Usage.model_validate(row) for row in checkpoint["accounting"]]
+    )
+    assert sum(item.input_tokens for item in restored_manager.accounting_components()) == 6
 
     # The probe kept the manager only to inspect zero-retention settlement; drop
     # that artificial reference before proving the production parent edge is gone.
@@ -1035,7 +1046,9 @@ async def test_child_gets_the_parents_mcp_manager_and_catalogue(tmp_path, monkey
     # the parent" edit would therefore have the first subagent to finish tear
     # down every server for the rest of the parent's session.
     assert not [hook for hook in child._dispose_hooks if getattr(hook, "__name__", "") == "close"]
-    assert len(child._dispose_hooks) == 1  # the config-watch unsubscribe only
+    # The child owns its web pool and config subscription, but never the
+    # borrowed MCP manager. Assert ownership directly rather than hook count.
+    assert manager.disconnect_all not in child._dispose_hooks
     await child.dispose()
     assert manager.disconnected == 0
     await parent.dispose()
@@ -1997,7 +2010,7 @@ async def test_a_parent_with_no_configured_servers_gives_an_empty_tail(tmp_path,
     child = await build_child(parent)
 
     assert knowledge_tail(child) == (
-        "<mcps>Read `mcp://` to discover configured MCP servers.</mcps>"
+        "<mcps>Find MCP tools: `mcp://?search=terms`; list: `mcp://`.</mcps>"
     )
     assert resolve(child, "mcp://nope") == "Unknown MCP server: nope. Available: (none)"
     await child.dispose()

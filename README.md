@@ -152,6 +152,10 @@ is about to run before anything touches your system:
 Switching models is a picker, not a config file — `/model` lists every model
 your signed-in providers offer, with fuzzy filtering:
 
+ChatGPT OAuth uses the account's supported maximum context by default, while
+keeping the provider default visible. [Context limits and the opt-out](docs/openai-context.md)
+explain how this works without changing your compaction settings.
+
 <p align="center">
   <img src="./static/tui-model-picker.png" alt="The /model picker with a fuzzy filter applied, showing context length and pricing per model" width="720">
 </p>
@@ -188,6 +192,7 @@ current session's cost live).
 | --- | --- |
 | `/model` | Switch model for this session; `/model default` saves it for new ones |
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
+| `/fast` | Toggle fast mode where the provider sells one — the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |

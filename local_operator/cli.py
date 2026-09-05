@@ -4030,8 +4030,11 @@ def main() -> int:
 
                 `lop` no longer hosts the agent. It opens a viewer bound to
                 nothing; the work runs in a separate runtime process that the
-                first message starts and that exits when it has nothing left to
-                do. That is what lets a turn survive the terminal closing.
+                TUI engages as soon as it has adopted the viewer (so the band
+                is complete before the first keystroke) and that exits when it
+                has nothing left to do — immediately, if the viewer leaves
+                without ever using it. That is what lets a turn survive the
+                terminal closing.
 
                 Two entry states, and the choice between them is just "is
                 something already running for this id":
@@ -4041,9 +4044,10 @@ def main() -> int:
                 - otherwise → COLD, which costs no process and no directory.
 
                 ``--resume`` of a session whose runtime is gone is the cold
-                case, and so is a fresh launch: a new id is minted here, in the
-                viewer, and the runtime materialises the directory for it on
-                first engage.
+                case (which is also what `/reload` comes back as), and so is a
+                fresh launch: a new id is minted here, in the viewer, and the
+                runtime materialises the directory for it on the first real
+                write — an engaged-but-unused session leaves nothing behind.
                 """
                 import uuid as _uuid
 

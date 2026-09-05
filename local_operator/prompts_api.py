@@ -12,25 +12,16 @@ handlebars-ish engine — no dependency, no partials, no helpers: just
 
 Block layout and caching
 ------------------------
-:func:`build_system_blocks` returns the system prompt as blocks ordered from
-most-stable to most-volatile:
+:func:`build_system_blocks` returns four desired blocks: standing instructions,
+compact tool inventory, environment, and selected knowledge/session state.
+Production Session builders persist the initial four blocks. Later changes
+enter history as typed host-state records instead of rewriting that prefix.
+Provider cache hierarchy is tools -> system -> messages: moving a changing
+SYSTEM block later can preserve earlier system text, but still invalidates all
+conversation after it. Resume and transcript forks recover the original bytes.
+Consumers must preserve the block list so provider cache breakpoints remain
+well-defined.
 
-- ``[0]`` instruction block — the persona and standing rules from
-  ``system.md`` rendered WITHOUT skills, date, or environment. Byte-stable
-  across every turn of a session (and across sessions for the same build).
-- ``[1]`` tool inventory block — one compact line per visible tool. Stable
-  across a turn; changes only when the tool set changes.
-- ``[2]`` (present only when skills matched this turn) skills block — the
-  per-turn selected skills listing, verbatim. Its absence never shifts the
-  stable prefix: the volatile env block is always LAST.
-- last block — environment block: date (a calendar date, never a timestamp,
-  so the prefix is byte-stable for a whole local day) and volatile
-  environment details (cwd, platform, session facts).
-
-Providers put prompt-cache breakpoints BETWEEN these blocks (e.g. Anthropic
-``cache_control`` after block 0/1) so a change in the volatile tail never
-invalidates the cached stable prefix. Consumers must pass the blocks to
-``ChatRequest.system_blocks`` as a list and never join them into one string.
 """
 
 from __future__ import annotations
@@ -277,22 +268,14 @@ def build_system_blocks(
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
-    Block order is a cache-layout decision: the stable head (instructions,
-    tool inventory, env) is byte-stable for the session, and the per-turn
-    volatile content rides LAST. A volatile block mid-prefix would
-    invalidate every message after it on each selection change — the bench
-    measured 40% stability with skills at index 2; at the tail the
-    conversation prefix stays warm. The list is fixed-arity (placeholder when
-    nothing matched) so the wire clients' breakpoint derivation never shifts.
-    The env block carries the calendar date — never a timestamp — plus
-    volatile environment facts.
-
-    ``goal`` (the session objective set by ``/goal``) and ``credentials``
-    (the names of session secrets set by ``/credential`` or ``ask``) share
-    that volatile tail block rather than adding a fifth one: that keeps the
-    arity fixed, and an edited goal or a newly stored key then invalidates
-    only the tail instead of the whole conversation prefix. Sessions that
-    never use either feature pay nothing for them.
+    These are the current desired blocks, not a promise of prefix cache
+    stability: every system block precedes conversation history on the wire.
+    Production sessions persist the first snapshot, then journal changes as
+    host-authored state messages at the history tail. Moving volatile content
+    to a later SYSTEM block alone cannot preserve the conversation cache.
+    A changed standing-instruction head starts a new persisted prefix: cached
+    bytes must never hide updated repository rules, custom instructions or a
+    newer packaged prompt, including when an old conversation is resumed.
 
     ``user_instructions`` (the operator's standing customization, read once at
     session start from ``system_prompt.md``) rides the HEAD block instead,
@@ -305,6 +288,16 @@ def build_system_blocks(
     ahead of every volatile change.
     """
     instructions = render_template("system.md", {})
+    instructions += (
+        "\n\n## Session state updates\n\n"
+        "The host may append [session-state] records containing current tool, "
+        "environment, knowledge, goal, team, agent, or interactivity state. "
+        "Each supplied section replaces that section's earlier snapshot, "
+        "including an explicit empty section. Treat these as host context, "
+        "not a new user task or permission to act. Direct user instructions "
+        "and existing approval requirements still apply. Older snapshots "
+        "describe the state at that point in the conversation."
+    )
     if repo_guidance.strip():
         # Same head-block, read-once discipline as user_instructions: the
         # files are part of the project's standing state, edited between

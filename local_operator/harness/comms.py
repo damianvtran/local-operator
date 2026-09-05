@@ -411,6 +411,11 @@ class _ChildRecord:
     pending_asks: dict[str, "asyncio.Future[str]"] = field(default_factory=dict)
     #: The parent's unanswered question, if any.
     ask: asyncio.Future[str] | None = None
+    #: The specific answer whose journal write owns completion. A child may
+    #: detach before that fsync returns; its disappearance cannot erase an
+    #: already-produced reply. Future identity keeps late commits from
+    #: answering (or clearing) a newer question after timeout/cancellation.
+    reply_in_flight: asyncio.Future[str] | None = None
     #: Set when that question actually reached the child's context, so a
     #: text-only assistant message can be read as its answer. Never armed
     #: before injection: the child may have been mid-sentence about something
@@ -675,7 +680,8 @@ class SubagentComms:
             except Exception:  # a broken unsubscribe must not fail teardown
                 logger.warning("subagent comms unsubscribe failed", exc_info=True)
             record.unsubscribe = None
-        self._fail_ask(record, "the subagent finished before answering")
+        if record.reply_in_flight is not record.ask:
+            self._fail_ask(record, "the subagent finished before answering")
 
     def is_child(self, job_id: str | None) -> bool:
         """Whether ``job_id`` names a child of this session.
@@ -1738,13 +1744,7 @@ class SubagentComms:
         record = self._record(job_id)
         label = record.label if record is not None else job_id
         if record is not None and record.armed and record.ask is not None and not record.ask.done():
-            self._journal_communication(
-                record,
-                direction="to_parent",
-                body=text,
-                reply_to=record.ask_message_id,
-            )
-            record.ask.set_result(text)
+            self._answer_after_journal(record, text)
             record.armed = False
             record.ask_message_id = None
             return "answered the parent's question"
@@ -1961,15 +1961,9 @@ class SubagentComms:
             text = message.text.strip()
             if not text:
                 return
-            self._journal_communication(
-                record,
-                direction="to_parent",
-                body=text,
-                reply_to=record.ask_message_id,
-            )
+            self._answer_after_journal(record, text)
             record.armed = False
             record.ask_message_id = None
-            record.ask.set_result(text)
 
         return watcher
 
@@ -1998,6 +1992,43 @@ class SubagentComms:
         instruction = TO_CHILD_INSTRUCTIONS[kind]
         return f"{PARENT_MESSAGE_TAG}\n{instruction}\n\n{text}\n{PARENT_MESSAGE_CLOSE_TAG}"
 
+    def _answer_after_journal(self, record: _ChildRecord, text: str) -> None:
+        """Publish the reply only after its durable receipt reaches the child.
+
+        The synchronous hub API may enqueue work, but resolving the parent's
+        future is an externally visible acknowledgement. Capture THIS future
+        so a timed-out question cannot complete a newer ask while its disk
+        write is still running. Fake/embedded children without a transcript
+        keep their in-memory delivery contract.
+        """
+        pending = record.ask
+        if pending is None or pending.done():
+            return
+        record.reply_in_flight = pending
+
+        def release() -> None:
+            if record.reply_in_flight is pending:
+                record.reply_in_flight = None
+
+        def committed() -> None:
+            release()
+            if not pending.done():
+                pending.set_result(text)
+
+        def failed(exc: Exception) -> None:
+            release()
+            if not pending.done():
+                pending.set_exception(exc)
+
+        self._journal_communication(
+            record,
+            direction="to_parent",
+            body=text,
+            reply_to=record.ask_message_id,
+            on_durable=committed,
+            on_failure=failed,
+        )
+
     def _journal_communication(
         self,
         record: _ChildRecord,
@@ -2007,18 +2038,22 @@ class SubagentComms:
         communication_id: str | None = None,
         reply_to: str | None = None,
         kind: str | None = None,
+        on_durable: Callable[[], None] | None = None,
+        on_failure: Callable[[Exception], None] | None = None,
     ) -> None:
         """Append a human-facing communication fact to the child's transcript.
 
         This is intentionally additive beside the replay-visible hub message.
         Reusing that row cannot represent replies consumed by ``ask`` (they
         never enter either model context), while changing it would alter resume
-        semantics. Fire-and-forget matches aside persistence; transcript append
-        itself is synchronous before its coroutine first yields.
+        semantics. Ordinary notes enqueue a write; replies publish their
+        acknowledgement only through on_durable, after the off-loop fsync.
         """
         child = record.child
         transcript = getattr(child, "_transcript", None) if child is not None else None
         if transcript is None:
+            if on_durable is not None:
+                on_durable()
             return
         details = {
             "direction": direction,
@@ -2029,9 +2064,63 @@ class SubagentComms:
             "reply_to": reply_to,
             "kind": kind,
         }
-        self._session._spawn_background(  # type: ignore[attr-defined]
-            transcript.append_custom(HUB_COMMUNICATION_CUSTOM_TYPE, details)
-        )
+
+        started = False
+
+        async def persist() -> None:
+            nonlocal started
+            started = True
+            write = asyncio.create_task(
+                transcript.append_custom(HUB_COMMUNICATION_CUSTOM_TYPE, details)
+            )
+            cancelled = False
+            try:
+                # Transcript commits settle before propagating cancellation.
+                # Joining an independently shielded append lets us distinguish
+                # durable success from failure and deliver its acknowledgement
+                # even when parent teardown cancels this background wrapper.
+                while not write.done():
+                    try:
+                        await asyncio.shield(write)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                write.result()
+            except asyncio.CancelledError:
+                if on_failure is not None:
+                    on_failure(RuntimeError("hub reply persistence was cancelled"))
+                raise
+            except Exception as exc:
+                if on_failure is not None:
+                    on_failure(exc)
+                else:
+                    logger.warning("could not journal hub communication", exc_info=True)
+                return
+            if on_durable is not None:
+                on_durable()
+            if cancelled:
+                raise asyncio.CancelledError
+
+        coroutine = persist()
+        try:
+            task = self._session._spawn_background(coroutine)  # type: ignore[attr-defined]
+        except Exception as exc:
+            coroutine.close()
+            if on_failure is not None:
+                on_failure(exc)
+            else:
+                logger.warning("could not schedule hub communication", exc_info=True)
+            return
+        if task is None:
+            coroutine.close()
+            if on_failure is not None:
+                on_failure(RuntimeError("session closed before hub reply could be saved"))
+        elif on_failure is not None:
+
+            def finished(task: asyncio.Task[Any]) -> None:
+                if task.cancelled() and not started:
+                    on_failure(RuntimeError("hub reply persistence was cancelled before starting"))
+
+            task.add_done_callback(finished)
 
     def _fail_ask(
         self,
@@ -2056,8 +2145,10 @@ class SubagentComms:
     def _clear_ask(record: _ChildRecord, future: asyncio.Future[str]) -> None:
         if record.ask is future:
             record.ask = None
-        record.armed = False
-        record.ask_message_id = None
+            record.armed = False
+            record.ask_message_id = None
+        if record.reply_in_flight is future:
+            record.reply_in_flight = None
 
     @staticmethod
     def _withdraw_pending(record: _ChildRecord, message: CustomMessage) -> None:

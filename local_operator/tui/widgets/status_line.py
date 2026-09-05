@@ -83,6 +83,19 @@ ICON_MODEL = "◆"
 #: `/effort`'s listing, and a glyph with two meanings in one feature is worse
 #: than a plain one with none.
 ICON_EFFORT = "▴"
+#: Fast mode. A CATEGORY marker like every other icon here, and the same
+#: single-cell rule applies (checked ``cell_len`` == 1).
+#:
+#: A lightning bolt, because the one thing this segment reports is SPEED.
+#: ``⚡`` is the obvious glyph and is excluded by the width rule above (2
+#: cells); ``↯`` is its single-cell arrow-family cousin (checked ``cell_len``
+#: == 1). Kept out of the triangle family ``ICON_EFFORT`` owns so a glance
+#: cannot confuse the depth dial with the speed dial — they sit next to each
+#: other on the band and mean different things — and out of the angle-quote
+#: family (``»``, the first choice) because the band's own segment separator
+#: is ``›``, and ``high › » fast`` read as two separators in a row (design
+#: D1).
+ICON_FAST = "↯"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -311,6 +324,13 @@ _DROP_LADDER: tuple[str, ...] = (
     # A static session setting the user chose — it does not change while they
     # watch, so it goes before either live number.
     "effort",
+    # Beside `effort` and shed just after it: both are static settings the user
+    # chose, so neither should outlive a live number. `fast` goes SECOND of the
+    # pair — later here means kept longer — because it is the one segment that
+    # is COSTING MONEY while it shows, and it spends 4 cells against effort's
+    # whole word. A band tight enough to drop one static dial should keep the
+    # expensive one visible.
+    "fast",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user
     # watches — so they belong in this static-settings band ahead of the live
@@ -941,6 +961,11 @@ class StatusLine:
         # session exists) must not have to invent one.
         self._model_name: str = ""
         self._effort: str = ""
+        #: The fast-mode word (``"fast"``) or "" when the dial is off or the
+        #: route sells no fast tier. Same plain-string shape as ``_effort``: the
+        #: band never reaches into the session, so the source of truth stays the
+        #: session's own spec and the app pushes the reading through ``update``.
+        self._fast: str = ""
         # The active /agent profile name and /team roster name governing this
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
@@ -1048,10 +1073,12 @@ class StatusLine:
     def set_starting(self, starting: bool) -> None:
         """Show "starting…" while a runtime is being brought up for this viewer.
 
-        The one visible consequence of the viewer model at rest. A viewer holds
-        no runtime until it needs one, so between the first keystroke and the
-        runtime being ready there is a real interval — short, but long enough
-        that a band saying nothing reads as a dropped keystroke.
+        The one visible consequence of the viewer model. The runtime is a
+        separate process the TUI engages as soon as it adopts a session (and
+        again on the first keystroke if that engage failed), so between boot
+        and the runtime being ready there is a real interval — a second or
+        two with a full MCP roster — during which the band would otherwise
+        show only what a cold viewer can read off disk.
 
         Deliberately the SAME glyph the working indicator uses
         (:data:`_SPINNER_FRAMES`) rather than a second animation vocabulary:
@@ -1164,6 +1191,7 @@ class StatusLine:
         model_label: str | None = None,
         model_name: str | None = None,
         effort: str | None = None,
+        fast: str | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1188,6 +1216,8 @@ class StatusLine:
             self._model_name = model_name
         if effort is not None:
             self._effort = effort
+        if fast is not None:
+            self._fast = fast
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -1670,6 +1700,21 @@ class StatusLine:
         if effort and "effort" not in dropped:
             parts.append(
                 (ICON_EFFORT, effort, Style(color=theme_mod.semantic_color("label")), None)
+            )
+        # Only while an OVERLAY is absent: fast mode is a property of the
+        # request the PARENT is making, and a subagent's spec is built for the
+        # child. Painting the parent's dial over a child's readings would assert
+        # a premium tier on a call that may not be running one — the same error
+        # `_shown_effort` records for the level it used to inherit, and worse
+        # here because this one is a claim about money.
+        if self._fast and self._subagent is None and "fast" not in dropped:
+            parts.append(
+                # `warning`, not the violet `label` the effort word carries: the
+                # segment's whole reason to exist is that a premium rate is
+                # being billed right now, and the band's warning ramp is the one
+                # colour a user already reads as "this is costing you". It also
+                # separates the two adjacent dials at a glance.
+                (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
             )
         # Active /team roster, then /agent profile (U2). Both are the SESSION's
         # own settings, never a subagent's: the overlay describes a CHILD's

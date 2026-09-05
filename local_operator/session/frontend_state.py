@@ -52,7 +52,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
-from local_operator.tui.costs import job_cost, turn_cost
+from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
@@ -182,8 +182,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, bool], Any] = {}
-    order: list[tuple[str, str, bool]] = []
+    folded: dict[tuple[str, str, str], Any] = {}
+    order: list[tuple[str, str, str]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -196,6 +196,7 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         # The price this receipt would ACTUALLY be billed at, which is the
         # branch ``cost_for_usage`` takes — not merely whether a field is set.
         accepted = _usage_cost(raw_component)
+        estimated = _usage_cost({"usd_cost": getattr(raw_component, "estimated_usd_cost", None)})
         # Normalise the counts through the same floors the pricing path
         # applies, so summing them afterwards cannot disagree with pricing
         # them individually. ``input_tokens`` absorbs the OpenAI-shaped
@@ -225,9 +226,15 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
                 # A rejected price must not survive into the folded receipt:
                 # it would be re-summed and could become acceptable.
                 "usd_cost": accepted,
+                "estimated_usd_cost": estimated,
             }
         )
-        key = (provider, model_id, accepted is not None)
+        mode = (
+            "reported"
+            if accepted is not None
+            else "estimated" if estimated is not None else "unknown"
+        )
+        key = (provider, model_id, mode)
         existing = folded.get(key)
         if existing is None:
             folded[key] = component.model_copy(deep=True)
@@ -250,6 +257,9 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
                     None
                     if existing.usd_cost is None
                     else existing.usd_cost + (component.usd_cost or 0.0)
+                ),
+                "estimated_usd_cost": (
+                    None if estimated is None else (existing.estimated_usd_cost or 0.0) + estimated
                 ),
                 # Occupancy is a level, not a sum: the newest reading wins, the
                 # same rule ``_aggregate_usage`` applies.
@@ -673,6 +683,10 @@ class JobState(BaseModel):
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
+    # None knowledge marks old owners, which still need the legacy pricing path.
+    # Explicit UNKNOWN forbids viewers from discovering/pricing independently.
+    direct_cost: float | None = None
+    direct_cost_knowledge: CostKnowledge | None = None
     start_time: float = 0.0
     started_at: float | None = None
     settled_at: float | None = None
@@ -752,6 +766,10 @@ class JobState(BaseModel):
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
             usage = Usage.model_validate(usage)
+        direct_cost, unknown = cost_summary(
+            (usage.cost_components or [usage]) if usage is not None else [],
+            model_label=getattr(job, "model_label", None) or "",
+        )
         descendants = []
         for component in list(getattr(job, "descendant_usage", None) or []):
             if isinstance(component, dict):
@@ -772,6 +790,8 @@ class JobState(BaseModel):
             model_label=getattr(job, "model_label", None),
             context_window=getattr(job, "context_window", None),
             usage=usage,
+            direct_cost=direct_cost,
+            direct_cost_knowledge=_cost_knowledge(direct_cost, unknown),
             start_time=float(
                 getattr(job, "start_time", 0.0)
                 or getattr(job, "started_at", 0.0)
@@ -885,6 +905,11 @@ class FrontendSessionState(BaseModel):
     context_breakdown: dict[str, int] | None = None
     cumulative_parent_cost: float | None = None
     child_costs: dict[str, float] = Field(default_factory=dict)
+    # Whole manager ledger, not a sum of visible rows: live descendants, folded
+    # attempts and retained-away jobs all belong here exactly once. Optional
+    # knowledge distinguishes legacy checkpoints from an explicitly empty ledger.
+    subagent_cost: float | None = None
+    subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
     streaming: bool = False
     generation: int = 0
@@ -937,9 +962,24 @@ class FrontendSessionState(BaseModel):
 
     @property
     def cumulative_cost(self) -> float | None:
-        if self.cumulative_parent_cost is None and not self.child_costs:
+        children = (
+            self.subagent_cost
+            if self.subagent_cost_knowledge is not None
+            else sum(self.child_costs.values()) if self.child_costs else None
+        )
+        if self.cumulative_parent_cost is None and children is None:
             return None
-        return float(self.cumulative_parent_cost or 0.0) + sum(self.child_costs.values())
+        return float(self.cumulative_parent_cost or 0.0) + (children or 0.0)
+
+    @property
+    def cumulative_cost_knowledge(self) -> CostKnowledge:
+        if self.cost_knowledge in {CostKnowledge.PARTIAL, CostKnowledge.FLOOR}:
+            return self.cost_knowledge
+        if self.subagent_cost_knowledge == CostKnowledge.PARTIAL:
+            return CostKnowledge.PARTIAL
+        if self.subagent_cost_knowledge == CostKnowledge.UNKNOWN and self.child_costs:
+            return CostKnowledge.PARTIAL
+        return self.cost_knowledge
 
     @property
     def model_label(self) -> str:
@@ -1710,6 +1750,7 @@ class FrontendStateStore:
             context_breakdown=context_breakdown,
             cumulative_parent_cost=parent_cost,
             child_costs=child_costs,
+            **_ledger_cost(session),
             cost_knowledge=knowledge,
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
@@ -1803,7 +1844,7 @@ class FrontendStateStore:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
             if cost is not None:
                 child_costs[job.id] = cost
-        return self.mutate(jobs=jobs, child_costs=child_costs)
+        return self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
         """Publish the owner's offerable model rows as canonical state.
@@ -1824,6 +1865,8 @@ class FrontendStateStore:
                     "model_id": str(getattr(entry, "model_id", "") or ""),
                     "label": str(getattr(entry, "label", "") or ""),
                     "context_window": int(getattr(entry, "context_window", 0) or 0),
+                    "default_context_window": getattr(entry, "default_context_window", None),
+                    "max_context_window": getattr(entry, "max_context_window", None),
                     "input_price": float(getattr(entry, "input_price", 0.0) or 0.0),
                     "output_price": float(getattr(entry, "output_price", 0.0) or 0.0),
                     "connected": bool(getattr(entry, "connected", False)),
@@ -2142,6 +2185,27 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
             "session_id": getattr(node, "session_id", None),
         }
     )
+
+
+def _cost_knowledge(cost: float | None, unknown: bool) -> CostKnowledge:
+    if cost is None:
+        return CostKnowledge.UNKNOWN
+    return CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT
+
+
+def _ledger_cost(session: Any) -> dict[str, Any]:
+    manager = getattr(session, "jobs", None)
+    accounting = getattr(manager, "accounting_components", None)
+    if not callable(accounting):
+        return {}
+    components = accounting()
+    cost, unknown = cost_summary(components)
+    return {
+        "subagent_cost": cost,
+        # An empty ledger has no missing bills; an unknown-only nonempty ledger
+        # does. PARTIAL keeps that distinction when parent spend is known.
+        "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
+    }
 
 
 def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:

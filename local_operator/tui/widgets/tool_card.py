@@ -2175,11 +2175,16 @@ class ToolCard(ExpandableActionBlock):
 
         row = _row_text()
         # See `bindings.BY_ELEMENT["tool.row.icon_running"].note`.
-        icon_style = (
-            bindings.style("tool.row.icon_running")
-            if running
-            else bindings.style("tool.row.icon_settled")
-        )
+        #
+        # A SETTLED icon takes the name's own category ink rather than one
+        # flat grey. The name is already category-coded
+        # (`tool.row.name_read`/`_mutate`/`_exec`/`_meta`), but the glyph
+        # beside it was `dim` for every tool — so the one mark that carries
+        # identity by SHAPE was also the one mark with no colour, and a
+        # settled ledger read as a wall of grey. Reusing `name_style` keeps
+        # icon and name in one ink per category and mints no new token.
+        # A running or failed row is unaffected: those branches own the icon.
+        icon_style = bindings.style("tool.row.icon_running") if running else name_style
         row.append(icon + " ", style=icon_style)
         row.append(name, style=name_style)
         row.append(" ", style=dim)

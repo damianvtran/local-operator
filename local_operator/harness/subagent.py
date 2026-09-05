@@ -20,10 +20,10 @@ Construction reuses the session primitives directly (the way
 ``session_factory.create_session`` composes a Session) rather than calling
 the factory: the factory needs the three legacy managers plus an argparse
 namespace to resolve hosting/model/skills, none of which a child needs — the
-child inherits the parent's model and STREAM FN (the parent's shared httpx
-pool serves any spec, so a ``model_spec`` override works through the same
-pipe, and the retry/fallback cascade the stream fn was built with therefore
-applies unchanged), the parent's cwd, the parent's approval handler, the
+child inherits the parent's model and a conversation-owned stream handle
+(the parent's shared httpx pool serves any spec, while routing, effort,
+callbacks and analytics identity are isolated per child), the parent's cwd,
+the parent's approval handler, the
 parent's compaction settings (a one-shot child was assumed too short to need
 them, but a real review child ran 48 requests / 1.5M tokens — a delegated
 task must not bypass the operator's compaction cap), the parent's lazy
@@ -45,10 +45,10 @@ blocking on a prompt nobody is watching is a hang, not a safety feature. All
 ``yolo=False`` actually buys is that the child cannot skip the gate object
 the way ``Session._build_tool_context`` lets a yolo session skip it.
 
-What it does NOT inherit: the frozen knowledge block (a per-launch semantic
-selection pass would make spawning expensive and flaky; ``read skill://`` and
-``read guide://`` still resolve on demand through the inherited resolver),
-and the session-capability tools ``task``/``wait``/``jobs``/``wake`` —
+The child inherits a bounded directory of the parent's selected knowledge and
+repository guidance, with on-demand ``read skill://`` / ``read guide://``
+resolution. It does not copy the parent's full conversation. The
+session-capability tools ``task``/``wait``/``jobs``/``wake`` are scoped below —
 children are one level deep, because a grandchild registers on the CHILD's
 job manager, which no panel renders and which dies with the child's single
 prompt. That last exclusion used to be implicit in the child's ToolContext
@@ -690,6 +690,10 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
 
 
 async def _dispose_child(child: "Session") -> None:
+    await _settle_child_cleanup(asyncio.create_task(child.dispose()))
+
+
+async def _settle_child_cleanup(dispose_task: asyncio.Task[None]) -> None:
     """Finish child teardown even while the runner itself is being cancelled.
 
     Shielding alone is insufficient here: it lets teardown continue but returns
@@ -698,7 +702,6 @@ async def _dispose_child(child: "Session") -> None:
     cancellation so teardown remains single-shot and the ledger is final when
     this function returns.
     """
-    dispose_task = asyncio.create_task(child.dispose())
     while not dispose_task.done():
         try:
             await asyncio.shield(dispose_task)
@@ -880,16 +883,31 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     """
     if job is None or usage is None:
         return
+    from local_operator.tui.costs import turn_cost
+
+    # Price detached leaf calls while the owning runtime still has the serving
+    # model metadata. A viewer has neither that memo nor necessarily credentials;
+    # durable estimates must survive that process boundary without becoming bills.
+    components = []
+    for item in usage.cost_components or [usage]:
+        component = item.model_copy(deep=True)
+        provider, _, model_id = (getattr(job, "model_label", None) or "").partition("/")
+        component.provider = component.provider or provider or None
+        component.model_id = component.model_id or model_id or None
+        if component.usd_cost is None and component.estimated_usd_cost is None:
+            component.estimated_usd_cost = turn_cost(
+                f"{component.provider}/{component.model_id}", component
+            )
+        components.append(component)
     total = job.usage
     if total is None:
         first = usage.model_copy()
-        first.cost_components = [
-            component.model_copy() for component in usage.cost_components or [usage]
-        ]
+        first.cost_components = components
         # An aggregate receipt is meaningful only when it covers the aggregate.
         # Components retain each call's receipt, so leave the outer field unset
         # and force readers through the provenance-preserving path.
         first.usd_cost = None
+        first.estimated_usd_cost = None
         job.usage = first
         return
     total.input_tokens += usage.input_tokens
@@ -905,10 +923,9 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     # Child failover can mix provider receipts and table-priced calls. Preserve
     # every original call so the TUI can price each one independently instead of
     # treating one receipt as authoritative for the aggregate token buckets.
-    total.cost_components.extend(
-        component.model_copy() for component in usage.cost_components or [usage]
-    )
+    total.cost_components.extend(components)
     total.usd_cost = None
+    total.estimated_usd_cost = None
     if usage.context_tokens is not None:
         total.context_tokens = usage.context_tokens
 
@@ -1053,6 +1070,10 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     enabled: set[tuple[str, str]] = {
         found for tool in parent_session._tools if (found := origin(tool)) is not None
     }
+    # Deferred discoveries remain callable through the validated fallback
+    # path without entering the advertised tool-prefix. A restricted child
+    # may inherit its parent's discovered set but cannot expand it.
+    deferred: set[tuple[str, str]] = set(getattr(parent_session, "_mcp_deferred_origins", ()))
     child: Session | None = None
     base: list[AgentTool] = []
 
@@ -1068,6 +1089,9 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
         if child is not None:
             child.refresh_tools(base + selected(manager.get_tools()))
 
+    def defer(server_name: str, raw_tool_name: str) -> None:
+        deferred.add((server_name, raw_tool_name))
+
     def attach(session: "Session") -> None:
         nonlocal child, base
         child = session
@@ -1075,6 +1099,18 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
         # its own capability tools in and this module prunes some back out, so
         # the constructor's list is not what the session ended up with.
         base = [tool for tool in session._tools if origin(tool) is None]
+        prior = session._fallback_tool_resolver
+
+        def resolve_deferred(name: str) -> AgentTool | None:
+            # Resolve fresh after reload/reconnect; retaining AgentTool objects
+            # would execute a stale server wrapper after its transport closes.
+            for tool in manager.get_tools():
+                if tool.name == name and origin(tool) in deferred:
+                    return tool
+            return prior(name) if prior is not None else None
+
+        setattr(session, "_mcp_deferred_origins", deferred)
+        session.set_fallback_tool_resolver(resolve_deferred)
 
     return _ChildMcp(
         tools=selected(manager.get_tools()),
@@ -1083,6 +1119,7 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
             manager,
             activate,
             deny_activation_reason=_MCP_ACTIVATION_DENIED if restricted else None,
+            defer=defer,
         ),
         attach=attach,
     )
@@ -1136,6 +1173,47 @@ async def _build_child_session(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
 ) -> "Session":
+    """Transfer child resource ownership only after construction succeeds.
+
+    The runner cannot dispose a child the builder never returned. Keep every
+    acquired resource on a rollback stack until async initialization completes;
+    cancellation must join that rollback before the failed launch is observable.
+    """
+    cleanup = contextlib.AsyncExitStack()
+    try:
+        child = await _construct_child_session(
+            label=label,
+            prompt=prompt,
+            parent_session=parent_session,
+            model_spec=model_spec,
+            job_id=job_id,
+            resume_dir=resume_dir,
+            agent=agent,
+            profile=profile,
+            restricted=restricted,
+            cleanup=cleanup,
+        )
+    except BaseException:
+        await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
+        raise
+    # Normal lifetime now belongs to the returned Session's dispose hooks.
+    cleanup.pop_all()
+    return child
+
+
+async def _construct_child_session(
+    *,
+    label: str,
+    prompt: str,
+    parent_session: "Session",
+    model_spec: ModelSpec | None,
+    job_id: str,
+    resume_dir: "Path | None",
+    agent: str,
+    profile: "AgentProfile | None",
+    restricted: bool,
+    cleanup: contextlib.AsyncExitStack,
+) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
 
@@ -1178,9 +1256,10 @@ async def _build_child_session(
     # writes the marker in one step, so claiming here leaves no unclaimed-empty
     # window. The pid is this process's — the process whose death makes the
     # directory dead.
-    from local_operator.session.retention import claim_session
+    from local_operator.session.retention import claim_session, release_session
 
     claim_session(session_dir)
+    cleanup.callback(release_session, session_dir)
     # Stamp the directory as the machine's BEFORE the transcript exists, so a
     # picker painted while this child is mid-run already knows what it is. A
     # child's directory is shape-identical to a user conversation, which is how
@@ -1343,6 +1422,16 @@ async def _build_child_session(
     if mcp is not None:
         tools = tools + mcp.tools
 
+    parent_provider = getattr(parent_session, "_system_blocks_provider", None)
+    repo_guidance = getattr(parent_provider, "repo_guidance", "")
+    parent_hooks = getattr(parent_provider, "knowledge_hooks", None)
+    # A bounded directory of already-selected knowledge costs far less than
+    # rediscovering the same guides in every child. These are names/links and
+    # descriptions, not the parent's conversation or full skill documents.
+    knowledge = getattr(parent_hooks, "frozen_block", "") or ""
+    if len(knowledge) > 12000:
+        knowledge = knowledge[:12000].rsplit("\n", 1)[0]
+
     def system_blocks_provider(model_label: str = "") -> list[str]:
         # ``model_label`` is passed by the child Session each turn (its own
         # ``model_label``), which for a subagent is the resolved effort-tier
@@ -1372,23 +1461,35 @@ async def _build_child_session(
         )
         return build_system_blocks(
             tools,
-            mcp.catalogue(prompt) if mcp is not None else "",
+            "\n\n".join(
+                filter(None, (knowledge, mcp.catalogue(prompt) if mcp is not None else ""))
+            ),
             _env_details(cwd),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
             user_instructions=user_instructions,
+            repo_guidance=repo_guidance,
             credentials=names,
             model_label=model_label,
         )
 
+    setattr(system_blocks_provider, "append_only_state", True)
+    setattr(system_blocks_provider, "repo_guidance", repo_guidance)
+    setattr(system_blocks_provider, "knowledge_hooks", parent_hooks)
+    parent_stream = parent_session._stream_fn
+    fork_stream = getattr(parent_stream, "fork", None)
+    # Transport pooling is shared infrastructure; routing, callbacks, effort,
+    # usage attribution and cache identity belong to this conversation.
+    child_stream: Any = (
+        fork_stream(transcript.directory.name) if callable(fork_stream) else parent_stream
+    )
+    if child_stream is not parent_stream:
+        # Register before Session.__init__, which can itself fail. close() is
+        # idempotent: this fallback also runs if a later child dispose hook fails.
+        cleanup.push_async_callback(child_stream.close)
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
-        # The parent's stream fn: one shared httpx pool serves any ModelSpec
-        # (the client is chosen per request), so an override rides the same
-        # pipe and the pool's lifetime stays the parent's dispose hook. The
-        # retry/failover cascade is baked into that stream fn at construction,
-        # which is how the operator's fallback chain reaches the child too.
-        stream_fn=parent_session._stream_fn,
+        stream_fn=child_stream,
         tools=tools,
         transcript=transcript,
         agent_id=parent_session.agent_id,
@@ -1450,6 +1551,9 @@ async def _build_child_session(
             else None
         ),
     )
+    cleanup.push_async_callback(child.dispose)
+    if child_stream is not parent_stream:
+        child.add_dispose_hook(child_stream.close)
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
     # DERIVED, not a copy of ``session.SESSION_CAPABILITY_TOOLS``: nothing links
     # a copy to that tuple, so the next session-gated tool added to it would be

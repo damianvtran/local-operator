@@ -30,6 +30,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -252,6 +253,7 @@ def test_no_advertised_command_tells_an_attached_user_to_reattach(command: str) 
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {
             "_slash_result",
             "_effort_slash",
+            "_fast_slash",
             "_model_slash",
             "_context_slash",
             "_team_slash",
@@ -339,3 +341,65 @@ def test_the_extractor_sees_a_capability_however_it_is_spelled(spelling: str) ->
         f"the extractor cannot see a capability spelled {spelling!r}; a guard "
         "that depends on how a call is written does not guard anything"
     )
+
+
+def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> None:
+    """`/fast` from a phone reaches the DETACHED runtime's spec.
+
+    The dial only matters on the spec the next provider call is built from,
+    and in a headless process that is the runtime's own — the terminal's copy
+    of the rule is not loaded there. A producer that reported success without
+    writing the spec would be the round-2 MAJOR-1 shape: a receipt for an
+    operation that never ran.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+
+    class _Session:
+        model_label = "anthropic/claude-opus-5"
+
+        def __init__(self) -> None:
+            self.model = build_model_spec("anthropic", "claude-opus-5")
+            self._stream_fn: Any = None
+
+        def set_model(self, spec, *, explicit: bool = False) -> None:  # noqa: ANN001
+            self.model = spec
+
+    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle._notify = lambda: None  # type: ignore[method-assign]
+    session = _Session()
+    assert session.model.supports_fast_mode and not session.model.fast_mode
+
+    on = handle._fast_slash(session, "", SlashResult)
+    assert session.model.fast_mode is True
+    assert "premium" in on.text.lower()
+
+    again = handle._fast_slash(session, "on", SlashResult)
+    assert session.model.fast_mode is True, "`on` names a state, it does not flip"
+    assert "on" in again.text.lower()
+
+    off = handle._fast_slash(session, "off", SlashResult)
+    assert session.model.fast_mode is False
+    assert "standard" in off.text.lower()
+
+    bad = handle._fast_slash(session, "maybe", SlashResult)
+    assert bad.style == "warning" and session.model.fast_mode is False
+
+    # `on` clears the driver's refusal latch through the stream fn hook.
+    class _Stream:
+        forgotten = 0
+
+        def forget_fast_refusal(self) -> None:
+            self.forgotten += 1
+
+    session._stream_fn = _Stream()
+    handle._fast_slash(session, "on", SlashResult)
+    assert session._stream_fn.forgotten == 1
+
+    # A route with no fast tier says so rather than taking a state the wire
+    # would silently drop.
+    session.model = build_model_spec("google", "gemini-3-pro")
+    refused = handle._fast_slash(session, "on", SlashResult)
+    assert "not available" in refused.text.lower()
+    assert session.model.fast_mode is False

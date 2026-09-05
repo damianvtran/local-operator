@@ -262,10 +262,11 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
     """A folded predecessor's settled usage must live in the authoritative row."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    parent = _session(tmp_path, OneShotStream())
+    stream = HangingStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     old_id = parent._launch_subagent(label="accounted", prompt="first attempt")
-    await wait_for(lambda: _status(parent, old_id) == "completed")
+    await stream.started.wait()
     old_row = parent.jobs.get(old_id)
     assert old_row is not None
     old_row.usage = Usage(input_tokens=4, provider="test", model_id="m")
@@ -320,7 +321,7 @@ async def test_live_continuation_preserves_prior_accounting_across_restart(tmp_p
 
 @pytest.mark.asyncio
 async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path, monkeypatch):
-    """A settled child's usage reaches the sidecar even when the roster writer
+    """A running child's usage reaches the sidecar even when the roster writer
     has ALREADY caught up before the mutation.
 
     ``usage`` is a durable roster field, but the session's writer is
@@ -336,10 +337,11 @@ async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path,
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    parent = _session(tmp_path, OneShotStream())
+    stream = HangingStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     job_id = parent._launch_subagent(label="accounted", prompt="do a thing")
-    await wait_for(lambda: _status(parent, job_id) == "completed")
+    await stream.started.wait()
 
     # The whole point: no pending flush is left for the mutation to ride on.
     await parent._await_subagent_roster_writer()
@@ -347,6 +349,8 @@ async def test_usage_mutation_persists_when_the_writer_already_drained(tmp_path,
 
     row = parent.jobs.get(job_id)
     assert row is not None
+    # Mutate before settlement: afterwards the manager owns a detached bill,
+    # and rewriting a display row is deliberately not a financial correction.
     row.usage = Usage(input_tokens=4, provider="test", model_id="m")
     parent.jobs.note_usage_changed()
     await parent._persist_subagent_roster()
@@ -381,10 +385,11 @@ async def test_detach_persists_descendant_usage_when_the_writer_already_drained(
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    parent = _session(tmp_path, OneShotStream())
+    stream = HangingStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     job_id = parent._launch_subagent(label="nested", prompt="do a thing")
-    await wait_for(lambda: _status(parent, job_id) == "completed")
+    await stream.started.wait()
 
     await parent._await_subagent_roster_writer()
     assert parent._subagent_roster_written_generation == parent._subagent_roster_generation
@@ -411,10 +416,11 @@ async def test_descendant_accounting_survives_process_resume(tmp_path, monkeypat
     """Nested spend lives on the owning row, not an in-process child manager."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    parent = _session(tmp_path, OneShotStream())
+    stream = HangingStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     job_id = parent._launch_subagent(label="nested", prompt="do nested work")
-    await wait_for(lambda: _status(parent, job_id) == "completed")
+    await stream.started.wait()
     row = parent.jobs.get(job_id)
     assert row is not None
     row.descendant_usage = [
@@ -426,6 +432,11 @@ async def test_descendant_accounting_survives_process_resume(tmp_path, monkeypat
         ),
         Usage(input_tokens=7, provider="test", model_id="m"),
     ]
+    # The runner replaces descendant_usage from its child's final ledger during
+    # teardown, so seed that owner rather than only its temporary display copy.
+    assert row.child_jobs is not None
+    row.child_jobs.restore_accounting(row.descendant_usage)
+    parent.jobs.note_usage_changed()
     await parent._persist_subagent_roster()
     await parent.dispose()
 

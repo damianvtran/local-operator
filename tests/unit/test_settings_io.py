@@ -38,7 +38,10 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
-    from local_operator.model.configure import ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+    from local_operator.model.configure import (
+        ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
+        OPENAI_USE_MAX_CONTEXT_WINDOW,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -79,6 +82,7 @@ def _consumer_defaults() -> dict[str, object]:
         "session.reap_unused": DEFAULT_REAP_UNUSED,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
+        "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_
         # 1h_min_context_tokens`` restates it for a settings mapping without the
         # key); the config default is checked against the same constant below.
@@ -120,6 +124,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
+    "display.heading_markers": "tui/settings.py derives its defaults from this registry",
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
     "display.notifications": "tui/settings.py derives its defaults from this registry",
@@ -169,6 +174,7 @@ def test_display_keys_are_flat_dotted() -> None:
     assert set(settings_io.flat_dotted_keys()) >= {
         "display.shimmer",
         "display.nerd_icons",
+        "display.heading_markers",
         "display.terminal_title",
         "display.images",
         "display.notifications",

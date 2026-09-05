@@ -32,7 +32,7 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
     TYPE_CHECKING,
@@ -607,6 +607,27 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # still prints the ladder with the current one marked. The list is what
         # the printed ladder could never be — the rungs are OFFERED rather than
         # transcribed by hand from a line of prose.
+        arguments=ArgumentMode.OPTIONAL,
+    ),
+    # Beside `/effort` because they are the two dials on the SAME request, and a
+    # user comparing "make it quicker" against "make it think less" should find
+    # them adjacent. They are not the same axis: effort changes how hard the
+    # model thinks, fast mode buys the identical answer sooner at a premium
+    # price (`model.speed` opens with the distinction).
+    #
+    # NOT an echo, the same rule `/effort` and `/approvals` follow: the argument
+    # is a setting rather than words the model is given, and the receipt names
+    # the resulting state — the durable fact — where the typed word is only how
+    # it was reached.
+    SlashCommand(
+        "fast",
+        # Names the TRADE, not just the effect. This is the only dial in the app
+        # that costs meaningfully more money, and a description promising speed
+        # while omitting the premium would sell half the bargain. 47 cells, in
+        # under the ~55 at which the description column wraps.
+        "Toggle faster output at premium pricing",
+        # OPTIONAL: bare `/fast` toggles, and the space offers on/off/status for
+        # a user who wants to name the resulting state rather than flip into it.
         arguments=ArgumentMode.OPTIONAL,
     ),
     # NOT an echo, same rule as `/approvals`: the argument is a setting, and
@@ -2798,6 +2819,11 @@ class OperatorApp(App[None]):
         # and dropped by `_spec_with_chosen_effort` when a model arrives that
         # cannot take it.
         self._effort_choice: str | None = None
+        #: The user's fast-mode choice, kept on the APP so it survives a session
+        #: being replaced under it (`/new`, `/reload`, `/resume` all rebuild
+        #: one) — the same reason `_effort_choice` lives here. Defaults False:
+        #: a premium-priced dial must never arrive on by inference.
+        self._fast_choice: bool = False
         # The model label the "not adjustable" answer was last given for, so
         # `shift+tab` says it ONCE per model instead of once per press. A user
         # probing an unfamiliar key four times got four warning rows, which is
@@ -3067,6 +3093,14 @@ class OperatorApp(App[None]):
         """
         self._invalidate_pending_frontend_state()
         self._session = session
+        # The latch belongs to the BINDING, not to the app: a swapped-in
+        # session is cold again and owes its own engage. Its declaration has
+        # always said a swap resets it, but nothing did — harmless while the
+        # only trigger was a keystroke on a viewer that was almost never
+        # swapped, and wrong the moment mount engages: `/resume` would adopt a
+        # cold session that never started a runtime, leaving exactly the
+        # half-empty band this change exists to remove.
+        self._warm_engage_started = False
         # The user can type `/team lop` while the boot worker is still building
         # the session. Its one opening fill then sees no registry, so adoption is
         # the second authoritative edge that must refill the CURRENT query and
@@ -3131,13 +3165,19 @@ class OperatorApp(App[None]):
         if (
             not callable(getattr(session, "route_shared_slash", None))
             and spec is not None
-            and self._effort_choice is not None
+            and (self._effort_choice is not None or self._fast_choice)
             and hasattr(session, "set_model")
         ):
             # A follower's remembered local effort must not silently rewrite
             # the shared owner's model. The owner projection is authoritative;
             # explicit /effort remains routed through RemoteSession.
-            session.set_model(self._spec_with_chosen_effort(spec))
+            #
+            # Fast mode rides the SAME restore for the same reason: a `/reload`
+            # or `/new` that dropped the dial would repaint the band without a
+            # segment the user is still being billed for, and one that kept it
+            # on a model that cannot serve it would assert a tier the wire never
+            # sends. `_spec_with_chosen_fast_mode` decides that per model.
+            session.set_model(self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)))
         # The refusal is latched per model, and this session may be on another
         # one; a stale latch would swallow the answer on the model that needs it.
         self._effort_refusal_shown = None
@@ -3172,6 +3212,7 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            fast=_fast_label(session),
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -3254,16 +3295,53 @@ class OperatorApp(App[None]):
         self._frontend_apply_scheduled = False
         state = getattr(self, "_pending_frontend_state", None)
         self._pending_frontend_state = None
+        # ONLY on an ordered update, never on the adoption snapshot painted by
+        # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
+        # is restored onto the fresh session's spec (whose dial defaults off),
+        # so reconciling against it read every `/new` and `/reload` as a
+        # provider refusal and dropped the dial the restore was about to put
+        # back (review round 2, F6). An update arrives only after adoption has
+        # finished, so by then a spec with the dial off means someone turned
+        # it off — the user, or `Session._on_fast_refused`.
+        self._reconcile_fast_choice(state)
         self._apply_frontend_state(state)
+
+    def _reconcile_fast_choice(self, state: Any) -> None:
+        """Drop the remembered fast-mode choice when the SPEC has the dial off.
+
+        The session switches its own dial off when a provider refuses fast
+        mode (`Session._on_fast_refused`), and a choice remembered here would
+        otherwise re-arm it on the next `/new`, `/reload` or `/model` — the
+        user would be re-billed for a tier they were just told they cannot
+        have. The spec is the truth; this app-side memory exists only to
+        survive a session being REPLACED, never to override one. Guarded on
+        the model SUPPORTING the dial, so a switch to a route with no fast
+        tier (where `_spec_with_chosen_fast_mode` already forgets the choice)
+        is not double-handled here.
+        """
+        selected = getattr(state, "selected_model", None) if state is not None else None
+        if (
+            self._fast_choice
+            and selected is not None
+            and getattr(selected, "supports_fast_mode", False)
+            and not getattr(selected, "fast_mode", False)
+        ):
+            self._fast_choice = False
 
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
         cost = getattr(state, "cumulative_cost", None)
-        knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
+        knowledge = getattr(
+            getattr(
+                state, "cumulative_cost_knowledge", getattr(state, "cost_knowledge", "unknown")
+            ),
+            "value",
+            "unknown",
+        )
         if cost is not None:
             self._total_cost = float(getattr(state, "cumulative_parent_cost", 0.0) or 0.0)
-            self._subagent_costs = dict(getattr(state, "child_costs", {}) or {})
+            self._subagent_costs = self._frontend_child_costs(state)
             self._spend_is_floor = knowledge in {"floor", "partial"}
         usage = getattr(state, "last_usage", None)
         billed_unknown = bool(
@@ -3281,6 +3359,7 @@ class OperatorApp(App[None]):
                 getattr(getattr(state, "effective_model", None), "display_name", "") or ""
             ),
             effort=_effort_label(state),
+            fast=_fast_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=str(getattr(state, "active_team", "") or ""),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -3452,6 +3531,7 @@ class OperatorApp(App[None]):
             model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
+            fast=_fast_label(session),
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -3484,10 +3564,16 @@ class OperatorApp(App[None]):
             parent_cost = getattr(frontend, "cumulative_parent_cost", None)
             if parent_cost is not None:
                 knowledge = getattr(
-                    getattr(frontend, "cost_knowledge", "unknown"), "value", "unknown"
+                    getattr(
+                        frontend,
+                        "cumulative_cost_knowledge",
+                        getattr(frontend, "cost_knowledge", "unknown"),
+                    ),
+                    "value",
+                    "unknown",
                 )
                 self._total_cost = float(parent_cost or 0.0)
-                self._subagent_costs = dict(getattr(frontend, "child_costs", {}) or {})
+                self._subagent_costs = self._frontend_child_costs(frontend)
                 self._spend_is_floor = knowledge in {"floor", "partial"}
                 self._status.update(cost=self._spend_text())
             context_tokens = getattr(frontend, "context_tokens", None)
@@ -3691,6 +3777,18 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        # Bring the runtime up NOW rather than on the first keystroke. A cold
+        # viewer can only paint what it reads off disk — the cwd and the
+        # configured model name — so the band opened without the MCP roster,
+        # the context/token reading or the live model until the user typed a
+        # character and the speculative warm-up ran. That read as a broken
+        # status bar rather than as a deliberate lazy start.
+        #
+        # Placed after `_adopt_session` because the engage needs the adopted
+        # session, and before `_preflight_usage` so the runtime is coming up
+        # while the usage preflight does its own I/O. It does not block boot:
+        # `_engage_runtime_eagerly` hands the work to a worker.
+        self._engage_runtime_eagerly()
         await self._preflight_usage(session)
         # Warm the active provider's quota row in the shared cache so the first
         # `/usage` after launch answers from disk. No-op when another session
@@ -4941,6 +5039,25 @@ class OperatorApp(App[None]):
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
+            # An engage still in flight belongs to the session being left.
+            # Cancel it before the dispose so it cannot land afterwards: the
+            # facade also refuses to bind once disposed (`_ensure_bound`),
+            # but a cancelled worker is the cheaper of the two and it also
+            # clears the band's "starting…" through the worker's `finally`.
+            self._cancel_runtime_engage()
+            if not keep_context:
+                # `/resume` and `/new` LEAVE this conversation, so a runtime
+                # engaged at mount and never used goes back now rather than
+                # lingering until the drain notices. Skipped when the caller
+                # means to continue the same conversation (`keep_context`),
+                # where the runtime is not being abandoned at all.
+                #
+                # Ordered before dispose because it travels over the socket
+                # dispose closes, and it is safe to ask this early: the
+                # runtime refuses unless the session is genuinely untouched
+                # and no other viewer is attached, so a `/resume` away from
+                # real work leaves that work running.
+                await self._retire_unused_runtime(self._session)
             try:
                 await self._session.dispose()
             except Exception:
@@ -5059,6 +5176,10 @@ class OperatorApp(App[None]):
                 # `fork.consume_boot_prompt` promises to keep by construction.
                 # Consuming it here makes both modes read it exactly once.
                 self._submit_boot_prompt(session)
+                # The replacement gets a runtime on the same terms the boot
+                # path gives one, so `/resume` and `/new` land on a complete
+                # band rather than on the half-filled one a cold viewer paints.
+                self._engage_runtime_eagerly()
                 await self._preflight_usage(session)
         finally:
             self._swapping_session = False
@@ -5899,6 +6020,12 @@ class OperatorApp(App[None]):
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
+            # `/resume` onto a LIVE session, which reaches here instead of
+            # `_reload_session`. Same abandonment, same offer: the runtime this
+            # viewer engaged at mount and never used goes back before the
+            # socket closes — and the same cancel first, for the same reason.
+            self._cancel_runtime_engage()
+            await self._retire_unused_runtime(self._session)
             try:
                 await self._session.dispose()
             except Exception:
@@ -8433,13 +8560,100 @@ class OperatorApp(App[None]):
         dock.styles.padding = (0, 0, lift, 0)
 
     # -- input --------------------------------------------------------------
+    def _engage_runtime_eagerly(self) -> None:
+        """Start this viewer's runtime as soon as the session is adopted.
+
+        A cold viewer reads its opening frame off disk, which covers the cwd
+        and the configured model NAME and nothing else. The MCP roster, the
+        context/token reading, the effective model and the live usage all come
+        from the runtime, so before this the band stayed half-empty until the
+        first keystroke triggered the speculative warm-up — indistinguishable,
+        from the user's side, from a status bar that had failed to load.
+
+        The cost this pays is a real one and is why the lazy start existed:
+        opening a terminal now starts a process. Two things make that
+        affordable, and both must hold.
+
+        * The runtime still DEFERS materialising the session directory
+          (``WarmErrand`` → ``LOP_RUNTIME_DEFER_MATERIALISE``), so a session
+          nobody uses leaves nothing on disk when the runtime exits.
+        * A viewer that leaves without using the session offers the runtime
+          back (``_retire_unused_runtime``), and anything that offer does not
+          catch is reaped by the ordinary residency drain within ~3 s of the
+          viewer detaching.
+
+        Shares one implementation with the draft warm-up because they differ
+        only in WHEN they fire — engaging twice must be, and is, a no-op
+        (``_ensure_bound`` is idempotent behind its own lock, and the
+        ``_warm_engage_started`` latch means the second caller does not even
+        get that far).
+        """
+        self._start_runtime_engage(reason="mount")
+
+    def _runtime_can_start(self) -> bool:
+        """Whether the viewer's session names a provider AND a model.
+
+        Read off the viewer's own canonical state, which for a cold viewer is
+        synthesised from config at construction (``_synthesise_cold_state``)
+        and for an attached one is the runtime's truth — so this is one
+        question with one answer on both. Reduced facades in tests carry no
+        ``frontend_state``; they are treated as startable, which is what the
+        pre-existing tests expect and costs nothing because their engage is
+        stubbed.
+        """
+        session = self._session
+        state = getattr(session, "frontend_state", None)
+        if state is None:
+            return True
+        model = getattr(state, "effective_model", None) or getattr(state, "selected_model", None)
+        if model is None:
+            return False
+        provider = str(getattr(model, "provider", "") or "")
+        if not provider:
+            return False
+        if getattr(model, "model_id", ""):
+            return True
+        # An empty ``model_name`` is NOT unconfigured: the runtime's resolver
+        # (``session_factory``) falls back to the provider's default model, so
+        # a config that names only `hosting` boots fine and must engage.
+        # Requiring a model id here regressed exactly that config to never
+        # engaging on mount OR keystroke (review round 2, MAJOR-1). Ask the
+        # same table the resolver asks.
+        from local_operator.model.defaults import default_model_for
+
+        return bool(default_model_for(provider))
+
     def _warm_runtime_for_draft(self) -> None:
+        """Engage a runtime for a cold viewer, at most once per binding.
+
+        Retained as a SECOND trigger rather than deleted now that mount
+        engages: the mount attempt can fail (no runtime could be started, the
+        socket was refused) and it clears the latch when it does, so the first
+        keystroke is still the moment a failed start is retried — quietly,
+        before the user commits to a message.
+        """
+        self._start_runtime_engage(reason="draft")
+
+    def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
         if self._warm_engage_started:
             return
         session = self._session
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
+            return
+        if not self._runtime_can_start():
+            # First run, or `hosting`/`model_name` cleared: there is nothing to
+            # spawn against. The cold viewer opens on an empty config on
+            # purpose (it is the screen that tells the user to `/login`), but
+            # a runtime spawned against it exits with rc=2, and the engage
+            # loop respawned three of those and then sat on "starting…" for
+            # its 30 s deadline on the onboarding screen (review round 1,
+            # MAJOR-2). Gated HERE, on both triggers, because a keystroke on
+            # that screen costs exactly the same three spawns. `/login` and
+            # `/model` rebuild the session, which adopts and engages again
+            # with a real provider in place.
+            logger.debug("%s engage skipped: no provider/model configured", reason)
             return
         self._warm_engage_started = True
         self._set_starting(True)
@@ -8450,20 +8664,72 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent: the user
                 # has not asked for anything yet, and the message they send
-                # next engages again and surfaces any error properly.
-                logger.debug("speculative runtime engage failed", exc_info=True)
+                # next engages again and surfaces any error properly. The same
+                # holds for the mount engage, which the user did not ask for
+                # at all — clearing the latch leaves the first keystroke free
+                # to retry.
+                logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
             finally:
                 self._set_starting(False)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
+    def _cancel_runtime_engage(self) -> None:
+        """Stop an engage that is still in flight for the session being left.
+
+        The mount engage runs in a worker that nothing cancels by itself: a
+        `/resume` or `/new` typed inside the first second of a fresh `lop`
+        (the engage takes ~0.5–2 s with a dozen MCP servers) used to let it
+        finish AFTER the swap had disposed its viewer, attaching a socket to a
+        dead facade that then held the old runtime resident for the life of
+        the process (review round 1, MAJOR-1). Cancelling at the swap closes
+        that from this side; `RemoteSession._ensure_bound` refusing to bind a
+        disposed facade closes it from the other, for callers that are not
+        this app.
+        """
+        self.workers.cancel_group(self, "warm-engage")
+        self._set_starting(False)
+
+    async def _retire_unused_runtime(self, session: Any) -> None:
+        """Hand back a runtime this viewer started but never used.
+
+        Called on the two paths that ABANDON a session: quitting the TUI, and
+        `/resume`ing onto a different one. Both exist because engaging at mount
+        means opening a terminal starts a process, and a user who opens one,
+        reads the band and leaves must not strand it.
+
+        THE VIEWER DOES NOT DECIDE. It asks, and the runtime answers by
+        inspecting state only it can see — see ``RuntimeServer``'s handler for
+        the two refusals (another viewer attached; anything durable in the
+        session). The long-forgotten-TUI case the user called out is exactly
+        the first refusal: a session held open for hours is still pristine, so
+        emptiness alone would happily retire a runtime a second terminal is
+        watching or a peer is about to message.
+
+        Never raises and never paints. It runs while the app is coming down or
+        mid-swap, where an exception would be noise the user cannot act on and
+        a notice would land on a surface that is going away. A failure leaves
+        the runtime up, which the residency drain resolves seconds later.
+        """
+        if session is None:
+            return
+        retire = getattr(session, "retire_if_unused", None)
+        if not callable(retire):
+            return
+        try:
+            detail = await cast(Callable[[], Awaitable[str]], retire)()
+            logger.debug("unused runtime offer: %s", detail)
+        except Exception:  # noqa: BLE001 — teardown must not fail over this
+            logger.debug("could not offer the unused runtime back", exc_info=True)
+
     def _set_starting(self, starting: bool) -> None:
         """Show or clear the band's "starting…" state.
 
-        The one visible consequence of the viewer model at rest: between the
-        first keystroke and the runtime being ready there is a real interval,
-        and a band that said nothing would read as a dropped keystroke.
+        The one visible consequence of the viewer model: between adopting a
+        session and its runtime being ready there is a real interval (the
+        engage runs at mount, and again on the first keystroke after a failed
+        one), and a band that said nothing would read as half-loaded.
         """
         if self._starting_runtime == starting:
             return
@@ -11355,6 +11621,12 @@ class OperatorApp(App[None]):
             unsubscribe_frontend()
             self._unsubscribe_frontend = None
         if self._session is not None:
+            # BEFORE dispose, which closes the socket this has to travel over.
+            # Quitting a terminal that engaged a runtime at mount and never
+            # used it is the main way eager engagement would otherwise leak a
+            # process; the runtime refuses if another viewer is attached or
+            # anything durable happened, so a real conversation is unaffected.
+            await self._retire_unused_runtime(self._session)
             await self._session.dispose()
 
     def _run_shell_command(self, text: str) -> None:
@@ -13404,7 +13676,7 @@ class OperatorApp(App[None]):
         # know of. `billed` carries that distinction off the same reading, so
         # the job is not probed a second time on a repeating timer.
         if stats.cost is not None:
-            cost = format_cost(stats.cost)
+            cost = format_cost(stats.cost) + ("+" if stats.cost_partial else "")
         elif stats.billed:
             cost = "$—"
         else:
@@ -14168,6 +14440,8 @@ class OperatorApp(App[None]):
             self._cmd_model(arg, notice)
         elif command == "/effort":
             self._cmd_effort(arg, notice)
+        elif command == "/fast":
+            self._cmd_fast(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/provider":
@@ -14993,7 +15267,10 @@ class OperatorApp(App[None]):
         # ``explicit``: this is a deliberate model choice, so a pinned fallback
         # route is withdrawn even when the choice re-selects the model the
         # fallback displaced — see ``Session.set_model``.
-        session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
+        session.set_model(
+            self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
+            explicit=True,
+        )
         self._probe_quota_after_switch(session)
         # A text-only model renders the history WITHOUT its images (see
         # ``Session._render_history``), so the estimate painted for the vision
@@ -15040,6 +15317,7 @@ class OperatorApp(App[None]):
                 model_label=_effective_label(session),
                 model_name=_model_name(session),
                 effort=_effort_label(session),
+                fast=_fast_label(session),
                 context_window=_context_window(session),
             )
         suffix, warning = self._model_access_note(provider)
@@ -15342,6 +15620,112 @@ class OperatorApp(App[None]):
         if self._status is not None:
             self._status.update(effort=_effort_label(session))
         return landed
+
+    def _fast_mode_available(self) -> bool:
+        """Whether the ACTIVE route can serve this model fast.
+
+        Read off the spec for the reason :meth:`_effort_levels` gives: the spec
+        is where ``build_model_spec`` already resolved it, and a second
+        derivation here is how the band and the wire end up disagreeing.
+        """
+        spec = _model_spec(self._session)
+        return bool(getattr(spec, "supports_fast_mode", False))
+
+    def _apply_fast_mode(self, enabled: bool) -> bool:
+        """Put the fast-mode dial on the session's spec and repaint the band.
+
+        Mirrors :meth:`_apply_effort` exactly — through ``set_model`` because
+        the spec IS the request, remembered on the app because a session can be
+        REPLACED under a running app, and READ BACK rather than trusted so a
+        receipt is never printed for a state the session is not carrying.
+        """
+        session = self._session
+        spec = _model_spec(session)
+        if session is None or spec is None or not hasattr(session, "set_model"):
+            return False
+        self._fast_choice = enabled
+        session.set_model(spec.model_copy(update={"fast_mode": enabled}))
+        landed = bool(getattr(_model_spec(session), "fast_mode", False)) == enabled
+        if self._status is not None:
+            self._status.update(fast=_fast_label(session))
+        return landed
+
+    def _spec_with_chosen_fast_mode(self, spec: Any) -> Any:
+        """``spec`` carrying the fast-mode choice, when the route can serve it.
+
+        The sibling of :meth:`_spec_with_chosen_effort`, and it forgets the
+        choice on a model that cannot honour it for the same reason: a
+        preference that vanished and reappeared two switches later would be
+        spookier than one the user re-picks. Here the stakes are higher than
+        spookiness — fast mode is billed at a premium, so a dial silently
+        re-arming itself on a later model would cost real money.
+        """
+        if not self._fast_choice:
+            return spec
+        if not bool(getattr(spec, "supports_fast_mode", False)):
+            self._fast_choice = False
+            return spec
+        return spec.model_copy(update={"fast_mode": True})
+
+    def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
+        """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
+
+        A TOGGLE rather than a ladder, because the dial has two states: the
+        provider either serves this request off its fast tier or off its
+        standard one. Bare ``/fast`` therefore flips it, which is what makes the
+        command worth typing over a settings page — and ``on``/``off`` are
+        accepted so a user who wants to be certain of the resulting state never
+        has to read the band first.
+
+        SESSION-scoped and deliberately not persistable, the same choice
+        ``/effort`` makes and for a sharper reason: fast mode carries a premium
+        price (roughly double, on both Anthropic and OpenAI). A dial that froze
+        one task's urgency into every future session would quietly bill the user
+        for it forever, so the receipt says how long the choice lasts rather
+        than pointing at a command that would extend it.
+        """
+        session = self._session
+        spec = _model_spec(session)
+        if session is None or spec is None:
+            self._system_notice("session is still starting…", "warning")
+            return
+        label = getattr(session, "model_label", "") or "this model"
+        if not self._fast_mode_available():
+            # Says so rather than accepting a toggle it would silently drop, the
+            # rule `/effort` follows: the request carries no speed key on this
+            # route, so any state the app took here would be a claim the wire
+            # does not back.
+            self._system_notice(_fast_unavailable(label))
+            return
+        current = bool(getattr(spec, "fast_mode", False))
+        wanted = arg.strip().lower()
+        if wanted in ("status", "show"):
+            self._system_notice(_fast_status_line(label, current))
+            return
+        if wanted in ("on", "yes", "true", "enable", "enabled"):
+            target = True
+        elif wanted in ("off", "no", "false", "disable", "disabled"):
+            target = False
+        elif not wanted:
+            target = not current
+        else:
+            self._system_notice(
+                f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
+                "warning",
+            )
+            return
+        if target == current:
+            self._system_notice(_fast_status_line(label, current))
+            return
+        if not self._apply_fast_mode(target):
+            self._system_notice("session cannot change model settings", "warning")
+            return
+        if target:
+            # An explicit re-ask is the one signal that the account's
+            # entitlement may have changed (credits bought since a refusal),
+            # so the driver's refusal latch is cleared for the next request.
+            _forget_fast_refusal(session)
+        self._system_notice(_fast_receipt(label, target))
 
     def _spec_with_chosen_effort(self, spec: Any) -> Any:
         """``spec`` carrying the level the user picked, when the model takes it.
@@ -16149,6 +16533,12 @@ class OperatorApp(App[None]):
         discovery surface. So a missing current row is rebuilt from the registry
         rather than merely spared.
         """
+        from local_operator.model.configure import _openai_use_max_context_window
+
+        settings = getattr(self._session, "routing_settings", None)
+        use_max_context = _openai_use_max_context_window(
+            settings if settings is not None else self._config_values()
+        )
         usable = self._usable_providers()
         current = self._current_selector()
         # A follower merges the OWNER's published catalogue: the session runs
@@ -16178,6 +16568,8 @@ class OperatorApp(App[None]):
                         model_id=str(row.get("model_id", "") or ""),
                         label=str(row.get("label", "") or row.get("model_id", "") or ""),
                         context_window=int(row.get("context_window", 0) or 0),
+                        default_context_window=row.get("default_context_window"),
+                        max_context_window=row.get("max_context_window"),
                         input_price=float(row.get("input_price", 0.0) or 0.0),
                         output_price=float(row.get("output_price", 0.0) or 0.0),
                         connected=bool(row.get("connected", False)),
@@ -16204,7 +16596,15 @@ class OperatorApp(App[None]):
                 provider=entry.provider,
                 model_id=entry.model_id,
                 label=entry.label,
-                context_window=entry.context_window,
+                context_window=(
+                    entry.default_context_window
+                    if entry.provider == "openai"
+                    and not use_max_context
+                    and entry.default_context_window
+                    else entry.context_window
+                ),
+                default_context_window=entry.default_context_window,
+                max_context_window=entry.max_context_window,
                 input_price=entry.input_price,
                 output_price=entry.output_price,
                 connected=entry.connected,
@@ -16214,6 +16614,24 @@ class OperatorApp(App[None]):
             for entry in entries
             if usable is None or entry.provider in usable or entry.selector == current
         ]
+        active = _effective_spec(session)
+        if active is not None and getattr(active, "default_context_window", None):
+            # A session can be sticky to a different account than the generic
+            # catalogue lookup. Its current row must describe its serving spec.
+            active_selector = f"{active.provider}/{active.model_id}"
+            rows = [
+                (
+                    replace(
+                        row,
+                        context_window=active.context_window,
+                        default_context_window=active.default_context_window,
+                        max_context_window=active.max_context_window,
+                    )
+                    if row.selector == active_selector
+                    else row
+                )
+                for row in rows
+            ]
         # Count what the catalogue FILTER dropped before appending a current
         # row that was never in ``entries``. Subtracting the rescued row made
         # one real hidden catalogue entry disappear from the footer; flooring
@@ -16268,6 +16686,8 @@ class OperatorApp(App[None]):
                 model_id=entry.model_id,
                 label=entry.label,
                 context_window=entry.context_window,
+                default_context_window=entry.default_context_window,
+                max_context_window=entry.max_context_window,
                 input_price=entry.input_price,
                 output_price=entry.output_price,
                 connected=entry.connected,
@@ -17516,6 +17936,15 @@ class OperatorApp(App[None]):
             return int(getattr(report, "fetched_at", 0) or 0)
 
         def _confirmed(report: Any) -> bool:
+            # A dead grant carries neither a streak nor the unavailable flag —
+            # it never enters the retry path that sets them — so it would pass
+            # both tests below while being the least confirmed state there is.
+            # A never-successful one is stamped with the moment of the failed
+            # verdict, which is precisely the `just now` sourced from an
+            # account that has never reported a number this predicate exists
+            # to exclude.
+            if getattr(report, "credential_invalid", False):
+                return False
             return int(getattr(report, "consecutive_failures", 0) or 0) <= 0 and not getattr(
                 report, "usage_unavailable", False
             )
@@ -18183,6 +18612,14 @@ class OperatorApp(App[None]):
             # open, late-adoption, and empty-only refresh edges must not diverge.
             self._fill_name_argument_list(editor, message.command)
             return
+        if message.command == "fast":
+            available = self._fast_mode_available()
+            picker.set_choices(self._fast_choices() if available else [])
+            # Same reason `/effort` states its empty list here: a user who
+            # opened the list is looking at the list, not at the ledger.
+            label = getattr(self._session, "model_label", "") or "this model"
+            picker.set_notice("" if available else _fast_unavailable(label))
+            return
         if message.command == "effort":
             levels = self._effort_levels()
             picker.set_choices(self._effort_choices(levels))
@@ -18384,6 +18821,38 @@ class OperatorApp(App[None]):
                 detail="current" if name == current else "",
             )
             for name in rungs
+        ]
+
+    def _fast_choices(self) -> list[ArgumentChoice]:
+        """``on``/``off``/``status``, with the state in force marked.
+
+        Three rows rather than two: bare ``/fast`` toggles, so the list exists
+        for the user who wants to name the RESULTING state instead of flipping
+        into it, and ``status`` is the read-only question that belongs beside
+        them rather than behind a second command.
+
+        ``on`` carries the price in its description because this list is the
+        last surface before the dial is switched, and the premium is the half of
+        the trade a user cannot see anywhere else. ``alert`` on it for the same
+        reason ``/approvals default auto`` carries one: it is the row with a
+        consequence beyond the keystroke.
+        """
+        enabled = bool(getattr(_model_spec(self._session), "fast_mode", False))
+        return [
+            ArgumentChoice(
+                "on",
+                "Faster output, premium pricing",
+                aliases=("yes", "enable"),
+                detail="current" if enabled else "",
+                alert=True,
+            ),
+            ArgumentChoice(
+                "off",
+                "Standard speed and pricing",
+                aliases=("no", "disable"),
+                detail="" if enabled else "current",
+            ),
+            ArgumentChoice("status", "Report the current state", aliases=("show",)),
         ]
 
     def _provider_choices(self, command: str) -> _ProviderRows:
@@ -19546,6 +20015,8 @@ class OperatorApp(App[None]):
             return self._rename_slash_result(args, SlashResult)
         if command == "effort":
             return self._effort_slash_result(args, SlashResult)
+        if command == "fast":
+            return self._fast_slash_result(args, SlashResult)
         if command == "mcp":
             return await self._mcp_slash_result(args, SlashResult, locality)
         if command == "team":
@@ -19656,6 +20127,51 @@ class OperatorApp(App[None]):
             style="info",
             data={"stored": stored},
         )
+
+    def _fast_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """``/fast`` over the remote/mobile control path.
+
+        An AUTHORITATIVE command, not a frontend-local one: the dial lives on
+        the spec the owner builds its requests from, so it has to be applied
+        where the requests are made — unlike ``/theme`` or ``/settings``, which
+        act on the machine the user is sitting at. Mirrors
+        :meth:`_effort_slash_result` so a phone and a terminal get the same
+        answers from one set of rules.
+        """
+        session = self._session
+        spec = _model_spec(session)
+        if session is None or spec is None:
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        label = getattr(session, "model_label", "") or "this model"
+        if not self._fast_mode_available():
+            return SlashResult(kind="notice", text=_fast_unavailable(label), style="info")
+        current = bool(getattr(spec, "fast_mode", False))
+        wanted = arg.strip().lower()
+        if wanted in ("status", "show"):
+            return SlashResult(kind="notice", text=_fast_status_line(label, current), style="info")
+        if wanted in ("on", "yes", "true", "enable", "enabled"):
+            target = True
+        elif wanted in ("off", "no", "false", "disable", "disabled"):
+            target = False
+        elif not wanted:
+            target = not current
+        else:
+            return SlashResult(
+                kind="notice",
+                text=f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
+                style="warning",
+            )
+        if target == current:
+            # The no-op voice, for the reason the effort sibling spells out: an
+            # arrow between two identical states reads as a change.
+            return SlashResult(kind="notice", text=_fast_status_line(label, current), style="info")
+        if not self._apply_fast_mode(target):
+            return SlashResult(
+                kind="notice", text="session cannot change model settings", style="warning"
+            )
+        if target:
+            _forget_fast_refusal(session)
+        return SlashResult(kind="notice", text=_fast_receipt(label, target), style="info")
 
     def _effort_slash_result(self, arg: str, SlashResult: Any) -> Any:
         session = self._session
@@ -19900,7 +20416,10 @@ class OperatorApp(App[None]):
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
             )
         old_label = session.model_label
-        session.set_model(self._spec_with_chosen_effort(spec), explicit=True)
+        session.set_model(
+            self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
+            explicit=True,
+        )
         self._probe_quota_after_switch(session)
         self._effort_refusal_shown = None
         self._warm_usage_background()
@@ -21122,6 +21641,16 @@ class OperatorApp(App[None]):
             return ""
         return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
 
+    @staticmethod
+    def _frontend_child_costs(state: Any) -> dict[str, float]:
+        # The legacy app ledger is also carried through reload. Feed that one
+        # consumer the owner ledger as a SINGLE contribution, never alongside
+        # compatibility row costs (which omit swept work and live descendants).
+        if getattr(state, "subagent_cost_knowledge", None) is not None:
+            cost = getattr(state, "subagent_cost", None)
+            return {"owner-ledger": cost} if cost is not None else {}
+        return dict(getattr(state, "child_costs", {}) or {})
+
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns plus its children's.
 
@@ -21986,6 +22515,7 @@ class OperatorApp(App[None]):
             # selected model's values, which is then also what the label says.
             model_name=_model_name(session) if session is not None else "",
             effort=_effort_label(session) if session is not None else "",
+            fast=_fast_label(session) if session is not None else "",
             context_window=_context_window(session) if session is not None else 0,
         )
         # Naming is isolated (no fallback chain) and often fires BEFORE the
@@ -22251,6 +22781,87 @@ def _effort_unavailable(label: str) -> str:
     other line in the feature.
     """
     return f"reasoning effort: not adjustable on {label}"
+
+
+def _forget_fast_refusal(session: Any) -> None:
+    """Clear the stream driver's fast-refusal latch, where the host has one.
+
+    Reached through the session's stream fn rather than the route state
+    directly, so the app carries no knowledge of failover internals; a host
+    without the hook (pilot fakes, embedders) has no latch to clear.
+    """
+    stream_fn = getattr(session, "_stream_fn", None)
+    forget = getattr(stream_fn, "forget_fast_refusal", None)
+    if callable(forget):
+        try:
+            forget()
+        except Exception:  # noqa: BLE001 — a latch that will not clear must not fail the toggle
+            logger.debug("forget_fast_refusal failed", exc_info=True)
+
+
+def _fast_receipt(label: str, enabled: bool) -> str:
+    """The receipt for a CHANGE, on every dispatch surface.
+
+    Opens with the feature's one subject (``fast mode:``) like the status and
+    refusal lines, then states the transition. The premium is named at the
+    moment it is incurred rather than buried in help — the whole trade of this
+    dial is money for latency.
+
+    No label and no scope clause, and both were measured off (design D2,
+    D6): the notice block is ~94 cells and an aggregator label alone is up to
+    40 (``openrouter/anthropic/claude-opus-4.8``), so a receipt carrying
+    either orphaned its last word on a second row for exactly the labels
+    most likely to be fast-capable. The band names the model the dial is on
+    one row below, ``/fast status`` states the label and the scope for a user
+    who asks, and nothing here offers to persist the dial — so the receipt
+    loses no fact by stopping at the price.
+    """
+    del label  # kept in the signature so every surface calls it the same way
+    if enabled:
+        return "fast mode: off → on — faster output at premium pricing"
+    return "fast mode: on → off — standard speed and pricing"
+
+
+def _fast_unavailable(label: str) -> str:
+    """The ONE sentence for "this route has no fast tier", used by command and key.
+
+    One string for the reason :func:`_effort_unavailable` is one string: it is
+    one fact, and two phrasings of one fact read as two authors. "Not available"
+    rather than "unsupported" because the model is usually fine — it is this
+    ROUTE to it that sells no fast tier, and the same model through another
+    provider may well offer one.
+    """
+    return f"fast mode: not available on {label}"
+
+
+def _fast_status_line(label: str, enabled: bool) -> str:
+    """What a bare report prints. Names the PRICE alongside the state.
+
+    The state alone would answer "is it on" while leaving the question a user
+    actually has — what is this costing me — unanswered, and this is the one
+    dial in the app where the answer is "about double".
+    """
+    if enabled:
+        return f"fast mode: on for {label} — faster output at premium pricing"
+    return f"fast mode: off for {label} — /fast turns it on at premium pricing"
+
+
+def _fast_label(session) -> str:
+    """The band's fast-mode word, or "" when there is nothing to say.
+
+    Two states rather than three, which is where this parts company with
+    :func:`_effort_label`. Fast mode is a BINARY the user switched on, so the
+    only informative reading is the ON one: a segment that also printed
+    ``standard`` would spend permanent width on the state every session is in
+    by default, and the band's scarcest resource is width. Off renders nothing,
+    which is what makes the segment's presence the whole message.
+    """
+    spec = _effective_spec(session)
+    if spec is None:
+        return ""
+    if not getattr(spec, "supports_fast_mode", False):
+        return ""
+    return "fast" if getattr(spec, "fast_mode", False) else ""
 
 
 def _effort_label(session) -> str:
