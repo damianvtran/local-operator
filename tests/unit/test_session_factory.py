@@ -1700,14 +1700,18 @@ def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
     # Present and readable: resolves.
     assert resume_mod.resume_dir(tmp_path, "sess-abc").name == "sess-abc"
 
-    real_is_file = Path.is_file
+    # The presence check is ``session_activity`` (a ``stat`` of the transcript
+    # and the mail spool), so that is the call made to fail. ``session_activity``
+    # itself reads a failing stat as "no such file" — which lands here as the
+    # same ResumeNotFound a missing session produces, never a traceback.
+    real_stat = Path.stat
 
-    def flaky(self):  # noqa: ANN001, ANN202
+    def flaky(self, *args, **kwargs):  # noqa: ANN001, ANN202
         if self.name == resume_mod.TRANSCRIPT_NAME:
             raise PermissionError("stat denied")
-        return real_is_file(self)
+        return real_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_file", flaky)
+    monkeypatch.setattr(Path, "stat", flaky)
     with pytest.raises(resume_mod.ResumeNotFound):
         resume_mod.resume_dir(tmp_path, "sess-abc")
 
