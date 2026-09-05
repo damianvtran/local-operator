@@ -3861,6 +3861,12 @@ def main() -> int:
         # own env config and the session factory does the same lazily — a
         # dead local would only invite drift.
         base_dir = config_dir()
+        # THE ONE place config migrations run: the `lop` entry point, for the
+        # config dir this command is about to use. Never from ConfigManager
+        # construction — see ``local_operator.config_migrations``.
+        from local_operator.config_migrations import run_startup_migrations
+
+        run_startup_migrations(base_dir)
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never

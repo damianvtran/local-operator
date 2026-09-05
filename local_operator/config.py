@@ -389,96 +389,17 @@ class ConfigManager:
                     if key not in config_dict["values"]:
                         config_dict["values"][key] = deepcopy(value)
 
-            if self._migrate_retired_session_cleanup_keys(config_dict["values"]):
-                self._write_config(config_dict)
-
             return Config(config_dict)
 
-    def _migrate_retired_session_cleanup_keys(self, values: Dict[str, Any]) -> bool:
-        """Drop the keys of the removed session reapers; opt the user out of cleanup.
-
-        One-time and idempotent: returns ``True`` only when it changed
-        ``values``, which is the caller's cue to write the file. A config
-        carrying none of the retired keys is untouched, so the ordinary load
-        path costs nothing.
-
-        The retired keys are the ceilings of the first eviction policy
-        (``session_retention_max_*``) and the opt-out of the #576 unused-session
-        reaper (``session.reap_unused``), which could be present in BOTH its
-        nested form (what ``/settings`` wrote) and its flat-dotted form (what
-        the reaper actually read) — the mismatch that made the toggle a no-op
-        is why both spellings are handled. Every one of those mechanisms is
-        gone, and leaving their keys behind would let a config file claim a
-        protection ("reap_unused: false") that no longer means anything.
-
-        A config that carried any of them belonged to a user who lived through
-        the old reapers, so the migration writes ``session.cleanup.enabled:
-        false`` EXPLICITLY rather than relying on the default — an explicit
-        ``false`` survives a future change of default and is visible to anyone
-        reading the file. An existing ``cleanup`` block is merged into, never
-        replaced. ``config.yml`` is backed up beside itself before the rewrite
-        so the user can see exactly what was removed.
-        """
-        retired_flat = (
-            "session_retention_max_sessions",
-            "session_retention_max_bytes",
-            "session_retention_max_age_days",
-            "session.reap_unused",
-        )
-        removed: list[str] = []
-        for key in retired_flat:
-            if key in values:
-                del values[key]
-                removed.append(key)
-        session = values.get("session")
-        if isinstance(session, dict) and "reap_unused" in session:
-            del session["reap_unused"]
-            removed.append("session.reap_unused (nested)")
-        if not removed:
-            return False
-
-        if not isinstance(session, dict):
-            session = {}
-            values["session"] = session
-        cleanup = session.get("cleanup")
-        if not isinstance(cleanup, dict):
-            cleanup = {}
-            session["cleanup"] = cleanup
-        cleanup.setdefault("enabled", False)
-
-        # A store that predates the marker is the operator's real one; mark it
-        # here so that IF they later enable cleanup it is eligible. Marking
-        # does not enable anything — ``enabled`` was just pinned to false.
-        from local_operator.session.cleanup import SESSIONS_DIRNAME, mark_store
-
-        if (self.config_dir / SESSIONS_DIRNAME).is_dir():
-            mark_store(self.config_dir / SESSIONS_DIRNAME)
-
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = self.config_file.with_name(
-            f"{self.config_file.name}.pre-cleanup-migration.{stamp}"
-        )
-        try:
-            backup.write_bytes(self.config_file.read_bytes())
-        except OSError as exc:
-            # Without a backup the migration must not rewrite the file: the
-            # user could lose the record of what they had set. The retired
-            # keys are inert either way, so leaving them costs nothing.
-            logger.warning(
-                "config migration: could not back up %s (%s); leaving it as is",
-                self.config_file,
-                exc,
-            )
-            return False
-        logger.warning(
-            "config migration: removed retired session-reaper keys %s from %s "
-            "(backup at %s); session.cleanup.enabled is now explicitly false "
-            "\u2014 no automatic session cleanup runs unless you turn it on in /settings",
-            ", ".join(removed),
-            self.config_file,
-            backup,
-        )
-        return True
+    # LOADING IS READ-ONLY. A migration used to live here, run from
+    # ``_load_config`` on every load that found a retired key — so ANY process
+    # that merely constructed a ConfigManager on a config dir with this code
+    # rewrote the file: an un-isolated probe script did exactly that to the
+    # operator's live config while this change was still under review, and
+    # an older runtime then read the rewritten file unguarded (PR #645,
+    # round 5). Migrations live in ``local_operator.config_migrations`` and
+    # run from ONE explicit startup seam (``cli.main``); a library caller
+    # constructing this class cannot trigger them.
 
     def _write_config(self, config: Dict[str, Any]) -> None:
         """Write configuration to YAML file.

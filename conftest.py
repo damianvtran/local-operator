@@ -115,6 +115,13 @@ import pytest
 #: otherwise ``~/.local-operator``. ``None`` when there is no such store.
 _REAL_STORE: pathlib.Path | None = None
 _REAL_STORE_ENTRIES: frozenset[str] | None = None
+#: The operator's real ``config.yml``, byte-for-byte at session start. A test
+#: process rewrote it once — the cleanup migration ran from ConfigManager's
+#: load path, and an un-isolated probe constructed one on the real dir (PR
+#: #645, round 5) — so a changed config at session end fails the run the same
+#: way a shrunken store does.
+_REAL_CONFIG: pathlib.Path | None = None
+_REAL_CONFIG_BYTES: bytes | None = None
 
 
 def _resolve_real_store() -> pathlib.Path | None:
@@ -169,10 +176,16 @@ def _guarded(original, *, positions: tuple[int, ...]):
 
 
 def _install_real_store_guard() -> None:
-    global _REAL_STORE, _REAL_STORE_ENTRIES
+    global _REAL_STORE, _REAL_STORE_ENTRIES, _REAL_CONFIG, _REAL_CONFIG_BYTES
     _REAL_STORE = _resolve_real_store()
     if _REAL_STORE is None:
         return
+    config = _REAL_STORE.parent / "config.yml"
+    try:
+        _REAL_CONFIG_BYTES = config.read_bytes()
+        _REAL_CONFIG = config
+    except OSError:
+        _REAL_CONFIG = None
     try:
         with os.scandir(_REAL_STORE) as entries:
             _REAL_STORE_ENTRIES = frozenset(entry.name for entry in entries)
@@ -214,6 +227,20 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         # a directory that cannot be listed is not proof of loss, so warn.
         warnings.warn(f"real-store tripwire: cannot re-list {_REAL_STORE}: {exc}", stacklevel=1)
         return
+    if _REAL_CONFIG is not None and _REAL_CONFIG_BYTES is not None:
+        try:
+            after = _REAL_CONFIG.read_bytes()
+        except OSError:
+            after = None
+        if after != _REAL_CONFIG_BYTES:
+            message = (
+                f"REAL CONFIG CHANGED DURING THIS TEST RUN: {_REAL_CONFIG} is not byte-identical "
+                "to its session-start snapshot. Something in this run (or running alongside "
+                "it) rewrote the operator's config; a test must never construct a "
+                "ConfigManager on the real dir, and loading must never write."
+            )
+            print(f"\n{message}", file=sys.stderr)
+            pytest.exit(message, returncode=pytest.ExitCode.TESTS_FAILED)
     missing = sorted(_REAL_STORE_ENTRIES - now)
     if missing:
         message = (

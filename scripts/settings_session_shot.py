@@ -17,9 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
-
-isolate_capture()
+# FIRST: re-homes HOME/config before the app loads (see scripts/probe_isolation.py).
+import scripts.probe_isolation  # noqa: E402, F401
+from scripts.visual_capture import save_capture  # noqa: E402
 
 
 async def main() -> None:
