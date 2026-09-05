@@ -215,6 +215,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    Density,
     JobStats,
     SubagentPanel,
     SubagentRow,
@@ -2004,9 +2005,10 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
-        # The subagent roster's matching disclosure. `ctrl+g` is free in the
-        # app and TextArea, and bubbles so an active picker keeps first refusal.
-        Binding("ctrl+g", "toggle_subagents", "Expand/collapse subagents", show=False),
+        # The subagent dock's density cycle (full → summary → hidden, with the
+        # overflow roster as a stop inside full). `ctrl+g` is free in the app
+        # and TextArea, and bubbles so an active picker keeps first refusal.
+        Binding("ctrl+g", "toggle_subagents", "Cycle the subagent panel", show=False),
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -5416,6 +5418,12 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
+        # The dock density chosen for the dead conversation goes with it: the
+        # replacement session re-reads `display.dock` on its first roster and
+        # a `ctrl+g` pressed against the old children does not pin the new
+        # ones (#525 design §2).
+        if self._subagent_panel is not None:
+            self._subagent_panel.reset_density()
         return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
@@ -13965,6 +13973,8 @@ class OperatorApp(App[None]):
                 # and every block already on screen re-lays out with it. A
                 # repaint would re-ink content that has not changed colour.
                 self._sync_row_density_class()
+            elif message.key == "display.dock":
+                self._apply_dock_density()
             elif message.key.startswith("display."):
                 # The display flags are read through the cached fast path, which
                 # `settings_io` already invalidated; the widgets that resolved a
@@ -14590,6 +14600,8 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
+        if "display.dock" in changed:
+            self._apply_dock_density()
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -16826,10 +16838,49 @@ class OperatorApp(App[None]):
                 self._repaint_themed_widgets()
 
     def action_toggle_subagents(self) -> None:
-        """``ctrl+g`` — flip the dock roster between recent and complete."""
-        if self._subagent_panel is not None and self._subagent_panel.display:
-            self._subagent_panel.toggle_expanded(enter_navigation=True)
+        """``ctrl+g`` — cycle the dock subagent panel: full, summary, hidden.
+
+        With overflow the full state has two stops (preview, then the expanded
+        roster with keyboard navigation) before it shrinks; without it the
+        first press goes straight to the summary row — which is the change
+        #525 asked for, since that press used to be a silent no-op at ≤6
+        children. ``_refresh_band`` settles the band inset and the todo budget
+        in the same frame the density changed, so the dock never paints one
+        frame at the old height.
+
+        Gated on ``_panel_holds_children`` rather than ``display``: a HIDDEN
+        panel is not displayed by definition, and the key is the only way
+        back from it.
+        """
+        panel = self._subagent_panel
+        if panel is not None and (panel.display or self._panel_holds_children(panel)):
+            panel.toggle_expanded(enter_navigation=True)
             self._refresh_band()
+
+    @staticmethod
+    def _panel_holds_children(panel: SubagentPanel) -> bool:
+        """Whether a hidden panel would show rows if brought back."""
+        return panel.density is Density.HIDDEN and bool(panel._rows)
+
+    def _apply_dock_density(self) -> None:
+        """Live-apply a changed ``display.dock`` to the mounted panel.
+
+        Honest LIVE scope for the Appearance section (#525 design §5): the
+        page's write and another process's edit both land here. The panel
+        applies it only while the user has not pressed ``ctrl+g`` this
+        session — an explicit choice outranks a file edit, the same rule the
+        todo panel's ``_expanded`` follows — so the apply cannot fight the
+        user, and the band is settled in the same frame either way.
+        """
+        panel = self._subagent_panel
+        if panel is None:
+            return
+        try:
+            panel.seed_density(panel._configured_density())
+        except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
+            logger.debug("display.dock live apply failed", exc_info=True)
+            return
+        self._refresh_band()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -20671,7 +20722,10 @@ class OperatorApp(App[None]):
         lines.append(_key_row("shift+tab", "cycle reasoning effort"))
         lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
-        lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
+        # 46 cells (66 composed) against the 74-cell ceiling: names the three
+        # stops so a user who only ever saw "expand/collapse" learns the panel
+        # can now shrink to a row or go away (#525).
+        lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
         # Directly under `ctrl+b`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
@@ -24033,6 +24087,13 @@ class OperatorApp(App[None]):
         pass
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
+        # BEFORE the refresh, so the re-emerged summary row paints in the same
+        # band pass that reads the failure — a hidden panel that came back one
+        # frame later would be a dock height jump (#525 design §2/§8). Only a
+        # FAILURE breaks through a hidden dock; cancelled and interrupted are
+        # not failures and leave the user's choice alone.
+        if message.status == "failed" and self._subagent_panel is not None:
+            self._subagent_panel.note_child_failed()
         self._refresh_band()
         # The last child settling is the moment a deferred completion becomes
         # true: the parent stopped talking earlier, and now the delegated work

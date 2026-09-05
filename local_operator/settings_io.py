@@ -726,6 +726,27 @@ SETTINGS: tuple[Setting, ...] = (
         help="Fires only while the terminal is unfocused.",
         choices=_bool_choices("notify when unfocused", "never notify"),
     ),
+    Setting(
+        # The session's INITIAL dock density, not a hard override: `ctrl+g`
+        # cycles freely from it and never writes it back (the same split as
+        # `tool_approval_mode` vs `/approvals`). A hard override would make
+        # the key a no-op again, which is the defect #525 fixed. LIVE by
+        # section: a write applies to the mounted panel unless the user has
+        # already cycled it this session. Named `display.dock` rather than
+        # `display.subagent_dock` so a later todo-panel extension can share it.
+        key="display.dock",
+        path=("display.dock",),
+        section="appearance",
+        label="Subagent dock",
+        kind=Kind.ENUM,
+        default="full",
+        help="How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
+        choices=(
+            Choice("full", "full", "one row per child, newest first"),
+            Choice("summary", "summary", "a one-line count"),
+            Choice("hidden", "hidden", "not shown; ctrl+g brings it back"),
+        ),
+    ),
     # -- session ------------------------------------------------------------
     Setting(
         key="tool_approval_mode",
