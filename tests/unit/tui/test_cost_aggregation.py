@@ -32,6 +32,21 @@ _CHILD_MODEL = ModelInfo(
 _MODELS = {"opus": _PARENT_MODEL, "haiku": _CHILD_MODEL}
 
 
+async def _settle_boot(pilot: Any, app: OperatorApp, session: Any) -> None:
+    """Wait for the boot worker to ADOPT the session before driving the app.
+
+    Boot runs in a worker; a single ``pause()`` is a bet that it has finished
+    and on a loaded runner it loses. A ``TurnEnded`` posted before adoption
+    lands on an app with no session, so the parent's own spend never reaches
+    ``_total_cost`` and the test reads $0. Wait on the edge, not the clock.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if app._session is session:
+            return
+    raise AssertionError("the boot worker never adopted the session")
+
+
 def _resolving():
     # Both resolvers patched: turn_cost prices through the paint-safe one
     # (resolve_model_info_paint), and patching only the full resolver would
@@ -118,7 +133,7 @@ async def test_band_total_is_own_spend_plus_children() -> None:
     )
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         with _resolving():
             app.post_message(
                 TurnEnded(False, None, context_tokens=0, usage=Usage(input_tokens=1_000_000))
@@ -232,7 +247,7 @@ async def test_poll_moves_the_total_while_a_child_keeps_spending() -> None:
     session.jobs = _fake_jobs(kid)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         with _resolving():
             app._poll_subagents()
             await pilot.pause()
@@ -261,7 +276,7 @@ async def test_total_survives_a_settled_child_leaving_the_ledger() -> None:
     )
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         with _resolving():
             app._poll_subagents()
             await pilot.pause()
@@ -283,7 +298,7 @@ async def test_a_turn_that_only_delegated_still_reports_a_total() -> None:
     session.jobs = _fake_jobs(_TaskJob("kid", usage=Usage(input_tokens=1_000_000)))
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         with _resolving():
             app.post_message(TurnEnded(False, None, context_tokens=0, usage=None))
             await pilot.pause()
@@ -298,7 +313,7 @@ async def test_unpriced_model_with_no_children_still_reports_unavailable() -> No
     session.jobs = _fake_jobs()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        await _settle_boot(pilot, app, session)
         with _resolving():
             app.post_message(
                 TurnEnded(False, None, context_tokens=0, usage=Usage(input_tokens=1_000_000))
