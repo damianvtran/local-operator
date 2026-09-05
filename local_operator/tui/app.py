@@ -5716,21 +5716,30 @@ class OperatorApp(App[None]):
         # machine by construction, and two terminals on one machine share one
         # ``config.yml``. The record scan is kept as the positive proof, and the
         # genuinely unknown cases below are the conservative ones — but the
-        # no-session-id case above is NOT unknown, it is known-local.
+        # cold case is NOT unknown, it is known-local.
+        if bool(getattr(session, "is_cold", False)):
+            # A COLD viewer is bound to no runtime at all: `lop` has launched,
+            # the user opens the picker and sets a default before typing
+            # anything. There is no remote runtime to be governed by the wrong
+            # config, because there is no runtime — the next one this terminal
+            # starts is exactly what this write is for. Treating that as
+            # "elsewhere" refused the write in the single most common moment a
+            # user sets a default (the operator's own report).
+            #
+            # Asked of ``is_cold``, NOT of an empty ``session_id``: `cli.py`
+            # mints the id BEFORE building the viewer, so a production cold
+            # viewer always carries one and the registry scan below finds no
+            # record for it (review round 1, R1 — the first version of this
+            # guard keyed on the id and was dead code in every real `lop`).
+            return False
         try:
             from local_operator.paths import config_dir
             from local_operator.session.runtime import registry
 
             session_id = getattr(session, "session_id", "") or ""
             if not session_id:
-                # No session id yet = no runtime has been spawned yet, which is
-                # the COLD viewer: `lop` has launched, the user opens the picker
-                # and sets a default before typing anything. There is no remote
-                # runtime to be governed by the wrong config, because there is
-                # no runtime at all — the next one this terminal starts is
-                # exactly what this write is for. Treating that as "elsewhere"
-                # refused the write in the single most common moment a user sets
-                # a default (round: the operator's own report).
+                # No id at all is the same known-local fact by another route:
+                # nothing could have published a record for it.
                 return False
             # ``registry.scan`` rather than ``find_owner_record``: the latter
             # deliberately excludes the CALLING process, which is the right

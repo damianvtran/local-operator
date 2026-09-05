@@ -37,7 +37,10 @@ year fails here without anyone remembering this bug.
 from __future__ import annotations
 
 import ast
+import uuid
 from pathlib import Path
+
+import pytest
 
 _APP = Path(__file__).resolve().parents[3] / "local_operator" / "tui" / "app.py"
 _OWNED = Path(__file__).resolve().parents[3] / "local_operator" / "session" / "runtime" / "owned.py"
@@ -235,30 +238,46 @@ def test_no_local_config_command_asks_is_remote_directly() -> None:
     )
 
 
-def test_a_cold_viewer_may_still_set_its_default_model() -> None:
-    """The cold case, which the predicate itself got wrong.
+@pytest.mark.asyncio
+async def test_a_cold_viewer_may_still_set_its_default_model(tmp_path, monkeypatch) -> None:
+    """The cold case, which the predicate itself got wrong — twice.
 
     A viewer whose runtime has not spawned publishes no discovery record, and
     ``_session_runs_elsewhere`` treated "no proof of local" as "elsewhere". But
-    a session with no id has no runtime AT ALL, so there is nothing anywhere for
-    the wrong config to govern — and this is the single most common moment a
-    user sets a default: open `lop`, open the picker, press ``d``, before
-    typing anything.
+    a cold viewer has no runtime AT ALL, so there is nothing anywhere for the
+    wrong config to govern — and this is the single most common moment a user
+    sets a default: open `lop`, open the picker, press ``d``, before typing
+    anything.
 
-    Asserted through the real method on a stub shaped like the session `lop`
-    actually builds, rather than on source, because the bug is in the branch
-    the predicate takes.
+    The first fix keyed on an EMPTY ``session_id`` and was dead code: `cli.py`
+    mints the id before ``RemoteSession.cold(...)`` is built, so no production
+    viewer ever has an empty one (review round 1, R1; QA Q1; UX U7 — three
+    independent reproductions on the real object). Hence this asserts on the
+    exact object `lop` builds — a ``RemoteSession.cold`` with a minted id in
+    an isolated config dir — not on a stub whose shape production never has.
     """
+    from local_operator.session.remote import RemoteSession
     from local_operator.tui.app import OperatorApp
 
-    class _ColdViewer:
-        is_remote = True
-        session_id = ""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
-    app = OperatorApp.__new__(OperatorApp)
-    app._session = _ColdViewer()  # type: ignore[attr-defined]
-    assert app._session_runs_elsewhere() is False, (
-        "a cold viewer has no runtime at all, so a config write cannot govern "
-        "the wrong machine — refusing here blocks the default-model flow at "
-        "the exact moment users reach for it"
+    async def _never() -> None:
+        raise AssertionError("a viewer never takes over")
+
+    # The id is minted the way `cli.py` mints it: non-empty, no record for it.
+    viewer = await RemoteSession.cold(
+        uuid.uuid4().hex[:12], config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
+    try:
+        assert viewer.session_id, "the production cold viewer always carries an id"
+        assert viewer.is_cold is True
+        assert viewer.is_remote is True
+        app = OperatorApp.__new__(OperatorApp)
+        app._session = viewer  # type: ignore[attr-defined]
+        assert app._session_runs_elsewhere() is False, (
+            "a cold viewer has no runtime at all, so a config write cannot govern "
+            "the wrong machine — refusing here blocks the default-model flow at "
+            "the exact moment users reach for it"
+        )
+    finally:
+        await viewer.dispose()
