@@ -80,8 +80,32 @@ def _billing_summary(quote: dict[str, Any]) -> str:
     )
 
 
-async def _ensure_billing(api: RadientTunnels, accepted: str | None) -> dict[str, Any]:
+def _positive_balance(quote: dict[str, Any]) -> bool:
+    """Enrollment requires real credit; renewal still uses the cloud's -$1 floor.
+
+    Missing/boolean/nonfinite amounts are unavailable, never a free-account
+    shortcut. This reads the fresh owner-pinned quote, not the usage cache.
+    """
+    value = quote.get("balance_usd")
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    try:
+        balance = Decimal(str(value))
+    except InvalidOperation:
+        return False
+    return balance.is_finite() and balance > 0
+
+
+async def _ensure_billing(
+    api: RadientTunnels, accepted: str | None, *, setup: bool = False
+) -> dict[str, Any]:
     quote = await api.request("GET", "/billing")
+    if setup and (not isinstance(quote, dict) or not _positive_balance(quote)):
+        raise ValueError(
+            "Tunnel setup requires a verified Radient balance above USD 0. "
+            "Add credit at https://console.radienthq.com/dashboard/tunnels, then rerun "
+            "lop tunnel billing --json with the same --credential-id."
+        )
     if quote.get("eligible"):
         return quote
     if accepted is None:
@@ -100,7 +124,7 @@ async def _ensure_billing(api: RadientTunnels, accepted: str | None) -> dict[str
     result = await api.request(
         "POST", "/billing/activate", body={"accepted_monthly_price_usd": float(amount)}
     )
-    if not result.get("eligible"):
+    if not result.get("eligible") or (setup and not _positive_balance(result)):
         raise ValueError(_billing_summary(result) + "\nAdd credit before activating the tunnel.")
     return result
 
@@ -130,11 +154,35 @@ async def dispatch(args: argparse.Namespace) -> str:
     action = args.tunnel_command
     if action in {"billing", "activate"}:
         async with httpx.AsyncClient(trust_env=False) as client:
-            api = RadientTunnels(credential_id(getattr(args, "credential_id", None)), client)
+            selected = credential_id(getattr(args, "credential_id", None))
+            api = RadientTunnels(selected, client)
             result = (
                 await api.request("GET", "/billing")
                 if action == "billing"
                 else await _ensure_billing(api, args.accept_monthly_price)
+            )
+        if action == "billing" and getattr(args, "json", False):
+            # Emit only the billing contract, never arbitrary provider fields.
+            # A successful request proves this selected login is valid now.
+            return json.dumps(
+                {
+                    "credential_id": selected,
+                    "account_valid": True,
+                    "positive_balance": _positive_balance(result),
+                    "setup_ready": _positive_balance(result) and result.get("eligible") is True,
+                    "billing": {
+                        key: result.get(key)
+                        for key in (
+                            "active",
+                            "eligible",
+                            "monthly_cost_usd",
+                            "monthly_price_usd",
+                            "balance_usd",
+                            "amount_due_usd",
+                        )
+                    },
+                },
+                allow_nan=False,
             )
         return _billing_summary(result)
     if action == "list":
@@ -164,7 +212,20 @@ async def dispatch(args: argparse.Namespace) -> str:
         async with httpx.AsyncClient(trust_env=False) as client:
             api = RadientTunnels(selected, client)
             if action in {"create", "connect"}:
-                await _ensure_billing(api, args.accept_monthly_price)
+                # A lost create response or reconnect is recovery, not a new
+                # enrollment. The cloud replays the same owner/key reservation
+                # and still rejects a genuinely new reservation without credit.
+                # Do not strand an existing connector at zero credit while its
+                # established subscription remains above the -$1 floor.
+                recovering = (
+                    action == "create" and (config.directory() / "create.json").exists()
+                ) or (
+                    action == "connect"
+                    and old.get("credential_id") == selected
+                    and old.get("tunnel_id") is not None
+                    and (args.tunnel_id or old["tunnel_id"]) == old["tunnel_id"]
+                )
+                await _ensure_billing(api, args.accept_monthly_price, setup=not recovering)
             if action == "create":
                 harnesses = _harnesses(args)
                 if any(h["port"] == gateway_port for h in harnesses):

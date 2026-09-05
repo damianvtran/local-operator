@@ -472,7 +472,9 @@ async def test_create_retry_reuses_intent_and_does_not_persist_connector_token(
 
     async def request(method, path="", **kwargs):
         if path == "/billing":
-            return {"eligible": True}
+            # The first response is lost after the cloud creates the tunnel.
+            # Spending the remaining credit must not strand its saved retry.
+            return {"eligible": True, "balance_usd": 0 if attempts else 10}
         assert kwargs["body"]["gateway_port"] == expected_gateway
         attempts.append(kwargs["idempotency_key"])
         if len(attempts) == 1:
@@ -586,7 +588,10 @@ async def test_console_connect_prepares_relay_and_starts_service_once(
     monkeypatch.delenv("LOP_MOBILE_PASSWORD", raising=False)
     monkeypatch.setattr(cli, "credential_id", lambda value=None: 7)
     api = AsyncMock()
-    api.request.side_effect = [{"eligible": True}, copy.deepcopy(connection["tunnel"])]
+    api.request.side_effect = [
+        {"eligible": True, "balance_usd": 10},
+        copy.deepcopy(connection["tunnel"]),
+    ]
     monkeypatch.setattr(cli, "RadientTunnels", lambda *args: api)
     prepare = Mock()
     installed = Mock()
@@ -699,3 +704,72 @@ async def test_account_wide_commands_accept_and_use_explicit_login(action, monke
     await dispatch(parser.parse_args(argv))
     select.assert_called_once_with(19)
     assert factory.call_args.args[0] == 19
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "connect"])
+@pytest.mark.parametrize("balance", [None, False, True, "bad", "NaN", "Infinity", 0, -0.5, -1])
+async def test_initial_setup_requires_fresh_positive_credit_before_any_mutation(
+    tmp_path, monkeypatch, action, balance
+):
+    """Even a zero-price eligible subscription does not prove enrollment credit."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli, "credential_id", lambda _: 7)
+    api = AsyncMock()
+    api.request.return_value = {"eligible": True, "balance_usd": balance}
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    with pytest.raises(ValueError, match="balance above USD 0"):
+        await dispatch(parser.parse_args(["tunnel", action]))
+    api.request.assert_awaited_once_with("GET", "/billing")
+    assert not (config.directory() / "config.json").exists()
+    assert not (config.directory() / "create.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_existing_billing_eligibility_preserves_negative_credit_floor():
+    api = AsyncMock()
+    api.request.return_value = {"eligible": True, "balance_usd": -0.5}
+    assert (await _ensure_billing(api, None))["eligible"]
+    api.request.assert_awaited_once_with("GET", "/billing")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "balance,eligible,ready", [(5, True, True), (0, True, False), (5, False, False)]
+)
+async def test_agent_billing_json_is_fresh_owner_pinned_and_allowlisted(
+    monkeypatch, balance, eligible, ready
+):
+    from local_operator.tunnels import cli
+
+    select = Mock(return_value=19)
+    monkeypatch.setattr(cli, "credential_id", select)
+    api = AsyncMock()
+    api.request.return_value = {
+        "balance_usd": balance,
+        "eligible": eligible,
+        "monthly_price_usd": 0,
+        "monthly_cost_usd": 0,
+        "amount_due_usd": 0,
+        "private_future_field": "never-print",
+    }
+    factory = Mock(return_value=api)
+    monkeypatch.setattr(cli, "RadientTunnels", factory)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(
+        parser.parse_args(["tunnel", "billing", "--credential-id", "19", "--json"])
+    )
+    data = json.loads(receipt)
+    assert data["credential_id"] == 19 and data["account_valid"] is True
+    assert data["setup_ready"] is ready
+    assert data["positive_balance"] is (balance > 0)
+    assert data["billing"]["monthly_price_usd"] == 0
+    assert "never-print" not in receipt
+    select.assert_called_once_with(19)
+    assert factory.call_args.args[0] == 19
+    api.request.assert_awaited_once_with("GET", "/billing")

@@ -1,6 +1,6 @@
 ---
 name: mobile
-description: Install and operate Local Operator phone access — the mobile daemon, portal password, LaunchAgent, and how to hand the password to the user securely.
+description: Set up phone access with a Radient account, fresh credit check and authenticated personal tunnel; operate the mobile daemon and optional direct local password access.
 ---
 
 # Mobile: phone access to every lop session
@@ -9,15 +9,69 @@ Read this guide before installing, rotating, or troubleshooting `lop mobile`.
 The design contract lives in `docs/mobile.md`; this file is the operational
 playbook an agent follows when the user asks to set phone access up.
 
-The daemon binds **loopback only** (`127.0.0.1:4098`). For Radient-authenticated
-remote access, read `guide://tunnel` and use `lop tunnel`: it supplies cloud
-authentication and the private local relay credential without a second phone
-password prompt. The password delivery steps below apply to direct local
-password access. Never widen the bind.
+Recommend **Radient personal tunnels first**. They give the phone a private
+Radient-authenticated URL on `radienthq.com`, with no separate relay password
+to copy. Radient manages the Cloudflare tunnel and cloud authentication. The
+daemon still binds **loopback only** (`127.0.0.1:4098`); never widen the bind.
 
 ## When the user asks to set it up
 
-Do the work. Do not dump the commands and wait. The sequence is:
+Do the work, following `guide://tunnel` for detailed configuration. The default
+sequence is:
+
+1. Run `lop login-status`. If Radient is missing or expired, have the user run
+   `/login radient` in their TUI. The browser offers **sign in or create an
+   account** with Google or Microsoft. A new user reviews the linked Terms of
+   Service and Privacy Policy and checks the required acknowledgements
+   themselves; marketing is optional. Continue the browser authorization so
+   the native login returns to Local Operator. Never accept terms for them or
+   ask for their provider password/token in chat.
+2. Select the bracketed Radient credential ID from `lop login-status`. If there
+   are several accounts and the intended owner is unclear, ask which one.
+   Run `lop tunnel billing --credential-id <id> --json`. This refreshes that
+   exact login and checks the cloud account. Require `account_valid: true` and
+   `positive_balance: true`; a cached `/usage` screen or the mere presence of
+   a stored login is insufficient. `/usage` now displays Radient's credit
+   balance, but the setup command must make this fresh check.
+3. Show the quoted `billing.monthly_price_usd`. At the current allocation the
+   tunnel price is **USD 0/month**; verify the actual quote rather than promise
+   it is always free. Positive credit is account credit, not a tunnel setup
+   fee. New accounts may already have starter credit; do not demand a purchase
+   when their fresh balance is positive. If credit is zero, negative or cannot
+   be verified, stop setup, direct them to
+   `https://console.radienthq.com/dashboard/tunnels`, and recheck after they
+   add credit or repair login. Never purchase credit automatically.
+4. Install `cloudflared` 2025.4.0 or newer with the supported package manager
+   if missing. Run `lop tunnel create --credential-id <id> --name "My computer"`
+   then `lop tunnel install`. If a paid quote requires activation, only pass
+   `--accept-monthly-price <amount>` for the exact amount the user accepted.
+   If the console already created the tunnel, use
+   `lop tunnel connect <tunnel-id> --credential-id <id>` instead of creating
+   another. If this machine is already configured, inspect `lop tunnel status`
+   and use `configure`/`install` as needed; don't revoke a working tunnel.
+5. Confirm `lop mobile status` reports healthy with a closed auth gate, and
+   `lop tunnel status` reports the connector running and its cloud route active.
+   On macOS tunnel installation prepares the mobile relay automatically and
+   keeps its existing Keychain password. On Linux prepare `lop mobile serve`
+   with a private password environment and then the connector's user service;
+   see the platform notes below and `guide://tunnel`.
+6. Give the user the **exact HTTPS URL printed by the tunnel**, not localhost
+   or a guessed hostname. They open it on the phone, sign in to the same
+   Radient account, and authorize access. Check the session list and opening
+   a session; explain they can start, resume and steer sessions from the phone.
+   Their computer and connector must remain running and awake. No mobile
+   portal password needs to be delivered for this route.
+
+Existing tunnels retain the normal monthly billing lifecycle: access suspends
+at the **−USD 1** floor and can be reactivated after a top-up. The positive
+balance check above is for initial setup, not a new suspension threshold.
+
+## Direct local password access (optional)
+
+Use this path when the user specifically wants local password access or an
+alternative such as their own Tailscale or identity-protected tunnel. Explain
+the extra remote-access setup. Do not default to an anonymous Cloudflare quick
+tunnel. The password delivery sequence applies only to this path:
 
 1. Ask how they want the portal password delivered (below). Do this **before**
    `install` so you are not holding a secret with nowhere to put it.
@@ -120,8 +174,8 @@ to print when stdout is not a TTY, so an agent cannot slurp it.
 - Local URL: `http://127.0.0.1:4098`
 - Every interactive `lop` they start now publishes itself; the phone list
   updates live. No extra flag.
-- Remote access is their tunnel (Cloudflare, Tailscale, …) in front of
-  loopback. The daemon will not bind a LAN address.
+- For convenient remote access, use the Radient setup above. An alternative
+  tunnel needs its own identity gate in front of loopback.
 - Rotate with `lop mobile password` then `lop mobile restart` (rotation
   invalidates every live cookie).
 
@@ -143,6 +197,14 @@ flag; check `lop mobile logs`.
 
 ## Troubleshooting
 
+- **Radient sign-in fails on the phone.** Start again from the personal HTTPS
+  URL in Safari or Chrome. Complete the standard Google/Microsoft browser
+  flow and return to the same tunnel authorization. If an embedded browser
+  refuses provider login, open the link in the full browser. Never disable
+  cloud authentication or substitute an anonymous tunnel to fix login.
+- **Setup rejects the credit balance.** Run the fresh billing check with the
+  same credential ID. Missing data is not zero-cost eligibility. Add credit
+  or repeat `/login radient` as appropriate, then retry setup.
 - **`install` says it needs macOS launchd.** Use `lop mobile serve` in the
   foreground. Supervision is the only macOS-specific piece.
 - **`auth gate: OPEN`.** The daemon is serving `/api` without a cookie.
