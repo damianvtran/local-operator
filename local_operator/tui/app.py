@@ -20545,6 +20545,20 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        # The record of every session the cleanup policy has removed. Named
+        # HERE, next to the log path, because the removal itself happens in
+        # the runtime process whose log is not the one above (UX round 2,
+        # U6 residual): a user asking "what happened to my session" from
+        # /help must land on the file that answers, not on a log that never
+        # mentions it. Shown even when the file does not exist yet — its
+        # absence IS the answer "nothing was ever removed".
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.session.cleanup import CLEANUP_LOG_NAME, SESSIONS_DIRNAME
+
+        record_row = Text()
+        record_row.append("cleanup record".ljust(name_width), style=muted)
+        record_row.append(str(_config_dir() / SESSIONS_DIRNAME / CLEANUP_LOG_NAME), style=dim)
+        lines.append(record_row)
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(

@@ -1141,6 +1141,11 @@ def _recent_sessions_with_origin(
     Private because the public pair is what every other caller wants and the
     CLI's recovery listing pins its shape.
     """
+    # Lazy and stdlib-only on the other side: ``retention`` imports nothing
+    # heavier than ``logging``, and the CLI startup guard measures this
+    # module's import, not this function's.
+    from local_operator.session.retention import session_activity
+
     rows: list[tuple[str, float, str]] = []
     try:
         scan = os.scandir(config_dir / "sessions")
@@ -1156,10 +1161,16 @@ def _recent_sessions_with_origin(
     seen: set[str] = set()
     with scan:
         for entry in scan:
-            try:
-                mtime = os.stat(os.path.join(entry.path, TRANSCRIPT_NAME)).st_mtime
-            except OSError:
+            # ONE ranking clock, shared with the cleanup policy
+            # (``session.retention.session_activity``): the picker's "most
+            # recent" and the policy's "most recent" must be the same
+            # directories, or the policy removes rows the picker shows
+            # (QA round 1 Q2, UX round 2 U11). A directory with no activity
+            # is not a resumable session and gets no row.
+            activity = session_activity(Path(entry.path))
+            if activity is None:
                 continue
+            mtime = activity
             # After the transcript stat, not before: the stat is what proves the
             # directory is a session at all, and an unreadable marker must not
             # cost a row.
@@ -1231,7 +1242,13 @@ def _recent_sessions_with_origin(
     # file on every open to persist nothing.
     if merged != cached:
         _save_origin_cache(cache_path, merged)
-    rows.sort(key=lambda row: row[1], reverse=True)
+    # Newest first; EQUAL stamps break on the id, ascending, so the order is
+    # a property of the store rather than of ``scandir`` on this filesystem.
+    # The cleanup policy sorts on the same key: with an unstable tie order
+    # the policy's "first page" and the picker's disagreed on a store of
+    # equal stamps, and each launch shaved one more session (QA round 2,
+    # Q10).
+    rows.sort(key=lambda row: (-row[1], row[0]))
     # Sliced only when a limit was actually asked for: ``rows[:None]`` would
     # also return everything, but spelling it out keeps "no limit" a decision
     # the code states rather than a property of slice syntax.

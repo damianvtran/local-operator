@@ -8275,6 +8275,17 @@ def test_help_mentions_the_window_title_toggle() -> None:
     assert "lo ›" in text and "lo ⣾" in text and "lo !" in text
 
 
+def test_help_names_the_cleanup_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """UX round 2, U6 residual: the removal happens in the runtime process,
+    whose log is not the `logs` row's file, so a user asking "what happened
+    to my session" from /help must be pointed at the record itself."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    text = _renderable_plain(app._help_block().renderable)
+    assert "cleanup record" in text
+    assert str(tmp_path / "sessions" / ".cleanup-log.jsonl") in text
+
+
 @pytest.mark.asyncio
 async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     """Both key-reference rows fit on ONE line at the commonest terminal width.

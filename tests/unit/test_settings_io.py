@@ -939,3 +939,16 @@ def test_an_unresolvable_choice_list_says_so_rather_than_offering_nothing() -> N
     assert problem is not None
     assert "could not be read" in problem
     assert not problem.endswith(": ")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("false", False), ("no", False), ("banana", False), ("yes", True), (1, True), ([], False)],
+)
+def test_bool_settings_read_strictly(tmp_path: Path, raw: object, expected: bool) -> None:
+    """``read_setting`` on a BOOL goes through ``strict_bool`` (R2-4), so the
+    page cannot paint ``on`` for a value the consumer reads as off."""
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"session": {"cleanup": {"enabled": raw}}})
+    setting = settings_io.BY_KEY["session.cleanup.enabled"]
+    assert settings_io.read_setting(ConfigManager(tmp_path), setting) is expected

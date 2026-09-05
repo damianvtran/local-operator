@@ -11,12 +11,17 @@ of the original by another name. Reading the module docstring that promised
 on the *shape* of the code does.
 
 HOW IT WORKS. Every ``.py`` under ``local_operator/`` is parsed and each call
-to one of :data:`_REMOVERS` or :data:`_MOVERS` is checked against
-:data:`_ALLOWED`, an explicit allow-list keyed by ``relative/path.py::
-function`` carrying the reason the call cannot reach a session directory.
-Anything not in the list fails with its ``file:line``. Adding a call site
-therefore means adding a line HERE with a reason a reviewer can check — the
-point is not that the list is short, it is that every entry was argued for.
+named in :data:`_NAMES` is checked against :data:`_ALLOWED`, an explicit
+allow-list keyed by ``relative/path.py::function::call-label`` — the
+FUNCTION and the SPECIFIC CALL SHAPE in it (``os.replace``, ``<path>.unlink``,
+``shutil.rmtree``…) — carrying the reason that call cannot reach a session
+directory. Keyed by call, not by function, because an excused function is
+otherwise a blind surface: review round 2 (R2-1) dropped ``shutil.rmtree``
+into an allow-listed ``wakes/store.py::remove_entry`` and the function-keyed
+list waved it through. Anything not in the list fails with its
+``file:line``. Adding a call site therefore means adding a row HERE with a
+reason a reviewer can check — the point is not that the list is short, it
+is that every entry was argued for.
 
 BIASED TOWARD FALSE POSITIVES, on purpose. Import aliases are resolved
 (``from shutil import rmtree``, ``import shutil as sh``), a call on ANY
@@ -55,160 +60,501 @@ _NAMES = frozenset(
 #: Modules whose functions of those names hit the filesystem.
 _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 
-#: ``path::function`` → why this call can never touch a directory under
-#: ``sessions/``. ``<module>`` is module scope. Keep the reasons honest: a
-#: reviewer reading a new entry should be able to open the line and agree.
-_ALLOWED: dict[str, str] = {
+#: ``(path::function, call-label, reason)`` — why this call can never touch a
+#: directory under ``sessions/``. ``<module>`` is module scope. Keep the
+#: reasons honest: a reviewer reading a new row should be able to open the
+#: line and agree.
+_ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
     # -- the one legitimate remover -----------------------------------------
-    f"{CLEANUP_MODULE}::remove_session_dir": (
+    (
+        "local_operator/session/cleanup.py::remove_session_dir",
+        "shutil.rmtree",
         "THE session remover: guarded by the store marker, the config dir, "
-        "the hard guards and the cleanup log"
+        "the hard guards and the cleanup log",
     ),
     # -- agent / team storage (agents/<id>/, teams/<name>/), never sessions/ --
-    "local_operator/agents.py::AgentRegistry.delete_agent": "agents/<id>",
-    "local_operator/agents.py::AgentRegistry.save_agent": "agents/<id> rollback of a failed save",
-    "local_operator/agents.py::AgentRegistry.import_agent": "agents/<id> rollback, failed import",
-    "local_operator/agents.py::AgentRegistry.migrate_agents_dir": "legacy agents/ layout",
-    "local_operator/agents.py::AgentRegistry.export_agent_archive": "mkdtemp staging dir",
-    "local_operator/agents.py::AgentRegistry.exported_agent_archive": "mkdtemp staging dir",
-    "local_operator/teams.py::_atomic_write_text": "temp FILE -> teams/ json",
-    "local_operator/teams.py::TeamRegistry._save_team_locked": "teams/<name> staging swap",
-    "local_operator/teams.py::TeamRegistry._swap_row_directory_locked": "teams/<name> staging swap",
-    "local_operator/teams.py::TeamRegistry._recover_interrupted_swap_locked": (
-        "teams/<name> staging swap recovery"
+    ("local_operator/agents.py::AgentRegistry.delete_agent", "shutil.rmtree", "agents/<id>"),
+    (
+        "local_operator/agents.py::AgentRegistry.save_agent",
+        "shutil.rmtree",
+        "agents/<id> rollback of a failed save",
     ),
-    "local_operator/teams.py::TeamRegistry.delete_team": "teams/<name>",
-    "local_operator/server/routes/transcription.py::create_transcription_endpoint": (
-        "mkdtemp upload dir"
+    (
+        "local_operator/agents.py::AgentRegistry.import_agent",
+        "shutil.rmtree",
+        "agents/<id> rollback, failed import",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
+        "shutil.rmtree",
+        "legacy agents/ layout",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.export_agent_archive",
+        "shutil.rmtree",
+        "mkdtemp staging dir",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.exported_agent_archive",
+        "shutil.rmtree",
+        "mkdtemp staging dir",
+    ),
+    ("local_operator/teams.py::_atomic_write_text", "os.replace", "temp FILE -> teams/ json"),
+    ("local_operator/teams.py::_atomic_write_text", "<path>.unlink", "temp FILE -> teams/ json"),
+    (
+        "local_operator/teams.py::TeamRegistry._save_team_locked",
+        "os.replace",
+        "teams/<name> staging swap",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._save_team_locked",
+        "shutil.rmtree",
+        "teams/<name> staging swap",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
+        "<path>.rmdir",
+        "teams/<name> staging swap",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
+        "shutil.rmtree",
+        "teams/<name> staging swap",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
+        "os.replace",
+        "teams/<name> staging swap",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._recover_interrupted_swap_locked",
+        "shutil.rmtree",
+        "teams/<name> staging swap recovery",
+    ),
+    (
+        "local_operator/teams.py::TeamRegistry._recover_interrupted_swap_locked",
+        "os.replace",
+        "teams/<name> staging swap recovery",
+    ),
+    ("local_operator/teams.py::TeamRegistry.delete_team", "shutil.rmtree", "teams/<name>"),
+    (
+        "local_operator/server/routes/transcription.py::create_transcription_endpoint",
+        "shutil.rmtree",
+        "mkdtemp upload dir",
     ),
     # -- file-level atomic writes: temp FILE -> its final FILE name ---------
     # These write a file that may live INSIDE a session directory (transcript,
     # roster sidecar, inbox, lease, origin/title sidecars) but never move or
     # remove the directory itself, and os.replace of a file onto a directory
     # fails with EISDIR/ENOTDIR by construction.
-    "local_operator/config.py::ConfigManager._handle_bad_config": "config.yml -> .bad backup FILE",
-    "local_operator/config.py::ConfigManager._write_config": "temp FILE -> config.yml",
-    "local_operator/credentials.py::CredentialManager.write_to_file": "temp FILE -> .env",
-    "local_operator/browser_bridge/daemon.py::_private_write": "temp FILE",
-    "local_operator/browser_bridge/state.py::publish": "temp FILE",
-    "local_operator/evaluation/adapters/supervisor.py::persist_rescue": "temp FILE",
-    "local_operator/evaluation/evidence/store.py::EvidenceWriter._write_state": (
-        "temp FILE -> state, dir_fd-bound to an evidence root"
+    (
+        "local_operator/config.py::ConfigManager._handle_bad_config",
+        "<path>.replace",
+        "config.yml -> .bad backup FILE",
     ),
-    "local_operator/mcp/config.py::_write_json_atomic": "temp FILE -> mcp json",
-    "local_operator/mobile/seen.py::SeenStore._persist_locked": "temp FILE",
-    "local_operator/multiplexer/markers.py::_FileBackend.publish": "temp FILE -> pane marker",
-    "local_operator/skills/index.py::SkillIndex._persist_cache": "temp FILEs -> index cache",
-    "local_operator/tools/spill.py::_atomic_write_bytes": "temp FILE -> spill",
-    "local_operator/tunnels/config.py::private_write": "temp FILE -> tunnels/ config",
-    "local_operator/wakes/store.py::write_entry": "temp FILE -> wakes/<id>.json",
-    "local_operator/session/runtime/registry.py::publish": "temp FILE -> runtime/<pid>.json",
-    "local_operator/session/runtime/inbox.py::_replace_remainder": (
-        "temp FILE -> inbox.jsonl inside the same session directory"
+    (
+        "local_operator/config.py::ConfigManager._write_config",
+        "os.replace",
+        "temp FILE -> config.yml",
     ),
-    "local_operator/session/session.py::_write_roster_sidecar": (
-        "temp FILE -> roster sidecar inside the same session directory"
+    (
+        "local_operator/config.py::ConfigManager._write_config",
+        "os.unlink",
+        "temp FILE -> config.yml",
     ),
-    "local_operator/session/transcript.py::Transcript._replace_file": (
-        "compaction temp FILE -> transcript.jsonl inside the same session directory"
+    (
+        "local_operator/credentials.py::CredentialManager.write_to_file",
+        "os.replace",
+        "temp FILE -> .env",
     ),
-    "local_operator/session_lease.py::acquire_session_lease": (
-        "stale lease FILE -> tombstone FILE inside the same session directory"
+    (
+        "local_operator/credentials.py::CredentialManager.write_to_file",
+        "os.unlink",
+        "temp FILE -> .env",
+    ),
+    ("local_operator/browser_bridge/daemon.py::_private_write", "os.replace", "temp FILE"),
+    ("local_operator/browser_bridge/state.py::publish", "os.replace", "temp FILE"),
+    ("local_operator/browser_bridge/state.py::publish", "os.unlink", "temp FILE"),
+    ("local_operator/evaluation/adapters/supervisor.py::persist_rescue", "os.replace", "temp FILE"),
+    ("local_operator/evaluation/adapters/supervisor.py::persist_rescue", "os.unlink", "temp FILE"),
+    (
+        "local_operator/evaluation/evidence/store.py::EvidenceWriter._write_state",
+        "os.rename",
+        "temp FILE -> state, dir_fd-bound to an evidence root",
+    ),
+    ("local_operator/mcp/config.py::_write_json_atomic", "os.replace", "temp FILE -> mcp json"),
+    ("local_operator/mcp/config.py::_write_json_atomic", "os.unlink", "temp FILE -> mcp json"),
+    ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
+    ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
+    (
+        "local_operator/multiplexer/markers.py::_FileBackend.publish",
+        "os.replace",
+        "temp FILE -> pane marker",
+    ),
+    (
+        "local_operator/skills/index.py::SkillIndex._persist_cache",
+        "os.replace",
+        "temp FILEs -> index cache",
+    ),
+    ("local_operator/tools/spill.py::_atomic_write_bytes", "os.replace", "temp FILE -> spill"),
+    ("local_operator/tools/spill.py::_atomic_write_bytes", "<path>.unlink", "temp FILE -> spill"),
+    (
+        "local_operator/tunnels/config.py::private_write",
+        "<path>.unlink",
+        "temp FILE -> tunnels/ config",
+    ),
+    (
+        "local_operator/tunnels/config.py::private_write",
+        "os.replace",
+        "temp FILE -> tunnels/ config",
+    ),
+    ("local_operator/wakes/store.py::write_entry", "os.replace", "temp FILE -> wakes/<id>.json"),
+    ("local_operator/wakes/store.py::write_entry", "os.unlink", "temp FILE -> wakes/<id>.json"),
+    (
+        "local_operator/session/runtime/registry.py::publish",
+        "os.replace",
+        "temp FILE -> runtime/<pid>.json",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::publish",
+        "os.unlink",
+        "temp FILE -> runtime/<pid>.json",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::_replace_remainder",
+        "os.replace",
+        "temp FILE -> inbox.jsonl inside the same session directory",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::_replace_remainder",
+        "<path>.unlink",
+        "temp FILE -> inbox.jsonl inside the same session directory",
+    ),
+    (
+        "local_operator/session/session.py::_write_roster_sidecar",
+        "os.replace",
+        "temp FILE -> roster sidecar inside the same session directory",
+    ),
+    (
+        "local_operator/session/session.py::_write_roster_sidecar",
+        "<path>.unlink",
+        "temp FILE -> roster sidecar inside the same session directory",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._replace_file",
+        "os.replace",
+        "compaction temp FILE -> transcript.jsonl inside the same session directory",
+    ),
+    (
+        "local_operator/session_lease.py::acquire_session_lease",
+        "os.replace",
+        "stale lease FILE -> tombstone FILE inside the same session directory",
+    ),
+    (
+        "local_operator/session_lease.py::acquire_session_lease",
+        "<path>.unlink",
+        "stale lease FILE -> tombstone FILE inside the same session directory",
     ),
     # -- in-memory .replace(), not the filesystem ---------------------------
-    "local_operator/session/remote.py::RemoteSession._install_frontend": "store facade .replace()",
-    "local_operator/session/remote.py::RemoteSession._apply_frontend_facades": (
-        "facade .replace() on in-memory state"
+    (
+        "local_operator/session/remote.py::RemoteSession._install_frontend",
+        "<path>.replace",
+        "store facade .replace()",
     ),
-    "local_operator/evaluation/runner/provider_client.py::ProviderModelClient._maybe_compact": (
-        "in-memory context .replace()"
+    (
+        "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",
+        "<path>.replace",
+        "facade .replace() on in-memory state",
     ),
-    "local_operator/evaluation/runner/provider_client.py::ProviderModelClient._shed_stale_turns": (
-        "in-memory context .replace()"
+    (
+        "local_operator/evaluation/runner/provider_client.py::ProviderModelClient._maybe_compact",
+        "<path>.replace",
+        "in-memory context .replace()",
+    ),
+    (
+        "local_operator/evaluation/runner/provider_client.py"
+        "::ProviderModelClient._shed_stale_turns",
+        "<path>.replace",
+        "in-memory context .replace()",
     ),
     # -- unlink/remove of FILES the same function owns (locks, caches, sidecars,
     #    temp files, install artefacts). A session directory is never the arg.
-    "local_operator/browser_bridge/daemon.py::BridgeService._try_pair": "pending-pair FILE",
-    "local_operator/browser_bridge/daemon.py::reset_pairing": "pairing FILE",
-    "local_operator/browser_bridge/install.py::uninstall": "plist/unit FILEs; state_store.remove()",
-    "local_operator/browser_bridge/state.py::remove": "bridge state FILE",
-    "local_operator/evaluation/adapters/supervisor.py::discard_rescue": "rescue FILE",
-    "local_operator/evaluation/evidence/store.py::_OSCalls.unlink": "dir_fd-bound FILE unlink",
-    "local_operator/fork.py::consume_boot_prompt": "one-shot boot-prompt sidecar FILE",
-    "local_operator/fork.py::consume_fork_boundary": "one-shot fork-boundary sidecar FILE",
-    "local_operator/mobile/install.py::uninstall": "plist FILE",
-    "local_operator/model/catalogue.py::_ListingFetchLease.acquire": "lease FILE under the cache",
-    "local_operator/model/catalogue.py::_ListingFetchLease.release": "lease FILE under the cache",
-    "local_operator/model/catalogue.py::_write_cache": "temp FILE -> cache FILE",
-    "local_operator/model/catalogue.py::invalidate": "catalogue cache FILE",
-    "local_operator/model/catalogue.py::invalidate_documents": "catalogue cache FILEs",
-    "local_operator/model/catalogue.py::purge_legacy_documents": "catalogue cache FILEs",
-    "local_operator/model/catalogue.py::purge_stranded_temp_files": "catalogue temp FILEs",
-    "local_operator/multiplexer/markers.py::_FileBackend.retire": "pane marker FILE",
-    "local_operator/resume.py::_save_origin_cache": "temp FILE -> origin-verdicts.json",
-    "local_operator/resume.py::_write_origin_scan_sentinel": "temp FILE -> sentinel in a session",
-    "local_operator/resume.py::_write_title_scan_sentinel": "temp FILE -> sentinel in a session",
-    "local_operator/resume.py::write_session_attachment": "temp FILE -> attachment.json",
-    "local_operator/resume.py::write_session_title": "temp FILE -> title.json in a session",
-    "local_operator/session/retention.py::release_session": ".session.pid marker FILE",
-    "local_operator/session/runtime/registry.py::scan": "stale runtime/<pid>.json FILE",
-    "local_operator/session/runtime/registry.py::unpublish": "own runtime/<pid>.json FILE",
-    "local_operator/session/search_index.py::_save": "temp FILE -> search index FILE",
-    "local_operator/session/transcript.py::Transcript._write_entries": (
-        "rollback of a half-written rebuild of the transcript FILE it just opened"
+    (
+        "local_operator/browser_bridge/daemon.py::BridgeService._try_pair",
+        "<path>.unlink",
+        "pending-pair FILE",
     ),
-    "local_operator/session_lease.py::SessionLease.release": "own lease + mirror FILEs",
-    "local_operator/session_lease.py::reap_proven_dead_session_claim": (
-        "a dead owner's lease + mirror FILEs; the directory is kept (QA N1)"
+    ("local_operator/browser_bridge/daemon.py::reset_pairing", "<path>.unlink", "pairing FILE"),
+    (
+        "local_operator/browser_bridge/install.py::uninstall",
+        "<path>.unlink",
+        "plist/unit FILEs; state_store.remove()",
     ),
-    "local_operator/tools/group_reaper.py::_rewrite_without_pgid_locked": "pgid ledger FILE",
-    "local_operator/tools/group_reaper.py::_safe_unlink": "pgid ledger FILE",
-    "local_operator/tools/group_reaper.py::kill_own_groups": "pgid ledger FILE",
-    "local_operator/tools/spill.py::SpillStore._remove": "spill FILE",
-    "local_operator/tui/notifier_app/__init__.py::_build_in_background": "build marker FILE",
-    "local_operator/tui/notifier_app/__init__.py::_build_in_background._run": "build marker FILE",
-    "local_operator/tunnels/cli.py::dispatch": "tunnel pid/state FILEs",
-    "local_operator/tunnels/install.py::uninstall": "plist FILE",
-    "local_operator/tunnels/service.py::run": "tunnel pid/state FILEs",
-    "local_operator/update.py::_write_cache": "temp FILE -> update cache FILE",
-    "local_operator/wakes/install.py::uninstall": "plist FILE",
-    "local_operator/wakes/store.py::remove_entry": "wakes/<id>.json FILE",
-    "local_operator/web_fetch/service.py::_prune_cache": "fetch cache FILEs",
+    (
+        "local_operator/browser_bridge/install.py::uninstall",
+        "<path>.remove",
+        "plist/unit FILEs; state_store.remove()",
+    ),
+    ("local_operator/browser_bridge/state.py::remove", "<path>.unlink", "bridge state FILE"),
+    (
+        "local_operator/evaluation/adapters/supervisor.py::discard_rescue",
+        "os.unlink",
+        "rescue FILE",
+    ),
+    (
+        "local_operator/evaluation/evidence/store.py::_OSCalls.unlink",
+        "os.unlink",
+        "dir_fd-bound FILE unlink",
+    ),
+    (
+        "local_operator/fork.py::consume_boot_prompt",
+        "<path>.unlink",
+        "one-shot boot-prompt sidecar FILE",
+    ),
+    (
+        "local_operator/fork.py::consume_fork_boundary",
+        "<path>.unlink",
+        "one-shot fork-boundary sidecar FILE",
+    ),
+    ("local_operator/mobile/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    (
+        "local_operator/model/catalogue.py::_ListingFetchLease.acquire",
+        "<path>.unlink",
+        "lease FILE under the cache",
+    ),
+    (
+        "local_operator/model/catalogue.py::_ListingFetchLease.release",
+        "<path>.unlink",
+        "lease FILE under the cache",
+    ),
+    (
+        "local_operator/model/catalogue.py::_write_cache",
+        "<path>.replace",
+        "temp FILE -> cache FILE",
+    ),
+    ("local_operator/model/catalogue.py::_write_cache", "<path>.unlink", "temp FILE -> cache FILE"),
+    ("local_operator/model/catalogue.py::invalidate", "<path>.unlink", "catalogue cache FILE"),
+    (
+        "local_operator/model/catalogue.py::invalidate_documents",
+        "<path>.unlink",
+        "catalogue cache FILEs",
+    ),
+    (
+        "local_operator/model/catalogue.py::purge_legacy_documents",
+        "<path>.unlink",
+        "catalogue cache FILEs",
+    ),
+    (
+        "local_operator/model/catalogue.py::purge_stranded_temp_files",
+        "<path>.unlink",
+        "catalogue temp FILEs",
+    ),
+    (
+        "local_operator/multiplexer/markers.py::_FileBackend.retire",
+        "<path>.unlink",
+        "pane marker FILE",
+    ),
+    (
+        "local_operator/resume.py::_save_origin_cache",
+        "<path>.replace",
+        "temp FILE -> origin-verdicts.json",
+    ),
+    (
+        "local_operator/resume.py::_write_origin_scan_sentinel",
+        "<path>.replace",
+        "temp FILE -> sentinel in a session",
+    ),
+    (
+        "local_operator/resume.py::_write_title_scan_sentinel",
+        "<path>.replace",
+        "temp FILE -> sentinel in a session",
+    ),
+    (
+        "local_operator/resume.py::write_session_attachment",
+        "<path>.replace",
+        "temp FILE -> attachment.json",
+    ),
+    (
+        "local_operator/resume.py::write_session_title",
+        "<path>.replace",
+        "temp FILE -> title.json in a session",
+    ),
+    (
+        "local_operator/session/retention.py::release_session",
+        "<path>.unlink",
+        ".session.pid marker FILE",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::scan",
+        "<path>.unlink",
+        "stale runtime/<pid>.json FILE",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::unpublish",
+        "<path>.unlink",
+        "own runtime/<pid>.json FILE",
+    ),
+    (
+        "local_operator/session/search_index.py::_save",
+        "<path>.replace",
+        "temp FILE -> search index FILE",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._write_entries",
+        "<path>.unlink",
+        "rollback of a half-written rebuild of the transcript FILE it just opened",
+    ),
+    (
+        "local_operator/session_lease.py::SessionLease.release",
+        "<path>.unlink",
+        "own lease + mirror FILEs",
+    ),
+    (
+        "local_operator/session_lease.py::reap_proven_dead_session_claim",
+        "<path>.unlink",
+        "a dead owner's lease + mirror FILEs; the directory is kept (QA N1)",
+    ),
+    (
+        "local_operator/tools/group_reaper.py::_rewrite_without_pgid_locked",
+        "<path>.unlink",
+        "pgid ledger FILE",
+    ),
+    ("local_operator/tools/group_reaper.py::_safe_unlink", "<path>.unlink", "pgid ledger FILE"),
+    ("local_operator/tools/group_reaper.py::kill_own_groups", "<path>.unlink", "pgid ledger FILE"),
+    ("local_operator/tools/spill.py::SpillStore._remove", "<path>.unlink", "spill FILE"),
+    (
+        "local_operator/tui/notifier_app/__init__.py::_build_in_background",
+        "<path>.unlink",
+        "build marker FILE",
+    ),
+    (
+        "local_operator/tui/notifier_app/__init__.py::_build_in_background._run",
+        "<path>.unlink",
+        "build marker FILE",
+    ),
+    ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs"),
+    ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs"),
+    ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
+    ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
+    ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
-    "local_operator/browser_bridge/daemon.py::BridgeService.shutdown": "state_store.remove() FILE",
-    "local_operator/config_watch.py::ConfigWatcher.subscribe.unsubscribe": "list.remove(listener)",
-    "local_operator/evaluation/adapters/discovery.py::_verified_imports": "sys.meta_path.remove",
-    "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint": "in-memory .replace",
-    "local_operator/session/frontend_state.py::FrontendStateStore.subscribe.unsubscribe": (
-        "list.remove(listener)"
+    (
+        "local_operator/browser_bridge/daemon.py::BridgeService.shutdown",
+        "<path>.remove",
+        "state_store.remove() FILE",
     ),
-    "local_operator/session/frontend_state.py::SnapshotJobs.__init__": "in-memory .replace",
-    "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__": "in-memory .replace",
-    "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__": (
-        "in-memory .replace"
+    (
+        "local_operator/config_watch.py::ConfigWatcher.subscribe.unsubscribe",
+        "<path>.remove",
+        "list.remove(listener)",
     ),
-    "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__": (
-        "in-memory .replace"
+    (
+        "local_operator/evaluation/adapters/discovery.py::_verified_imports",
+        "<path>.remove",
+        "sys.meta_path.remove",
     ),
-    "local_operator/session/remote.py::RemoteSession.subscribe.unsubscribe": "list.remove",
-    "local_operator/session/session.py::Session.subscribe._unsubscribe": "list.remove",
-    "local_operator/session/session.py::Session.subscribe_presentation.unsubscribe": "list.remove",
-    "local_operator/session/session.py::Session.subscribe_rejected_steering.unsubscribe": (
-        "list.remove"
+    (
+        "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",
+        "<path>.replace",
+        "in-memory .replace",
     ),
-    "local_operator/session/session.py::_paired_prefix": "set.remove(tool_call_id)",
-    "local_operator/session/transcript.py::Transcript.subscribe_admitted_commands.unsubscribe": (
-        "list.remove"
+    (
+        "local_operator/session/frontend_state.py::FrontendStateStore.subscribe.unsubscribe",
+        "<path>.remove",
+        "list.remove(listener)",
     ),
-    "local_operator/tui/app.py::OperatorApp._close_org_chart_view": "widget.remove()",
-    "local_operator/tui/app.py::OperatorApp._close_settings_view": "widget.remove()",
-    "local_operator/tui/app.py::OperatorApp._close_subagent_view": "widget.remove()",
-    "local_operator/tui/app.py::OperatorApp._recall_queued_steers": "widget.remove() / list.remove",
-    "local_operator/tui/app.py::OperatorApp._unmount_prompt": "widget.remove()",
-    "local_operator/tui/widgets/subagent_panel.py::SubagentPanel._sync_rows": "widget.remove()",
-    "local_operator/tui/widgets/transcript.py::TranscriptView.clear_blocks": "widget.remove()",
-    "local_operator/tui/widgets/transcript.py::TranscriptView.remove_block": "widget.remove()",
-}
+    (
+        "local_operator/session/frontend_state.py::SnapshotJobs.__init__",
+        "<path>.replace",
+        "in-memory .replace",
+    ),
+    (
+        "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
+        "<path>.replace",
+        "in-memory .replace",
+    ),
+    (
+        "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
+        "<path>.replace",
+        "in-memory .replace",
+    ),
+    (
+        "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
+        "<path>.replace",
+        "in-memory .replace",
+    ),
+    (
+        "local_operator/session/remote.py::RemoteSession.subscribe.unsubscribe",
+        "<path>.remove",
+        "list.remove",
+    ),
+    (
+        "local_operator/session/session.py::Session.subscribe._unsubscribe",
+        "<path>.remove",
+        "list.remove",
+    ),
+    (
+        "local_operator/session/session.py::Session.subscribe_presentation.unsubscribe",
+        "<path>.remove",
+        "list.remove",
+    ),
+    (
+        "local_operator/session/session.py::Session.subscribe_rejected_steering.unsubscribe",
+        "<path>.remove",
+        "list.remove",
+    ),
+    (
+        "local_operator/session/session.py::_paired_prefix",
+        "<path>.remove",
+        "set.remove(tool_call_id)",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript.subscribe_admitted_commands.unsubscribe",
+        "<path>.remove",
+        "list.remove",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_org_chart_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_settings_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_subagent_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._recall_queued_steers",
+        "<path>.remove",
+        "widget.remove() / list.remove",
+    ),
+    ("local_operator/tui/app.py::OperatorApp._unmount_prompt", "<path>.remove", "widget.remove()"),
+    (
+        "local_operator/tui/widgets/subagent_panel.py::SubagentPanel._sync_rows",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/tui/widgets/transcript.py::TranscriptView.clear_blocks",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/tui/widgets/transcript.py::TranscriptView.remove_block",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+)
+
+_ALLOWED: dict[str, str] = {f"{fn}::{label}": reason for fn, label, reason in _ALLOWED_ROWS}
 
 
 def _qualname_index(tree: ast.Module) -> dict[int, str]:
@@ -356,7 +702,7 @@ def _call_sites() -> list[tuple[str, int, str, str]]:
 
 def _offenders() -> list[tuple[str, int, str, str]]:
     """Classified calls NOT allow-listed."""
-    return [site for site in _call_sites() if f"{site[0]}::{site[3]}" not in _ALLOWED]
+    return [site for site in _call_sites() if f"{site[0]}::{site[3]}::{site[2]}" not in _ALLOWED]
 
 
 def test_no_session_directory_removal_outside_cleanup() -> None:
@@ -367,7 +713,10 @@ def test_no_session_directory_removal_outside_cleanup() -> None:
             "tests/unit/session/test_no_session_deletion.py. If the call provably "
             "cannot reach a directory under sessions/, add it to _ALLOWED with the "
             "reason; if it can, it belongs in session/cleanup.py behind the guards.",
-            *(f"  {rel}:{line}: {call} in {owner}" for rel, line, call, owner in offenders),
+            *(
+                f"  {rel}:{line}: {call} in {owner}  (key: {rel}::{owner}::{call})"
+                for rel, line, call, owner in offenders
+            ),
         ]
     )
 
@@ -394,7 +743,7 @@ def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
 def test_allow_list_is_not_stale() -> None:
     """Every allow-list entry must still name a real call site, so a removed
     call cannot leave a dangling permission behind for the next one."""
-    live = {f"{rel}::{owner}" for rel, _line, _label, owner in _call_sites()}
+    live = {f"{rel}::{owner}::{label}" for rel, _line, label, owner in _call_sites()}
     stale = sorted(set(_ALLOWED) - live)
     assert not stale, f"allow-list entries with no call site any more: {stale}"
 

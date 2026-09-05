@@ -1764,11 +1764,17 @@ def _non_negative_int(text: str) -> int:
 
 def _cleanup_row(candidate: Any, verb: str) -> str:
     """One decision, with what a user needs to judge it: name, age, size."""
-    title = f'"{candidate.title}"' if candidate.title else "(no title)"
+    # Budgeted to 100 columns with a 12-hex id and the longest reason
+    # (`[max_inactive_days] idle 400d > 30d`): title 28 cells, one space
+    # between columns. At 110 cols a 48-char title wrapped every row and a
+    # 9-row list read as 13 lines (UX round 2, U13).
+    title = candidate.title or "(no title)"
+    if len(title) > 22:
+        title = title[:21] + "…"
     age = f"{candidate.idle_days:.0f}d" if candidate.idle_days >= 1 else "<1d"
     return (
-        f"  {verb:<12} {candidate.session}  {title}  {age}  "
-        f"{_format_bytes(candidate.size_bytes)}  [{candidate.policy}] {candidate.reason}"
+        f"  {verb:<12} {candidate.session:<12} {title:<22} {age:>4} "
+        f"{_format_bytes(candidate.size_bytes):>6} [{candidate.policy}] {candidate.reason}"
     )
 
 
@@ -1790,6 +1796,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     from local_operator.session.cleanup import (
         CLEANUP_LOG_NAME,
         CleanupResult,
+        apply_cleanup,
         policy_from_config,
         run_cleanup,
     )
@@ -1809,8 +1816,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     policy = dataclasses.replace(policy, **overrides)
     record_path = root / "sessions" / CLEANUP_LOG_NAME
     switch_hint = (
-        "session.cleanup.enabled is off - turn it on in /settings (Session > Session cleanup) "
-        "or pass --force to run once anyway"
+        "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
+        "or pass --force to run once"
     )
 
     def emit_json(result: CleanupResult, *, outcome: str, confirmed: bool | None = None) -> None:
@@ -1877,7 +1884,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print(_cleanup_row(candidate, "would remove"))
         for name, guard in preview.protected:
             print(f"  kept         {name}  ({guard})")
-        print("nothing was removed (dry run); the record of real removals is " f"{record_path}")
+        print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
     if not args.json:
@@ -1923,9 +1930,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     # not the console: the stdout listing below already carries every fact
     # and the console copy doubled each line in a terminal (UX U3, QA Q7).
     # ``file_logging`` detaches the console handlers for the block and puts
-    # them back afterwards.
+    # them back afterwards. ``apply_cleanup(preview)`` removes EXACTLY the
+    # rows the user just confirmed — a second scan could rank a session
+    # created meanwhile and take one shown as kept (review round 2, R2-2).
     with file_logging():
-        result = run_cleanup(root, policy, force=bool(args.force), actor="cli")
+        result = apply_cleanup(root, preview, actor="cli")
     if args.json:
         emit_json(result, outcome="removed", confirmed=confirmed)
         return 3 if result.errors else 0

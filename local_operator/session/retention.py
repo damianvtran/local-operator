@@ -288,28 +288,31 @@ def _is_claimed(directory: Path, now: float) -> bool:
     return now - stamp < CLAIM_TRUST_S
 
 
-def _activity_mtime(directory: Path, fallback: float) -> float:
-    """When the user last worked in this session.
+def session_activity(directory: Path) -> float | None:
+    """When the user last worked in this session, or ``None`` if never.
 
-    Used on the unverifiable-platform branch of :func:`_is_claimed` to bound
-    how long a claim is trusted after real activity, and by the cleanup policy
-    as its definition of "last activity" for the inactivity limit and the
-    "most recently active" ordering.
+    THE ONE RANKING CLOCK. ``resume.recent_sessions`` (the ``/resume``
+    picker) and ``session.cleanup`` (the ``max_sessions`` / ``RECENT_KEEP``
+    ordering and the ``max_inactive_days`` limit) both call this, so "the N
+    most recent" means the same N directories on both surfaces. Two rankings
+    were the defect class behind UX round 2 U11: the policy fell back to the
+    directory mtime for a transcript-less directory, so every idle
+    open-and-quit launch ranked as the MOST recent session and displaced a
+    real conversation from the top-N — eleven launches emptied an 8-session
+    store.
 
-    THE CLOCK IS THE TRANSCRIPT (and the unread-mail spool), NOTHING ELSE. An
-    earlier version took the newest non-sidecar file anywhere under the
+    THE CLOCK IS THE TRANSCRIPT (and the unread-mail spool), NOTHING ELSE.
+    An earlier version took the newest non-sidecar file anywhere under the
     directory, which meant any bookkeeping the harness wrote — the startup
     backfills' ``title-scan.json`` above all — restamped "last activity" to
-    "now" on every boot, so ``max_inactive_days`` silently stopped matching
-    anything and the recent-N guard drifted away from what ``/resume`` shows
-    (QA round 1, Q2). Reading only :data:`_ACTIVITY_FILES` at the top level
-    is also what ``resume.recent_sessions`` does (it sorts on the transcript's
-    mtime), so the picker and the policy agree by construction. The directory
-    mtime is deliberately not consulted either: it moves whenever any entry
-    is added or removed.
+    "now" on every boot (QA round 1, Q2). The directory mtime is never
+    consulted: it moves whenever any entry is added or removed.
 
-    A directory with neither file falls back to ``fallback`` — the caller's
-    best remaining signal (the marker's mtime, or the directory's own).
+    ``None`` means NO ACTIVITY: a directory with neither file has never been
+    worked in, is outside the ranked set entirely, never counts toward
+    ``max_sessions`` or the recent-N guard, and is only ever a
+    ``remove_empty`` candidate. Stdlib-only and import-light because the
+    picker calls it per directory on every open.
     """
     newest: float | None = None
     for name in _ACTIVITY_FILES:
@@ -318,4 +321,16 @@ def _activity_mtime(directory: Path, fallback: float) -> float:
         except OSError:
             continue
         newest = stamp if newest is None else max(newest, stamp)
-    return fallback if newest is None else newest
+    return newest
+
+
+def _activity_mtime(directory: Path, fallback: float) -> float:
+    """:func:`session_activity` with ``fallback`` for a never-active directory.
+
+    Used on the unverifiable-platform branch of :func:`_is_claimed` to bound
+    how long a claim is trusted after real activity; the marker's own mtime
+    is the best remaining signal there. The cleanup policy does NOT use this
+    form — a fallback is exactly what let empty directories rank (U11).
+    """
+    activity = session_activity(directory)
+    return fallback if activity is None else activity

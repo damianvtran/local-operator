@@ -4860,3 +4860,27 @@ def test_every_gated_setting_names_a_bool_master() -> None:
             master = settings_io.BY_KEY[setting.gated_by]
             assert master.kind is Kind.BOOL, setting.key
             assert master.section == setting.section, setting.key
+
+
+@pytest.mark.asyncio
+async def test_page_reads_a_garbage_master_switch_the_way_the_policy_does(tmp_path: Path) -> None:
+    """Review round 2, R2-4: ``enabled: "banana"`` is OFF to the policy and
+    must be OFF on the page — value, ink, and the children's inert state —
+    or the page and the policy disagree about whether cleanup runs."""
+    from local_operator.session.cleanup import policy_from_config
+    from local_operator.tui import theme as theme_mod
+
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": "banana", "max_sessions": 5}}}
+    )
+    assert policy_from_config(ConfigManager(tmp_path)).enabled is False
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        index = _select(view, "session.cleanup.enabled")
+        assert " off" in view.render_lines_for_test()[index + 2]
+        assert _value_ink(view, "session.cleanup.max_sessions") == (
+            theme_mod.semantic_color("dim").lower()
+        )
+        assert "inert: Session cleanup is off" in view.render_lines_for_test()[-1]

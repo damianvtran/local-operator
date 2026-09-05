@@ -247,11 +247,152 @@ def test_max_total_bytes_trims_least_recent_first(tmp_path: Path) -> None:
 
 
 def test_the_ten_most_recent_are_never_candidates(tmp_path: Path) -> None:
-    _store(tmp_path, 10, transcript=False, age_days=400)
+    _store(tmp_path, 10, transcript=True, age_days=400)
     result = run_cleanup(tmp_path, dataclasses.replace(AGGRESSIVE, enabled=True), now=NOW)
     assert result.removed == []
     assert len(_names(tmp_path)) == 10
     assert all(guard.startswith("one of the 10") for _, guard in result.protected)
+
+
+def test_never_active_directories_are_outside_the_ranked_set(tmp_path: Path) -> None:
+    """UX round 2, U11 — the reviewer's scenario, with enough conversations
+    that BOTH the recent-10 guard and ``max_sessions`` bite. 14
+    conversations, ``max_sessions: 5``, then eleven idle open-and-quit
+    launches (empty directories, each newer than every conversation). The
+    old fallback ranked each launch as the MOST recent session, so eleven
+    launches filled the recent-10 with empties and emptied the store of
+    conversations. Now: the 10 most recently ACTIVE conversations survive
+    (the recent-N guard outranks the cap, as before), and every launch
+    directory is untouched unless ``remove_empty`` — it has no activity and
+    no rank."""
+    from local_operator.resume import recent_sessions
+
+    mark_store(tmp_path / "sessions")
+    for index in range(14):
+        _session(tmp_path, f"conv{index:02d}", transcript=True, age_days=30 - index)
+    for index in range(11):
+        directory = tmp_path / "sessions" / f"launch{index:02d}"
+        directory.mkdir()
+        os.utime(directory, (NOW - index, NOW - index))  # all newer than any conversation
+    policy = CleanupPolicy(enabled=True, max_sessions=5)
+    result = run_cleanup(tmp_path, policy, now=NOW)
+    # conv13 newest. Recent-10 = conv04..conv13 (protected); the cap takes
+    # the rest — conv00..conv03 — and NOT a single launch directory.
+    assert {c.session for c in result.removed} == {f"conv{i:02d}" for i in range(4)}
+    survivors = _names(tmp_path)
+    assert {f"conv{i:02d}" for i in range(4, 14)} <= survivors
+    assert {f"launch{i:02d}" for i in range(11)} <= survivors
+    # The picker and the policy agree: the picker's rows are exactly the
+    # ranked set, in the same order, and no launch directory has a row.
+    picker = [name for name, _stamp in recent_sessions(tmp_path)]
+    assert picker == [f"conv{i:02d}" for i in range(13, 3, -1)]
+    # A second wave of launches changes nothing.
+    for index in range(11, 22):
+        (tmp_path / "sessions" / f"launch{index:02d}").mkdir()
+    again = run_cleanup(tmp_path, policy, now=NOW)
+    assert again.removed == []
+    assert {f"conv{i:02d}" for i in range(4, 14)} <= _names(tmp_path)
+    # ``remove_empty`` is the ONLY policy that takes them.
+    swept = run_cleanup(tmp_path, dataclasses.replace(policy, remove_empty=True), now=NOW)
+    assert {c.session for c in swept.removed} == {f"launch{i:02d}" for i in range(22)}
+    assert all(c.policy == "remove_empty" for c in swept.removed)
+    assert {f"conv{i:02d}" for i in range(4, 14)} == _names(tmp_path)
+
+
+def test_the_recent_guard_is_the_pickers_first_page(tmp_path: Path) -> None:
+    """QA round 2, Q8. The 10 newest directories are subagent-origin or
+    empty; the 10 rows the user sees on ``/resume`` are OLDER user-origin
+    transcripts. ``max_sessions: 12`` must keep every picker row: the
+    recent-N guard is ``recent_sessions(limit=10)`` itself, not a ranking
+    of every directory. Subagent-origin transcripts still rank under the
+    cap by activity — they are real transcripts, never "empty" — so the
+    12 kept are the 10 picker rows plus the 2 most recent subagent runs."""
+    from local_operator.resume import (
+        ORIGIN_SUBAGENT,
+        mark_session_origin,
+        recent_sessions,
+    )
+
+    mark_store(tmp_path / "sessions")
+    for index in range(10):  # user-origin, 30..21 d old
+        _session(tmp_path, f"user{index:02d}", transcript=True, age_days=30 - index)
+    for index in range(7):  # subagent-origin, 7..1 d old — newer than every user row
+        directory = _session(tmp_path, f"sub{index:02d}", transcript=True, age_days=7 - index)
+        mark_session_origin(directory, ORIGIN_SUBAGENT)
+    for index in range(3):  # empty, newest of all
+        (tmp_path / "sessions" / f"empty{index:02d}").mkdir()
+    picker = [name for name, _stamp in recent_sessions(tmp_path, limit=10)]
+    assert picker == [f"user{i:02d}" for i in range(9, -1, -1)]
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=12), now=NOW)
+    survivors = _names(tmp_path)
+    assert {f"user{i:02d}" for i in range(10)} <= survivors, "a picker row was removed"
+    assert {f"empty{i:02d}" for i in range(3)} <= survivors
+    # Ranked set = 17 transcripts; cap 12; guard protects the 10 user rows;
+    # the 5 oldest subagent runs go (sub00..sub04), sub05/sub06 stay.
+    assert {c.session for c in result.removed} == {f"sub{i:02d}" for i in range(5)}
+    assert all(c.policy == "max_sessions" for c in result.removed)
+    assert {"sub05", "sub06"} <= survivors
+    # The guard rows are reported as the picker's, by name.
+    guarded = {name for name, guard in result.protected if guard.startswith("one of the 10")}
+    assert guarded <= set(picker)
+
+
+def test_equal_stamps_are_stable_across_consecutive_runs(tmp_path: Path) -> None:
+    """QA round 2, Q10: consecutive launches must not each shave one more
+    equal-stamped session. With a name tie-break the ranked order is a
+    property of the store, so a second run over the survivors removes
+    nothing and a third run removes nothing."""
+    mark_store(tmp_path / "sessions")
+    for index in range(15):
+        _session(tmp_path, f"t{index:02d}", transcript=True, age_days=30)  # identical stamps
+    policy = CleanupPolicy(enabled=True, max_sessions=12)
+    first = run_cleanup(tmp_path, policy, now=NOW)
+    assert [c.session for c in first.removed] == ["t14", "t13", "t12"]
+    for _ in range(3):
+        assert run_cleanup(tmp_path, policy, now=NOW).removed == []
+    assert len(_names(tmp_path)) == 12
+
+
+def test_picker_and_policy_share_one_ranking(tmp_path: Path) -> None:
+    """The picker's order IS the policy's order, by construction: both call
+    ``session_activity``. A sidecar newer than every transcript and an
+    inbox spool newer still must move the row on both surfaces or neither."""
+    from local_operator.resume import recent_sessions
+    from local_operator.session.retention import session_activity
+
+    made = _store(tmp_path, 6, transcript=True)  # s005 newest
+    (made[1] / "title-scan.json").write_text("{}")  # bookkeeping: no effect
+    (made[0] / "inbox.jsonl").write_text('{"from":"peer"}\n')  # unread mail: activity
+    picker = [name for name, _stamp in recent_sessions(tmp_path)]
+    by_clock = sorted(
+        (p.name for p in made), key=lambda n: -(session_activity(tmp_path / "sessions" / n) or 0)
+    )
+    assert picker == by_clock == ["s000", "s005", "s004", "s003", "s002", "s001"]
+
+
+def test_apply_removes_exactly_the_previewed_set(tmp_path: Path) -> None:
+    """Review round 2, R2-2 — reproduced: a session created between the
+    preview and the confirmation shifted the recent-10 window and a row
+    shown as KEPT was removed. ``apply_cleanup(plan)`` removes the plan's
+    set and nothing else; only the hard guards are re-checked."""
+    from local_operator.session.cleanup import apply_cleanup
+
+    _store(tmp_path, 15, transcript=True)  # s014 newest; recent-10 = s005..s014
+    policy = CleanupPolicy(enabled=True, max_sessions=10)
+    plan = run_cleanup(tmp_path, policy, now=NOW, dry_run=True)
+    assert {c.session for c in plan.removed} == {f"s{i:03d}" for i in range(5)}
+    assert ("s005", "one of the 10 most recent") not in plan.protected  # not even a candidate
+    # Meanwhile: a brand-new conversation lands, newer than everything.
+    _session(tmp_path, "fresh", transcript=True, age_days=0.5)
+    # And one planned directory acquires unread mail before the removal.
+    (tmp_path / "sessions" / "s004" / "inbox.jsonl").write_text('{"from":"peer"}\n')
+    result = apply_cleanup(tmp_path, plan, actor="cli", now=NOW)
+    assert {c.session for c in result.removed} == {f"s{i:03d}" for i in range(4)}
+    assert ("s004", "has unread spooled mail (since the preview)") in result.protected
+    # s005 — shown as kept — is still there, even though a re-scan would
+    # now rank it 11th.
+    assert (tmp_path / "sessions" / "s005").is_dir()
+    assert (tmp_path / "sessions" / "fresh").is_dir()
 
 
 @pytest.mark.parametrize(

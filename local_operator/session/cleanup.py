@@ -78,9 +78,9 @@ from local_operator.session.retention import (
     _SIDECAR_NAMES,
     SESSIONS_DIRNAME,
     TRANSCRIPT_FILENAME,
-    _activity_mtime,
     _is_claimed,
     _process_alive,
+    session_activity,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,26 +208,13 @@ def _coerce_int(value: Any, default: int) -> int:
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
-    """A REAL boolean or the default — never ``bool(value)``.
+    """The settings registry's strict parser, so the page and the policy read
+    the master switch identically (R1-6, R2-4). Imported lazily: this module
+    must stay light for the runtime child, and ``settings_io`` is the page's
+    module — but the PARSER is one function and there must be one of it."""
+    from local_operator.settings_io import strict_bool
 
-    ``enabled: "false"`` in a hand-edited YAML is a non-empty string, and
-    ``bool("false")`` is True: the one leaf where "garbage means the default"
-    did not hold was the master switch (review round 1, R1-6). An operator
-    frightened by the incident will hand-edit exactly this key, so anything
-    that is not literally ``true``/``false`` (or the YAML 1.1 spellings a
-    human types: yes/no/on/off, 0/1) reads as the default, which is OFF.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("true", "yes", "on", "1"):
-            return True
-        if lowered in ("false", "no", "off", "0"):
-            return False
-    return default
+    return strict_bool(value, default)
 
 
 def policy_from_config(config_manager: Any) -> CleanupPolicy:
@@ -487,9 +474,27 @@ def _dir_bytes(directory: Path) -> int:
 @dataclass
 class _Entry:
     path: Path
-    activity: float
+    activity: float | None
     has_transcript: bool
     size: int
+
+
+def _picker_first_page(config_dir: Path) -> set[str]:
+    """The ids on the first :data:`RECENT_KEEP` rows of ``/resume``.
+
+    Owned by ``resume.recent_sessions`` — ONE ranking, consumed by the picker
+    and by this policy — and imported lazily because ``resume`` is heavier
+    than this module wants at import. A picker that cannot be listed (an
+    unreadable store) protects nothing extra rather than failing the pass;
+    the hard guards still apply.
+    """
+    try:
+        from local_operator.resume import recent_sessions
+
+        return {name for name, _stamp in recent_sessions(config_dir, limit=RECENT_KEEP)}
+    except Exception:  # noqa: BLE001 — best-effort guard, never a reason to fail
+        logger.debug("session cleanup: cannot list the picker's first page", exc_info=True)
+        return set()
 
 
 def _session_title(directory: Path) -> str:
@@ -538,15 +543,26 @@ def run_cleanup(
     limit re-checking the guards on its own candidates:
 
     1. ``remove_empty`` — directories with no non-empty transcript.
-    2. ``max_inactive_days`` — last activity (:func:`_activity_mtime`: the
-       transcript's or the mail spool's mtime, never a sidecar's) older than
-       the limit.
+    2. ``max_inactive_days`` — last activity (:func:`session_activity`: the
+       transcript's or the mail spool's mtime, never a sidecar's, never the
+       directory's) older than the limit.
     3. ``max_sessions`` — beyond the N most recently active, oldest first.
     4. ``max_total_bytes`` — least recently active first until under budget.
 
-    The :data:`RECENT_KEEP` newest sessions are excluded from every limit.
+    Only directories WITH activity are ranked; a never-active directory is
+    outside the ranked set, never counts toward ``max_sessions`` or
+    :data:`RECENT_KEEP`, and is only a ``remove_empty`` candidate (U11). The
+    first :data:`RECENT_KEEP` rows of ``/resume`` — exactly what
+    ``resume.recent_sessions`` lists, so user-origin transcripts only — are
+    excluded from every limit (Q8). Subagent-origin transcripts rank under
+    ``max_sessions`` by activity like any other session but are not on the
+    picker and so are not covered by that guard.
     Ties on the activity clock break on the directory NAME so a dry run and
     the real run pick the same directories on any filesystem (R1-11).
+
+    A real run is a plan followed by :func:`apply_cleanup` on that exact
+    plan; a caller that previewed first should pass its preview to
+    :func:`apply_cleanup` rather than calling this again (R2-2).
     """
     result = CleanupResult(dry_run=dry_run)
     if not policy.enabled and not force and not dry_run:
@@ -581,16 +597,37 @@ def run_cleanup(
             if live_resolved is not None and child.resolve() == live_resolved:
                 result.protected.append((child.name, "the current session"))
                 continue
-            stamp = child.stat().st_mtime
-            activity = _activity_mtime(child, stamp)
-            entries.append(_Entry(child, activity, _has_transcript(child), _dir_bytes(child)))
+            entries.append(
+                _Entry(child, session_activity(child), _has_transcript(child), _dir_bytes(child))
+            )
         except OSError:
             continue
 
-    # Newest first; equal stamps fall back to the name so the order is a
-    # property of the store, not of ``iterdir`` on this filesystem.
-    entries.sort(key=lambda entry: (-entry.activity, entry.path.name))
-    recent = {entry.path.name for entry in entries[:RECENT_KEEP]}
+    # THE RANKED SET IS ONLY DIRECTORIES WITH ACTIVITY. A directory that has
+    # never been worked in (no transcript, no spool — every idle open-and-quit
+    # launch) has no place in "the N most recently active": it is not a
+    # conversation, and ranking it by any fallback made each such launch
+    # displace a real one (UX round 2, U11: eleven launches emptied an
+    # 8-session store under `max_sessions: 5`). It is only ever a
+    # `remove_empty` candidate. Newest first; equal stamps fall back to the
+    # name so the order is a property of the store, not of `iterdir`.
+    ranked = sorted(
+        (entry for entry in entries if entry.activity is not None),
+        key=lambda entry: (-(entry.activity or 0.0), entry.path.name),
+    )
+    never_active = [entry for entry in entries if entry.activity is None]
+    # THE RECENT-N GUARD IS THE PICKER'S FIRST PAGE, LITERALLY. ``recent``
+    # is what ``resume.recent_sessions(limit=RECENT_KEEP)`` returns — the
+    # same function, the same rows, the same order the user sees on
+    # ``/resume``. The policy used to rank every directory for this guard
+    # while the picker lists only transcripted, user-origin sessions; on a
+    # real store that is 179/210 subagent-origin the two sets did not
+    # intersect at all, and ``max_sessions: 12`` would have removed 9 of the
+    # 10 rows the user could see (QA round 2, Q8). Subagent-origin sessions
+    # are real transcripts and rank under ``max_sessions`` by activity like
+    # any other — they are never "empty" — but they are not on the picker,
+    # so they are not what this guard protects.
+    recent = _picker_first_page(config_dir)
     chosen: dict[str, Candidate] = {}
 
     # A directory several limits would take is reported once, under the first
@@ -614,44 +651,56 @@ def run_cleanup(
         if guard is not None:
             protect(name, guard)
             return False
+        idle = 0.0 if entry.activity is None else max(0.0, (moment - entry.activity) / 86400.0)
         chosen[name] = Candidate(
             name,
             policy_name,
             reason,
             title=_session_title(entry.path) if entry.has_transcript else "",
-            idle_days=max(0.0, (moment - entry.activity) / 86400.0),
+            idle_days=idle,
             size_bytes=entry.size,
         )
         return True
 
     if policy.remove_empty:
-        for entry in entries:
+        for entry in [*never_active, *ranked]:
             if not entry.has_transcript:
                 consider(entry, "remove_empty", "no transcript")
 
     if policy.max_inactive_days:
         cutoff = moment - policy.max_inactive_days * 86400.0
-        for entry in entries:
-            if entry.activity < cutoff:
-                idle_days = (moment - entry.activity) / 86400.0
+        for entry in ranked:
+            activity = entry.activity or 0.0
+            if activity < cutoff:
+                idle_days = (moment - activity) / 86400.0
                 consider(
                     entry,
                     "max_inactive_days",
-                    f"inactive {idle_days:.1f}d > {policy.max_inactive_days}d",
+                    f"idle {idle_days:.0f}d > {policy.max_inactive_days}d",
                 )
 
     if policy.max_sessions:
-        survivors = [entry for entry in entries if entry.path.name not in chosen]
-        excess = survivors[policy.max_sessions :]
-        for entry in reversed(excess):  # oldest first
-            consider(
+        # Walk oldest-first and stop once the KEPT count fits the cap. Not a
+        # positional slice of the ranked list: a guarded row (a picker row,
+        # a live claim) that sits inside the top-N slice would otherwise
+        # shield everything newer than it from ever being considered, and
+        # the cap would silently not apply (Q8's scenario: 10 older picker
+        # rows guarded, 7 newer subagent runs, cap 12 -> the 5 oldest
+        # subagent runs must go).
+        survivors = [entry for entry in ranked if entry.path.name not in chosen]
+        kept = len(survivors)
+        for entry in reversed(survivors):  # oldest first
+            if kept <= policy.max_sessions:
+                break
+            if consider(
                 entry,
                 "max_sessions",
-                f"beyond the {policy.max_sessions} most recently active",
-            )
+                f"beyond newest {policy.max_sessions}",
+            ):
+                kept -= 1
 
     if policy.max_total_bytes:
-        survivors = [entry for entry in entries if entry.path.name not in chosen]
+        survivors = [entry for entry in ranked if entry.path.name not in chosen]
         total = sum(entry.size for entry in survivors)
         for entry in reversed(survivors):  # least recently active first
             if total <= policy.max_total_bytes:
@@ -659,7 +708,7 @@ def run_cleanup(
             if consider(
                 entry,
                 "max_total_bytes",
-                f"store {total} B > {policy.max_total_bytes} B",
+                f"store {total // 1024} kB > {policy.max_total_bytes // 1024} kB",
             ):
                 total -= entry.size
 
@@ -667,8 +716,43 @@ def run_cleanup(
     if dry_run and not policy.enabled and not force:
         # Listed, not removed, and the caller is told why: the switch is off.
         result.skipped = "disabled"
-    for candidate in result.chosen:
+    if dry_run:
+        result.removed = list(result.chosen)
+        return result
+    return apply_cleanup(config_dir, result, actor=actor, now=moment)
+
+
+def apply_cleanup(
+    config_dir: Path,
+    plan: CleanupResult,
+    *,
+    actor: str,
+    now: float | None = None,
+) -> CleanupResult:
+    """Remove EXACTLY the set ``plan`` chose, re-checking only the hard guards.
+
+    The CLI shows the user a plan (a dry run), asks, then removes. If the
+    removal were a second scan, a session created between the prompt and the
+    ``yes`` would shift the recent-N window and a row shown as KEPT could be
+    removed (review round 2, R2-2 — reproduced). So the set is fixed here:
+    nothing is re-ranked, nothing is added. What IS re-checked is whether a
+    chosen directory has since acquired a live claim, an armed wake or
+    unread mail, because those are facts about NOW and refusing is always the
+    safe side. A directory that is no longer there is not an error.
+    """
+    moment = now if now is not None else time.time()
+    sessions_dir = config_dir / SESSIONS_DIRNAME
+    result = CleanupResult(scanned=plan.scanned, protected=list(plan.protected))
+    result.chosen = list(plan.chosen)
+    result.skipped = plan.skipped
+    for candidate in plan.chosen:
         target = sessions_dir / candidate.session
+        if not target.is_dir():
+            continue
+        guard = _guard(target, config_dir, moment)
+        if guard is not None:
+            result.protected.append((candidate.session, f"{guard} (since the preview)"))
+            continue
         try:
             done = remove_session_dir(
                 target,
@@ -677,7 +761,6 @@ def run_cleanup(
                 reason=candidate.reason,
                 actor=actor,
                 title=candidate.title,
-                dry_run=dry_run,
             )
         except OSError as exc:
             logger.warning("session cleanup: cannot remove %s: %s", candidate.session, exc)
@@ -685,8 +768,7 @@ def run_cleanup(
             continue
         if done:
             result.removed.append(candidate)
-            if not dry_run:
-                _forget_wake_entry(config_dir, candidate.session)
+            _forget_wake_entry(config_dir, candidate.session)
     return result
 
 

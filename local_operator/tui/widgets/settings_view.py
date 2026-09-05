@@ -3218,7 +3218,10 @@ class SettingsView(Vertical):
             # clause is the safety-relevant fact ("would remove 9 at next
             # launch") and at 80 cols it was the FIRST thing dropped because
             # the key path was kept ahead of it — for a row whose key the
-            # user is looking at (design round 2, D7).
+            # user is looking at (design round 2, D7). `default: N` keeps
+            # the same rank on purpose: it is what an unconfirmed `r`
+            # restores, and review round 1 (U2/U3) settled that it outranks
+            # the help; UX round 2 U12 is deferred in-thread on that basis.
             if clause:
                 both = cell_len(help_text) + cell_len(f" · {clause}") + cell_len(key_suffix)
                 clause_and_key = cell_len(clause) + cell_len(key_suffix)

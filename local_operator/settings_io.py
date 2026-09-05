@@ -1274,11 +1274,44 @@ def _walk(values: Mapping[str, Any], path: Sequence[str]) -> Any:
     return current
 
 
+def strict_bool(value: Any, default: bool) -> bool:
+    """A REAL boolean or ``default`` — never ``bool(value)``.
+
+    ``enabled: "false"`` in a hand-edited YAML is a non-empty string, and
+    ``bool("false")`` is True. The cleanup policy parses its master switch
+    this way (review round 1, R1-6); the settings PAGE must read it the same
+    way, or the page paints ``on`` for a switch the policy treats as off
+    (review round 2, R2-4) — the incident's accessor-mismatch class again,
+    one level up. So this lives here, beside the reader every page read goes
+    through, and the consumer imports it rather than spelling its own.
+    Anything that is not literally true/false, 0/1, or the YAML 1.1 spellings
+    a human types (yes/no/on/off) reads as the default.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    return default
+
+
 def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
-    """The stored value for ``setting``, or its default when unset."""
+    """The stored value for ``setting``, or its default when unset.
+
+    A BOOL is normalised through :func:`strict_bool` so a hand-edited
+    ``"false"`` reads as the consumer reads it (off), and ``is_default`` /
+    the value ink / the toggle all agree with the policy about the state.
+    """
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
+    if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
+        return strict_bool(raw, setting.default)
     return raw
 
 
