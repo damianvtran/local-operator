@@ -131,11 +131,13 @@ class _Suggestion(NamedTuple):
     is what an Enter/Tab writes into the buffer, and it matches what each key
     STORES: a bare provider id for ``hosting`` and a bare MODEL ID for
     ``model_name`` — NOT the ``provider/id`` selector. This is load-bearing:
-    ``_persist_default_from_picker`` in app.py writes ``model_name =
-    row.model_id`` (bare) beside ``hosting = row.provider``, and `bootstrap`
-    reads the two keys independently, so storing a selector here would leave
-    ``model_name`` holding ``anthropic/claude-opus-5`` under an ``anthropic``
-    hosting and boot a model id no provider owns.
+    ``/model default`` in app.py's ``_cmd_model`` splits its selector on the
+    FIRST ``/`` and writes ``model_name`` from the right-hand side (bare) beside
+    ``hosting`` from the left, and `bootstrap` reads the two keys
+    independently — so storing a selector here would leave ``model_name``
+    holding ``anthropic/claude-opus-5`` under an ``anthropic`` hosting and boot
+    a model id no provider owns. This page is the OTHER route to the same pair,
+    so the two writers have to agree on the shape.
 
     ``label`` is display-only and carries the ``provider/id`` SELECTOR for a
     model row, so the dropdown disambiguates the two catalogue entries that can

@@ -62,7 +62,7 @@ _COLUMN_GAP = 2
 #: by PREFIX because the app composes it with other clauses; kept as a constant
 #: here rather than imported from ``app`` because ``app`` imports this module.
 #: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
-PERSIST_HINT_PREFIX = "d in /model"
+PERSIST_HINT_PREFIX = "/model default"
 
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
@@ -428,16 +428,6 @@ class ModelPicker(Static):
         self._query = ""
         self._open = False
         self._status = ""
-        #: Whether the user has MOVED the highlight since this open — arrow,
-        #: page, home/end, wheel or a hover. The `d` affordance (#369) asks it:
-        #: a picker that just opened on `/model ` has an empty query and a
-        #: highlighted row, which is also exactly the state a user is in one
-        #: keystroke into typing `/model default …`. Without this the `d` of
-        #: `default` was consumed as "save the highlighted row" — a silent
-        #: config write of the CURRENT model — and the rest of the line ran
-        #: as a switch to a model named `efault …` (UX round 1, U8; QA Q4).
-        #: Navigating the list is what turns `d` from a letter into a key.
-        self._navigated = False
         # Whether this open has painted a status row (anything but the protected
         # persistent hint). Once it has, the row is kept — blank — until close:
         # the app paints `checking providers…` on the keystroke and clears it
@@ -448,6 +438,19 @@ class ModelPicker(Static):
         # so a bare `render_text` call (the unit tests do this) holds the row
         # too; only `close()` releases it.
         self._status_row_held = False
+        # The query Esc dismissed, or ``None``. The counterpart of
+        # ``CommandPicker._dismissed_query``, and it exists for the same reason:
+        # the editor re-derives every list from the buffer on EVERY key, before
+        # routing, so a bare ``close()`` was undone by the next keystroke's
+        # pre-sync — ``open()`` ran on the unchanged `/model ` buffer, posted
+        # ``ModelQueryOpened``, and the key's own edit closed the list again in
+        # the same tick. Nothing showed, but the app answered the message: the
+        # rows were refilled and the persist-hint notice printed once per
+        # Esc-then-edit cycle (UX review round 2, U8). The latch makes
+        # ``open()`` on the dismissed query a no-op, so a dismissal holds until
+        # the query TEXT changes — the same expiry the command picker uses, so
+        # a user who pressed Esc still gets the list back by typing.
+        self._dismissed_query: str | None = None
         # A closed picker takes no layout space at all; `visible: hidden` would
         # reserve the rows and leave a hole above the input.
         self.display = False
@@ -473,11 +476,10 @@ class ModelPicker(Static):
     def query_text(self) -> str:
         """The filter text currently narrowing the list ("" when unfiltered).
 
-        Exposed so the editor can tell an ACTION key from a FILTER key: every
-        printable character here belongs to the query, so a key like `d` may
-        only act while the query is empty (see the `d` branch in
-        `Editor._on_key`). Without this the shortcut would eat the `d` of
-        `deepseek`.
+        No printable key is an action in this picker, so nothing routes on this
+        any more — it survives as the state a test asserts to prove that (a `d`
+        typed here filters rather than saving a boot default; see
+        `test_d_in_the_model_picker_filters_and_never_acts`).
         """
         return self._query
 
@@ -498,14 +500,6 @@ class ModelPicker(Static):
         if not self._open or not self._matches:
             return None
         return self._matches[self._selected]
-
-    def navigated(self) -> bool:
-        """Whether the highlight has been moved by the user since the list opened.
-
-        The gate for the `d` key: only a row the user has actually walked to
-        is one they mean to save (see ``_navigated``).
-        """
-        return self._navigated
 
     def highlighted_selector(self) -> str | None:
         """``provider/id`` of the highlighted row, or None."""
@@ -528,19 +522,28 @@ class ModelPicker(Static):
         end = min(total, self._window_start + self._row_budget())
         return self._window_start, end, total
 
-    def open(self, query: str = "") -> None:
-        """Show the list, filtered by ``query``.
+    def open(self, query: str = "") -> bool:
+        """Show the list, filtered by ``query``; ``True`` when it actually opened.
 
         On an EMPTY query the highlight lands on the session's current model. That
         makes the first frame answer "what am I on" as well as "what could I be on",
         and it makes the first Enter a no-op instead of an unrequested switch to
         whatever happened to sort first. A non-empty query is the user having
         already narrowed, so the best match wins as usual.
+
+        Declines — returning ``False`` and staying closed — while ``query`` is
+        the one :meth:`dismiss` recorded. The editor treats a closed→open call
+        as the transition that posts ``ModelQueryOpened``, so this answer is
+        what keeps an Esc from being re-announced by the next keystroke's
+        resync (see ``_dismissed_query``).
         """
+        if query == self._dismissed_query:
+            return False
+        self._dismissed_query = None
         self._open = True
         self._query = query
-        self._navigated = False
         self._refilter(keep=self._current if not query.strip() else None)
+        return True
 
     def set_query(self, query: str) -> None:
         """Re-filter to ``query`` without changing open/closed state."""
@@ -552,13 +555,36 @@ class ModelPicker(Static):
         # command picker makes the same choice for the same reason.
         self._refilter()
 
+    def forget_dismissal(self) -> None:
+        """Expire an Esc: the buffer has left `/model …`, so the next entry is
+        a fresh opening. Called by the editor's resync on the leave edge, the
+        way ``CommandPicker.sync`` forgets its own dismissal when the caret
+        leaves slash context — the two lists expire an Esc on the same rule."""
+        self._dismissed_query = None
+
+    def dismiss(self) -> None:
+        """Hide the list for the CURRENT query without touching the text.
+
+        Esc's meaning, as distinct from :meth:`close` (a choice, a completion,
+        or the buffer leaving `/model …`): the query survives in the buffer, so
+        the list must remember not to come back for it until it changes.
+        """
+        self._dismissed_query = self._query
+        self.close()
+
     def close(self) -> None:
-        """Hide the list and release a row's pointer shape."""
+        """Hide the list and release a row's pointer shape.
+
+        Does NOT touch ``_dismissed_query``. The latch expires in exactly two
+        places — a changed query in :meth:`open`, or the editor's leave-edge
+        :meth:`forget_dismissal` — and neither is this one: a plain close is
+        also what the pre-routing resync calls in the same tick it reopened a
+        dismissed list, so clearing here would let that resync forget the Esc.
+        """
         self._open = False
         self._matches = []
         self._selected = 0
         self._window_start = 0
-        self._navigated = False
         self._status_row_held = False
         self._hovered = None
         # A stationary pointer gets no mouse-move after this surface leaves;
@@ -570,7 +596,6 @@ class ModelPicker(Static):
         """Move the highlight by ``delta`` rows, wrapping at both ends."""
         if not self._matches:
             return
-        self._navigated = True
         self._selected = (self._selected + delta) % len(self._matches)
         self._scroll_to_selection()
         self._repaint()
@@ -584,7 +609,6 @@ class ModelPicker(Static):
         """
         if not self._matches:
             return
-        self._navigated = True
         step = max(1, self._row_budget()) * (1 if delta > 0 else -1)
         self._selected = max(0, min(len(self._matches) - 1, self._selected + step))
         self._scroll_to_selection()
@@ -594,7 +618,6 @@ class ModelPicker(Static):
         """Home/End, clamped."""
         if not self._matches:
             return
-        self._navigated = True
         self._selected = len(self._matches) - 1 if to_end else 0
         self._scroll_to_selection()
         self._repaint()
@@ -610,7 +633,6 @@ class ModelPicker(Static):
         """
         if not self._matches:
             return
-        self._navigated = True
         self._selected = max(0, min(len(self._matches) - 1, self._selected + delta))
         self._scroll_to_selection()
         self._repaint()
@@ -917,10 +939,6 @@ class ModelPicker(Static):
         index = self._index_at(event.y)
         if index != self._hovered:
             self._hovered = index
-            if index is not None:
-                # Pointing at a row is navigating too: a user who hovers and
-                # then presses `d` meant the key.
-                self._navigated = True
             self._repaint()
         # Hand pointer over a row only (a click chooses it); the widget's
         # non-row rows keep the default shape. The inline-rule assignment

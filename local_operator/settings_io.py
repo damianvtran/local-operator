@@ -418,7 +418,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default provider",
         kind=Kind.TEXT,
         default="",
-        help="Provider new launches boot on. Written by /model default.",
+        help="Provider new launches boot on. Set here or by /model default.",
         empty_unsets=True,
     ),
     Setting(
@@ -428,7 +428,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default model",
         kind=Kind.TEXT,
         default="",
-        help="Model id new launches boot on. Written by /model default.",
+        help="Model id new launches boot on. Set here or by /model default.",
         empty_unsets=True,
     ),
     # -- providers ----------------------------------------------------------
