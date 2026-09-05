@@ -495,3 +495,105 @@ async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
     assert len(ends) == 1, f"one owner loss produced {len(ends)} aborted ends"
     assert remote._buffered_events == []
     assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
+async def test_going_cold_survives_a_controllers_higher_adopted_generation(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, BLOCKER-1: the go-cold end must reach the APP, not just
+    the handler list.
+
+    The sibling test above asserts the event is delivered, and that stayed true
+    while the defect was live — the ``EventController`` sitting one layer below
+    dropped it, so no ``TurnEnded`` was ever posted. This drives the REAL
+    controller for that reason: the drop happens where the event is consumed,
+    which is the only layer that can pin it.
+
+    The scenario is the one ``_go_cold``'s direct delivery exists for. Owner A
+    stamps its turn with a long-lived session's generation (6 here); the
+    controller adopts it. A successor binds and ``_apply_frontend_facades``
+    re-marks the turn live from ITS snapshot — a fresh runtime, so generation
+    1. Stamping the synthesised end with that number made
+    ``_handle_agent_end`` drop it as ``gen < current`` and, with the follower
+    band held by design and no wall-clock timeout, left the tab title asserting
+    ``working`` permanently. An unstamped end (``generation=0``) is the
+    controller's "belongs to whatever turn is open" encoding.
+    """
+    from local_operator.harness.types import AgentStartEvent
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.tui.events import EventController, TurnEnded, TurnStarted
+    from tests.unit.tui.test_events import FakeApp
+
+    previous_owner_generation = 6
+    successor_first_turn_generation = 1  # Session.__init__ starts a fresh count
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._ready_for_events = True
+
+    app = FakeApp()
+    controller = EventController(remote, app)  # type: ignore[arg-type]
+    app.controller = controller
+    controller.subscribe()
+
+    remote._on_wire_event(
+        AgentStartEvent(generation=previous_owner_generation).model_dump(mode="json")
+    )
+    assert controller.generation == previous_owner_generation
+    assert sum(isinstance(m, TurnStarted) for m in app.posted) == 1
+
+    remote._apply_frontend_facades(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="e1",
+            streaming=True,
+            generation=successor_first_turn_generation,
+        )
+    )
+    assert remote.is_streaming is True
+
+    remote._go_cold()
+
+    ends = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert len(ends) == 1, "the synthesised end never reached the app"
+    assert ends[0].aborted is True
+    assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
+async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, MINOR-1: a handler that raises must not strand teardown.
+
+    ``_go_cold`` already guards the client close and the went-cold callback
+    because "a viewer notice must not break teardown". The end-the-turn call
+    now sits between them and takes the same guard: without it a raising
+    handler skips ``_owner_ready.set()``, and the prompt path waits forever on
+    an event nothing else will set.
+    """
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = True
+
+    def explode(event: Any) -> None:
+        raise RuntimeError("handler blew up while pricing the turn")
+
+    remote.subscribe(explode)
+
+    remote._go_cold()
+
+    assert remote._owner_ready.is_set(), "teardown was stranded by a raising handler"
+    assert remote.is_cold
