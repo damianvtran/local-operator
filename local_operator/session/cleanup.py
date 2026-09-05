@@ -484,16 +484,26 @@ def run_cleanup(
     recent = {entry.path.name for entry in entries[:RECENT_KEEP]}
     chosen: dict[str, Candidate] = {}
 
+    # A directory several limits would take is reported once, under the first
+    # guard that saved it; without this a dry run listed the same session
+    # per limit.
+    protected_seen: set[str] = set()
+
+    def protect(name: str, guard: str) -> None:
+        if name not in protected_seen:
+            protected_seen.add(name)
+            result.protected.append((name, guard))
+
     def consider(entry: _Entry, policy_name: str, reason: str) -> bool:
         name = entry.path.name
         if name in chosen:
             return True
         if name in recent:
-            result.protected.append((name, f"one of the {RECENT_KEEP} most recent"))
+            protect(name, f"one of the {RECENT_KEEP} most recent")
             return False
         guard = _guard(entry.path, config_dir, moment)
         if guard is not None:
-            result.protected.append((name, guard))
+            protect(name, guard)
             return False
         chosen[name] = Candidate(name, policy_name, reason)
         return True
