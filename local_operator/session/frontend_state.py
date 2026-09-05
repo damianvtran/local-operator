@@ -367,6 +367,9 @@ _FRONTEND_LOCAL_SLASHES = {
     "failovers",
     "usage",
     "analytics",
+    # Like analytics, reads the shared local ledger for the mirrored current
+    # session ID. No owner RPC or new transport payload is needed.
+    "session",
     "skills",
     "login",
     "logout",

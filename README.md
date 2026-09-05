@@ -207,6 +207,7 @@ current session's cost live).
 | `/btw` | Ask a side question off the record — it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
+| `/session` | Current-session recorded usage, combined cost, cache and request diagnostics |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>` puts a manager and roster on it |

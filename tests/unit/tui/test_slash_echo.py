@@ -87,6 +87,7 @@ ECHO_POLICY = {
     # The screen it opens IS the receipt (same rule as `/usage`); the argument
     # names a view, never words the model is told.
     "analytics": False,
+    "session": False,
     "goal": True,
     "loop": False,
     # The aside's whole promise is that the exchange leaves no trace in the
@@ -155,6 +156,7 @@ PROMPT_POLICY = {
     # A view selector, not a prompt: `/analytics [view]` names which screen to
     # open, so it splices-and-runs inline like `/usage` rather than reassembling.
     "analytics": False,
+    "session": False,
     # Free text the model is given (the objective / a loop instruction / a side
     # question), so an inline engage reassembles to the front.
     "goal": True,

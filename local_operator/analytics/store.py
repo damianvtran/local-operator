@@ -20,8 +20,9 @@ Instead each call is an append (no contention beyond the WAL) and the
 ``/analytics`` screen runs a ``GROUP BY`` when it opens. On a bounded ledger
 that scan is milliseconds, and it is paid only when someone actually looks.
 
-Everything degrades silently: a store that cannot open is a no-op recorder and
-an empty report, never an exception on a session's path.
+Failures never interrupt a session: a store that cannot open is a no-op
+recorder. Aggregate reads retain their empty fallback; the current-session
+diagnostic additionally distinguishes an unavailable ledger from zero usage.
 """
 
 from __future__ import annotations
@@ -38,6 +39,9 @@ from typing import Any, Iterable, Sequence
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     CallSnapshot,
+    SessionReport,
+    SessionRequest,
+    TimingSummary,
     UsageAggregate,
     UsagePeriod,
     apportion_components,
@@ -998,6 +1002,135 @@ class AnalyticsStore:
         }
         setattr(result, "session_names", result_session_names)
         return result
+
+    def session_report(self, session_id: str, *, recent_limit: int = 12) -> SessionReport:
+        """Read one exact session ID without creating, migrating or pricing data.
+
+        A single explicit read transaction pins all queries to the same WAL
+        snapshot, even if the recorder commits between totals and recent rows.
+        Inspect columns on THIS connection rather than writer migration flags:
+        diagnostics must also work against a read-only, older ledger. Missing
+        optional fields remain unknown, not invented successes or zero timings.
+        """
+        conn: sqlite3.Connection | None = None
+        try:
+            if not self._db_path.exists():
+                return SessionReport(session_id=session_id)
+            conn = sqlite3.connect(
+                self._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5
+            )
+            conn.execute("BEGIN")
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(calls)")}
+            if not {"session_id", "provider", "model_id", "ts_ms", "id"} <= columns:
+                return SessionReport(session_id=session_id, available=False)
+
+            def col(name: str, default: str = "0") -> str:
+                # Names are code-owned constants, never user input. Only the ID
+                # is caller supplied, and every query binds it as a parameter.
+                return name if name in columns else default
+
+            sums = ["COUNT(*)", f"SUM({col('ok')})"]
+            sums += [
+                f"SUM({col(name)})"
+                for name in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "reasoning_tokens",
+                    "context_tokens",
+                    "cost_micro",
+                    "cost_known",
+                    *(f"c_{key}" for key in COMPONENT_KEYS),
+                )
+            ]
+            measures = ", ".join(sums)
+            scope = " FROM calls WHERE session_id = ?"
+            params = (session_id,)
+            aggregate = _aggregate_from_row(
+                conn.execute(f"SELECT {measures}" + scope, params).fetchone()
+            )
+            by_model = {
+                (str(row[0]), str(row[1])): _aggregate_from_row(row[2:])
+                for row in conn.execute(
+                    f"SELECT provider, model_id, {measures}"
+                    + scope
+                    + " GROUP BY provider, model_id",
+                    params,
+                )
+            }
+            purpose = col("purpose", "'unknown'")
+            outcome = col("outcome", "'unknown'")
+            groups = {
+                (str(row[0]), str(row[1])): int(row[2])
+                for row in conn.execute(
+                    f"SELECT {purpose}, {outcome}, COUNT(*)" + scope + " GROUP BY 1, 2", params
+                )
+            }
+            usage = col("usage_reported", "NULL")
+            missing, unknown, first, last = conn.execute(
+                f"SELECT SUM({usage} = 0), SUM({usage} IS NULL), MIN(ts_ms), MAX(ts_ms)" + scope,
+                params,
+            ).fetchone()
+            timings: dict[str, TimingSummary] = {}
+            for name in ("duration_ms", "ttft_ms", "preparation_ms"):
+                expression = col(name, "NULL")
+                row = conn.execute(
+                    f"SELECT COUNT({expression}), AVG({expression}), "
+                    f"MIN({expression}), MAX({expression})" + scope + f" AND {expression} >= 0",
+                    params,
+                ).fetchone()
+                timings[name] = TimingSummary(int(row[0]), row[1], row[2], row[3])
+            fields = [
+                col("request_id", "''"),
+                "ts_ms",
+                "provider",
+                "model_id",
+                purpose,
+                outcome,
+                usage,
+                col("context_tokens"),
+                col("output_tokens"),
+                *(f"NULLIF({col(name, '-1')}, -1)" for name in timings),
+            ]
+            recent = tuple(
+                SessionRequest(
+                    request_id=row[0],
+                    ts_ms=row[1],
+                    provider=row[2],
+                    model_id=row[3],
+                    purpose=row[4],
+                    outcome=row[5],
+                    usage_reported=None if row[6] is None else bool(row[6]),
+                    context_tokens=row[7],
+                    output_tokens=row[8],
+                    duration_ms=row[9],
+                    ttft_ms=row[10],
+                    preparation_ms=row[11],
+                )
+                for row in conn.execute(
+                    "SELECT " + ", ".join(fields) + scope + " ORDER BY ts_ms DESC, id DESC LIMIT ?",
+                    (*params, max(0, min(int(recent_limit), 50))),
+                )
+            )
+            return SessionReport(
+                session_id=session_id,
+                aggregate=aggregate,
+                by_model=by_model,
+                by_purpose_outcome=groups,
+                missing_usage_calls=int(missing or 0),
+                unknown_usage_calls=int(unknown or 0),
+                timings=timings,
+                recent=recent,
+                first_ts_ms=first,
+                last_ts_ms=last,
+            )
+        except Exception:  # noqa: BLE001 — diagnostics must not interrupt a turn
+            logger.debug("analytics: session report unavailable", exc_info=True)
+            return SessionReport(session_id=session_id, available=False)
+        finally:
+            if conn is not None:
+                conn.close()
 
     # -- rollup reads (calendar time series) ---------------------------------
     def _series(self, table: str, key: str, buckets: int, *, by_model: bool) -> list[UsagePeriod]:
