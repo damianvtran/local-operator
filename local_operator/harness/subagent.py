@@ -583,7 +583,7 @@ def _make_runner(
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial
                 # text.
-                raise RuntimeError(_describe_child_failure(str(final["error"]), child, model_spec))
+                raise RuntimeError(_describe_child_failure(str(final["error"]), model_spec))
             result_text = final["text"]
             # Recorded on the comms record, not just the job row: the manager
             # sweeps settled rows after its retention window while comms
@@ -670,9 +670,7 @@ def _make_runner(
     return runner
 
 
-def _describe_child_failure(
-    error: str, child: "Session | None", model_spec: ModelSpec | None
-) -> str:
+def _describe_child_failure(error: str, model_spec: ModelSpec | None) -> str:
     """The error a failed child settles with, naming the model when that is the point.
 
     A pinned child (``model_spec`` given) that dies on an auth/availability
@@ -693,7 +691,7 @@ def _describe_child_failure(
     from local_operator.providers.failover import is_rendered_auth_error
 
     # ``final["error"]`` is the loop's RENDERED text, not an exception, so the
-    # kind is read the way the display layer reads it (``with_auth_hint``):
+    # kind is read the way the display layer reads it (``append_auth_recovery``):
     # by the stable "authentication failed" label the failover module puts in
     # front of every auth-kind error. ``classify_provider_error`` is
     # deliberately not used here — it refuses to read kinds out of text, and

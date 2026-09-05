@@ -770,8 +770,8 @@ def is_rendered_auth_error(rendered_error: str) -> bool:
     The one sanctioned way to read a kind back out of text: the failover
     module itself put ``_KIND_LABELS["auth"]`` at the front of every auth-kind
     error it rendered, so the prefix is its own statement rather than a guess
-    about a provider's wording. This is the predicate :func:`with_auth_hint`
-    already applies inline; it is named so a second caller (the subagent
+    about a provider's wording. This is the predicate :func:`append_auth_recovery`
+    already applied inline; it is named so a second caller (the subagent
     runner, deciding whether a pinned child died of access) shares it instead
     of re-deriving the prefix and drifting from it.
     """

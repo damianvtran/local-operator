@@ -6051,12 +6051,18 @@ class Session:
         if wanted is None:
             return None
 
-        def _unavailable(reason: str) -> ModelSpec | None:
+        def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
             # One exit for every "asked for a tier, cannot honour it" branch so
-            # strict and lenient callers differ in exactly one place.
+            # strict and lenient callers differ in exactly one place. ``quiet``
+            # is for the ordinary unconfigured case on the lenient path: a
+            # session with no ``subagents.models`` at all names itself on the
+            # parent model by design, and a warning on every naming call for
+            # that would be noise about a default (the pre-strict code was
+            # silent there too). Malformed or unreadable config still warns.
             if strict:
                 raise SubagentModelUnavailable(wanted, reason)
-            logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
+            if not quiet:
+                logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
 
         try:
@@ -6069,7 +6075,7 @@ class Session:
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
             return _unavailable(f"config could not be read ({exc})")
         if not selector:
-            return _unavailable(f"no model configured at subagents.models.{wanted}")
+            return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
         provider, _, model_id = str(selector).partition("/")
         if not model_id:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")

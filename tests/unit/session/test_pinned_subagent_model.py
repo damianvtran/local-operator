@@ -131,14 +131,45 @@ async def test_no_effort_still_inherits_the_parent(tmp_path, monkeypatch):
     await session.dispose()
 
 
-def test_lenient_resolution_still_inherits_for_naming(tmp_path, monkeypatch):
+def test_lenient_resolution_still_inherits_for_naming(tmp_path, monkeypatch, caplog):
     """Session naming prefers ``lo`` but has a sound fallback of its own; it
     must keep getting ``None`` (inherit) rather than an exception when the
-    tier is unset."""
+    tier is unset -- and SILENTLY, because "no subagents.models at all" is the
+    default configuration and a warning on every naming call for a default
+    is noise (review R1). A malformed selector still warns."""
+    import logging
+
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     session = make_session(tmp_path)
-    assert session._resolve_subagent_model("task", "lo") is None
-    assert session._resolve_subagent_model("task", "lo", strict=False) is None
+    with caplog.at_level(logging.WARNING):
+        assert session._resolve_subagent_model("task", "lo") is None
+        assert session._resolve_subagent_model("task", "lo", strict=False) is None
+    assert not [r for r in caplog.records if "subagent model tier" in r.getMessage()]
+
+    write_tiers(tmp_path / "config", lo="no-provider-here")
+    with caplog.at_level(logging.WARNING):
+        assert session._resolve_subagent_model("task", "lo") is None
+    assert [r for r in caplog.records if "lacks provider/model" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_a_tier_that_broke_since_launch(tmp_path, monkeypatch):
+    """A resume is a second launch (review R2): a child launched on ``hi``
+    whose tier has since been removed must NOT come back on the parent's
+    model with the panel still saying ``hi``. The refusal lands in the same
+    ``(None, reason)`` slot every other resume refusal uses."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=f"{MODEL.provider}/{MODEL.model_id}")
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(label="review", prompt="review it", effort="hi")
+    await wait_for(lambda: (j := session.jobs.get(job_id)) is not None and j.status == "completed")
+
+    # The tier disappears between launch and resume.
+    (tmp_path / "config" / "config.yml").write_text("values: {}\n")
+    new_id, reason = session.subagent_comms.resume(job_id, "carry on")
+    assert new_id is None
+    assert reason is not None and "effort tier 'hi' is unavailable" in reason
+    await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -194,7 +225,7 @@ def test_pinned_child_auth_failure_names_the_pinned_model():
         "authentication failed (HTTP 403): This model requires you to complete "
         "18+ age confirmation."
     )
-    out = _describe_child_failure(rendered, None, spec)
+    out = _describe_child_failure(rendered, spec)
     assert out.startswith(rendered)
     assert "pinned model openrouter/meta/muse-spark-1.2 is unavailable" in out
     assert "do not re-run it at another effort tier" in out
@@ -207,9 +238,9 @@ def test_pinned_child_transient_failure_is_left_alone():
         provider="openrouter", model_id="moonshotai/kimi-k3", context_window=1, max_output_tokens=1
     )
     rendered = "transient provider error (HTTP 502): upstream unavailable"
-    assert _describe_child_failure(rendered, None, spec) == rendered
+    assert _describe_child_failure(rendered, spec) == rendered
 
 
 def test_unpinned_child_failure_is_left_alone():
     rendered = "authentication failed (HTTP 401): bad key"
-    assert _describe_child_failure(rendered, None, None) == rendered
+    assert _describe_child_failure(rendered, None) == rendered
