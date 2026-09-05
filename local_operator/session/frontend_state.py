@@ -133,6 +133,51 @@ JOB_ERROR_WIRE_CHARS = 2_000
 JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
 JOB_TEXT_FLOOR_CHARS = 200
 
+#: Wire bounds for the launch-row reconciliation identities (see
+#: :func:`_wire_launch_prompts`).
+#:
+#: ``launch_prompts`` is a dict of PROMPTS — free text, one entry per resume
+#: attempt #314 collapsed into a record — so putting it on the wire verbatim
+#: would be the fourth instance of the unbounded-field shape the three caps
+#: above exist to close, and the one that grows with RESUME DEPTH rather than
+#: with roster depth. It is bounded at CONSTRUCTION (``_with_lineage``) rather
+#: than at the wire boundary like ``prompt``/``result_text``, because the delta
+#: stream serializes job rows through :func:`_job_summary`, which never passes
+#: through :func:`sync_wire_payload` — a wire-boundary-only bound would hold for
+#: the attach snapshot and leak on every subsequent frame.
+#:
+#: The entry cap keeps the NEWEST attempts: durable history pages from the tail,
+#: so the most recently collapsed launch rows are the ones a reader loads first
+#: and the oldest are the least likely to be on screen at all.
+#:
+#: 200 chars is the same "legible preview" floor :data:`JOB_TEXT_FLOOR_CHARS`
+#: sets, and it is sufficient for what this field is FOR: the viewer replaces
+#: the durable row wholesale, so a truncated concise prompt still prevents the
+#: preamble leak completely and only costs informational richness. Worst case
+#: is ~1.9 KB per job before the roster budget below, and the common case is
+#: zero entries — a child that was never resumed has no collapsed attempts.
+JOB_LAUNCH_PROMPT_WIRE_CHARS = 200
+JOB_LAUNCH_PROMPTS_MAX = 8
+
+#: Aggregate budget for collapsed-attempt prompt text across ONE frame.
+#:
+#: The per-row caps above bound a row; they do not bound a FRAME, and "bounded
+#: per row, unbounded in total" is the same defect one level up — the argument
+#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` already makes for ``prompt``/
+#: ``result_text``. Measured without this: a 200-row roster of resumed children
+#: at the per-row cap adds 392 KB to a 1 MiB frame, and 1,000 rows adds 1.9 MB,
+#: so roster depth alone would put the frame back over the socket's line limit.
+#:
+#: Shared across the rows that actually carry collapsed attempts rather than
+#: across the whole roster, because the common row contributes nothing and
+#: dividing by it would starve the few rows that do. Rows past the budget keep
+#: their launch IDENTITIES and lose only the prior attempts' text: identity is
+#: what suppresses the duplicate preamble, so the fix still holds everywhere and
+#: only the concise re-labelling of an old attempt degrades. 20,000 chars is
+#: ~2% of the line limit and covers 100 collapsed attempts at the per-entry cap
+#: — two orders of magnitude past the deepest resume chain observed.
+JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS = 20_000
+
 
 def _folded_components(components: Sequence[Any]) -> list[Any]:
     """Collapse receipts that share a serving identity, without moving money.
@@ -693,6 +738,59 @@ def _job_summary(job: "JobState") -> dict[str, Any]:
     return to_jsonable_python(values)
 
 
+def _bound_launch_prompts_across_jobs(jobs: list[Any]) -> None:
+    """Spend one frame's collapsed-attempt text budget across the roster.
+
+    See :data:`JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS`. Rows are served in roster
+    order until the budget is gone, then later rows keep their identities and
+    drop the prior attempts' TEXT — the current launch is unaffected either way,
+    because the view derives its concise prompt from the job's own ``prompt``
+    field, so the duplicate this whole change exists to remove stays fixed for
+    every row at any depth.
+
+    A whole row's map is dropped rather than part of it: a half-served map would
+    reconcile some of a child's collapsed attempts and leak the others' preamble,
+    which reads as a bug rather than as a bounded preview.
+    """
+    spent = 0
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        prompts = job.get("launch_prompts")
+        if not isinstance(prompts, dict) or not prompts:
+            continue
+        cost = sum(len(str(key)) + len(str(value)) for key, value in prompts.items())
+        if spent + cost > JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS:
+            job["launch_prompts"] = {}
+            continue
+        spent += cost
+
+
+def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
+    """Omit the launch-reconciliation keys from a row that has no launch.
+
+    An absent fact must not buy wire bytes. These two keys are empty on every
+    bash job and on every child that was never resumed, and at roster scale the
+    empty values alone were measured at ~9 KB of the 1 MiB line budget — enough
+    to push the ``ran all year`` class guard over the limit on their own, with
+    no information in them at all.
+
+    Omission is exactly equivalent to sending the empty values: ``JobState``
+    defaults both, a delta rebuilds each row by revalidating the raw dict rather
+    than merging it onto the prior row (``apply_update``), and a follower
+    reading neither key takes the same degrade path as one attached to an owner
+    that predates the fields. So this is a pure byte saving, not a semantic one.
+
+    Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
+    attach snapshot in :func:`sync_wire_payload` — because the two serialize job
+    rows by different routes and a saving in one does not reach the other.
+    """
+    if not job.get("launch_message_id"):
+        job.pop("launch_message_id", None)
+    if not job.get("launch_prompts"):
+        job.pop("launch_prompts", None)
+
+
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
     """Compare changed rows only; stable refreshes reuse frozen job identities."""
     return len(current) == len(candidate) and all(
@@ -784,6 +882,32 @@ class JobState(BaseModel):
     #: disk. ``None`` from an owner that predates this field is tolerated —
     #: ``SnapshotSubagentComms`` derives the path from ``session_id`` then.
     session_dir: str | None = None
+    #: The deterministic ``subagent-launch:<job_id>`` id of the CURRENT launch
+    #: turn, and every launch identity in this lineage mapped to its concise
+    #: authored prompt.
+    #:
+    #: These ride for the same reason ``session_dir`` does, and they are only
+    #: load-bearing BECAUSE it does. The full-page view folds the durable launch
+    #: turn into the synthetic prompt head by matching a durable row's key
+    #: against these (``SubagentView._chronological_entries``); with them empty
+    #: it cannot correlate the two and renders BOTH — and the durable copy is
+    #: the full role/team/system preamble, not a short line. That was inert
+    #: until a follower loaded durable history at all, which is what #669
+    #: shipped, so the visible duplicate arrived with it (its review Q1 /
+    #: round-1 item 6, deferred there and fixed here).
+    #:
+    #: ``launch_prompts`` is bounded before it is stamped — see
+    #: :data:`JOB_LAUNCH_PROMPT_WIRE_CHARS` for why the bound cannot live at the
+    #: wire boundary. It stays a MAPPING rather than collapsing to the current
+    #: id: a resumed child's transcript holds one launch turn per collapsed
+    #: attempt, and reconciling only the newest leaks every earlier attempt's
+    #: preamble (the exact defect owner-side review round 4 R4-1 fixed).
+    #:
+    #: Both are absent from an owner that predates them (``extra='allow'``), and
+    #: a follower missing them degrades to rendering the synthetic head plus the
+    #: unreconciled durable row — today's behaviour, not a crash.
+    launch_message_id: str = ""
+    launch_prompts: dict[str, str] = Field(default_factory=dict)
     attempt_aliases: list[str] = Field(default_factory=list)
     # Child plans are detail payloads, not roster metadata. None is unavailable;
     # an empty list is an authoritative clear and must never restore a stale plan.
@@ -874,6 +998,13 @@ class JobState(BaseModel):
             trajectory_length=len(trajectory),
             descendant_usage=descendants,
             prompt=getattr(job, "prompt", None),
+            # Recorded on the job at registration beside ``prompt``
+            # (``harness/subagent.py``), so it survives for a child whose comms
+            # record has been swept: ``_with_lineage`` can then stamp nothing,
+            # and this is the only copy of the launch identity left. That is
+            # enough on its own for a never-resumed child — the view derives
+            # ``{launch_message_id: prompt}`` itself in ``SubagentView.show``.
+            launch_message_id=str(getattr(job, "launch_message_id", "") or ""),
             agent_role=getattr(job, "agent_role", None),
             effort=getattr(job, "effort", None),
             output_tail=str(getattr(job, "output_tail", "") or ""),
@@ -1197,6 +1328,12 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
                 job["todos"] = None
                 _fold_job_usage_in_place(job)
                 _bound_job_text_in_place(job, share=text_share)
+            # After the per-row pass: this budget is spent ACROSS rows, so it
+            # needs the whole roster rather than one row at a time.
+            _bound_launch_prompts_across_jobs(jobs)
+            for job in jobs:
+                if isinstance(job, dict):
+                    _drop_absent_launch_fields_in_place(job)
     return payload
 
 
@@ -1413,6 +1550,16 @@ class SnapshotSubagentComms:
             prompt=job.prompt or "",
             agent_role=job.agent_role or "",
             effort=job.effort or "",
+            # Launch-row reconciliation, read off the node by
+            # ``_refresh_subagent_view`` exactly as it is on an owner. Defaulted
+            # rather than conditional: an older owner sends neither field, and
+            # the empty values are what the view already tolerates (it keeps the
+            # synthetic head and leaves the durable row unreconciled).
+            launch_message_id=job.launch_message_id or "",
+            # Copied out of the (possibly frozen) wire value into a plain dict:
+            # the view iterates and indexes it, and a follower must never be
+            # handed a container whose identity is shared with canonical state.
+            launch_prompts=dict(job.launch_prompts or {}),
         )
 
     def node(self, job_id: str) -> Any | None:
@@ -1870,6 +2017,13 @@ class FrontendStateStore:
                     # fetch. Thaw at this wire boundary, just as snapshots do.
                     trajectory_appends[job_id] = [_wire_value(event) for event in appended]
                 summaries.append(_job_summary(job))
+            # Same roster-shared budget the attach snapshot applies, and applied
+            # here too because a delta re-serializes job rows by its own route:
+            # a bound placed only at the snapshot boundary holds for the first
+            # frame and leaks on every one after it.
+            _bound_launch_prompts_across_jobs(summaries)
+            for summary in summaries:
+                _drop_absent_launch_fields_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -2533,6 +2687,36 @@ def _slash_capabilities() -> list[SlashCapability]:
     return values
 
 
+def _wire_launch_prompts(value: Any) -> dict[str, str]:
+    """Bound the launch-identity map before it is stamped onto a job row.
+
+    See :data:`JOB_LAUNCH_PROMPT_WIRE_CHARS` for the budget and for why the
+    bound is applied HERE rather than in :func:`sync_wire_payload` beside the
+    other text caps: :func:`_job_summary` serializes the delta stream directly
+    off the model, so anything left unbounded on ``JobState`` rides every
+    subsequent frame however well the attach snapshot is trimmed.
+
+    Truncation is marked with an ellipsis for the same reason the other text
+    bounds mark theirs — a silent cut reads as the whole instruction — and the
+    newest entries are kept because durable history pages from the tail.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    bounded: dict[str, str] = {}
+    # Insertion order is launch order (``prior_launch_prompts`` merges oldest
+    # first, then the current attempt), so the tail is the newest attempts.
+    items = list(value.items())
+    for key, prompt in items[-JOB_LAUNCH_PROMPTS_MAX:]:
+        identity = str(key or "").strip()
+        text = str(prompt or "")
+        if not identity or not text:
+            continue
+        if len(text) > JOB_LAUNCH_PROMPT_WIRE_CHARS:
+            text = text[:JOB_LAUNCH_PROMPT_WIRE_CHARS] + "\u2026"
+        bounded[identity] = text
+    return bounded
+
+
 def _with_lineage(job: JobState, comms: Any) -> JobState:
     """Stamp one job's canonical parent/child identity from the comms tree.
 
@@ -2560,6 +2744,17 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
             "parent_job_id": getattr(node, "parent_job_id", None),
             "session_id": getattr(node, "session_id", None),
             "session_dir": str(session_dir) if session_dir is not None else None,
+            # Launch-row reconciliation identity. From the NODE, not the job
+            # row: a live job knows only its own attempt, while the node
+            # carries every attempt #314 collapsed into this record. The job's
+            # own ``launch_message_id`` is the fallback for a node that has
+            # none, mirroring how the owner-side view reads the two.
+            "launch_message_id": str(
+                getattr(node, "launch_message_id", "")
+                or getattr(job, "launch_message_id", "")
+                or ""
+            ),
+            "launch_prompts": _wire_launch_prompts(getattr(node, "launch_prompts", None)),
             "attempt_aliases": list(getattr(node, "attempt_aliases", ())),
             "todos": (
                 [phase.model_dump(mode="json") for phase in _todo_state(node.session_id)]
