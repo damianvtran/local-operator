@@ -99,6 +99,7 @@ class TailAnchor:
 
     def __init__(self) -> None:
         self._following = True
+        self._release_revision = 0
         #: Depth, not a bool: a follow-scroll can settle a layout that scrolls
         #: again, and the inner exit must not re-arm the outer guard.
         self._depth = 0
@@ -113,6 +114,11 @@ class TailAnchor:
         """Whether a scroll happening right now is this widget's own."""
         return self._depth > 0
 
+    @property
+    def release_revision(self) -> int:
+        """Identify explicit releases so deferred follows cannot undo newer intent."""
+        return self._release_revision
+
     def note_user_scroll(self) -> None:
         """A human moved the viewport. Release NOW, ask where they landed later.
 
@@ -126,6 +132,7 @@ class TailAnchor:
         """
         if self._depth:
             return
+        self._release_revision += 1
         self._following = False
 
     def resync(self, *, at_end: bool) -> None:
@@ -144,6 +151,7 @@ class TailAnchor:
         this widget choosing a row head, and the next extent change must
         not `_scroll_to_tail` onto the fragment it just left.
         """
+        self._release_revision += 1
         self._following = False
 
     @contextmanager
@@ -2418,6 +2426,7 @@ class TranscriptView(ScrollableContainer):
         # the new end, so asking afterwards reports "scrolled up" for a reader
         # who never moved.
         was_at_tail = self._tail_anchor.following or self.is_near_bottom()
+        release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
         self.call_after_refresh(self._settle_gaps, blocks)
         self._remeasure_empty_state()
@@ -2436,9 +2445,9 @@ class TranscriptView(ScrollableContainer):
         # Deferred rather than immediate for the reason `_scroll_to_tail`
         # states in reverse: it scrolls to the extent as measured RIGHT NOW,
         # so it has to run after the authored heights, not with them.
-        self.call_after_refresh(self._land_on_tail, was_at_tail)
+        self.call_after_refresh(self._land_on_tail, was_at_tail, release_revision)
 
-    def _land_on_tail(self, was_at_tail: bool) -> None:
+    def _land_on_tail(self, was_at_tail: bool, release_revision: int) -> None:
         """Re-follow the tail once a batch's blocks have authored their heights.
 
         ``was_at_tail`` is sampled by the caller before the mount, because by
@@ -2456,7 +2465,12 @@ class TranscriptView(ScrollableContainer):
         just lands the current frame so the viewport is never visibly short
         while the remaining passes settle.
         """
-        if not was_at_tail:
+        # A batch can finish after the subagent page has snapped to a row
+        # head, or after a reader has scrolled away. Its pre-mount observation
+        # cannot override that newer choice. Compare explicit releases, not
+        # just `following`: layout-driven offset resync may legitimately
+        # disarm following while the authored heights are still settling.
+        if not was_at_tail or release_revision != self._tail_anchor.release_revision:
             return
         self._tail_anchor.resync(at_end=True)
         self._scroll_to_tail()

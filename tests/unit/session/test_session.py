@@ -944,6 +944,7 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
     # Rigorous upper bound (>= the exact estimate) used by the cheap pre-check
@@ -1016,6 +1017,10 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     summary_request = stream.requests[1]
     assert summary_request.tools == []
     assert summary_request.tool_choice == "none"
+    assert summary_request.max_tokens == 16384
+    assert summary_request.purpose == "compaction"
+    # A terminal answer remains terminal even if the pass creates headroom.
+    assert len(stream.requests) == 2
 
     # Context rebuilt: marker + the kept assistant message (cut=1 keeps it).
     assert len(session._context.messages) == 2
@@ -1062,6 +1067,7 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", lambda messages, *a, **k: (list(messages), False))
     setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 1_000)
 
@@ -2311,6 +2317,7 @@ async def test_compaction_on_a_text_only_model_keeps_images_in_the_live_context(
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(
         fake_api,
         "prune_tool_outputs",
@@ -2437,6 +2444,7 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
     setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
@@ -2581,6 +2589,7 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
     setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 95_000)

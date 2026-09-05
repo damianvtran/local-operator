@@ -581,7 +581,16 @@ def _latest_user_query(transcript: Any) -> str:
     never break a session.
     """
     try:
-        entries = transcript.entries()
+        # Production transcripts index these at durable append time. Keep the
+        # historical fallback for embedders/test stores exposing entries only.
+        if hasattr(transcript, "latest_user_entry"):
+            entries = [
+                entry
+                for entry in (transcript.latest_entry("compaction"), transcript.latest_user_entry())
+                if entry is not None
+            ]
+        else:
+            entries = transcript.entries()
     except Exception:  # noqa: BLE001 — degradation is the contract
         return ""
     user_text = ""
@@ -632,6 +641,9 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     ``None`` (treated as "no compaction yet"), never breaks the turn.
     """
     try:
+        if hasattr(transcript, "latest_entry"):
+            entry = transcript.latest_entry("compaction")
+            return entry.id if entry is not None else None
         entries = transcript.entries()
     except Exception:  # noqa: BLE001 — degradation is the contract
         return None
@@ -782,7 +794,7 @@ class _KnowledgeHooks:
     User skills and packaged guides share one index. Registered agent metadata
     gets a separate local-only index: it can select the generic agents guide,
     but names and descriptions never enter the prompt or a remote embedding
-    request. The selected block freezes after the first task for cache stability.
+    request. Selection is reused within each task and refreshed on the next user row.
     """
 
     index: SkillIndex | None = None
@@ -795,6 +807,10 @@ class _KnowledgeHooks:
     #: transcript head is being rewritten anyway, so the prompt cache the
     #: freeze protects is already gone.
     frozen_compaction_id: str | None = None
+    # A new admitted user row is a task boundary, unlike tool continuations.
+    # Selection updates enter history as host state, so refreshing here no
+    # longer rewrites the historical system prefix.
+    frozen_task_id: str | None = None
     mcp_resolver: Callable[[str], str | None] | None = None
     # Takes the frozen selection query. Configured names are populated before
     # deferred connection work begins, closing the first-turn race without
@@ -955,21 +971,21 @@ async def _select_knowledge_block(
     *,
     compaction_id: str | None = None,
     cwd: str | None = None,
+    task_id: str | None = None,
 ) -> str:
-    """Freeze selected knowledge plus the bounded MCP catalogue for the session.
+    """Reuse routing within a task, refresh for a new user or compaction row.
 
-    The freeze exists purely for prompt-cache warmth: once the block is
-    rendered, later turns reuse it byte-for-byte rather than re-embedding and
-    possibly reordering the tail. The ONE thing that re-opens it is a new
-    compaction marker (``compaction_id`` differs from the id recorded at
-    freeze time): compaction rewrites the transcript head the block rides
-    behind, invalidating that cache anyway, so selection is re-run against
-    the latest user query + compaction summary (the query the provider
-    extracts) and re-frozen under the new id. ``cwd`` feeds gitignore-style
-    ``globs`` matching in the index (see
-    :meth:`local_operator.skills.index.SkillIndex.select`).
+    ``task_id`` is an admitted USER message identity, never a tool-step ID, so
+    long tool loops pay one selection while a new task can discover different
+    guidance. Production Session appends changes after history instead of
+    changing the system prefix. Legacy callers omitting task_id retain their
+    compaction-only selection contract. ``cwd`` supports skill globs.
     """
-    if hooks.frozen_block is not None and hooks.frozen_compaction_id == compaction_id:
+    if (
+        hooks.frozen_block is not None
+        and hooks.frozen_compaction_id == compaction_id
+        and hooks.frozen_task_id == task_id
+    ):
         return hooks.frozen_block
 
     picked: list[Skill] = []
@@ -1004,6 +1020,7 @@ async def _select_knowledge_block(
             sections.append(catalogue)
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
+    hooks.frozen_task_id = task_id
     return hooks.frozen_block
 
 
@@ -1061,12 +1078,10 @@ def _make_system_blocks_provider(
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
-    Session awaits the result (committed tolerance for awaitable providers),
-    so semantic knowledge selection can live inside. Block layout comes from
-    ``prompts_api.build_system_blocks``: stable head (instructions, inventory,
-    env) then the session-frozen guide/skill block last, so the cache prefix
-    stays warm — re-selected only when a new compaction marker invalidates
-    that prefix anyway (see :func:`_select_knowledge_block`).
+    Semantic routing refreshes only at admitted user/compaction boundaries.
+    Unchanged desired blocks reuse a small immutable snapshot. Session persists
+    its initial prefix and journals later state changes at the conversation
+    tail; inspecting this closure directly remains read-only.
 
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next model step's
@@ -1082,20 +1097,34 @@ def _make_system_blocks_provider(
     the next session, which is also what makes a session's prompt reproducible.
     """
 
+    environment = _env_details(cwd)
+    cached_key: tuple[Any, ...] | None = None
+    cached_blocks: list[str] = []
+
     async def provider(model_label: str = "") -> list[str]:
+        nonlocal cached_key, cached_blocks
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
         # closure. The benchmark/preflight caller passes the spec label directly.
         from local_operator.prompts_api import build_system_blocks
 
-        query = _latest_user_query(transcript)
+        task = transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
+        task_id = task.id if task is not None else None
+        compaction_id = _latest_compaction_id(transcript)
+        unchanged = (
+            hooks.frozen_block is not None
+            and hooks.frozen_task_id == task_id
+            and hooks.frozen_compaction_id == compaction_id
+        )
+        query = "" if unchanged else _latest_user_query(transcript)
         try:
             knowledge_block = await _select_knowledge_block(
                 hooks,
                 query,
-                compaction_id=_latest_compaction_id(transcript),
+                compaction_id=compaction_id,
                 cwd=cwd,
+                task_id=task_id,
             )
         except Exception:  # noqa: BLE001 — never break the turn
             knowledge_block = ""
@@ -1108,10 +1137,24 @@ def _make_system_blocks_provider(
             if variable_store is not None and hasattr(variable_store, "credential_names")
             else []
         )
-        return build_system_blocks(
+        interactive = goal_state.is_interactive() if goal_state is not None else True
+        key = (
+            knowledge_block,
+            date_str,
+            goal,
+            team_brief,
+            agent_brief,
+            tuple(names),
+            model_label,
+            interactive,
+            tuple((tool.name, tool.description) for tool in tools),
+        )
+        if key == cached_key:
+            return list(cached_blocks)
+        cached_blocks = build_system_blocks(
             tools,
             knowledge_block,
-            _env_details(cwd),
+            environment,
             date_str,
             goal=goal,
             user_instructions=user_instructions,
@@ -1125,9 +1168,17 @@ def _make_system_blocks_provider(
             # cost O(1) in the number of those events (round 2, operator
             # requirement 4). Absent a probe this is True, so every host that
             # is not a detached runtime is unaffected.
-            interactive=(goal_state.is_interactive() if goal_state is not None else True),
+            interactive=interactive,
         )
+        cached_key = key
+        return list(cached_blocks)
 
+    # A host-supplied arbitrary block provider retains its historical dynamic
+    # semantics. Production providers opt into Session's persisted-prefix
+    # protocol explicitly; benchmarks can still call this builder read-only.
+    setattr(provider, "append_only_state", True)
+    setattr(provider, "repo_guidance", repo_guidance)
+    setattr(provider, "knowledge_hooks", hooks)
     return provider
 
 
@@ -1921,6 +1972,8 @@ async def wire_mcp_into_session(
     )
     installed_mcp: set[str] = set()
     enabled_origins: set[tuple[str, str]] = set()
+    deferred_origins: set[tuple[str, str]] = set()
+    setattr(session, "_mcp_deferred_origins", deferred_origins)
 
     def selected_tools(source: list[AgentTool]) -> list[AgentTool]:
         selected: list[AgentTool] = []
@@ -1945,7 +1998,22 @@ async def wire_mcp_into_session(
 
     from local_operator.mcp.resources import make_mcp_resolver, render_mcp_catalogue
 
-    knowledge_hooks.mcp_resolver = make_mcp_resolver(manager, activate)
+    def defer(server_name: str, raw_tool_name: str) -> None:
+        deferred_origins.add((server_name, raw_tool_name))
+
+    prior = getattr(session, "_fallback_tool_resolver", None)
+
+    def resolve_deferred(name: str) -> AgentTool | None:
+        for tool in manager.get_tools():
+            meta = manager.get_tool_meta(tool.name) or {}
+            origin = (str(meta.get("server_name", "")), str(meta.get("mcp_tool_name", "")))
+            if tool.name == name and origin in deferred_origins:
+                return tool
+        return prior(name) if prior is not None else None
+
+    if hasattr(session, "set_fallback_tool_resolver"):
+        session.set_fallback_tool_resolver(resolve_deferred)
+    knowledge_hooks.mcp_resolver = make_mcp_resolver(manager, activate, defer=defer)
     # Once the manager exists, compaction-time reselection sees reloads. The
     # already frozen first-task block remains byte-stable until compaction.
     knowledge_hooks.mcp_catalogue = lambda query: render_mcp_catalogue(manager, query)

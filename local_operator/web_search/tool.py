@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import uuid
@@ -22,7 +23,7 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import config_dir
 from local_operator.web_search.models import SearchProviderId, SearchResponse
-from local_operator.web_search.providers import tavily_response_from_payload
+from local_operator.web_search.providers import PROVIDERS, tavily_response_from_payload
 from local_operator.web_search.service import (
     WebSearchService,
     coerce_search_settings,
@@ -318,14 +319,47 @@ async def execute_web_search(
         settings,
         credentials,
         tavily_oauth_search=_tavily_oauth_delegate(context, signal, on_update),
+        io=context.web_io if context is not None else None,
     )
+
+    async def search() -> SearchResponse:
+        return await service.search(
+            params.query, limit=params.max_results, forced_provider=params.provider
+        )
+
     try:
+        # Credentials are resolved anew for each invocation. Only a digest
+        # scopes duplicate work; no secret values enter keys or diagnostics.
+        # OAuth delegates capture per-call signals/events, so they retain
+        # independent calls rather than borrowing another caller's lifecycle.
+        io = context.web_io if context is not None else None
+        if io is not None and service.tavily_oauth_search is None:
+            auth = hashlib.sha256(
+                json.dumps(
+                    {
+                        key: value.get_secret_value()
+                        for key, value in {
+                            key: credentials.get_credential(key)
+                            for provider in settings.providers
+                            for key in PROVIDERS[provider].credential_keys
+                        }.items()
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            key = (
+                "search",
+                settings.model_dump_json(),
+                auth,
+                params.query.strip(),
+                params.max_results,
+                params.provider,
+            )
+            work = io.singleflight(key, search)
+        else:
+            work = search()
         response = await _search_or_abort(
-            service.search(
-                params.query,
-                limit=params.max_results,
-                forced_provider=params.provider,
-            ),
+            work,
             signal,
         )
     except asyncio.CancelledError:

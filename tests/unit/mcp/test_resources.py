@@ -19,6 +19,67 @@ async def _noop(*args: Any, **kwargs: Any) -> ToolResult:
     raise AssertionError("discovery tests must not execute an MCP tool")
 
 
+def test_search_returns_full_schema_and_defers_without_native_activation():
+    manager = FakeManager()
+    activated = []
+    deferred = []
+    resolve = make_mcp_resolver(
+        manager, lambda *args: activated.append(args), defer=lambda *args: deferred.append(args)
+    )
+    result = resolve("mcp://?search=authenticated+user&limit=2")
+    assert result and "mcp__linear_get_user" in result
+    assert '"verbose":{"type":"boolean"}' in result
+    assert deferred == [("linear", "get_user")]
+    assert activated == []
+    assert "untrusted reference data" in result
+    assert "tool(" in result
+
+
+def test_restricted_search_cannot_grant_deferred_or_native_tools():
+    activated = []
+    deferred = []
+    resolve = make_mcp_resolver(
+        FakeManager(),
+        lambda *args: activated.append(args),
+        defer=lambda *args: deferred.append(args),
+        deny_activation_reason="This role cannot enable tools.",
+    )
+    result = resolve("mcp://linear?search=user")
+    assert result and "This role cannot enable tools" in result
+    assert activated == deferred == []
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "?search=user&limit=0",
+        "?search=user&limit=9",
+        "?search=user&limit=no",
+        "?search=user&search=other",
+        "?unknown=x",
+        "linear/tool?search=user",
+    ],
+)
+def test_invalid_search_never_enables_a_tool(suffix):
+    enabled = []
+    resolve = make_mcp_resolver(FakeManager(), lambda *args: enabled.append(args))
+    assert resolve("mcp://" + suffix)
+    assert enabled == []
+
+
+def test_oversized_schema_is_omitted_whole_and_not_enabled():
+    manager = FakeManager()
+    manager.tools[0].parameters = {"type": "object", "description": "x" * 20000}
+    enabled = []
+    resolve = make_mcp_resolver(
+        manager, lambda *args: enabled.append(args), defer=lambda *args: enabled.append(args)
+    )
+    result = resolve("mcp://?search=user")
+    assert result and "schema exceeds this search budget" in result
+    assert "x" * 100 not in result
+    assert enabled == []
+
+
 def _tool(agent_name: str, description: str = "Look up the authenticated user") -> AgentTool:
     return AgentTool(
         name=agent_name,

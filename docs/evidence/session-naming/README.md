@@ -72,7 +72,9 @@ support it; GPT-5 preservation is covered deterministically, not claimed live.
 QA drove the **real OperatorApp**, using Textual `run_test` at 110×32, with its
 actual stylesheet. The main answer was deliberately synthetic (and labelled as
 such in every populated frame); **the title completion was a real provider call**.
-Baseline captures used a separate baseline source tree. Empty, loading, settled,
+Baseline captures loaded the exact base effort module into a fresh interpreter;
+the rest of the application code was unchanged, not a separate baseline checkout.
+Empty, loading, settled,
 a subsequent settled frame, and `/effort` output were captured as SVGs and
 rendered to the committed PNGs. The baseline's settled state is also the naming
 error state: the best-effort request fails without interrupting the main turn.
@@ -114,7 +116,44 @@ they produced **6 passed**. Requests remain single-attempt, isolated, capped at
 remain unchanged. Family tests cover GPT-5 preservation, GPT-6 direct/prefixed
 and unlisted variants, future-generation fallback, and none/minimal/max clamping.
 
-## Whole-tree gate outcomes
+## Integration onto updated main
+
+After the original proof above, merged `origin/main` at `3b100234` (PR #628)
+with a normal merge, retaining the original history. Reserved patch version is
+now **0.46.17** to avoid other coordinated release branches. The original
+`619ec60a` reproduction and screenshots remain historical evidence, not claims
+that the baseline changed.
+
+On the integrated source, ran the same live naming probe:
+
+```sh
+.venv/bin/python /tmp/lop-naming-probe.py integrated
+```
+
+Actual result: `low`, `max_tokens=1024`, `isolated=true`; output 16 tokens,
+reasoning 0; terminal `stop`, no error; title
+`Fix Expired Session Login Redirect Loop` in **5.030s**, selected foreground
+`high` unchanged.
+
+Integration regression command:
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest \
+  tests/unit/model tests/unit/providers tests/unit/session/test_session.py \
+  tests/unit/session/test_naming.py tests/unit/tui/test_conversation_naming.py \
+  tests/unit/session/runtime/test_owned.py tests/unit/test_session_factory.py -q
+```
+
+Result: **1946 passed, 18 failed** in 28.81s. Every failed node ID exactly
+matches the 18 already demonstrated baseline resume failures in
+[baseline-failures.txt](baseline-failures.txt); no naming/model/provider/lifecycle
+failure appeared. Full-tree flake8, black 26.1.0 (891 files), isort 5.13.2,
+and pyright were repeated and passed on the integration; pyright reported
+zero errors and warnings.
+The full unit suite was not repeated locally for unchanged majority code;
+current-head CI supplies the full integrated run.
+
+## Original whole-tree gate outcomes
 
 Flake8, black 26.1.0 (871 files), isort 5.13.2, and pyright over the whole tree
 passed; pyright reported zero errors and warnings. Final focused naming,

@@ -2846,3 +2846,32 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
     assert session is not None, "a failing sweep took the session down with it"
     assert ran == ["titles"], "a failing pass stopped the passes after it"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_admitted_user_refreshes_knowledge_but_tool_steps_reuse_it(tmp_path):
+    """Task routing must change without a compaction or repeated tool-step embedding."""
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    class Index:
+        def __init__(self):
+            self.queries = []
+
+        async def select(self, query, **kwargs):
+            self.queries.append(query)
+            return []
+
+    index = Index()
+    transcript = Transcript(tmp_path / "knowledge")
+    hooks = session_factory._KnowledgeHooks(index=cast(Any, index))
+    provider = session_factory._make_system_blocks_provider([], transcript, hooks)
+    await transcript.append_message(Message.user("inspect Slack"))
+    await provider()
+    await provider()
+    await transcript.append_message(Message.assistant("found it"))
+    await provider()
+    assert index.queries == ["inspect Slack"]
+    await transcript.append_message(Message.user("now inspect Python"))
+    await provider()
+    assert index.queries == ["inspect Slack", "now inspect Python"]
