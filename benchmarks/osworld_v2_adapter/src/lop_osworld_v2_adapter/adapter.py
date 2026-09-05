@@ -303,6 +303,7 @@ class OSWorldV2Adapter:
         self._secrets: dict[str, str] = {}
         self._provider: EnvironmentProvider | None = None
         self._observation_builder: ObservationBuilder | None = None
+        self._artifact_root: Path | None = None
         self._current_observation: Any = None
         self._sequence = 0
 
@@ -498,7 +499,8 @@ class OSWorldV2Adapter:
         # ambient carries it. The parent creates the directory and refuses a
         # reset whose root differs from the one its verifier reads, so writing
         # exactly here is what makes a frame verifiable rather than a guess.
-        self._observation_builder = ObservationBuilder(Path(params.artifact_root))
+        self._artifact_root = Path(params.artifact_root)
+        self._observation_builder = ObservationBuilder(self._artifact_root)
         raw = await provider.observe()
         self._sequence = 0
         self._current_observation = self._observation_builder.build(
@@ -716,14 +718,14 @@ class OSWorldV2Adapter:
     # ------------------------------------------------------------------
 
     async def score(self, params: ScoreParams) -> ScoreResult:
-        if self._provider is None or self._task is None:
+        if self._provider is None or self._task is None or self._artifact_root is None:
             raise scoring.ScoringUnavailable("score before reset_start")
         if not self._task.has_evaluator():
             # NOT 0.0: a task with no evaluator scored as failed would record
             # a failure the agent did not commit.
             raise scoring.ScoringUnavailable("task declares no evaluator")
         raw = await self._provider.evaluate()
-        return ScoreResult(score=scoring.score_to_artifact(raw))
+        return ScoreResult(score=scoring.score_to_artifact(raw, artifact_root=self._artifact_root))
 
     # ------------------------------------------------------------------
     # cleanup / close / begin_rescue
