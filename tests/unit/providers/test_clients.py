@@ -1021,6 +1021,22 @@ async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
     return None
 
 
+@pytest.fixture()
+def three_effort_tiers(tmp_path, monkeypatch) -> None:
+    """``lo``/``med``/``hi`` configured for the tests that audit the ``effort``
+    enum on the wire. The ``agent``/``task`` schemas advertise only CONFIGURED
+    tiers (an unconfigured one is a guaranteed launch failure), so with the
+    suite's isolated HOME the enum would otherwise be ``["inherit"]`` alone and
+    these tests would no longer prove that every tier survives the client."""
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents",
+        {"models": {"lo": "openai/gpt-5-mini", "med": "openai/gpt-5", "hi": "anthropic/opus"}},
+    )
+
+
 def _default_tools_with_agent() -> list[AgentTool]:
     """Build the genuinely COMPLETE inventory, not merely the ungated part.
 
@@ -1058,7 +1074,9 @@ def _default_tools_with_agent() -> list[AgentTool]:
     return tools
 
 
-async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member() -> None:
+async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member(
+    three_effort_tiers,
+) -> None:
     """Exercise the real OpenRouter client and complete registry-built bundle."""
 
     captured: dict[str, Any] = {}
@@ -1095,7 +1113,7 @@ async def test_openrouter_gemini_full_tool_bundle_has_no_empty_enum_member() -> 
     assert effort["anyOf"][0]["enum"] == ["lo", "med", "hi", "inherit"]
 
 
-def test_direct_google_full_tool_bundle_has_no_empty_enum_member() -> None:
+def test_direct_google_full_tool_bundle_has_no_empty_enum_member(three_effort_tiers) -> None:
     tools = _default_tools_with_agent()
     body = GoogleClient()._build_body(
         ChatRequest(
@@ -1116,7 +1134,9 @@ def test_direct_google_full_tool_bundle_has_no_empty_enum_member() -> None:
     ("provider", "model_id"),
     [("openai", "gpt-5.4"), ("openrouter", "qwen/qwen3-coder")],
 )
-def test_openai_compatible_models_keep_agent_effort_semantics(provider: str, model_id: str) -> None:
+def test_openai_compatible_models_keep_agent_effort_semantics(
+    three_effort_tiers, provider: str, model_id: str
+) -> None:
     """Ordinary OpenAI/Qwen routes receive every tier plus the clear sentinel."""
 
     tools = _default_tools_with_agent()
