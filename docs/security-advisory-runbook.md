@@ -12,9 +12,10 @@ escalation in phase 8 are recorded. This was the lesson of the September 2026
 advisories (GHSA-22mg-8gw7-636x, GHSA-3xjw-9qpc-53mh, fixed in 0.47.5): the
 reporter pointed out that a repository advisory alone does not warn anyone
 running a vulnerable version in their CI/CD, because those tools read from the
-vulnerability databases, not from our repository page. Hours after publishing,
-the GitHub *global* Advisory Database had 0 entries for us — publishing alone
-had not queued them for curation; requesting a CVE did.
+vulnerability databases, not from our repository page. Hours after publishing
+(and after requesting CVEs), the GitHub *global* Advisory Database still had 0
+entries for us. Propagation is asynchronous and unannounced, so it has to be
+verified (phase 7) and chased (phase 8), never assumed from any single action.
 
 Placeholders below: `<GHSA>` is the advisory id (`GHSA-xxxx-xxxx-xxxx`),
 `<X>` the fixed version, `<vulnerable>` any version in the affected range, and
@@ -99,9 +100,15 @@ security patch that breaks the CLI is a second incident.
 - Keep the PR title and description free of exploit detail until publication if
   the fix lands in the public repository rather than the private fork. "Harden
   path validation in X" is fine; the payload is not.
+- The PR body carries the `Release: patch — <one-line user impact>` line
+  under its summary (see "What the release owner does" in `AGENTS.md`); the
+  release owner writes the release notes from it, and a security fix whose
+  impact line is missing is the one most likely to be described wrongly.
+  Keep the impact line free of exploit detail; "fixes a path-traversal in X"
+  is enough. Never touch `pyproject.toml` in the fix PR.
 - If the fix changes an API contract the desktop app relies on, the companion
   repository (`local-operator-ui`) needs a matching change and its own release
-  (phase 4, step 5). Enumerate callers rather than recalling them.
+  (phase 4, step 6). Enumerate callers rather than recalling them.
 
 ## 4. Release
 
@@ -110,14 +117,28 @@ is published**, because Dependabot and `pip-audit` will otherwise tell users
 they are vulnerable with no version to move to.
 
 1. Merge the fix PR to `main` once the gate is clean.
-2. Bump the version by materiality (a security fix is a patch bump unless it
-   ships alongside a step-function feature; see "Versioning" in `AGENTS.md`).
-   If a release owner is already running a combined release, coordinate rather
-   than bumping in parallel — two agents bumping `pyproject.toml` is a conflict
-   that lands on `main`.
-3. Publish a **GitHub Release** `vX`. Its notes must link the GHSA(s) and name
-   the fixed vulnerability class in one line each; the release is what most
-   users read. Publishing the release triggers `.github/workflows/publish.yml`
+2. **Get the fix into a release window; never bump `pyproject.toml` yourself.**
+   Releases here are combined and cut by one release owner per window, and the
+   lock on a window is an open `chore(release):` PR — see "One release owner
+   per window" in `AGENTS.md` for the mechanics, which this runbook does not
+   repeat. What the advisory handler does:
+   - Look for the lock:
+     `gh pr list --search '"chore(release)" in:title' --state open`.
+   - If a window is owned, `send` the owner (the pid named in that PR's body)
+     the fix PR number, its merge SHA and its `Release:` line, and wait for
+     that window's tag and PyPI upload. Tell the owner it is a security fix so
+     the release notes link the GHSA(s) (phase 5 publishes their ids).
+   - If nothing is open, take the lock per that section (claim PR on
+     `release-next`) and cut the window yourself; a security fix on its own is
+     a patch bump.
+
+   The fixed version `<X>` is **whatever that window's version turns out to
+   be**, not a number chosen in advance; `patched_versions` in phase 5 is
+   filled in from the tag, and the advisory is published only after that
+   version is on PyPI.
+3. The window's **GitHub Release** `v<X>` must link the GHSA(s) and name the
+   fixed vulnerability class in one line each; the release is what most users
+   read. Publishing the release triggers `.github/workflows/publish.yml`
    (`release: published`), which uploads to PyPI.
 4. Confirm PyPI has it before going further:
 
@@ -178,7 +199,10 @@ EOF
 
 # Read it back and check every field above is populated before publishing.
 gh api "repos/<owner>/<repo>/security-advisories/<GHSA>" \
-  | jq '{state, summary, severity, cvss_vector_string, cwe_ids, vulnerabilities, credits}'   # severity is derived from the vector
+  | jq '{state, summary, severity, cvss: .cvss.vector_string, cvss_score: .cvss.score, cwe_ids, vulnerabilities, credits}'
+# The GET shape differs from the PATCH shape: the vector is read back at
+# `.cvss.vector_string` (there is no top-level `cvss_vector_string` on a GET,
+# so selecting it prints null and looks like the field was never set).
 
 # Publish. Only after PyPI has <X> (phase 4 step 4).
 gh api -X PATCH "repos/<owner>/<repo>/security-advisories/<GHSA>" -f state=published
@@ -189,11 +213,12 @@ the reporter to accept in the thank-you message in phase 9.
 
 ## 6. CVE request
 
-Request a CVE for every published advisory, immediately after publishing.
-Beyond giving users a stable identifier, **this is the step that puts the
-advisory into GitHub's curation queue.** In September 2026 both advisories sat
-for hours after publication with 0 entries in the global database; the CVE
-request is what moved them.
+Request a CVE for every published advisory, immediately after publishing. It
+is free, it gives scanners and users a stable identifier that outlives the
+GHSA, and reporters ask for it. GitHub reviews published repository advisories
+for the Advisory Database on its own schedule (their docs say usually within
+72 hours, not guaranteed); the CVE request is not what triggers that review,
+and neither action is evidence of propagation — only the phase 7 checks are.
 
 ```sh
 gh api -X POST "repos/<owner>/<repo>/security-advisories/<GHSA>/cve"
@@ -297,8 +322,9 @@ An advisory is closed when all of the following are true and recorded:
 - The temporary worktree(s), isolated `HOME` directories and any throwaway
   Dependabot test repository are deleted.
 - This runbook is updated with anything that surprised you. The September 2026
-  lesson (publishing does not queue curation; requesting a CVE does) was added
-  exactly this way, and the next gap will be found the same way.
+  lesson — publishing was not the end; hours later nothing had propagated, so
+  the phase 7 checks and phase 8 follow-ups were added — landed exactly this
+  way, and the next gap will be found the same way.
 
 ## Appendix: why the inbound scanners in this repository are not enough
 

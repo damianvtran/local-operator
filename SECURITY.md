@@ -20,8 +20,8 @@ fixed version, upgrade to it (or newer) and pin at least that version in your
 own dependency spec, for example `local-operator>=0.47.5`.
 
 Because a fix only protects the installs that pick it up, we also recommend
-that consumers run their own dependency scanning — `pip-audit`, GitHub
-Dependabot, or Snyk — in CI so the advisory reaches you even if you miss the
+that consumers run their own dependency scanning (`pip-audit`, GitHub
+Dependabot, or Snyk) in CI so the advisory reaches you even if you miss the
 release notes. See "How advisories are published" for how we make sure those
 tools actually know about a fix.
 
@@ -76,13 +76,16 @@ therefore commit to the full propagation chain, not just the first step:
 1. **GitHub repository advisory** published with a precise affected range and
    the patched version, a "Verified fix" section (fixed version, fixing PR,
    before/after evidence), CWE and CVSS, and credit to the reporter.
-2. **CVE request** through GitHub. Requesting a CVE is what puts the advisory
-   into GitHub's curation queue; publishing alone does not.
-3. **GitHub Advisory Database** — the advisory appears as a reviewed global
-   entry at `https://github.com/advisories/<GHSA>`.
+2. **CVE request** through GitHub, immediately after publishing, so that
+   scanners and users have a stable identifier.
+3. **GitHub Advisory Database**: GitHub reviews published repository
+   advisories and adds them to the global database (their documentation says
+   usually within 72 hours, but this is not guaranteed). The advisory then
+   appears as a reviewed entry at `https://github.com/advisories/<GHSA>`, which
+   is what **Dependabot** alerts read.
 4. **OSV** ([osv.dev](https://osv.dev)) ingests the reviewed entry; from there
    it reaches **PyPI**'s per-release vulnerability data, **`pip-audit`** (both
-   the `pypi` and `osv` sources), **Dependabot** alerts, and **Snyk**.
+   the `pypi` and `osv` sources), and **Snyk**.
 5. We check that chain a few days and again about two weeks after publication.
    If the advisory has not propagated by then, we submit it directly to the
    [PyPA advisory database](https://github.com/pypa/advisory-database) (which

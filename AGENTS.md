@@ -521,13 +521,15 @@ one PR alone while other merged work is sitting on `main` unreleased.
 
 Any agent handling a reported vulnerability or a GHSA for this repository
 **must read [`docs/security-advisory-runbook.md`](docs/security-advisory-runbook.md)
-first** and follow its phases in order — in particular, the fix must be on PyPI
-before the advisory is published, and a CVE must be requested after publishing
-(that request, not publication, is what queues the advisory for GitHub
-curation). A published advisory is **not** the end of the task: the advisory is
-done only when the runbook's propagation checks (GitHub Advisory Database, OSV,
-PyPI, `pip-audit`) pass, or when the +3d/+14d follow-up wake and the escalation
-path (PYSEC PR, Snyk disclosure) are recorded. `SECURITY.md` carries the public
+first** and follow its phases in order — in particular, the fix rides a normal
+release window under "One release owner per window" above (the handler never
+bumps `pyproject.toml`), the advisory is published only once that window's
+version is on PyPI, and a CVE is requested immediately after publishing. A
+published advisory is **not** the end of the task: GitHub's review for the
+Advisory Database is asynchronous and unannounced, so the advisory is done only
+when the runbook's propagation checks (GitHub Advisory Database, OSV, PyPI,
+`pip-audit`) pass, or when the +3d/+14d follow-up wake and the escalation path
+(PYSEC PR, Snyk disclosure) are recorded. `SECURITY.md` carries the public
 commitment and the "Past advisories" table; update it in the fix's close-out.
 
 ## Versioning: choose the bump by materiality, not commit type
