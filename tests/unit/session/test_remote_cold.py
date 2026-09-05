@@ -953,3 +953,52 @@ async def test_the_restored_roster_unions_the_sidecar_and_the_checkpoint(
         assert jobs["shared"].status == "failed"
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_fork_does_not_list_its_parents_children(tmp_path: Path, monkeypatch) -> None:
+    """#573 on the cold path: the checkpoint a fork inherits is the parent's.
+
+    ``fork.EXCLUDED_SIDECARS`` keeps the roster sidecar out of a fork precisely
+    so it does not list children it cannot address, and the checkpoint was
+    smuggling equivalent rows past that exclusion. The rest of the durable
+    state — title, spend, occupancy — IS the conversation's and still restores,
+    and the identity the viewer reports is its own directory's.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendModelSpec,
+        FrontendSessionState,
+        JobState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("go"))
+    inherited = FrontendSessionState(
+        session_id="parent000001",
+        epoch="parent-owner",
+        conversation_title="Parent's title",
+        jobs=[JobState(id="parent-child", type="task", label="auditor", status="succeeded")],
+        cumulative_parent_cost=4.5,
+        selected_model=FrontendModelSpec(provider="", model_id=""),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "cp-parent", "state": inherited.model_dump(mode="json")},
+    )
+    viewer = await RemoteSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.session_id == SESSION_ID
+        assert state.jobs == ()
+        assert state.conversation_title == "Parent's title"
+        assert state.cumulative_parent_cost == 4.5
+    finally:
+        await viewer.dispose()

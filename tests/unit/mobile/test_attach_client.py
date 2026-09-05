@@ -252,3 +252,124 @@ async def test_request_error_raises_runtime_error(config: Path) -> None:
         await client.detach()
     finally:
         r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_frame_is_not_reported_as_an_oversized_one(config: Path) -> None:
+    """The pump's disconnect reason names what actually happened.
+
+    ``StreamReader.readline`` raises ``ValueError`` on a line overrun, and the
+    pump's ``except ValueError`` was written for that. But the frame callbacks
+    raise ``ValueError`` too — a follower store refusing an update as "not the
+    next state sequence", pydantic validating a frame — and every one of those
+    was logged as "owner sent a frame larger than the 1048576-byte line
+    limit" for a frame of a few hundred bytes (#573's viewer, whose store was
+    still the cold one because the sync had been refused). Only the READ can
+    be oversized; a callback failure carries its own reason.
+    """
+    from local_operator.mobile.attach_client import OVERSIZED_FRAME_REASON
+    from tests.unit.session.runtime.test_server import FakeHandle as RelayHandle
+
+    # The relay-capable fake (session_id "s1"): this test needs an owner that
+    # actually pushes an event frame at the client.
+    handle = RelayHandle()
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+
+        def refuse(_data):  # noqa: ANN001, ANN202
+            raise ValueError("frontend update is not the next state sequence")
+
+        # The real shape: the sync installs, then the follower's store refuses
+        # the next ordered update (a viewer left at the wrong epoch).
+        synced = asyncio.Event()
+        client = AttachClient(
+            lambda p: None,
+            disconnected.append,
+            frontend_state=True,
+            on_frontend_sync=lambda _data: synced.set(),
+            on_frontend_update=refuse,
+        )
+        await client.connect(record, "s1")
+        # ``connect()`` returns at the WELCOME frame, but the server subscribes
+        # this connection to the frontend only afterwards. A mutation landing in
+        # that gap is folded into the sync snapshot instead of being relayed as
+        # an update, so ``refuse`` never fires and no amount of waiting on the
+        # deadline below can produce the frame. Gate on the sync itself.
+        await asyncio.wait_for(synced.wait(), timeout=5)
+        handle._frontend.mutate(goal="anything that publishes an update")
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not disconnected:
+            await asyncio.sleep(0.05)
+        assert len(disconnected) == 1
+        assert disconnected[0] != OVERSIZED_FRAME_REASON
+        assert "not the next state sequence" in disconnected[0]
+        assert not client.connected
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_abandon_closes_without_reporting_owner_loss(config: Path) -> None:
+    """``abandon`` is the close for a host that is abandoning a connection it
+    judged unusable and intends to keep running: the pump's ``finally`` must
+    not report it as a disconnect, or the host's recovery loop would redial
+    the very runtime it just gave up on."""
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        client.abandon()
+        await asyncio.sleep(0.2)
+        assert disconnected == []
+        assert not client.connected
+        for _ in range(50):
+            if r.attach_clients() == 0:
+                break
+            await asyncio.sleep(0.02)
+        assert r.attach_clients() == 0
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one(
+    config: Path,
+) -> None:
+    """Locks the pump's clause ORDER, which is load-bearing and invisible.
+
+    ``ConnectionResetError`` and ``BrokenPipeError`` are ``ConnectionError``
+    subclasses, and ``ConnectionError`` is an ``OSError``. So the pump's three
+    handlers are ordered reset -> ConnectionError -> OSError, and every one of
+    them is reachable only because of that order: hoisting the bare
+    ``ConnectionError`` clause above the reset clause would silently retag a
+    dead transport as "a frame this client refused", which is the opposite
+    diagnosis — the host redials for a fresh snapshot instead of reporting the
+    owner as gone. Nothing about the source says that, so this pins it
+    (review round 1, F4).
+    """
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        # A transport death, raised out of the pump's read exactly as a peer
+        # RST would surface it.
+        assert client._reader is not None
+        client._reader.set_exception(ConnectionResetError("peer reset"))
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not disconnected:
+            await asyncio.sleep(0.05)
+        assert disconnected == ["owner connection reset"]
+        assert not client.connected
+    finally:
+        r.close()

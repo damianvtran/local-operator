@@ -74,6 +74,13 @@ OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
 logger = logging.getLogger(__name__)
 
 
+class _OversizedFrame(Exception):
+    """A readline overrun, re-raised under its own type so the pump's outer
+    handler cannot confuse it with a ``ValueError`` a frame CALLBACK raised —
+    the two mean opposite things (owner sent too much vs. this side refused
+    what it sent) and were logged as the same overrun before this existed."""
+
+
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
@@ -239,7 +246,33 @@ class AttachClient:
         reason = "owner exited"
         try:
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError as exc:
+                    # ``StreamReader.readline`` raises ValueError (via
+                    # LimitOverrunError) when one frame exceeds the connection's
+                    # ``limit``. It is NOT a transport failure and it is not
+                    # recoverable by reading on: the oversized line stays in the
+                    # buffer, so every subsequent read raises the same way.
+                    #
+                    # Before this it fell through as an unhandled task exception
+                    # that killed the pump silently, and the host — which only
+                    # ever learns about a dead connection through
+                    # ``on_disconnected`` — kept waiting for a sync that could
+                    # never arrive, timed out after 15 s, and degraded to a
+                    # runtime-less cold session. A hard bug that presented as a
+                    # slow owner. Report it as its own reason so the host can
+                    # say what actually happened instead of blaming the owner's
+                    # liveness.
+                    #
+                    # Caught HERE, around the read alone, and not around the
+                    # whole loop: the frame callbacks below raise ValueError
+                    # too (a follower store refusing an update as "not the next
+                    # state sequence", pydantic validation of a frame), and
+                    # when the outer handler owned every ValueError those were
+                    # logged as "owner sent a frame larger than the limit" — a
+                    # 104 KB frame reported as an overrun (#573's viewer).
+                    raise _OversizedFrame() from exc
                 if not line:
                     break
                 try:
@@ -322,28 +355,35 @@ class AttachClient:
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
                         future.set_result(frame)
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            reason = "owner connection reset"
-        except ValueError:
-            # ``StreamReader.readline`` raises ValueError (via LimitOverrunError)
-            # when one frame exceeds the connection's ``limit``. It is NOT a
-            # transport failure and it is not recoverable by reading on: the
-            # oversized line stays in the buffer, so every subsequent read
-            # raises the same way.
-            #
-            # Before this it fell through as an unhandled task exception that
-            # killed the pump silently, and the host — which only ever learns
-            # about a dead connection through ``on_disconnected`` — kept waiting
-            # for a sync that could never arrive, timed out after 15 s, and
-            # degraded to a runtime-less cold session. A hard bug that presented
-            # as a slow owner. Report it as its own reason so the host can say
-            # what actually happened instead of blaming the owner's liveness.
+        except _OversizedFrame:
             reason = OVERSIZED_FRAME_REASON
             logger.error(
                 "attach client: owner sent a frame larger than the %d-byte line limit; "
                 "the connection cannot continue",
                 _READ_LIMIT_BYTES,
             )
+        except (ConnectionResetError, BrokenPipeError):
+            reason = "owner connection reset"
+        except ConnectionError as exc:
+            # A frame the owner sent was refused by this side — malformed, a
+            # sequence gap, or a sync a host callback rejected. The socket is
+            # healthy; the STATE is not, and the host's disconnect handler is
+            # the one place that can decide between redialling for a fresh
+            # snapshot and giving up. Named so the log says which. Ordered
+            # BEFORE the bare ``OSError`` clause below because
+            # ``ConnectionError`` is one, and the two resets above are
+            # ``ConnectionError`` subclasses in turn.
+            reason = str(exc) or "owner sent a frame this client refused"
+            logger.warning("attach client: %s; the connection cannot continue", reason)
+        except OSError:
+            reason = "owner connection reset"
+        except Exception as exc:  # noqa: BLE001 — a callback failure must still report
+            # A host callback raised something else (a store rejecting an
+            # update, a validation error). Same treatment: the pump cannot
+            # continue past a frame it could not apply, and silence here is
+            # the "slow owner" bug shape above wearing a different exception.
+            reason = f"owner frame could not be applied: {exc}"
+            logger.warning("attach client: %s; the connection cannot continue", reason)
         finally:
             self._connected = False
             for future in self._pending.values():
@@ -634,6 +674,20 @@ class AttachClient:
                 self._writer.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def abandon(self) -> None:
+        """Close WITHOUT reporting the closure as a disconnect.
+
+        Both ``detach`` and ``close`` still end in ``on_disconnected`` (the
+        pump observes EOF or its cancellation) — right for a host that is
+        exiting or leaving, whose teardown runs one path, and wrong for a host
+        that is ABANDONING a connection it judged unusable and intends to keep
+        running: there the callback reads as owner loss and starts a recovery
+        that redials the same runtime. The refused-sync path in
+        ``RemoteSession`` is that case.
+        """
+        self._on_disconnected = lambda _reason: None
+        self.close()
 
     def close(self) -> None:
         """Synchronous teardown for hosts without a loop (app exit paths)."""
