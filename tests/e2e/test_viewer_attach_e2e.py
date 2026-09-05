@@ -416,7 +416,10 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
         assert retire_details, "the viewer never offered the runtime back"
         assert retire_details[-1].startswith("kept:"), retire_details
         assert not handle.is_pristine(), "a stamped team is durable state, not a pristine session"
-        from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+        from local_operator.resume import (
+            ATTACHMENT_SIDECAR_NAME,
+            read_session_attachment,
+        )
 
         assert (directory / ATTACHMENT_SIDECAR_NAME).exists(), "the attachment must survive"
         restored = read_session_attachment(directory)

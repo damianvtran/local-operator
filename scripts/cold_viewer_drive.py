@@ -32,21 +32,22 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
 
-ISO = Path(tempfile.mkdtemp(prefix="teamfix-cold-"))
-CONFIG = ISO / ".local-operator"
-CONFIG.mkdir(parents=True)
-os.environ["HOME"] = str(ISO)
-os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(CONFIG)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+# The sandbox HOME + config dir the other shot scripts use, set BEFORE any
+# local_operator import so nothing consults the real ~/.local-operator.
+isolate_capture()
+CONFIG = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
+CONFIG.mkdir(parents=True, exist_ok=True)
+ISO = Path(os.environ["HOME"])
 os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
 os.environ["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
-os.environ["TERM"] = "xterm-256color"
-os.environ.pop("NO_COLOR", None)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from textual import events  # noqa: E402
 
@@ -181,7 +182,7 @@ async def main() -> None:
         print(f"  refused with old copy:    {'but not run one' in rendered}")
         print(f"  transcript: {rendered[:220]}")
         if out is not None:
-            app.save_screenshot(str(out))
+            save_capture(app, out)
         await _stop_runtime(app, pilot)
 
     # ---- cell 2: /credential KEY, pasted at t=0 on a cold viewer ----

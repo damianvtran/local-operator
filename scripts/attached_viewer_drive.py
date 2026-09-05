@@ -14,15 +14,17 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, cast
 
-CONFIG = Path(tempfile.mkdtemp(prefix="teamfix-tui-"))
-os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(CONFIG)
-os.environ["TERM"] = "xterm-256color"
-os.environ.pop("NO_COLOR", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+# Sandbox HOME + config dir, set BEFORE any local_operator import.
+isolate_capture()
+CONFIG = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
+CONFIG.mkdir(parents=True, exist_ok=True)
 
 from local_operator.session.runtime import registry  # noqa: E402
 from local_operator.session.runtime.owned import OwnedSessionHandle  # noqa: E402
@@ -195,7 +197,7 @@ async def main() -> None:
             print(f"  org chart opened:   {app.screen.__class__.__name__}")
 
             if len(sys.argv) > 1:
-                app.save_screenshot(sys.argv[1])
+                save_capture(app, sys.argv[1])
                 print(f"\nframe: {sys.argv[1]}")
     finally:
         if viewer is not None:
