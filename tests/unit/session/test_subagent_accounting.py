@@ -216,3 +216,160 @@ async def test_rendered_footer_uses_whole_owner_ledger():
         assert app._spend_is_floor
         assert app.screen.virtual_size == app.screen.size
         assert not app.screen.show_vertical_scrollbar
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", [True, False])
+@pytest.mark.parametrize("swept", [True, False])
+@pytest.mark.parametrize("ledger", ["new", "malformed", "legacy", "empty"])
+async def test_cold_facade_restores_sidecar_ledger_without_parent_checkpoint(
+    tmp_path, monkeypatch, checkpoint, swept, ledger
+):
+    import json
+
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.remote import RemoteSession
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
+    )
+    directory = tmp_path / "sessions" / "coldledger01"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    if checkpoint:
+        state = FrontendSessionState(
+            epoch="old",
+            session_id="coldledger01",
+            subagent_cost=0.125,
+            subagent_cost_knowledge=CostKnowledge.EXACT,
+        )
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": state.model_dump(mode="json")}
+        )
+    payload = {
+        "version": 1,
+        "generation": 1,
+        "records": [],
+        "jobs": (
+            []
+            if swept
+            else [
+                {
+                    "id": "new",
+                    "type": "task",
+                    "status": "completed",
+                    "usage": Usage(usd_cost=0.25).model_dump(),
+                }
+            ]
+        ),
+    }
+    if ledger != "legacy":
+        payload["accounting"] = {
+            "new": [Usage(estimated_usd_cost=0.25).model_dump()],
+            "empty": [],
+            "malformed": [{"estimated_usd_cost": -1}],
+        }[ledger]
+    (directory / SUBAGENT_ROSTER_SIDECAR).write_text(json.dumps(payload))
+
+    async def never():
+        pytest.fail("cold restore started owner")
+
+    viewer = await RemoteSession.cold(
+        "coldledger01", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never
+    )
+    try:
+        assert viewer.is_cold
+        expected = (
+            0.25
+            if ledger == "new"
+            else None if ledger == "empty" else 0.125 if checkpoint else None
+        )
+        assert viewer.frontend_state.cumulative_cost == expected
+        assert len(viewer.frontend_state.jobs) == (0 if swept else 1)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.parametrize(
+    "provider,model_id,counts",
+    [
+        (
+            "anthropic",
+            "claude-fable-5-1",
+            dict(
+                input_tokens=116,
+                output_tokens=52767,
+                cache_read_tokens=4282533,
+                cache_write_tokens=164387,
+                context_tokens=113735,
+            ),
+        ),
+        (
+            "openai",
+            "gpt-6-astra",
+            dict(
+                input_tokens=5935061,
+                output_tokens=7159,
+                cache_read_tokens=4740864,
+                context_tokens=179608,
+            ),
+        ),
+    ],
+)
+def test_both_table_priced_models_preserve_cache_semantics_offline(
+    monkeypatch, provider, model_id, counts
+):
+    from local_operator.model.configure import cost_for_usage
+    from local_operator.model.registry import ModelInfo
+
+    # Controlled test prices, NOT vendor-rate claims. The actual model/cache
+    # shapes exercise Anthropic's separate cache buckets versus OpenAI's cached
+    # subset of input, through the shared pricing helper rather than a workaround.
+    info = ModelInfo(
+        id=model_id,
+        name=model_id,
+        description="controlled pricing fixture",
+        input_price=2,
+        output_price=10,
+        cache_reads_price=0.2,
+        cache_writes_price=2.5,
+    )
+    monkeypatch.setattr("local_operator.tui.costs._resolve_for_paint", lambda *_: info)
+    usage = Usage(provider=provider, model_id=model_id, **counts)
+    expected = cost_for_usage(provider, info, usage)
+    plain_input = (
+        counts["input_tokens"]
+        if provider == "anthropic"
+        else counts["input_tokens"] - counts["cache_read_tokens"]
+    )
+    assert expected == pytest.approx(
+        (
+            plain_input * 2
+            + counts["output_tokens"] * 10
+            + counts["cache_read_tokens"] * 0.2
+            + counts.get("cache_write_tokens", 0) * 2.5
+        )
+        / 1_000_000
+    )
+    job = AsyncJob(
+        start_time=0, id="priced", type="task", label="priced", model_label=f"{provider}/{model_id}"
+    )
+    _accumulate_usage(job, usage)
+    assert job.usage is not None
+    persisted = Usage.model_validate_json(job.usage.model_dump_json())
+    assert persisted.cost_components[0].usd_cost is None
+    monkeypatch.setattr(
+        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("offline discovery")
+    )
+    assert cost_summary(persisted.cost_components, recorded_only=True) == (expected, False)
+    _accumulate_usage(job, Usage(provider=provider, model_id=model_id, usd_cost=0.125))
+    assert job_stats(JobState.from_job(job)).cost == pytest.approx(expected + 0.125)
+    unknown = Usage(provider="test", model_id="unpriced", input_tokens=10)
+    assert cost_summary([*persisted.cost_components, unknown], recorded_only=True) == (
+        expected,
+        True,
+    )
