@@ -53,6 +53,7 @@ from local_operator.evaluation.adapters.api import (
     AckResult,
     AdapterCapabilities,
     AdapterMetadata,
+    AskUserExchangeResult,
     CleanupOutcome,
     CleanupResult,
     ExecuteResult,
@@ -374,7 +375,38 @@ class TinyAdapter:
         return ExecuteResult(observation=output, receipt=receipt)
 
     async def ask_user_exchange(self, params):
-        raise NotImplementedError
+        from pathlib import Path
+        import asyncio
+        site = Path(__file__).parent
+        mode = (site / "tiny_ask_mode").read_text() if (site / "tiny_ask_mode").exists() else "host"
+        with (site / "tiny_ask_calls").open("a") as handle:
+            handle.write(str(params.answer) + "\\n")
+        answer = None
+        if mode != "host":
+            assert params.answer is None
+            # A second generation is observably different, so a retry cannot
+            # accidentally pass as the same public reply.
+            count = len((site / "tiny_ask_calls").read_text().splitlines())
+            answer = "public simulator answer " + str(count)
+            if mode == "timeout":
+                await asyncio.sleep(60)
+            if mode in ("refuse", "missing-answer"):
+                answer = None
+            if mode == "empty":
+                answer = ""
+            if mode == "oversize":
+                answer = "x" * 100_001
+        bound = params
+        if mode == "wrong-prompt":
+            bound = params.model_copy(update={"prompt": "different question"})
+        if mode == "wrong-episode":
+            bound = params.model_copy(update={"episode_id": "wrong-episode"})
+        return AskUserExchangeResult(
+            ask_id="wrong" if mode == "wrong-id" else params.ask_id,
+            request_digest=bound.request_digest,
+            accepted=mode not in ("refuse", "refusal-answer"),
+            answer=answer,
+        )
 
     async def score(self, params):
         self._maybe_die("score")
@@ -399,6 +431,9 @@ class TinyAdapter:
 
 
 def create():
+    from pathlib import Path
+    mode_path = Path(__file__).parent / "tiny_ask_mode"
+    mode = mode_path.read_text() if mode_path.exists() else "host"
     installed = distribution("tiny-runner-adapter")
     return TinyAdapter(
         AdapterMetadata(
@@ -408,9 +443,10 @@ def create():
             entry_point="tiny_runner_adapter:create",
             package_digest=distribution_digest(installed),
             release_digest="%s",
-            schema_version="1.5",
+            schema_version="1.5" if mode == "old-schema" else "1.6",
             capabilities=AdapterCapabilities(
-                routes=("computer",), ask_user=False, scoring=True
+                routes=("computer",), ask_user=mode != "invalid-capability", scoring=True,
+                ask_user_answer_owner="host" if mode == "host" else "adapter",
             ),
         )
     )
@@ -479,7 +515,7 @@ def real_selector(tmp_path: Path, adapter_site: Path) -> AdapterSelector:
     (workspace / "tasks" / "pkg").mkdir(exist_ok=True)
     (workspace / "tasks" / "pkg" / "mod.py").write_text("MARK = 'nested'\n")
     return AdapterSelector(
-        schema_version="1.5",
+        schema_version="1.6",
         adapter_id="tiny-runner",
         distribution="tiny-runner-adapter",
         version="1.0",
@@ -504,16 +540,16 @@ def _subprocess_config(tmp_path: Path, **overrides: Any) -> Any:
     assertion into a flake about machine speed rather than about the runner.
     """
 
-    return build_config(
-        tmp_path,
+    defaults = dict(
         handshake_timeout=60.0,
         prepare_timeout=60.0,
         reset_timeout=60.0,
         step_timeout=60.0,
         score_timeout=60.0,
         cleanup_timeout=60.0,
-        **overrides,
     )
+    defaults.update(overrides)
+    return build_config(tmp_path, **defaults)
 
 
 def _arm_cutpoint(site: Path, cutpoint: str | None) -> None:
@@ -1047,3 +1083,143 @@ async def test_worker_importing_from_the_workspace_leaves_no_bytecode_behind(
     assert caches == [], caches
     assert not list(workspace.rglob("*.pyc"))
     assert workspace_digest(str(workspace)) == real_selector.workspace_digest
+
+
+def _offline_ask_client(artifact_root: Path) -> tuple[Any, Any]:
+    from tests.unit.evaluation.runner.test_provider_client import (
+        RecordingStream,
+        _client,
+    )
+
+    def reply(message: Any) -> str:
+        text = message.content[0].text
+        observation_id = next(
+            line.split(": ", 1)[1]
+            for line in text.splitlines()
+            if line.startswith("Observation ID: ")
+        )
+        action = (
+            {"kind": "ask_user", "request_id": "public-ask", "question": "What next?"}
+            if len(stream.requests) == 1
+            else {"kind": "finish", "status": "done", "reason": "answered"}
+        )
+        return json.dumps({"actions": [{"observation_id": observation_id, **action}]})
+
+    stream = RecordingStream(reply)
+    return _client(stream, artifact_root), stream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["adapter", "host"])
+async def test_public_answer_crosses_worker_into_next_model_request(
+    tmp_path: Path, episode_id: str, real_selector: AdapterSelector, adapter_site: Path, owner: str
+) -> None:
+    from local_operator.evaluation.evidence.models import UserSimulatorExchangePayload
+    from tests.unit.evaluation.runner.conftest import RecordingResponder, payloads
+
+    (adapter_site / "tiny_ask_mode").write_text(owner)
+    config = _subprocess_config(tmp_path)
+    model, stream = _offline_ask_client(config.artifact_root)
+    responder = RecordingResponder("host public answer") if owner == "host" else None
+    outcome = await EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=model,
+        responder=responder,
+        synthetic_model=True,
+    ).run()
+    assert outcome.status == "completed", outcome.diagnostic
+    assert not outcome.rescue_required
+    assert outcome.bundle_root is not None
+    report = verify_bundle(outcome.bundle_root)
+    assert report.valid, report.issues
+    answer = "public simulator answer 1" if owner == "adapter" else "host public answer"
+    calls = (adapter_site / "tiny_ask_calls").read_text().splitlines()
+    assert calls == (["None"] if owner == "adapter" else [answer])
+    assert len(stream.requests) == 2
+    assert f"Answer from the user: {answer}" in stream.requests[1].messages[-1].content[0].text
+    exchanges = payloads(outcome.bundle_root, UserSimulatorExchangePayload)
+    assert len(exchanges) == 1
+    artifact = exchanges[0].response_artifact
+    assert artifact.sha256 == hashlib.sha256(answer.encode()).hexdigest()
+    assert any(
+        path.read_bytes() == answer.encode()
+        for path in outcome.bundle_root.rglob(artifact.sha256)
+        if path.is_file()
+    )
+    kinds = [event.kind for event in report.events]
+    index = kinds.index("user_simulator_exchange")
+    assert kinds[index + 1 : index + 3] == ["action_batch", "environment_step"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "refuse",
+        "timeout",
+        "host",
+        "wrong-id",
+        "wrong-prompt",
+        "wrong-episode",
+        "missing-answer",
+        "empty",
+        "oversize",
+        "refusal-answer",
+    ],
+)
+async def test_unanswered_or_ambiguous_exchange_never_regenerates(
+    tmp_path: Path, episode_id: str, real_selector: AdapterSelector, adapter_site: Path, mode: str
+) -> None:
+    from local_operator.evaluation.evidence.models import UserSimulatorExchangePayload
+    from tests.unit.evaluation.runner.conftest import payloads
+
+    (adapter_site / "tiny_ask_mode").write_text(mode)
+    config = _subprocess_config(tmp_path, step_timeout=0.5)
+    model, stream = _offline_ask_client(config.artifact_root)
+
+    rescued: list[Any] = []
+
+    async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+        rescued.append(descriptor)
+        raise RuntimeError("synthetic rescue unavailable")
+
+    outcome = await EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=model,
+        synthetic_model=True,
+        rescue=rescue,
+    ).run()
+    ambiguous = mode not in ("refuse", "host")
+    assert outcome.status == ("failed" if ambiguous else "cancelled"), outcome.diagnostic
+    assert outcome.rescue_required == ambiguous
+    assert bool(rescued) == ambiguous
+    assert outcome.score is None or outcome.score.status == "unscored"
+    assert len(stream.requests) == 1
+    assert outcome.bundle_root is not None
+    assert not payloads(outcome.bundle_root, UserSimulatorExchangePayload)
+    calls = adapter_site / "tiny_ask_calls"
+    if mode == "host":
+        assert not calls.exists()
+    else:
+        assert calls.read_text().splitlines() == ["None"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["old-schema", "invalid-capability"])
+async def test_incompatible_ownership_protocol_fails_before_allocation(
+    tmp_path: Path, episode_id: str, real_selector: AdapterSelector, adapter_site: Path, mode: str
+) -> None:
+    (adapter_site / "tiny_ask_mode").write_text(mode)
+    config = _subprocess_config(tmp_path)
+    model = ScriptedModel(["ask"])
+    outcome = await EpisodeRunner(
+        build_spec(episode_id), config, selector=real_selector, model=model
+    ).run()
+    assert outcome.status == "failed_pre_bundle", outcome.diagnostic
+    assert model.calls == 0 and outcome.bundle_root is None
+    assert not list(config.artifact_root.iterdir())
+    assert not (adapter_site / "tiny_ask_calls").exists()
