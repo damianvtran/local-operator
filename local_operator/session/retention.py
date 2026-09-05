@@ -74,14 +74,35 @@ SESSIONS_DIRNAME = "sessions"
 #: and is reaped once :func:`_is_claimed` confirms no live process owns it.
 LIVE_MARKER_NAME = ".session.pid"
 
+#: The attachment sidecar's name (``resume.ATTACHMENT_SIDECAR_NAME``), spelled
+#: here for the same import-weight reason :data:`TRANSCRIPT_FILENAME` is.
+ATTACHMENT_SIDECAR_FILENAME = "attachment.json"
+
 #: Files a session directory may hold that are bookkeeping ABOUT the run rather
-#: than content produced BY it, and so are not charged as bytes. Only the
-#: liveness marker qualifies: ``origin.json`` is deliberately treated as
-#: content (see :func:`_dir_size`) so an aborted child stamped with its origin
-#: is protected exactly as #154/#192 intend — the point of the never-delete
-#: model. Collected in one place so the size charge and the activity clock
-#: agree on the list.
-_SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME})
+#: than content produced BY it, and so are not charged as bytes. Two qualify:
+#:
+#: - the liveness marker (``.session.pid``);
+#: - the attachment sidecar (``attachment.json``), which names the ``/team``,
+#:   ``/agent`` and ``/goal`` a resume re-stamps. It is durable, and a live
+#:   runtime treats it as such (``OwnedSessionHandle.is_pristine`` refuses to
+#:   retire a session that has one). But on a directory with NO transcript
+#:   it names an attachment to a conversation that never existed: the user
+#:   attached a team and left before a first message. Nothing lists such a
+#:   directory (``/resume`` and ``@latest`` gate on the transcript), so
+#:   treating the sidecar as content would make it immortal — exactly the
+#:   marker-only corpse the never-delete model has to be able to reap. It
+#:   reads as empty here, and the one-hour :data:`EMPTY_DIR_GRACE_SECONDS`
+#:   is what protects a session that attached a team and is still typing its
+#:   first message. Once a transcript row exists the sidecar is beside real
+#:   content and this rule never applies. (#624 review round 2, R7: the
+#:   pre-fix stranded shape is a sidecar-only directory, and this is where
+#:   it is reclaimed.)
+#:
+#: ``origin.json`` is deliberately treated as content (see :func:`_dir_size`)
+#: so an aborted child stamped with its origin is protected exactly as
+#: #154/#192 intend — the point of the never-delete model. Collected in one
+#: place so the size charge and the activity clock agree on the list.
+_SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME, ATTACHMENT_SIDECAR_FILENAME})
 
 #: The transcript file's name, used by :func:`_holds_content` as a fast-path
 #: sentinel: a session that has written a turn has a non-empty one, and a

@@ -8691,8 +8691,11 @@ class OperatorApp(App[None]):
 
         A viewer that quits right after this offers its runtime back
         (``_retire_unused_runtime``); the runtime refuses because the attach
-        journalled a durable row and the turn is in flight — see
-        ``tests/unit/tui/test_cold_slash_binds.py`` for the sequence.
+        journalled ``attachment.json``, which ``OwnedSessionHandle.is_pristine``
+        consults alongside the transcript — a bare ``/team <name>`` writes no
+        row, so the sidecar is the only thing that makes it durable (review
+        round 2, R7). The request form is additionally held by its in-flight
+        turn. ``tests/e2e/test_viewer_attach_e2e.py`` drives both.
         """
         session = self._session
         ensure = getattr(session, "_ensure_bound", None)

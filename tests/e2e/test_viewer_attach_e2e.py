@@ -296,18 +296,27 @@ async def test_a_viewer_runs_a_team_and_holds_a_credential(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_text", ["", "ship it"], ids=["bare-attach", "with-request"])
 async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
-    headless_tui_env: Path, workspace: Path
+    headless_tui_env: Path, workspace: Path, request_text: str
 ) -> None:
-    """#622 × #624: the runtime a cold `/team x req` just engaged must survive the quit.
+    """#622 × #624: the runtime a cold `/team x` just engaged must survive the quit.
 
     Since #622 a viewer that leaves offers its runtime back
     (``retire_if_pristine``) and the runtime refuses when anything durable
     exists. #624 makes a cold viewer engage a runtime and route ``/team
-    <name> <request>`` through it — an attach plus a turn. The sequence to
-    rule out is: cold `/team x req` → `ctrl+d` before the turn's first row is
-    durable → the runtime reads as pristine → the stop lands on a turn in
-    flight and the user's request is lost.
+    <name> [<request>]`` through it. The sequence to rule out: cold `/team x`
+    → `ctrl+d` → the runtime reads as pristine → it retires, discarding the
+    attachment the "team x is ready" receipt just vouched for and stranding a
+    sidecar-only directory.
+
+    The BARE form is the primary cell (review round 2, R7). The first version
+    of this test used the request form only and passed for the wrong reason:
+    the viewer sends the ``prompt`` frame before the quit, and that — not the
+    attach — was what made the session non-pristine. With no request there is
+    no prompt frame, so the attach's own durability (the ``attachment.json``
+    sidecar, which ``is_pristine`` now consults) is the only thing standing
+    between the runtime and retirement.
 
     Driven end to end with nothing stubbed on the runtime side: a production
     ``OwnedSessionHandle`` behind a production ``RuntimeServer`` (the same
@@ -384,9 +393,16 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
             editor = app.query_one(Editor)
             editor.focus()
             await pilot.pause()
-            app.post_message(events.Paste("/team quitteam ship it"))
+            line = f"/team quitteam {request_text}".rstrip()
+            app.post_message(events.Paste(line))
             await pilot.pause()
             await pilot.press("enter")
+            if not request_text:
+                # A bare name parks as `/team quitteam ` with the name-argument
+                # picker's completion; the second Enter is the blank-Enter
+                # SWITCH the picker advertises ("Enter to switch").
+                await pilot.pause()
+                await pilot.press("enter")
             # Wait only for the ROUTE to land (the attach is synchronous on the
             # owner inside the slash handler), then quit at once.
             for _ in range(400):
@@ -399,20 +415,30 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
         # Quit ran `_retire_unused_runtime` before dispose.
         assert retire_details, "the viewer never offered the runtime back"
         assert retire_details[-1].startswith("kept:"), retire_details
-        assert not handle.is_pristine(), "a session with a stamped team and a turn is not pristine"
-        # The runtime was NOT stopped: the turn it was given still lands.
-        deadline = asyncio.get_running_loop().time() + 15
-        body = ""
-        while asyncio.get_running_loop().time() < deadline:
-            body = (
-                (directory / "transcript.jsonl").read_text()
-                if (directory / "transcript.jsonl").exists()
-                else ""
-            )
-            if "ship it" in body and "ack" in body:
-                break
-            await asyncio.sleep(0.05)
-        assert "ship it" in body and "ack" in body, f"the turn was lost to retirement:\n{body}"
+        assert not handle.is_pristine(), "a stamped team is durable state, not a pristine session"
+        from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+
+        assert (directory / ATTACHMENT_SIDECAR_NAME).exists(), "the attachment must survive"
+        restored = read_session_attachment(directory)
+        assert restored is not None and getattr(restored, "team", "") == "quitteam", restored
+        assert session.active_team_name == "quitteam", "the runtime kept the team it was given"
+        if not request_text:
+            # The sidecar ALONE held the runtime: no prompt frame, no row.
+            assert not (directory / "transcript.jsonl").exists(), "the bare form wrote a row"
+        if request_text:
+            # The runtime was NOT stopped: the turn it was given still lands.
+            deadline = asyncio.get_running_loop().time() + 15
+            body = ""
+            while asyncio.get_running_loop().time() < deadline:
+                body = (
+                    (directory / "transcript.jsonl").read_text()
+                    if (directory / "transcript.jsonl").exists()
+                    else ""
+                )
+                if request_text in body and "ack" in body:
+                    break
+                await asyncio.sleep(0.05)
+            assert request_text in body and "ack" in body, f"the turn was lost:\n{body}"
     finally:
         launch_module.engage_runtime = original  # type: ignore[assignment]
         server.close()

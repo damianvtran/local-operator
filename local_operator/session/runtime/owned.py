@@ -458,6 +458,19 @@ class OwnedSessionHandle(SessionHandle):
             directory = Path(getattr(transcript, "directory", "") or "")
             if (directory / TRANSCRIPT_FILENAME).exists():
                 return False
+            # The attachment sidecar is durable state the user asked for with
+            # no transcript row to show for it: a routed `/team <name>` or
+            # `/agent <name>` (a cold viewer can do that since #624) journals
+            # the roster onto `attachment.json` and prints "team X is ready" —
+            # then `ctrl+d`. Retiring here discarded the attachment the
+            # receipt had just confirmed and stranded a sidecar-only
+            # directory nothing lists (review round 2, R7). The sidecar is
+            # what a resume restores the team from, so it is exactly as
+            # durable as a transcript row for this question.
+            from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+            if (directory / ATTACHMENT_SIDECAR_NAME).exists():
+                return False
         except Exception:  # noqa: BLE001 — an unreadable transcript is not pristine
             logger.debug("pristine probe: transcript unreadable", exc_info=True)
             return False
