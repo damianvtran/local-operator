@@ -174,3 +174,61 @@ def test_logout_invalidates_once_per_storage_id(cache, monkeypatch, capsys) -> N
 
     assert auth_cli.run_logout("zai-oauth", store) == 0  # type: ignore[arg-type]
     assert dropped == ["zai"]
+
+
+def test_login_drops_the_providers_cached_usage_row(cache, monkeypatch, tmp_path) -> None:
+    """#618 R11: the shell login is the TUI's `/login` in another entry point.
+
+    `ProviderController.login` drops the provider's cached usage row because a
+    completed login contradicts any `sign-in expired` verdict the row still
+    carries, and re-authenticating an already-stored account keeps the cache
+    key. `run_login` wrote the credential through a bare `AuthStore` and did
+    not, so `local-operator login kimi` left the dead-grant note standing for
+    the cache TTL. Driven through the REAL `run_login` over a real `AuthStore`
+    and a real `UsageCacheStore`, with the key derived by the controller the
+    same way the TUI derives it -- a hand-spelled key here would drift.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+    from local_operator.providers.usage import UsageReport
+    from local_operator.providers.usage_cache import (
+        USAGE_REPORT_TTL_MS,
+        UsageCacheStore,
+    )
+
+    monkeypatch.setattr(auth_cli, "_apply_login_defaults", lambda provider_id: None)
+    # Redirect the shared cache: the CLI has no cache handle to inject, so it
+    # resolves `default_cache_path()`, which follows the config dir.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    auth = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        # kimi returns no account id, so the identity key is a per-provider
+        # constant and a re-login lands on the SAME row -- the shape that keeps
+        # the account fingerprint (and so the cache key) unchanged.
+        auth.upsert_credential("kimi", {"refresh": "dead", "access": "a", "type": "oauth"})
+        controller = ProviderController(auth, login_callbacks=None)
+        key = controller._usage_cache_key("kimi")
+        controller.close()
+
+        dead = UsageReport(provider="kimi", fetched_at=1, identity="cred:1")
+        dead.credential_invalid = True
+        planted = UsageCacheStore()
+        try:
+            planted.set(key, "kimi", [dead], expires_at_ms=planted._now_ms() + USAGE_REPORT_TTL_MS)
+            assert planted.get(key) is not None
+        finally:
+            planted.close()
+
+        _swap_login(monkeypatch, "kimi", {"refresh": "fresh", "access": "b", "type": "oauth"})
+        assert auth_cli.run_login("kimi", None, auth) == 0
+
+        rows = auth.list_credentials("kimi")
+        assert len(rows) == 1 and rows[0].data.get("refresh") == "fresh", "re-login, one row"
+        after = ProviderController(auth, login_callbacks=None)
+        try:
+            assert after._usage_cache_key("kimi") == key, "the key did not move"
+            assert after.usage_cache_age_ms("kimi") is None, "the verdict row is gone"
+        finally:
+            after.close()
+    finally:
+        auth.close()
