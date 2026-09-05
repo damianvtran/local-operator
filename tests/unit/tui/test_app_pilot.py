@@ -9021,6 +9021,91 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     assert qualifier._token == receipt._token, (qualifier._token, receipt._token)
 
 
+class _AsyncLabelSession(FakeSession):
+    """A session whose label follows ``set_model`` only LATER, as ``RemoteSession``'s
+    does: there ``set_model`` schedules the owner request as a task and
+    ``model_label`` reads the frontend-state sync that lands on a later tick.
+    The label here never moves on its own, which is the sharpest form of that
+    gap — a receipt that re-reads the label after the call sees the old model.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._label = "anthropic/claude-opus-5"
+        self.requested: list[tuple[str, str]] = []
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    def set_model(self, model, *, explicit: bool = False) -> None:
+        self.requested.append((model.provider, model.model_id))
+
+
+@pytest.mark.asyncio
+async def test_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The arrow's right-hand side is the model the user ASKED for, even when the
+    session's own label has not caught up yet.
+
+    Operator report: on a terminal attached to another owner's session,
+    ``/model anthropic/claude-fable-5-1`` printed ``model: anthropic/claude-opus-5
+    → anthropic/claude-opus-5 (this session)`` while the band and the
+    model-switch incident correctly showed the new model. The receipt re-read
+    ``session.model_label`` after ``set_model``, which on a ``RemoteSession`` is
+    still the pre-switch value; the destination has to come from the spec the
+    command resolved.
+    """
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert session.model_label == "anthropic/claude-opus-5", "the fake's label must not have moved"
+    assert (
+        _unwrapped("model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)")
+        in text
+    ), text
+    assert _unwrapped("claude-opus-5 → anthropic/claude-opus-5") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_switch_row_prints_before_a_remote_label_lands() -> None:
+    """The mid-turn qualifier fires on a real change of model, judged against the
+    RESOLVED destination — not against a re-read label that, on a remote
+    session, still equals the old one and made the guard read as "no change".
+    """
+    session = _AsyncLabelSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
+
+
+@pytest.mark.asyncio
+async def test_routed_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The routed ``/model`` (the owner-loop path a phone or a peer terminal
+    resolves through) formats the same receipt and had the same re-read."""
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        result = await app.run_slash_authoritative("model", "anthropic/claude-fable-5-1")
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert "model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)" in (
+        result["text"]
+    ), result
+
+
 @pytest.mark.asyncio
 async def test_model_default_mid_turn_also_says_when_it_applies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

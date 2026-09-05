@@ -290,6 +290,42 @@ def _capped_components(components: Sequence[Any]) -> list[Any]:
     return values[len(values) - USAGE_COMPONENT_CAP :]
 
 
+def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
+    """Fields a restored checkpoint must NOT be allowed to carry across a fork.
+
+    A fork copies ``transcript.jsonl`` verbatim (``fork.py``), and every
+    ``frontend_state_checkpoint_v1`` row in it was written by the PARENT — so
+    the newest checkpoint a fork restores is stamped with the parent's
+    identity, and down a fork chain with whatever the previous hop was
+    already serving (the grandparent's, observed in #573). The directory a
+    session runs in is authoritative for who it is; a status row it inherited
+    is not. Without this the fork's runtime served the parent's ``session_id``
+    in every ``frontend_sync``, ``RemoteSession._install_frontend`` refused
+    the frame ("frontend state belongs to another session"), and the fork was
+    permanently un-attachable: the switched-to fork's own viewer never got a
+    state install, so ``/model`` appeared to do nothing and the band never
+    painted its context (#573).
+
+    ``session_id`` is always re-stamped. The other two are corrected only when
+    the checkpoint is provably someone else's — a same-session resume keeps
+    them, because they are then this session's own history:
+
+    * ``checkpoint_id`` names the parent's last status row. It self-heals on
+      the fork's first turn end, but until then a reconciling reader would
+      match it against a row this transcript did write for the parent.
+    * ``jobs`` are the parent's children. ``subagent-roster.v1.json`` is on
+      ``fork.EXCLUDED_SIDECARS`` precisely so a fork does not list children it
+      cannot address (their comms registry belongs to the parent's process),
+      and the checkpoint smuggled equivalent rows past that exclusion.
+    """
+    fixups: dict[str, Any] = {"session_id": session_id}
+    inherited = str(getattr(state, "session_id", "") or "")
+    if inherited and inherited != session_id:
+        fixups["checkpoint_id"] = None
+        fixups["jobs"] = []
+    return fixups
+
+
 # Commands whose effect belongs to the process drawing the widgets. Every other
 # advertised slash is routed to the authoritative session owner; keeping this a
 # complement means adding a command without classification fails the test rather
@@ -1708,7 +1744,8 @@ class FrontendStateStore:
             except Exception:
                 restored = None
         epoch = uuid.uuid4().hex
-        state = restored or FrontendSessionState(session_id=str(session.session_id), epoch=epoch)
+        session_id = str(session.session_id)
+        state = restored or FrontendSessionState(session_id=session_id, epoch=epoch)
         # A new owner epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
         #
@@ -1723,6 +1760,7 @@ class FrontendStateStore:
                 "epoch": epoch,
                 "sequence": 0,
                 "usage_components": _capped_components(state.usage_components),
+                **_inherited_identity_fixups(state, session_id),
             }
         )
 
