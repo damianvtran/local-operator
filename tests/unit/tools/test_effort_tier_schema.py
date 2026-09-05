@@ -30,6 +30,7 @@ from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    read_effort_tier_selectors,
 )
 from local_operator.harness.types import (
     AbortSignal,
@@ -131,21 +132,88 @@ def test_malformed_selectors_are_excluded(config_dir) -> None:
             "lo": "just-a-model",  # no provider
             "med": "   ",  # blank
             "hi": THREE["hi"],
-            "ultra": "provider/",  # no model
-            "empty": "",
-            "notastring": {"provider": "x", "model": "y"},
-            "custom": "openai/gpt-5",  # a hand-added tier is honoured
         },
     )
-    assert configured_effort_tiers() == {"hi": THREE["hi"], "custom": "openai/gpt-5"}
+    assert configured_effort_tiers() == {"hi": THREE["hi"]}
 
 
-def test_an_unreadable_config_reports_no_tiers_rather_than_raising(config_dir) -> None:
+def test_a_tier_outside_the_registry_set_is_inert_in_every_consumer(config_dir) -> None:
+    """``subagents.models`` is a free mapping in YAML, but the watcher's
+    per-registry-key diff can only report lo/med/hi — a hand-added ``xl``
+    would be read and advertised yet never trigger the live schema re-render,
+    so the schema would promise a tier whose edits the rebuild cannot reach.
+
+    The narrowing therefore lives in the shared reader, and this asserts all
+    three consumers agree: dropping it in the schema alone would leave ``xl``
+    unadvertised but launchable through a role pin, and would refuse it as
+    'lacks provider/model' — false, since the selector is well-formed."""
+    write_tiers(config_dir, {"hi": THREE["hi"], "xl": "openai/gpt-5"})
+
+    assert read_effort_tier_selectors() == {"hi": THREE["hi"]}
+    assert configured_effort_tiers() == {"hi": THREE["hi"]}
+    # Refused as absent, not as malformed — and it names the tier that works.
+    rejection = effort_tier_rejection("xl")
+    assert rejection is not None
+    assert "not configured at subagents.models.xl" in rejection
+    assert "lacks provider/model" not in rejection
+
+
+def test_whitespace_padded_selectors_are_stripped_once(config_dir) -> None:
+    """``lop config edit`` preserves surrounding whitespace verbatim. The
+    strip lives in the shared reader so the schema and the strict launch
+    path see the SAME value: before this, the schema stripped and launch
+    did not, so a padded selector was advertised, passed the strict check,
+    and failed on the first provider call with ``provider='  openai'``."""
+    write_tiers(config_dir, {"lo": "  openai/gpt-5-mini  "})
+    assert configured_effort_tiers() == {"lo": "openai/gpt-5-mini"}
+
+
+def test_yaml_coerced_non_string_tier_keys_cannot_break_the_schema(config_dir, tmp_path) -> None:
+    """The exact F1 repro: YAML parses ``1:``/``on:``/``yes:`` as int/bool
+    keys, and a mixed-type ``sorted()`` on them raised ``TypeError`` OUTSIDE
+    the reader's ``try`` — through ``create_tools`` (a session could not
+    boot) and through ``TaskParams(effort=...)`` as a non-ValidationError.
+    Non-string keys are dropped rather than stringified: ``1: openai/…`` is
+    a YAML accident, not a tier anyone can ask for by name."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    # Written as YAML text rather than safe_dump: the point is YAML's silent
+    # key coercion (``1:`` → int, ``on:`` → bool True), and a dict literal
+    # with both would trip F601 (``1 == True`` hashes equal).
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    models:\n"
+        f"      1: openai/gpt-5-mini\n      on: x/y\n      hi: {THREE['hi']}\n"
+    )
+    assert configured_effort_tiers() == {"hi": THREE["hi"]}
+
+    # Schema construction — the session-boot path — must survive it, and the
+    # surviving tier must still be accepted as a plain ValidationError-checked
+    # argument rather than escaping as a TypeError.
+    from local_operator.tools.builtin import TaskParams
+
+    TaskParams(label="r", prompt="p", effort="hi")
+    task = next(t for t in create_tools(_context(tmp_path), enabled=["task"]))
+    assert _enum(task.parameters["properties"]["effort"]) == ["hi"]
+
+
+def test_an_unreadable_config_reports_no_tiers_rather_than_raising(
+    config_dir, monkeypatch, tmp_path
+) -> None:
     """Schema construction runs while the tool inventory is being built; a
-    corrupt config.yml must cost the operator a tier picker, not a session."""
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.yml").write_text("values: [not, a, mapping")
+    corrupt config.yml must cost the operator a tier picker, not a session.
+    The read failure is SYNTHESIZED here: ``ConfigManager`` on a corrupt
+    file moves it aside and returns defaults rather than raising, so only a
+    monkeypatched reader actually exercises the except branch the docstring
+    promises."""
+    import local_operator.harness.subagent as subagent_mod
+
+    def boom() -> dict[str, Any]:
+        raise OSError("config.yml is on fire")
+
+    monkeypatch.setattr(subagent_mod, "read_effort_tier_selectors", boom)
     assert configured_effort_tiers() == {}
+    # And the failure must not reach the tool inventory either.
+    task = next(t for t in create_tools(_context(tmp_path), enabled=["task"]))
+    assert "effort" not in task.parameters["properties"]
 
 
 def test_describe_names_the_model_behind_each_tier() -> None:

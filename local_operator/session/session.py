@@ -6103,14 +6103,20 @@ class Session:
         try:
             # The same read the tool schemas use (``configured_effort_tiers``),
             # so a tier the schema advertises is one this path resolves and
-            # vice versa. Raw on purpose: a malformed selector must reach the
-            # named refusal below, not vanish into "not configured".
+            # vice versa. Unstripped-but-not on purpose: the shared reader
+            # strips selectors once, so the tier it advertises cannot pass
+            # this check and then die on a whitespace-padded provider name at
+            # the first provider call. Malformed selectors are still kept by
+            # the read: they must reach the named refusal below, not vanish
+            # into "not configured".
             selector = read_effort_tier_selectors().get(wanted)
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
             return _unavailable(f"config could not be read ({exc})")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
-        provider, _, model_id = str(selector).partition("/")
+        if not isinstance(selector, str):
+            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+        provider, _, model_id = selector.partition("/")
         if not model_id:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         try:

@@ -119,6 +119,39 @@ def test_strict_launch_fails_on_a_malformed_selector(tmp_path, monkeypatch):
     assert "lacks provider/model" in caught.value.reason
 
 
+def test_a_tier_outside_the_registry_set_never_launches(tmp_path, monkeypatch):
+    """The launch half of the reader's narrowing (review R1-F2). A hand-added
+    ``xl:`` is not advertised by the schema because the config watcher's
+    per-registry-key diff could never re-render it; leaving it launchable
+    through a role pin would make the schema and the launch path disagree in
+    exactly the direction this PR exists to close."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", xl="openrouter/moonshotai/kimi-k3")
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="xl")
+    assert caught.value.tier == "xl"
+    assert "no model configured at subagents.models.xl" in caught.value.reason
+    assert not session.jobs.list()
+
+
+def test_a_padded_selector_resolves_to_a_clean_provider(tmp_path, monkeypatch):
+    """Q-1: ``lop config edit`` preserves surrounding whitespace verbatim, so
+    a padded selector was advertised by the schema (which stripped) but the
+    strict launch path (which did not) built ``ModelSpec(provider='  openai')``
+    and died on the first provider call. The strip now lives once in
+    ``read_effort_tier_selectors``, so both consumers see the same value."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="  openrouter/moonshotai/kimi-k3  ")
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi")
+    assert spec is not None
+    assert spec.provider == "openrouter"
+    assert spec.model_id == "moonshotai/kimi-k3"
+
+
 @pytest.mark.asyncio
 async def test_no_effort_still_inherits_the_parent(tmp_path, monkeypatch):
     """The ordinary case must be untouched: a plain child with no tier and no

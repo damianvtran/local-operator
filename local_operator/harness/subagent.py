@@ -166,23 +166,63 @@ class SubagentModelUnavailable(RuntimeError):
         self.reason = reason
 
 
-#: The tier names the ``/settings`` registry knows, in the order they are
-#: presented. Tiers are NOT limited to these — ``values.subagents.models`` is a
-#: free mapping and a hand-edited key is honoured like any other — this only
-#: fixes the presentation order so the schema stays byte-stable (it rides in
-#: the prompt-cache prefix) rather than following YAML key order.
+#: The tier names the harness supports, in the order they are presented.
+#:
+#: This is the WHOLE set, not merely a presentation order over a free mapping:
+#: :func:`read_effort_tier_selectors` drops every other key in
+#: ``values.subagents.models``, so a hand-added ``xl:`` is inert everywhere
+#: (schema, tool-argument validation, launch) rather than honoured by some
+#: consumers and not others.
+#:
+#: Narrowing to the registry set is what keeps ADVERTISED == REBUILDABLE.
+#: These are the only keys ``lop config edit`` and the ``/settings`` page can
+#: write (``settings_io`` accepts registered keys only), and — the reason this
+#: is a correctness boundary rather than a preference — the only ones the
+#: config watcher's per-registry-key diff can report. A tier outside the set
+#: would be read and advertised, but editing it produces no ``changed_keys``
+#: entry, so ``Session._rebuild_effort_tier_tools`` never fires: the schema
+#: would promise a tier whose edits the live re-render could not reach until
+#: the next session. Widening this tuple therefore means registering the key
+#: in ``settings_io.SETTINGS`` in the same change, which is what makes the
+#: watcher see it.
+#:
+#: The order is load-bearing too: the schema rides in the prompt-cache prefix,
+#: so it follows this tuple rather than YAML key order, and a reordering edit
+#: to ``config.yml`` cannot move the enum.
 CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
 
 
 def read_effort_tier_selectors() -> dict[str, Any]:
-    """The raw ``values.subagents.models`` mapping, exactly as configured.
+    """``values.subagents.models``, narrowed to the tiers the harness supports.
 
     The one place the tier mapping is read from ``config.yml``, shared by the
-    strict launch path (``Session._resolve_subagent_model``) and the tool
-    schemas (:func:`configured_effort_tiers`), so the two can never disagree
-    about what is configured. Raw and unfiltered on purpose: the launch path
-    turns a malformed selector into a *named* refusal ("lacks
-    provider/model"), which it cannot do if the read has already dropped it.
+    strict launch path (``Session._resolve_subagent_model``), the tool-argument
+    refusal (:func:`effort_tier_rejection`) and the tool schemas
+    (:func:`configured_effort_tiers`), so no two of them can disagree about
+    what is configured.
+
+    The narrowing to :data:`CANONICAL_EFFORT_TIERS` happens HERE rather than
+    in each consumer, because a key filtered in only one of them is exactly
+    the drift this shared reader exists to prevent: a hand-added ``xl`` left
+    visible to the launch path but hidden from the schema would be
+    unadvertised yet launchable through a role pin, and would draw the
+    "lacks provider/model" refusal (which is false — the selector is
+    well-formed) instead of the accurate "not configured". One filter, one
+    key set, one story. See :data:`CANONICAL_EFFORT_TIERS` for why the
+    registry set is the honest boundary.
+
+    That membership test also disposes of keys YAML silently coerced away
+    from ``str`` (``1:``, ``on:``, ``yes:`` parse as int/bool): they match no
+    canonical name, so they never reach a ``sorted()`` or an enum. Stringifying
+    them instead would advertise an ``effort='1'`` no operator ever typed.
+
+    Selector VALUES are stripped here and nowhere else: ``lop config edit``
+    preserves surrounding whitespace verbatim, and two consumers stripping
+    (or not) independently is how a padded ``'  openai/gpt-5-mini  '`` got
+    advertised, passed the strict launch check, and then failed on the first
+    provider call with ``provider='  openai'`` instead of at launch. A
+    non-string value is passed through raw so the launch path can still turn
+    it into a *named* refusal, which it cannot do if the read dropped it.
 
     Raises whatever the config read raises; callers decide whether that is a
     reason (launch) or nothing (schema).
@@ -191,7 +231,13 @@ def read_effort_tier_selectors() -> dict[str, Any]:
 
     raw = ConfigManager(config_dir()).get_config_value("subagents", None)
     models = raw.get("models") if isinstance(raw, dict) else None
-    return dict(models) if isinstance(models, dict) else {}
+    if not isinstance(models, dict):
+        return {}
+    return {
+        tier: selector.strip() if isinstance(selector, str) else selector
+        for tier, selector in models.items()
+        if tier in CANONICAL_EFFORT_TIERS
+    }
 
 
 def configured_effort_tiers() -> dict[str, str]:
@@ -216,18 +262,26 @@ def configured_effort_tiers() -> dict[str, str]:
         selectors = read_effort_tier_selectors()
     except Exception:  # noqa: BLE001 — schema construction must never fail a turn
         return {}
+    # Iterating CANONICAL_EFFORT_TIERS rather than the config's own keys is
+    # what makes this function's "never raises" contract hold. The previous
+    # shape sorted the non-canonical leftovers, and that ``sorted()`` sat
+    # OUTSIDE the ``try``: one YAML-coerced ``1:`` key beside a ``hi:`` was a
+    # ``TypeError`` through ``create_tools`` (the session could not boot) and
+    # through ``TaskParams(effort=...)`` as a non-ValidationError. There is no
+    # ordering decision left to make here — the canonical tuple IS the order,
+    # which also keeps the schema byte-stable in the prompt-cache prefix.
+    ordered = [tier for tier in CANONICAL_EFFORT_TIERS if selectors.get(tier)]
     tiers: dict[str, str] = {}
-    ordered = [t for t in CANONICAL_EFFORT_TIERS if t in selectors] + sorted(
-        t for t in selectors if t not in CANONICAL_EFFORT_TIERS
-    )
     for tier in ordered:
-        selector = selectors.get(tier)
-        if not isinstance(selector, str) or not selector.strip():
+        selector = selectors[tier]
+        if not isinstance(selector, str):
+            # A non-string VALUE is kept by the read so the launch path can
+            # name it; it is simply not a tier the schema may advertise.
             continue
-        provider, _, model_id = selector.strip().partition("/")
+        provider, _, model_id = selector.partition("/")
         if not provider or not model_id:
             continue
-        tiers[str(tier)] = selector.strip()
+        tiers[tier] = selector
     return tiers
 
 
@@ -1301,10 +1355,26 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     # may inherit its parent's discovered set but cannot expand it.
     deferred: set[tuple[str, str]] = set(getattr(parent_session, "_mcp_deferred_origins", ()))
     child: Session | None = None
-    base: list[AgentTool] = []
 
     def selected(source: list[AgentTool]) -> list[AgentTool]:
         return [tool for tool in source if origin(tool) in enabled]
+
+    def base() -> list[AgentTool]:
+        # Derived from the LIVE inventory on every activation rather than
+        # snapshotted at ``attach``: the config watcher swaps fresh
+        # ``task``/``agent`` objects into a child mid-run when the effort
+        # tiers change, and a frozen base would silently reinstate the
+        # pre-rebuild objects (with the stale ``effort`` enum) the first time
+        # the child activated an MCP tool. A live tool whose metadata has
+        # been dropped from the manager (``origin`` can no longer answer for
+        # it) keeps its earlier classification from being rewritten to base
+        # here: the cost of a transient misclassification — it stays visible
+        # until the next activation — beats disappearing a tool the child
+        # was already using, and the top-level path accepts the same
+        # trade-off with its ``installed_mcp`` name set.
+        if child is None:
+            return []
+        return [tool for tool in child._tools if origin(tool) is None]
 
     def activate(server_name: str, raw_tool_name: str) -> None:
         # Unreachable for a restricted child: its resolver is built with
@@ -1313,18 +1383,14 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
         # allow-check that could drift from the resolver's.
         enabled.add((server_name, raw_tool_name))
         if child is not None:
-            child.refresh_tools(base + selected(manager.get_tools()))
+            child.refresh_tools(base() + selected(manager.get_tools()))
 
     def defer(server_name: str, raw_tool_name: str) -> None:
         deferred.add((server_name, raw_tool_name))
 
     def attach(session: "Session") -> None:
-        nonlocal child, base
+        nonlocal child
         child = session
-        # The non-MCP base is DERIVED, not remembered: Session.__init__ merges
-        # its own capability tools in and this module prunes some back out, so
-        # the constructor's list is not what the session ended up with.
-        base = [tool for tool in session._tools if origin(tool) is None]
         prior = session._fallback_tool_resolver
 
         def resolve_deferred(name: str) -> AgentTool | None:
