@@ -113,6 +113,10 @@ class AllocationError(RuntimeError):
     """``allocate`` could not reach a fully-leased, ready guest."""
 
 
+class GuestExecutionError(RuntimeError):
+    """Input may have partially committed; never replay the failed batch."""
+
+
 class ReadinessTimeout(AllocationError):
     """The instance ran but the guest service never answered in time."""
 
@@ -425,7 +429,7 @@ class AwsProvider:
         )
         returncode = body.get("returncode")
         return guest_disk.CommandResult(
-            returncode=returncode if isinstance(returncode, int) else 1,
+            returncode=returncode if type(returncode) is int else 1,
             stdout=str(body.get("output") or ""),
             stderr=str(body.get("error") or ""),
         )
@@ -765,8 +769,24 @@ class AwsProvider:
         env = self._require_env()
 
         def run() -> None:
-            for statement in statements:
-                env.controller.execute_python_command(statement)
+            for index, statement in enumerate(statements):
+                # Upstream retries failed HTTP requests and logs their full body.
+                # A lost response can already have typed text, so reuse our
+                # single-shot transport, preserving the controller's input patch.
+                script = env.controller.pkgs_prefix.format(command=statement)
+                try:
+                    result = self._run_guest_command(["python", "-c", script], timeout=90)
+                except Exception:
+                    # Neither transport exceptions nor guest stderr are safe to
+                    # expose: they may echo the command, credentials or UI text.
+                    raise GuestExecutionError(
+                        f"guest action {index + 1} outcome is unknown; batch not retried"
+                    ) from None
+                if result.returncode != 0:
+                    raise GuestExecutionError(
+                        f"guest action {index + 1} failed (exit {result.returncode}); "
+                        "input may be partial; batch not retried"
+                    )
             # Let the desktop settle after the batch, exactly as OSWorld's
             # own ``step(pause=...)`` does. An empty batch still settles so a
             # pure WAIT advances the guest clock.
