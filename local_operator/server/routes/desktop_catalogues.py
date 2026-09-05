@@ -41,6 +41,10 @@ class Catalogue(BaseModel):
     models: list[dict[str, Any]]
     source: Literal["initial", "live"]
     errors: dict[str, str] = Field(default_factory=dict)
+    #: Whether the credential store could be read. When False, every row's
+    #: `connected` is a listing default rather than a statement about auth, and
+    #: a caller must not group or badge on it.
+    credentials_known: bool = True
 
 
 class UsageReports(BaseModel):
@@ -75,11 +79,20 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             failures = {key: "Model listing unavailable" for key in raw_failures}
         else:
             entries = await asyncio.to_thread(controller.initial_catalogue)
+        # `CatalogueEntry.connected` is True both when a provider IS usable and
+        # when the credential store could not be read at all -- the deliberate
+        # "show everything rather than claim you own no models" degradation. For
+        # LISTING that is right; for LABELLING it is not, and it put every model
+        # under a "Connected" heading on a fixture with no credentials (D5).
+        # Carrying the uncertainty separately lets the picker keep listing
+        # everything while only claiming what is known.
+        credentials_known = controller.usable_providers() is not None
         return reply(
             {
                 "models": [dataclasses.asdict(row) | {"selector": row.selector} for row in entries],
                 "source": "live" if live else "initial",
                 "errors": failures,
+                "credentials_known": credentials_known,
             }
         )
     finally:
