@@ -68,6 +68,9 @@ SCORE_FUZZY_MAX = 40
 class SlashCommand:
     """A user-facing slash command known to the app."""
 
+    # Navigation is not owner execution. This field keeps desktop destinations
+    # beside command identity instead of introducing another command registry.
+    desktop_destination: str = field(default="", kw_only=True)
     name: str
     description: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)

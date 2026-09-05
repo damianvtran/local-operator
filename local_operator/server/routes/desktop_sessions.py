@@ -32,6 +32,7 @@ from local_operator.server.models.desktop_sessions import (
     WatchReceipt,
 )
 from local_operator.server.models.schemas import CRUDResponse
+from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
 from local_operator.server.utils.desktop_receipts import (
     DesktopReceipts,
     ReceiptConflict,
@@ -228,34 +229,52 @@ async def prompt(session_id: str, body: Prompt, request: Request):
         )
 
 
-# Native destinations and the remaining command families are introduced by the
-# command adapter, not routed through this owner-only endpoint as fake successes.
-OWNER_COMMANDS = frozenset(
-    {
-        "rename",
-        "model",
-        "effort",
-        "fast",
-        "context",
-        "goal",
-        "compact",
-        "approvals",
-        "team",
-        "agent",
-    }
-)
-
-
 @router.post(
     "/v1/desktop/sessions/{session_id}/commands", response_model=CRUDResponse[CommandReceipt]
 )
 async def command(session_id: str, body: Command, request: Request):
     spec = slash_command_for("/" + body.command.removeprefix("/"))
-    if spec is None or spec.name not in OWNER_COMMANDS:
-        raise HTTPException(422, "This endpoint accepts authoritative session controls only")
+    if spec is None or not spec.desktop_destination:
+        raise HTTPException(422, "Unknown command")
+    if spec.name == "credential" and body.args:
+        raise HTTPException(
+            422, "Enter credentials in the masked credential form, not command text"
+        )
+    if spec.name == "mcp" and body.args.strip():
+        from local_operator.mcp.config import SERVER_NAME_RE
+        from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+
+        parts = body.args.split()
+        if (
+            len(parts) > 2
+            or parts[0] not in MCP_SUBCOMMANDS
+            or (len(parts) == 2 and not SERVER_NAME_RE.fullmatch(parts[1]))
+        ):
+            raise HTTPException(
+                422, "Use the MCP setup form for configuration and secret references"
+            )
+    if spec.name in {"login", "logout"} and body.args.strip():
+        from local_operator.providers.registry import get_provider_definition
+
+        if get_provider_definition(body.args.strip()) is None:
+            raise HTTPException(422, "Choose a provider in the authentication panel")
     async with errors(), host(request).session(session_id) as bridge:
 
         async def execute():
+            if (
+                (spec.name == "team" and (body.args == "chart" or body.args.startswith("chart ")))
+                or (
+                    spec.name == "approvals"
+                    and (body.args == "default" or body.args.startswith("default "))
+                )
+                or spec.name not in OWNER_COMMANDS
+                or (
+                    not body.args
+                    and spec.name
+                    in {"rename", "model", "effort", "fast", "approvals", "team", "agent", "loop"}
+                )
+            ):
+                return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
             await bridge.refresh_watch()
@@ -264,10 +283,17 @@ async def command(session_id: str, body: Command, request: Request):
                 body.args,
                 images=decode_images(body.images),
             )
-            if outcome is None:
-                raise ValueError("This command requires a frontend action")
+            if outcome is None or outcome.get("kind") == "noop":
+                return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
             outcome = SlashResult.model_validate(outcome)
             result = outcome.model_dump(mode="json")
+            if outcome.kind == "error" and outcome.data.get("code") in {
+                "loop_invalid",
+                "loop_busy",
+            }:
+                raise HTTPException(
+                    422 if outcome.data["code"] == "loop_invalid" else 409, outcome.text
+                )
             consumed = outcome.data.get("request", "")
             attached = outcome.data.get("type") in {"team_attached", "agent_attached"}
             if attached and (consumed or body.images):

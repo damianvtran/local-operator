@@ -69,9 +69,26 @@ class OwnerCommandResult(SlashResult):
     admission: AdmissionDetail | None = None
 
 
+class NativeField(BaseModel):
+    name: str
+    kind: Literal["text", "secret", "choice", "sessions", "boolean"]
+    value: Any = None
+    required: bool = False
+    choices: list[str] = Field(default_factory=list)
+
+
+class NativeAction(BaseModel):
+    kind: Literal["native_action"]
+    destination: str
+    session_id: str
+    args: str
+    fields: list[NativeField] = Field(default_factory=list)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class CommandReceipt(BaseModel):
     command: str
-    result: OwnerCommandResult
+    result: NativeAction | OwnerCommandResult
     replayed: bool = False
 
 

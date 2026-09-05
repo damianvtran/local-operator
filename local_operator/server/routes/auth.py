@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -19,6 +20,10 @@ from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.desktop_auth import DesktopAuth, LoginOperation
 
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
+
+
+class AccountRemoval(BaseModel):
+    id: int
 
 
 class LoginRequest(BaseModel):
@@ -123,6 +128,10 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
 async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
     accounts = []
     for row in host.store.list_credentials():
+        if get_provider_definition(row.provider) is None:
+            # MCP registrations/grants have their own server-scoped lifecycle;
+            # a DCR-only row is not a signed-in model-provider account.
+            continue
         # Select fields explicitly. StoredCredential.data contains full grants;
         # dataclass/asdict serialization here would turn status into a token API.
         label = row.data.get("email") or row.data.get("account_id") or row.data.get("org_name")
@@ -133,10 +142,34 @@ async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
                 "type": row.credential_type,
                 "identity_label": str(label)[:256] if label else "Stored credential",
                 "source": "oauth" if row.credential_type == "oauth" else "api_key",
-                "state": "configured",
+                "state": (
+                    "refresh_due"
+                    if isinstance(row.data.get("expires"), (int, float))
+                    and row.data["expires"] <= time.time() * 1000
+                    else "configured"
+                ),
+                "expires_at": (
+                    row.data.get("expires")
+                    if isinstance(row.data.get("expires"), (int, float))
+                    else None
+                ),
             }
         )
     return _reply({"accounts": accounts})
+
+
+@router.delete("/v1/auth/accounts/{account_id}", response_model=CRUDResponse[AccountRemoval])
+async def remove_account(account_id: int, host: DesktopAuth = Depends(get_desktop_auth)):
+    row = host.store.get_credential(account_id)
+    if row is None or get_provider_definition(row.provider) is None:
+        raise HTTPException(404, "Provider account not found")
+    host.store.delete_credential(account_id)
+    from local_operator.providers.auth_cli import _invalidate_cached_listing
+
+    _invalidate_cached_listing(row.provider)
+    return _reply(
+        {"id": account_id}, "Stored account removed. Environment credentials are unchanged."
+    )
 
 
 @router.post("/v1/auth/login", response_model=CRUDResponse)

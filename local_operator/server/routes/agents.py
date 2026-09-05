@@ -31,9 +31,11 @@ from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
+from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_credential_manager,
+    get_provider_auth_store,
 )
 from local_operator.server.models.schemas import (
     Agent,
@@ -465,6 +467,7 @@ async def upload_agent_to_radient(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
     credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ):
     """
     Upload (push) the agent with the given ID to the Radient agents marketplace.
@@ -472,7 +475,13 @@ async def upload_agent_to_radient(
     """
     try:
         # Get config and credentials
-        api_key = credential_manager.get_credential("RADIENT_API_KEY")
+        from local_operator.providers.radient_credentials import (
+            resolve_radient_credential,
+        )
+
+        api_key = await resolve_radient_credential(
+            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+        )
         if not api_key:
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
         base_url = env_config.radient_api_base_url

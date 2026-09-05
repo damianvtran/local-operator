@@ -936,6 +936,7 @@ class FrontendSessionState(BaseModel):
     wakes: list[WakeState] = Field(default_factory=list)
     mcp_servers: list[McpServerState] = Field(default_factory=list)
     mcp_startup: dict[str, Any] | None = None
+    loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
     # The owner's provider-catalogue rows, so an attached terminal's bare
