@@ -217,7 +217,13 @@ async def test_wait_names_the_model_a_task_child_ran_on(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_task_tool_tells_the_model_not_to_retry_on_another_tier():
+async def test_task_tool_tells_the_model_not_to_retry_on_another_tier(tmp_path, monkeypatch):
+    """The launch-time backstop. ``hi`` IS configured here, so the tool's own
+    argument validation lets it through, and the launcher's refusal stands in
+    for the case validation cannot see (a selector that no longer builds)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+
     def launcher(label, prompt, *, agent="task", effort=None):
         raise SubagentModelUnavailable("hi", "no model configured at subagents.models.hi")
 

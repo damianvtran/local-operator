@@ -166,6 +166,124 @@ class SubagentModelUnavailable(RuntimeError):
         self.reason = reason
 
 
+#: The tier names the ``/settings`` registry knows, in the order they are
+#: presented. Tiers are NOT limited to these — ``values.subagents.models`` is a
+#: free mapping and a hand-edited key is honoured like any other — this only
+#: fixes the presentation order so the schema stays byte-stable (it rides in
+#: the prompt-cache prefix) rather than following YAML key order.
+CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
+
+
+def read_effort_tier_selectors() -> dict[str, Any]:
+    """The raw ``values.subagents.models`` mapping, exactly as configured.
+
+    The one place the tier mapping is read from ``config.yml``, shared by the
+    strict launch path (``Session._resolve_subagent_model``) and the tool
+    schemas (:func:`configured_effort_tiers`), so the two can never disagree
+    about what is configured. Raw and unfiltered on purpose: the launch path
+    turns a malformed selector into a *named* refusal ("lacks
+    provider/model"), which it cannot do if the read has already dropped it.
+
+    Raises whatever the config read raises; callers decide whether that is a
+    reason (launch) or nothing (schema).
+    """
+    from local_operator.config import ConfigManager
+
+    raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+    models = raw.get("models") if isinstance(raw, dict) else None
+    return dict(models) if isinstance(models, dict) else {}
+
+
+def configured_effort_tiers() -> dict[str, str]:
+    """``{tier: "provider/model"}`` for every tier a launch could honour.
+
+    What the ``task`` and ``agent`` tool schemas advertise. Only a tier whose
+    selector is a non-empty ``provider/model`` string is included, because
+    those are exactly the tiers the strict launch path
+    (:class:`SubagentModelUnavailable`) accepts: the incident behind this was
+    the schema hard-coding ``lo|med|hi`` while the operator had configured
+    NONE, so the delegating model read the enum, picked ``hi``, and the launch
+    refused it — the tool's own schema was steering the model into a
+    guaranteed failure, and nothing told it that omitting ``effort`` was the
+    only working choice.
+
+    Never raises. A config that cannot be read reports no tiers: this runs
+    while the tool inventory is being built, and a corrupt ``config.yml`` must
+    cost the operator a tier picker, not a session. The launch path reads the
+    file again on its own terms and still names the read error there.
+    """
+    try:
+        selectors = read_effort_tier_selectors()
+    except Exception:  # noqa: BLE001 — schema construction must never fail a turn
+        return {}
+    tiers: dict[str, str] = {}
+    ordered = [t for t in CANONICAL_EFFORT_TIERS if t in selectors] + sorted(
+        t for t in selectors if t not in CANONICAL_EFFORT_TIERS
+    )
+    for tier in ordered:
+        selector = selectors.get(tier)
+        if not isinstance(selector, str) or not selector.strip():
+            continue
+        provider, _, model_id = selector.strip().partition("/")
+        if not provider or not model_id:
+            continue
+        tiers[str(tier)] = selector.strip()
+    return tiers
+
+
+def effort_tier_rejection(tier: str) -> str | None:
+    """Why ``tier`` cannot be asked for right now, or ``None`` when it can.
+
+    The tool-argument counterpart of the strict launch check: the ``task``
+    and ``agent`` tools validate ``effort`` against the LIVE config with this
+    (``subagents.models.*`` is a live setting, read at every spawn), so a tier
+    that is not usable is refused with a message that names what IS — before
+    a job row, a role pin, or a launch attempt exists. The launch path keeps
+    its own refusal for the case this cannot see: a pin recorded while the
+    tier existed and read after the operator removed it.
+
+    Always tells the model the working alternative. The failure this guards
+    against was a model that could see tiers and not the fact that omitting
+    the field was the only choice that worked.
+    """
+    tiers = configured_effort_tiers()
+    if tier in tiers:
+        return None
+    inherit = "omit 'effort' to inherit this session's model and reasoning effort"
+    if not tiers:
+        return (
+            f"effort tier {tier!r} is unavailable: no tiers are configured under "
+            f"values.subagents.models; {inherit}"
+        )
+    try:
+        raw = read_effort_tier_selectors().get(tier)
+    except Exception:  # noqa: BLE001 — the tier list above already survived the read
+        raw = None
+    # Same wording as the launch path's refusal for a selector that is present
+    # but unusable, so an operator who set ``lo: gpt-5`` (no provider) learns
+    # that the KEY is there and the VALUE is wrong, not that it is missing.
+    why = (
+        f"subagents.models.{tier}={raw!r} lacks provider/model"
+        if raw not in (None, "")
+        else f"not configured at subagents.models.{tier}"
+    )
+    return (
+        f"effort tier {tier!r} is unavailable: {why} "
+        f"(configured: {describe_effort_tiers(tiers)}); pick one of those or {inherit}"
+    )
+
+
+def describe_effort_tiers(tiers: dict[str, str]) -> str:
+    """One short clause naming what each tier resolves to, for a schema
+    description: ``lo → openai/gpt-5-mini, hi → anthropic/claude-opus-5``.
+
+    The model chooses on this, so it must carry the MODEL and not just the
+    label — "hi" says nothing about cost, family, or capability — while
+    staying short, because a schema description is billed on every turn.
+    """
+    return ", ".join(f"{tier} → {selector}" for tier, selector in tiers.items())
+
+
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
     from local_operator.harness.comms import SubagentComms

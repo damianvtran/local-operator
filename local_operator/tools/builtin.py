@@ -74,6 +74,11 @@ from pydantic import (
 from rich.cells import cell_len
 
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.subagent import (
+    configured_effort_tiers,
+    describe_effort_tiers,
+    effort_tier_rejection,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -7683,12 +7688,142 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 # never advertise tools that can only error.
 
 
+def _validate_effort_tier(value: str | None) -> str | None:
+    """Refuse an ``effort`` the live config cannot honour, naming what can be.
+
+    Shared by both ``task`` forms and the ``agent`` tool so the three fields
+    cannot drift. Validation reads the config at CALL time while the schema
+    was rendered at BUILD time (see :func:`_advertise_effort_tiers`); the two
+    agree except across a mid-session edit, and this is the side that must be
+    right — an accepted-but-stale tier would reach the strict launch path and
+    fail there with less context than the message here carries.
+    """
+    if value is None:
+        return None
+    rejection = effort_tier_rejection(value)
+    if rejection is not None:
+        raise ValueError(rejection)
+    return value
+
+
+def _advertise_effort_tiers(
+    schema: dict[str, Any], *, description: str, extra: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Rewrite every ``effort`` property in ``schema`` to the CONFIGURED tiers.
+
+    The params models declare ``effort`` as a free string so validation can
+    consult the live config; the schema the model reads is patched here at
+    tool-build time. Before this, ``effort`` was a hard-coded
+    ``Literal["lo", "med", "hi"]`` regardless of what the operator had set
+    under ``values.subagents.models``. Observed live with NO tier configured:
+    the delegating model read the enum, chose ``effort="hi"``, and the strict
+    launch path (correctly) refused it — every value the schema offered was a
+    guaranteed failure, and the schema never said that omitting the field was
+    the one choice that worked.
+
+    With tiers configured, the enum lists exactly those and the description
+    names the ``provider/model`` each resolves to, so the model chooses on
+    information rather than a label. With none configured the property is
+    REMOVED rather than advertised as empty: Gemini function declarations
+    reject ``enum: []``, an always-invalid field is pure schema cost on every
+    turn, and a model that cannot see the field cannot pick it. Validation
+    still refuses a stray ``effort`` with the same guidance (see
+    :func:`_validate_effort_tier`). ``extra`` members (the ``agent`` tool's
+    ``inherit`` sentinel) follow the configured tiers and keep the property
+    alive on their own.
+
+    Patches both the top-level property and every ``$defs`` entry, so the
+    batch form's ``TaskItem`` mirror gets the same treatment as the single
+    form. Tools are built once at session construction; a config edit is
+    picked up by ``Session._apply_config_change``, which rebuilds the two
+    tools that carry this field.
+    """
+    tiers = configured_effort_tiers()
+    members = [*tiers, *extra]
+
+    def patch(properties: Any) -> None:
+        if not isinstance(properties, dict) or "effort" not in properties:
+            return
+        if not members:
+            del properties["effort"]
+            return
+        # The same ``anyOf [enum, null]`` shape pydantic renders for
+        # ``Literal[...] | None``, so providers see a field of the shape they
+        # always did — only the members and the description change.
+        properties["effort"] = {
+            "anyOf": [{"type": "string", "enum": members}, {"type": "null"}],
+            "default": None,
+            "description": description,
+            "title": "Effort",
+        }
+
+    patched = dict(schema)
+    patched["properties"] = dict(patched.get("properties") or {})
+    patch(patched["properties"])
+    defs = patched.get("$defs")
+    if isinstance(defs, dict):
+        patched["$defs"] = {
+            name: (
+                {**entry, "properties": dict(entry.get("properties") or {})}
+                if isinstance(entry, dict)
+                else entry
+            )
+            for name, entry in defs.items()
+        }
+        for entry in patched["$defs"].values():
+            if isinstance(entry, dict):
+                patch(entry.get("properties"))
+    return patched
+
+
+def _effort_tier_field_description() -> str:
+    """The ``task`` ``effort`` description, built from the configured tiers.
+
+    Only ever rendered when at least one tier exists (with none the property
+    is dropped), so it can lead with the tier list. Short on purpose: it is
+    billed on every turn of every session that can delegate.
+    """
+    tiers = configured_effort_tiers()
+    return (
+        f"Model tier for this subagent ({describe_effort_tiers(tiers)}). "
+        "Omit to inherit this session's model and reasoning effort."
+    )
+
+
+def _task_tool_description() -> str:
+    """The ``task`` tool description, with the effort sentence matching the schema.
+
+    A model told "effort picks a configured model tier" while no tier is
+    configured infers that some tier must be pickable; the sentence has to
+    say which state it is in. One sentence either way — prompt text is paid on
+    every turn.
+    """
+    tiers = configured_effort_tiers()
+    if tiers:
+        effort = (
+            "Omit 'effort' to inherit this session's model and reasoning effort, "
+            "or set it to one of the configured tiers the schema lists."
+        )
+    else:
+        effort = (
+            "No effort tiers are configured (values.subagents.models), so every "
+            "child inherits this session's model and reasoning effort; do not pass "
+            "'effort'."
+        )
+    return (
+        "Launch background subagents — one, or a whole concurrent batch "
+        "('tasks' + shared 'context') in a single call. 'agent' names a "
+        "role carrying vetted guidance (reviewer, coder, architect, "
+        f"manager, designer, scout — see the `agent` tool). {effort}"
+    )
+
+
 class TaskItem(BaseModel):
     """One slice of a task batch. ``agent`` names the ROLE the child runs as —
     a registered profile or a packaged starter (reviewer, coder, architect,
     manager, designer, scout); the role supplies standing guidance and may
     restrict the child's tools. ``effort`` routes to a configured model tier
-    (values.subagents.models lo/med/hi)."""
+    (a key of values.subagents.models)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -7708,10 +7843,20 @@ class TaskItem(BaseModel):
             "carries vetted guidance and may restrict tools."
         ),
     )
-    effort: Literal["lo", "med", "hi"] | None = Field(
+    # A free string, not a Literal: the valid set is whatever the operator has
+    # configured under ``values.subagents.models`` at CALL time, and a Literal
+    # would freeze one guess at import. The schema the model sees is rewritten
+    # to the configured tiers by ``_advertise_effort_tiers``; validation below
+    # is what refuses anything else.
+    effort: str | None = Field(
         default=None,
-        description="Model tier for this subagent (values.subagents.models).",
+        description="Model tier for this subagent (a configured values.subagents.models key).",
     )
+
+    @field_validator("effort")
+    @classmethod
+    def _effort_is_configured(cls, value: str | None) -> str | None:
+        return _validate_effort_tier(value)
 
 
 class TaskParams(BaseModel):
@@ -7735,10 +7880,16 @@ class TaskParams(BaseModel):
         default=None,
         description="Single-task form: role for the subagent (see 'tasks[].agent').",
     )
-    effort: Literal["lo", "med", "hi"] | None = Field(
+    effort: str | None = Field(
         default=None,
         description="Single-task form: model tier for the subagent.",
     )
+
+    @field_validator("effort")
+    @classmethod
+    def _effort_is_configured(cls, value: str | None) -> str | None:
+        return _validate_effort_tier(value)
+
     context: str = Field(
         default="",
         description=(
@@ -8087,14 +8238,11 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=(
-            "Launch background subagents — one, or a whole concurrent batch "
-            "('tasks' + shared 'context') in a single call. 'agent' names a "
-            "role carrying vetted guidance (reviewer, coder, architect, "
-            "manager, designer, scout — see the `agent` tool); effort picks a "
-            "configured model tier."
+        description=_task_tool_description(),
+        parameters=_advertise_effort_tiers(
+            TaskParams.model_json_schema(),
+            description=_effort_tier_field_description(),
         ),
-        parameters=TaskParams.model_json_schema(),
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",
