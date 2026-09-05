@@ -577,6 +577,16 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
     now sits between them and takes the same guard: without it a raising
     handler skips ``_owner_ready.set()``, and the prompt path waits forever on
     an event nothing else will set.
+
+    BOTH HALVES OF THE INVARIANT, deliberately (review round 2, MAJOR-2). The
+    caller's guard alone is not enough: the exception escapes from INSIDE
+    ``_end_turn_locally``, where the ``_streaming`` clear used to be the line
+    after the delivery, so it was skipped and the facade reported a live turn
+    forever on a cold session. Asserting only that teardown finished pinned
+    half of what the guard exists to protect and let that through — the flag
+    is what ``_retire_turn_band`` reads to decide whether to withhold the band
+    write, so a stuck True is a tab title asserting ``working`` for the life
+    of the process.
     """
     monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
     remote = RemoteSession(
@@ -597,3 +607,4 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
 
     assert remote._owner_ready.is_set(), "teardown was stranded by a raising handler"
     assert remote.is_cold
+    assert remote.is_streaming is False, "the facade reports a live turn forever on a cold session"

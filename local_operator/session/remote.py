@@ -1740,11 +1740,27 @@ class RemoteSession:
         if not self._streaming:
             return
         end = AgentEndEvent(aborted=True, generation=0, error=None)
-        if direct:
-            self._deliver(end)
-        else:
-            self._emit_or_buffer(end)
-        self._streaming = False
+        # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
+        # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
+        # synchronously with no guard of its own, and
+        # `EventController._handle_agent_end` does real work on this path —
+        # flush, usage pricing, cost summation. When one of those raises, a
+        # trailing assignment never runs and the facade reports `is_streaming`
+        # True on a session that is now cold with no runtime left to clear it.
+        # The caller's `try/except` cannot cover that: it catches the exception
+        # OUTSIDE this method, by which point the clear has already been
+        # skipped. That strands `_retire_turn_band`'s hold — the band and tab
+        # title assert `working` for the rest of the process's life, with no
+        # wall-clock timeout by design — and mis-routes the next message into
+        # the steer branch, which is the round-4 MAJOR-3/D4-1 failure the
+        # deliberate-stop comment above records.
+        try:
+            if direct:
+                self._deliver(end)
+            else:
+                self._emit_or_buffer(end)
+        finally:
+            self._streaming = False
 
     async def _session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
