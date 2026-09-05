@@ -42,6 +42,15 @@ class TestTheLadderIsPerModel:
             ("claude-fable-5", ("low", "medium", "high", "xhigh", "max")),
             # OpenAI: gpt-5.4's model page states none/low/medium/high/xhigh.
             ("gpt-5.4", ("none", "low", "medium", "high", "xhigh")),
+            ("gpt-5.5", ("none", "low", "medium", "high", "xhigh")),
+            # GPT-6's model page and a live Codex 400 agree: none/minimal
+            # are invalid, and max is supported. The offline generation
+            # fallback must not silently inherit GPT-5's incompatible floor.
+            ("gpt-6-astra", ("low", "medium", "high", "xhigh", "max")),
+            ("openai/gpt-6-astra", ("low", "medium", "high", "xhigh", "max")),
+            ("gpt-6-new-tier", ("low", "medium", "high", "xhigh", "max")),
+            ("gpt-7-preview", ("low", "medium", "high", "xhigh", "max")),
+            ("gpt-10", ("low", "medium", "high", "xhigh", "max")),
             # The o-series predates the extended vocabulary.
             ("o3", ("low", "medium", "high")),
             ("o4-mini", ("low", "medium", "high")),
@@ -135,6 +144,9 @@ class TestALevelCannotOutliveItsModel:
         The floor of the target's ladder is the nearest thing it can express."""
         assert resolve_effort("claude-opus-5", "none") == "low"
         assert resolve_effort("o3", "none") == "low"
+        assert resolve_effort("gpt-6-astra", "none") == "low"
+        assert resolve_effort("gpt-6-astra", "minimal") == "low"
+        assert resolve_effort("gpt-6-astra", "max") == "max"
 
     def test_an_unrecognised_value_still_falls_back_to_the_default(self) -> None:
         """Stale state or a hand-edited config: there is no rung to clamp
