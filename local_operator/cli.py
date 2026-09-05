@@ -366,8 +366,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--host",
         type=str,
-        default="0.0.0.0",
-        help="Host address for the server (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help=(
+            "Host address (default: 127.0.0.1). This API has no authentication; "
+            "use a non-loopback address only behind trusted access controls."
+        ),
     )
     serve_parser.add_argument(
         "--port",
@@ -400,6 +403,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
     serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
+
+    # Register only stdlib arguments here. JWT/HTTP/service code remains lazy
+    # so an ordinary terminal session pays no tunnel startup cost.
+    from local_operator.tunnels.arguments import add_parser as add_tunnel_parser
+
+    add_tunnel_parser(subparsers)
 
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
@@ -3508,7 +3517,7 @@ def main() -> int:
         # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
         # a per-process cache, so a session that later needs it still primes at
         # most once. ``None`` is the bare interactive launch.
-        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile", "browser"})
+        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile", "browser", "tunnel"})
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
 
@@ -3741,6 +3750,10 @@ def main() -> int:
             return serve_command(args.host, args.port, args.reload)
         elif args.subcommand == "mobile":
             return mobile_command(args)
+        elif args.subcommand == "tunnel":
+            from local_operator.tunnels.cli import main as tunnel_main
+
+            return tunnel_main(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":

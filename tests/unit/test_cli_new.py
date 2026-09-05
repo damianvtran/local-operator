@@ -259,11 +259,12 @@ def test_agents_pull_id_required(parser: argparse.ArgumentParser) -> None:
 def test_serve_defaults_preserved(parser: argparse.ArgumentParser) -> None:
     args = parser.parse_args(["serve"])
     assert args.subcommand == "serve"
-    assert args.host == "0.0.0.0"
+    assert args.host == "127.0.0.1"
     assert args.port == 1111
     assert args.reload is False
     args = parser.parse_args(["serve", "--host", "localhost", "--port", "8000", "--reload"])
     assert (args.host, args.port, args.reload) == ("localhost", 8000, True)
+    assert parser.parse_args(["serve", "--host", "0.0.0.0"]).host == "0.0.0.0"
 
 
 def test_exec_legacy_shape(parser: argparse.ArgumentParser) -> None:

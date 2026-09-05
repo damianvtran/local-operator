@@ -11,6 +11,7 @@ builders.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import sys
 
@@ -32,8 +33,11 @@ def macos_argv(launch: ForkLaunch) -> list[str]:
         GHOSTTY_APP,
         "--args",
         f"--working-directory={launch.cwd}",
-        "-e",
-        *launch.argv,
+        # The CLI shortcut also activates macOS command forwarding: through
+        # `open --args` Ghostty 1.3.1 can execute it twice (#572). The config
+        # key applies only to the first surface. It takes shell text, so quote
+        # every argument rather than letting spaces or metacharacters execute.
+        f"--initial-command={shlex.join(launch.argv)}",
     ]
 
 

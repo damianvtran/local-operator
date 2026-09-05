@@ -158,6 +158,7 @@ class KeyPromptBlock(TranscriptBlock):
         sole_path: bool = True,
         field_label: str | None = None,
         default: str | None = None,
+        credential: bool = False,
     ) -> None:
         """``secret`` says WHICH kind of value this prompt is reading.
 
@@ -180,6 +181,15 @@ class KeyPromptBlock(TranscriptBlock):
         it must: reporting "login cancelled" for a login that is still running
         told the user something false, and their next `/login` was refused with
         "a login is already in progress".
+
+        ``credential`` is the ``/credential <KEY>`` prompt, which reuses this
+        block for its masked paste. The value is a session secret named by the
+        user — a database password, a deploy token — not a provider's API key,
+        and nothing about it is a LOGIN. The label is the key name, so the
+        prompt says "paste the value for DB_PASSWORD" and the cancel receipt
+        says the key was not stored, rather than "Paste your DB_PASSWORD API
+        key" and "DB_PASSWORD login cancelled" (UX round 1, U5). The masking,
+        the length-only receipt and the focus handling are identical.
         """
         super().__init__()
         self.add_class("key-prompt-card")
@@ -189,6 +199,7 @@ class KeyPromptBlock(TranscriptBlock):
         # An explicit default (including an empty optional token) distinguishes
         # Enter from Escape without changing OAuth's empty-means-cancel contract.
         self.default = default
+        self.credential = credential
         # Both strings come from the provider registry rather than from a model,
         # but they are stripped on the same principle the approval prompt
         # applies to tool arguments: anything reaching a real terminal is
@@ -539,6 +550,11 @@ class KeyPromptBlock(TranscriptBlock):
                         ("paste skipped ", muted),
                         (f"{self.provider_label} — still waiting for the browser", dim),
                     )
+                if self.credential:
+                    # The cancel receipt IS the outcome here: the flow prints
+                    # nothing further, so a second "not stored" row would say
+                    # the same thing twice (U5).
+                    return row(("✗ ", danger), (f"{self.provider_label} not stored", muted))
                 return row(("✗ ", danger), (f"{self.provider_label} login cancelled", muted))
             if self._unusable:
                 # A value was handed over and the flow could not use it (see
@@ -555,18 +571,20 @@ class KeyPromptBlock(TranscriptBlock):
                 ("✓ ", success),
                 (
                     f"{self.provider_label} "
-                    f"{self.field_label or ('key' if self.secret else 'code')} received ",
+                    f"{self.field_label or ('value' if self.credential else ('key' if self.secret else 'code'))} "
+                    "received ",
                     muted,
                 ),
                 (f"({self._submitted_length} chars)", dim),
             )
 
-        noun = "API key" if self.secret else "authorization code"
-        title = (
-            f"{self.provider_label}: {self.field_label}"
-            if self.field_label
-            else f"Paste your {self.provider_label} {noun}"
-        )
+        if self.field_label:
+            title = f"{self.provider_label}: {self.field_label}"
+        elif self.credential:
+            title = f"Paste the value for {self.provider_label}"
+        else:
+            noun = "API key" if self.secret else "authorization code"
+            title = f"Paste your {self.provider_label} {noun}"
         lines = [row(("? ", accent), (title, fg))]
         if self.instructions:
             lines.append(row(("  ", dim), (self.instructions, dim)))
@@ -577,7 +595,7 @@ class KeyPromptBlock(TranscriptBlock):
             # The empty state says what to do rather than leaving a bare caret,
             # because this prompt appears right after the browser opened and the
             # user's attention was somewhere else entirely.
-            hint_noun = self.field_label or ("key" if self.secret else "code")
+            hint_noun = self.field_label or ("value" if self.credential else ("key" if self.secret else "code"))
             lines.append(
                 row(("  ", dim), (f"paste or type the {hint_noun}, then press enter", dim))
             )

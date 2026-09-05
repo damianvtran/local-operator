@@ -42,6 +42,7 @@ from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _
 #: entry in ``SLASH_COMMANDS``.
 ECHO_POLICY = {
     "help": False,
+    "mobile": False,  # infrastructure status is its own receipt, never model input
     "exit": False,
     "clear": False,
     # Opens a picker, and nothing here reaches the model. The receipt is
@@ -121,6 +122,7 @@ ECHO_POLICY = {
 #: the user's text. Pinned entry-by-entry for the same reason ``ECHO_POLICY`` is:
 #: a new command must state whether its argument is a prompt.
 PROMPT_POLICY = {
+    "mobile": False,
     "help": False,
     "exit": False,
     "clear": False,

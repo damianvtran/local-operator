@@ -294,6 +294,10 @@ class RemoteSession:
         self._approval_handler: ApprovalGate | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
+        self._gates_detached = False
+        # Snapshot creation is not retryable: navigation must retire the UI,
+        # not close the response channel after the owner has begun a copy.
+        self._snapshot_clients: dict[AttachClient, int] = {}
         # One ask card keeps its request id while advancing through questions.
         # The question index is therefore part of the gate identity: request id
         # alone made Q2 look like a duplicate of Q1 and stranded the owner gate.
@@ -1471,6 +1475,8 @@ class RemoteSession:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
+        if self._gates_detached:
+            return
         if pending is None:
             pending = _pending_request(self.frontend_state.pending_gate)
         if pending is None or self._gate_task is not None:
@@ -2010,6 +2016,44 @@ class RemoteSession:
             on_delta(answer)
         return answer
 
+    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+        """The owner serializes the copy; a viewer never raw-copies a live store."""
+        await self._ensure_bound()
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError("session is reconnecting; retry /fork when it is ready")
+        self._snapshot_clients[client] = self._snapshot_clients.get(client, 0) + 1
+        try:
+            return await client.fork_snapshot(message)
+        except RuntimeError as error:
+            if "unknown op" in str(error):
+                raise RuntimeError("this owner cannot fork; update it and retry /fork") from error
+            raise
+        finally:
+            remaining = self._snapshot_clients[client] - 1
+            if remaining:
+                self._snapshot_clients[client] = remaining
+            else:
+                del self._snapshot_clients[client]
+                if self._disposed or self._client is not client:
+                    client.close()
+
+    async def detach_viewer_gates(self) -> None:
+        """Withdraw this UI's waiters without answering the owner's questions.
+
+        A fork switch must stop the answer bridge BEFORE the app clears its
+        approval widgets. Clearing first resolves those widgets as denied, which
+        would silently reject an original session's pending tool on departure.
+        The next attach recreates the bridge from the unchanged owner state.
+        """
+        # A sibling frontend may settle Q1 while detach awaits cancellation.
+        # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
+        self._gates_detached = True
+        task, self._gate_task = self._gate_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.
 
@@ -2224,6 +2268,27 @@ class RemoteSession:
             self._deliberate_stop = False
             raise
 
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """Run one ``/credential`` verb on the owner's store.
+
+        The viewer hosts the masked paste (the user is sitting HERE) and the
+        owner holds the value (the agent's bash commands run THERE), so this is
+        the seam between the two halves. A disconnected viewer answers
+        ``unavailable`` rather than raising: the caller turns that into a
+        notice naming what happened, which is the whole point of the fix — a
+        capability that cannot run must SAY so instead of reporting a boot
+        state that will never resolve.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            return {"ok": False, "reason": "disconnected"}
+        try:
+            answer = await client.credential(action, key, value)
+        except Exception:  # noqa: BLE001 — a lost owner is a notice, not a crash
+            logger.debug("credential op failed", exc_info=True)
+            return {"ok": False, "reason": "disconnected"}
+        return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
+
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Optimistic cancel: returns the running count the offer promised.
 
@@ -2321,6 +2386,12 @@ class RemoteSession:
         client = self._client
         if client is None or not client.connected:
             return "no runtime attached"
+        if self._snapshot_clients:
+            # The connection dispatches requests serially. Waiting for a retire
+            # reply behind a held copy blocks navigation until BOTH RPCs time
+            # out, losing the very result its socket lease protects. A copy is
+            # ongoing work, never evidence of an unused runtime; keep it alive.
+            return "fork snapshot is still in progress"
         ask = getattr(client, "retire_if_pristine", None)
         if not callable(ask):
             return "client cannot ask for retirement"
@@ -2340,7 +2411,10 @@ class RemoteSession:
             # interrupts adoption halfway through and strands the lease winner.
             self._recovery_task.cancel()
         if self._client is not None:
-            self._client.close()
+            if self._client not in self._snapshot_clients:
+                self._client.close()
+            # A pending snapshot owns the final close, including failure and
+            # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
 
 

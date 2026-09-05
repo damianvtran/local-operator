@@ -842,15 +842,15 @@ SETTINGS: tuple[Setting, ...] = (
         section="fork",
         label="Where a fork opens",
         kind=Kind.ENUM,
-        default="window",
-        help="Whether /fork opens a new window or takes over this one.",
+        default="switch",
+        help="Choose where the fork opens; unfinished work stays in the original.",
         choices=(
             Choice(
                 "window",
                 "new window",
                 "open the fork elsewhere; this session keeps running",
             ),
-            Choice("switch", "switch in place", "this terminal moves onto the fork"),
+            Choice("switch", "this terminal", "follow the fork here; return with /resume"),
         ),
     ),
     Setting(

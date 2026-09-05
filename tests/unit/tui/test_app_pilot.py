@@ -5235,12 +5235,17 @@ async def test_loop_goal_suppresses_turn_ended_toast() -> None:
         app._notify = _record_notify  # type: ignore[assignment]
         # Held loop: a per-turn settle must not notify.
         app._loop_suppress_completion = True
+        # Turn OPENED first, both times: retirement is at-most-once per turn, so
+        # a `TurnEnded` for a turn nothing started is correctly a no-op and this
+        # seam would be asserted against a state the product cannot reach.
+        app.post_message(TurnStarted())
         app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
         await pilot.pause()
         await pilot.pause()
         assert completion_notifies == []
         # Not held: the same event notifies as usual (numeric mode / normal turns).
         app._loop_suppress_completion = False
+        app.post_message(TurnStarted())
         app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1_000))
         await pilot.pause()
         await pilot.pause()
@@ -8320,6 +8325,98 @@ async def test_model_picker_d_saves_the_highlighted_row_as_default(
     assert (written["hosting"], written["model_name"]) == (row.provider, row.model_id), written
     # The session was NOT switched: `d` and Enter must stay distinguishable.
     assert session.model_label == before_label, session.model_label
+
+
+_MODEL_DEFAULT_KEYS = {" ": "space", "/": "slash", "-": "minus"}
+
+
+@pytest.mark.asyncio
+async def test_typing_model_default_letter_by_letter_is_not_eaten_by_the_d_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1, U8 (QA Q4): the advertised command, typed rather than pasted.
+
+    `/model ` opens the picker with an empty query and the current model
+    highlighted — which is also the state one keystroke into `/model default
+    <p>/<id>`. The `d` gate (#369) read that `d` as "save the highlighted row":
+    a silent write of the CURRENT model to config, then Enter switched to a
+    model literally named `efault anthropic/…`. Measured before the fix:
+    composer `/model efault anthropic/claude-opus-5`, config `model_name:
+    deepseek/deepseek-chat`, notice `unknown provider: efault anthropic`.
+
+    The gate now also asks whether the user NAVIGATED the list: arrowing to a
+    row is what makes `d` a key; typing straight after the space is spelling.
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for char in "/model default anthropic/claude-opus-5":
+            await pilot.press(_MODEL_DEFAULT_KEYS.get(char, char))
+        await pilot.pause()
+        # Every letter reached the composer — the picker did not swallow one.
+        assert editor.text == "/model default anthropic/claude-opus-5", editor.text
+        await pilot.press("enter")
+        for _ in range(5):
+            await pilot.pause()
+        text = _transcript_text(app)
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    # The NAMED model was persisted, not the one that happened to be highlighted.
+    assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
+    assert session.model_label == "anthropic/claude-opus-5", session.model_label
+    assert "efault anthropic" not in text, text
+    assert "unknown provider" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_d_still_saves_after_arrowing_to_a_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of U8: the #369 affordance survives, through real keys.
+
+    ``test_model_picker_d_saves_the_highlighted_row_as_default`` calls the
+    handler directly; this drives the KEY, because the gate it exercises now
+    lives on the key path (empty query AND navigated) and a handler-level test
+    could not tell a gate that never fires from one that fires correctly.
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        await pilot.pause()
+        picker = editor.model_picker
+        assert picker.is_open() and not picker.navigated()
+        await pilot.press("down")
+        await pilot.pause()
+        assert picker.navigated()
+        row = picker.highlighted()
+        assert row is not None
+        before_label = session.model_label
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        # The letter was the KEY: it did not land in the composer.
+        assert editor.text == "/model ", editor.text
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert (written["hosting"], written["model_name"]) == (row.provider, row.model_id), written
+    assert session.model_label == before_label
 
 
 @pytest.mark.asyncio

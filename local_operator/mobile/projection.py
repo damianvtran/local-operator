@@ -1223,11 +1223,37 @@ class ProjectionFold:
             # Back to waiting on the model: restart the clock for the gap.
             self._set_activity("thinking", restart_clock=True)
         elif isinstance(event, MessageStartEvent):
+            # A model call is in flight with nothing streamed yet: "thinking",
+            # not "responding". The loop yields this from a placeholder at the
+            # top of EVERY provider call, before the first token, and a
+            # tool-only turn never produces a text delta after it — so keying
+            # "responding" here claimed prose for every model call. The TUI's
+            # WorkingBlock says "responding" only once its streaming block is
+            # mounted, which happens on the first non-empty delta below.
             if isinstance(event.message, Message) and event.message.role == "assistant":
-                self._set_activity("responding")
+                self._set_activity("thinking")
         elif isinstance(event, MessageUpdateEvent):
-            if p.activity in ("thinking", ""):
+            # The first text delta is the transition to prose. Only from the
+            # model-wait: a running tool's intent outranks narration arriving
+            # beside it, and once "responding" it stays until the phase ends.
+            if event.delta and p.activity in ("thinking", ""):
                 self._set_activity("responding")
+        elif isinstance(event, MessageEndEvent):
+            # Ends the PROSE phase only. `message_end` closes the model call,
+            # but for a tool-calling turn it arrives AFTER the compose events
+            # and BEFORE `tool_execution_start` — with the approval gate's wait
+            # in between for a write/exec-tier call. The composed intent set
+            # above must survive that window: the TUI's `_composing_cards` are
+            # only adopted on tool start or cleared at turn settle, so its
+            # working line keeps saying `composing …` across `message_end`
+            # while only the streaming block unmounts. Downgrading anything but
+            # "responding" here said "thinking" for the whole approval wait.
+            if (
+                isinstance(event.message, Message)
+                and event.message.role == "assistant"
+                and p.activity == "responding"
+            ):
+                self._set_activity("thinking")
 
     # -- todos / pending / state -------------------------------------------
 

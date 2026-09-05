@@ -133,11 +133,18 @@ class AttachClient:
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
+        locality: str = "local",
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
+        if locality not in ("local", "remote"):
+            raise ValueError("attach locality must be local or remote")
+        # A phone viewer reaches this loopback socket through a relay. Keep
+        # the physical user's locality explicit; a local socket is not proof
+        # that browser-opening or desktop-only actions are appropriate.
+        self._locality = locality
         # v4 events mode: subscribe to the owner's raw AgentEvent relay. The
         # callbacks receive the WIRE dicts — deserialization back into concrete
         # AgentEvent subclasses is RemoteSession's job, so this transport stays
@@ -180,7 +187,11 @@ class AttachClient:
             raise ConnectionError(f"owner socket unreachable: {exc}") from exc
         self._reader = reader
         self._writer = writer
-        auth: dict[str, Any] = {"key": record.control_key, "client": "attach"}
+        auth: dict[str, Any] = {
+            "key": record.control_key,
+            "client": "attach",
+            "locality": self._locality,
+        }
         if self._events:
             # v4 capability flag. A v3 owner ignores unknown auth fields and
             # simply never sends event frames — the caller gates on
@@ -555,6 +566,24 @@ class AttachClient:
         return await self._request_payload(
             "slash_result", command=command, args=args, images=images or []
         )
+
+    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+        """Copy the authenticated owner's committed history, without interrupting it."""
+        result = await self._request_payload("fork_snapshot", message=message)
+        if not isinstance(result, dict) or not result.get("fork_id"):
+            raise ValueError("owner returned no fork; retry /fork")
+        return result
+
+    async def credential(self, action: str, key: str = "", value: str = "") -> Any:
+        """Run one ``/credential`` verb against the owner's variable store.
+
+        ``value`` carries a SECRET for the ``store`` action and is empty for
+        every other verb. It has its own named field rather than riding the
+        generic ``args`` string of ``slash_result`` so that the one place a
+        secret appears on the wire is the one place that must handle it
+        carefully — nothing echoes, logs, or transcribes this field.
+        """
+        return await self._request_payload("credential", action=action, key=key, value=value)
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork an aside exchange into the conversation on the authoritative owner."""

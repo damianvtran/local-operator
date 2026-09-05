@@ -217,6 +217,42 @@ async def test_a_runtime_that_cannot_judge_itself_is_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_is_pristine_reads_the_attachment_sidecar(tmp_path: Path, monkeypatch) -> None:
+    """#624 review round 2, R7: a routed `/team <name>` with no request.
+
+    ``Session.attach_team`` journals ``attachment.json`` and prints "team X is
+    ready" — and wrote no transcript row, so ``is_pristine`` said True and a
+    quit retired the runtime the receipt had just vouched for. The sidecar is
+    what a resume re-stamps the team from; it is as durable as a row.
+    """
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+
+    class _Session:
+        def __init__(self) -> None:
+            self._transcript = transcript
+            self.wake_scheduler = None
+            self.session_id = "s1"
+
+        def history(self):  # noqa: ANN202
+            return []
+
+    handle = object.__new__(OwnedSessionHandle)
+    handle._session = _Session()  # type: ignore[attr-defined]
+    object.__setattr__(handle, "is_busy", lambda: False)
+
+    assert handle.is_pristine() is True, "nothing has happened yet"
+    (directory / ATTACHMENT_SIDECAR_NAME).write_text('{"team": "lopdev"}', encoding="utf-8")
+    assert handle.is_pristine() is False, "an attached team is durable state the user asked for"
+
+
+@pytest.mark.asyncio
 async def test_is_pristine_reads_durable_rows_not_the_model_window(
     tmp_path: Path,
 ) -> None:
@@ -305,6 +341,7 @@ async def test_leaving_a_session_offers_its_runtime_back(tmp_path: Path) -> None
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
 
     class _Client:
         connected = True
@@ -329,6 +366,7 @@ async def test_a_cold_viewer_has_no_runtime_to_offer_back() -> None:
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
     viewer._client = None  # type: ignore[attr-defined]
 
     assert await viewer.retire_if_unused() == "no runtime attached"
@@ -340,6 +378,7 @@ async def test_a_failed_offer_is_swallowed_on_the_way_out() -> None:
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
 
     class _Client:
         connected = True
