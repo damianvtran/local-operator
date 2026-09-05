@@ -19,7 +19,7 @@ def credential_id(selected: int | None = None) -> int:
         if len(rows) != 1:
             raise ValueError(
                 "Log in with /login radient first. If multiple accounts are signed in, "
-                "select one with --credential-id from lop login status."
+                "select one with --credential-id from lop login-status."
             )
         return rows[0].id
 

@@ -490,7 +490,10 @@ async def test_create_retry_reuses_intent_and_does_not_persist_connector_token(
 
 
 @pytest.mark.asyncio
-async def test_tunnel_auth_never_rotates_or_falls_back_to_environment(tmp_path, monkeypatch):
+async def test_tunnel_auth_never_rotates_or_falls_back_to_environment(
+    tmp_path, monkeypatch, capsys
+):
+    from local_operator import cli
     from local_operator.tunnels.api import RadientTunnels, credential_id
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -502,8 +505,18 @@ async def test_tunnel_auth_never_rotates_or_falls_back_to_environment(tmp_path, 
         store.upsert_credential(
             "radient", {"type": "oauth", "account_id": "second", "access": "other-oauth"}
         )
-    with pytest.raises(ValueError, match="multiple accounts"):
+    with pytest.raises(ValueError, match="multiple accounts") as error:
         credential_id()
+    assert "lop login-status" in str(error.value)
+    # Exercise the advertised command through the real CLI dispatcher against
+    # only the fixture store. `login status` instead attempts provider login.
+    monkeypatch.setattr(cli, "_build_auth_stack", lambda _: (AuthStore(), None))
+    monkeypatch.setattr(cli.sys, "argv", ["lop", "login-status"])
+    assert cli.main() == 0
+    listing = capsys.readouterr().out
+    assert f"[{first.id}] radient" in listing
+    assert "selected-oauth" not in listing and "other-oauth" not in listing
+    assert credential_id(first.id) == first.id
     seen = []
 
     def api(request):

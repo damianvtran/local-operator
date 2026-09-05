@@ -46,8 +46,8 @@ use `lop tunnel connect <id>`
 on the computer that will host it. This prepares the relay and starts the
 connector service. Use `--no-start` to save its configuration only. A local connector
 is pinned to the selected Radient OAuth credential. With several Radient
-logins, pass `--credential-id` explicitly; model quota routing never chooses
-the owner of your tunnel.
+logins, run `lop login-status` and pass the desired Radient row's bracketed ID
+as `--credential-id`; model quota routing never chooses the owner of your tunnel.
 
 ## Harness configuration
 

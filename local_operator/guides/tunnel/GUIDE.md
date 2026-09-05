@@ -10,8 +10,9 @@ another device. The connection is generic: Local Operator and OpenCode each
 receive a collision-protected personal hostname. A Radient login is required;
 it does not expose the machine by itself.
 
-1. Check `lop login status` and ask the user to complete `/login radient` if
-   needed. Do not read auth.db or print credentials.
+1. Check `lop login-status` and ask the user to complete `/login radient` if
+   needed. With several Radient logins, use the bracketed ID shown in that
+   listing as `--credential-id`. Do not read auth.db or print credentials.
 2. Run `lop tunnel billing` and show its actual monthly price. Only activate
    billing at the exact amount the user has accepted; do not invent a fixed
    price or silently accept a changed quote. Supply that amount with
