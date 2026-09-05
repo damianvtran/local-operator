@@ -3,7 +3,9 @@
 `/session` opens a read-only, scrollable snapshot of the current session. It
 accepts no arguments, does not call a model, and does not append a prompt or a
 receipt to conversation history. Escape or `q` closes the view and returns focus
-to the composer. Close and reopen to refresh; arrow, page, Home and End keys
+to the composer. A loading screen appears immediately while the ledger is read;
+Escape or `q` cancels that presentation too, so a late disk result cannot open
+over a new draft. Close and reopen to refresh; arrow, page, Home and End keys
 navigate the report.
 
 ## Scope
@@ -59,8 +61,11 @@ shown as unavailable.
 `AnalyticsStore.session_report` uses one short-lived, read-only connection and
 an explicit SQLite read transaction. Totals, grouping, timings and bounded recent
 rows all observe the same snapshot even while a WAL writer commits new calls.
-The UI runs that read off the event loop. Before displaying the result it checks
-the captured session object, ID and (when exposed) mirrored owner epoch, so
+The UI runs that read off the event loop and updates only the loading screen
+that owns it; it never pushes a second screen on completion. Closing/unmounting
+invalidates that presentation even if the bounded read finishes in the background.
+Before displaying the result it checks the captured session object, ID and
+(when exposed) mirrored owner epoch, so
 `/new` or `/resume` cannot surface a stale report over another session, including
 an owner replacement behind the same remote facade.
 

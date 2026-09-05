@@ -76,7 +76,7 @@ def _milliseconds(value: float | None) -> str:
     return "unknown" if value is None else f"{value:,.0f} ms"
 
 
-def build_session_report(report: SessionReport, runtime: SessionDiagnostics) -> Text:
+def build_session_report(report: SessionReport | None, runtime: SessionDiagnostics) -> Text:
     """Stacked, wrapping rows keep full IDs readable even in a 50-column pane."""
     fg = Style(color=theme_mod.semantic_color("fg"))
     muted = Style(color=theme_mod.semantic_color("muted"))
@@ -95,6 +95,11 @@ def build_session_report(report: SessionReport, runtime: SessionDiagnostics) -> 
 
     line(runtime.name or "Untitled session")
     line("ID", runtime.session_id)
+    if report is None:
+        section("Loading usage records")
+        line("Reading the local ledger. Esc or q cancels.")
+        line("No model request is made.")
+        return result
     line("Current session only. Close and reopen to refresh.")
     aggregate = report.aggregate
     if not report.available:
@@ -243,10 +248,11 @@ class SessionScreen(ModalScreen[None]):
         Binding("end", "scroll_end", "Bottom", show=False),
     ]
 
-    def __init__(self, report: SessionReport, runtime: SessionDiagnostics) -> None:
+    def __init__(self, report: SessionReport | None, runtime: SessionDiagnostics) -> None:
         super().__init__()
         self.report = report
         self.runtime = runtime
+        self.presentation_cancelled = False
 
     def compose(self) -> ComposeResult:
         with Container(classes="analytics-panel"):
@@ -256,14 +262,55 @@ class SessionScreen(ModalScreen[None]):
             )
             with VerticalScroll(id="session-report-scroll") as scroll:
                 self._scroll = scroll
-                yield Static(
+                self._body = Static(
                     build_session_report(self.report, self.runtime), id="session-report-body"
                 )
-            self._hint = Static("esc / q back", id="session-report-hint")
+                yield self._body
+            self._hint = Static(self._back_hint(), id="session-report-hint")
             yield self._hint
 
     def on_mount(self) -> None:
-        self.call_after_refresh(self._sync_hint)
+        # A fast disk read can finish while this screen is still mounting. The
+        # stored result, not the first compose-time text, must win that race.
+        self._repaint()
+        self.call_after_refresh(self._dismiss_if_cancelled)
+
+    def on_unmount(self) -> None:
+        self.presentation_cancelled = True
+
+    def on_screen_resume(self) -> None:
+        self._dismiss_if_cancelled()
+
+    def invalidate(self) -> None:
+        """Retire this request without ever popping a newer modal above it."""
+        self.presentation_cancelled = True
+        self._dismiss_if_cancelled()
+
+    def _dismiss_if_cancelled(self) -> None:
+        # An owner switch may happen while another modal covers this one.
+        # Dismiss only when resumed: Screen.dismiss() pops the CURRENT screen,
+        # not necessarily the instance on which it was called.
+        # A queued screen is registered before its mount finishes. Popping it
+        # during that mount races Textual's parent teardown; on_mount schedules
+        # another check after layout, without ever publishing the stale data.
+        if self.presentation_cancelled and self.is_mounted and self.app.screen is self:
+            self.dismiss(None)
+
+    def set_report(self, report: SessionReport) -> None:
+        """Publish the disk result only while this presentation is still owned."""
+        if self.presentation_cancelled:
+            return
+        self.report = report
+        self._repaint()
+
+    def _repaint(self) -> None:
+        body = getattr(self, "_body", None)
+        if body is not None and body.is_mounted and not self.presentation_cancelled:
+            body.update(build_session_report(self.report, self.runtime))
+            self.call_after_refresh(self._sync_hint)
+
+    def _back_hint(self) -> str:
+        return "esc / q cancel" if self.report is None else "esc / q back"
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._sync_hint)
@@ -274,10 +321,10 @@ class SessionScreen(ModalScreen[None]):
         scroll = getattr(self, "_scroll", None)
         hint = getattr(self, "_hint", None)
         if scroll is not None and hint is not None and hint.is_mounted:
-            hint.update("esc / q back" + (" · ↑↓ scroll" if scroll.max_scroll_y > 0 else ""))
+            hint.update(self._back_hint() + (" · ↑↓ scroll" if scroll.max_scroll_y > 0 else ""))
 
     def action_dismiss_screen(self) -> None:
-        self.dismiss(None)
+        self.invalidate()
 
     def action_scroll_up(self) -> None:
         self._scroll.scroll_up()
