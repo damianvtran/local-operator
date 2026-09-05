@@ -273,7 +273,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # genuinely read-per-use today, and the point of routing the probe through
     # them is that the guard notices the day one of them starts caching at
     # construction — the very change the deferred web-tools follow-up proposes.
-    "fork.mode": ("switch", lambda s, w: fork_mode(w.values)),
+    "fork.mode": ("window", lambda s, w: fork_mode(w.values)),
     "fork.cmux_placement": ("surface", lambda s, w: fork_cmux_placement(w.values)),
     "web_search.strategy": ("ordered", lambda s, w: _search_settings(w).strategy),
     "web_search.providers": (["brave"], lambda s, w: list(_search_settings(w).providers)),

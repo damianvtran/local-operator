@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-#: Where a fork opens. ``window`` keeps the current session running and opens the
-#: branch elsewhere, which is the whole point of forking rather than switching.
-DEFAULT_FORK_MODE = "window"
+#: Forking follows the branch in this terminal; the owner retains the original
+#: work. Explicit window preferences remain honored, without a config migration.
+DEFAULT_FORK_MODE = "switch"
 
 #: Under cmux, a fork gets its own sidebar workspace by default rather than a
 #: tab in the current one. The workspace form is also the one that needs a single
@@ -25,6 +25,34 @@ DEFAULT_FORK_CMUX_PLACEMENT = "workspace"
 #: Valid ``fork.mode`` values, mirroring the registry's choices.
 FORK_MODE_WINDOW = "window"
 FORK_MODE_SWITCH = "switch"
+
+
+def parse_fork_args(arg: str) -> tuple[str | None, str]:
+    """Parse leading destination flags without rewriting the prompt's quoting.
+
+    Only leading tokens are options. `--` protects a literal flag-looking
+    opening instruction, and the rest stays byte-for-byte text rather than
+    round-tripping through shlex (the model, not a shell, receives it).
+    """
+    mode = None
+    rest = arg.strip()
+    while rest.startswith("--"):
+        # split(None, 1) also admits tabs/newlines between options and prose.
+        parts = rest.split(None, 1)
+        flag = parts[0]
+        remainder = parts[1] if len(parts) > 1 else ""
+        if flag == "--":
+            return mode, remainder
+        if flag not in ("--window", "--switch"):
+            raise ValueError(
+                f"unknown fork option {flag}; use --window, --switch, or -- before text"
+            )
+        selected = flag[2:]
+        if mode is not None and mode != selected:
+            raise ValueError("choose either --window or --switch, not both")
+        mode = selected
+        rest = remainder
+    return mode, rest
 
 
 def fork_mode(values: Mapping[str, Any] | None) -> str:

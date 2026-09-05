@@ -164,7 +164,13 @@ def new_session_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
+def fork_session(
+    config_dir: Path,
+    parent_id: str,
+    *,
+    message: str = "",
+    exclude_entry_ids: frozenset[str] = frozenset(),
+) -> str:
     """Clone ``parent_id``'s conversation into a fresh session. Returns its id.
 
     Synchronous and blocking-by-design at the file level, so callers on an event
@@ -218,7 +224,24 @@ def fork_session(config_dir: Path, parent_id: str, *, message: str = "") -> str:
             # reproduce the parent's cached prefix byte-for-byte, and a
             # re-serialisation would reorder JSON keys — changing nothing
             # semantically while changing every byte the replay derives from.
-            shutil.copyfile(source, fork_dir / name)
+            if name == TRANSCRIPT_NAME and exclude_entry_ids:
+                # Only the owner's validated incomplete suffix may be omitted.
+                # Keep every retained byte and journal row, rather than rebuilding
+                # history and losing compaction/prune metadata or attachment refs.
+                with source.open("rb") as incoming, (fork_dir / name).open("wb") as outgoing:
+                    for line in incoming:
+                        try:
+                            row = json.loads(line)
+                        except (ValueError, UnicodeDecodeError):
+                            # Transcript replay skips malformed lines individually.
+                            # Keep their bytes, too: trimming a known message id
+                            # must not introduce a new parser or repair the source.
+                            outgoing.write(line)
+                            continue
+                        if not isinstance(row, dict) or row.get("id") not in exclude_entry_ids:
+                            outgoing.write(line)
+            else:
+                shutil.copyfile(source, fork_dir / name)
     except OSError as exc:
         raise ForkError(f"cannot copy the conversation into the fork: {exc}") from exc
 
