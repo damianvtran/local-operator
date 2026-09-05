@@ -50,6 +50,7 @@ from local_operator.providers.failover import (
     is_connectivity_loss,
     is_direct_credential_rotation_error,
     is_fast_mode_refusal,
+    is_fast_mode_refusal_for,
     is_image_rejection,
     is_transient_error,
     is_usage_limit_error,
@@ -4533,10 +4534,34 @@ def test_a_fast_mode_entitlement_refusal_is_not_classified_as_quota() -> None:
     assert error.kind != "quota"
 
 
-def test_a_rejected_service_tier_is_not_classified_as_quota() -> None:
-    """The OpenAI-shaped half of the same hazard (HTTP 400, measured)."""
+def test_a_rejected_service_tier_is_a_refusal_the_driver_recovers_from() -> None:
+    """The OpenAI-shaped half of the same hazard (HTTP 400, measured).
+
+    A 400 was never `quota` on base, so the classifier assertion alone is
+    vacuous (review F4); what matters is that the driver's wider test treats
+    it as a refusal when — and only when — the request asked for fast mode.
+    """
     error = ProviderError(400, "Unsupported service_tier: fast")
-    assert error.kind != "quota"
+    assert is_fast_mode_refusal_for(error, fast_requested=True) is True
+    assert is_fast_mode_refusal_for(error, fast_requested=False) is False
+
+
+def test_a_quota_body_that_merely_names_the_field_stays_quota() -> None:
+    """The bare `service_tier` marker was dropped (review F2): a priority-tier
+    rate limit that names the field is still a rate limit."""
+    error = ProviderError(429, "Rate limit exceeded for service_tier priority on gpt-5.4")
+    assert error.kind == "quota"
+    assert is_fast_mode_refusal(429, str(error)) is False
+
+
+def test_a_bare_429_on_a_fast_request_is_answered_at_standard_speed_first() -> None:
+    """Anthropic's documented fast-tier rate limit is a plain 429 with no text
+    marker (review F5). With the dial on, the driver drops it before spending
+    the quota path; with the dial off the same 429 is the quota it looks like."""
+    error = ProviderError(429, "rate limit exceeded", retryable=True, retry_after_ms=5000)
+    assert error.kind == "quota"
+    assert is_fast_mode_refusal_for(error, fast_requested=True) is True
+    assert is_fast_mode_refusal_for(error, fast_requested=False) is False
 
 
 def test_a_genuine_credit_exhaustion_is_still_quota() -> None:
@@ -4587,3 +4612,163 @@ def test_a_hop_never_switches_fast_mode_on_for_a_user_who_left_it_off() -> None:
 
     hopped = spec_for_target(base, FallbackTarget(selector="openai/gpt-5.4"))
     assert hopped.fast_mode is False
+
+
+class _FastThenStandard:
+    """Refuses while the request carries `fast_mode`, serves once it does not."""
+
+    def __init__(self, refusal: ProviderError) -> None:
+        self.refusal = refusal
+        self.attempts: list[tuple[bool, str | None]] = []
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        fast = bool(request.model.fast_mode)
+        self.attempts.append((fast, api_key))
+        if fast:
+            raise self.refusal
+        yield StreamTextDelta(delta="ok")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+def _fast_request() -> ChatRequest:
+    return ChatRequest(
+        model=ModelSpec(
+            provider="anthropic",
+            model_id="claude-opus-5",
+            supports_fast_mode=True,
+            fast_mode=True,
+        )
+    )
+
+
+async def test_the_driver_serves_a_refused_fast_request_at_standard_on_the_same_key() -> None:
+    """The feature's headline safety property, driven through the real loop (F4).
+
+    The measured Anthropic answer: HTTP 429 "Usage credits are required for
+    fast mode." on an account that serves the model fine at standard speed.
+    The turn must be served, on the SAME credential, with no rotation, no
+    block, and the caller's own request untouched.
+    """
+    client = _FastThenStandard(ProviderError(429, "Usage credits are required for fast mode."))
+    auth = FakeAuth({"anthropic": ["k1", "k2"]})
+    request = _fast_request()
+    route_state = FailoverRouteState()
+    refusals: list[tuple[str, str]] = []
+
+    async def on_refused(selector: str, message: str) -> None:
+        refusals.append((selector, message))
+
+    route_state.on_fast_refused = on_refused
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return client
+
+    got = [
+        event
+        async for event in stream_with_failover(
+            request,
+            auth,
+            {"retry": {"enabled": True, "maxRetries": 3}},
+            client_for,
+            route_state=route_state,
+        )
+    ]
+    assert [type(e).__name__ for e in got] == ["StreamTextDelta", "StreamEndEvent"]
+    assert client.attempts == [(True, "k1"), (False, "k1")], "same key, exactly one retry"
+    assert auth.rotations == [], "a refusal is not a credential problem"
+    assert request.model.fast_mode is True, "the caller's own request is untouched"
+    # The refusal is latched on the route state and announced exactly once.
+    assert route_state.fast_refused_for("anthropic/claude-opus-5")
+    assert refusals == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
+
+
+async def test_a_latched_refusal_stops_the_driver_re_paying_it() -> None:
+    """After one refusal the next request on that selector asks at standard
+    speed from the start (F1): no doomed fast attempt at every call boundary."""
+    client = _FastThenStandard(ProviderError(429, "Usage credits are required for fast mode."))
+    auth = FakeAuth({"anthropic": ["k1"]})
+    route_state = FailoverRouteState()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return client
+
+    for _ in range(2):
+        async for _event in stream_with_failover(
+            _fast_request(),
+            auth,
+            {"retry": {"enabled": True, "maxRetries": 3}},
+            client_for,
+            route_state=route_state,
+        ):
+            pass
+    assert client.attempts == [(True, "k1"), (False, "k1"), (False, "k1")]
+
+    # `/fast on` again clears the latch, so the driver re-asks.
+    route_state.forget_fast_refusal()
+    async for _event in stream_with_failover(
+        _fast_request(),
+        auth,
+        {"retry": {"enabled": True, "maxRetries": 3}},
+        client_for,
+        route_state=route_state,
+    ):
+        pass
+    assert client.attempts[-2:] == [(True, "k1"), (False, "k1")]
+
+
+async def test_an_isolated_errand_recovers_silently_without_latching() -> None:
+    """Naming/compaction must not move session state (the cascade's own rule),
+    so an errand that hits the refusal retries at standard and records nothing."""
+    client = _FastThenStandard(ProviderError(429, "Usage credits are required for fast mode."))
+    auth = FakeAuth({"anthropic": ["k1"]})
+    route_state = FailoverRouteState()
+    refusals: list[Any] = []
+    route_state.on_fast_refused = lambda s, m: refusals.append((s, m))
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return client
+
+    request = _fast_request().model_copy(update={"isolated": True})
+    got = [
+        e
+        async for e in stream_with_failover(
+            request, auth, {"retry": {"enabled": True}}, client_for, route_state=route_state
+        )
+    ]
+    assert len(got) == 2
+    assert client.attempts == [(True, "k1"), (False, "k1")]
+    assert not route_state.fast_refused and refusals == []
+
+
+async def test_a_refusal_does_not_occupy_the_reported_error_slot() -> None:
+    """A refusal being recovered from must not be what the user is shown when
+    the standard-speed retry then dies of something else (review nit)."""
+    refusal = ProviderError(429, "Usage credits are required for fast mode.")
+    real = ProviderError(400, "max_tokens must be positive")
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, request: ChatRequest, api_key: Any, oauth_access: Any = None):
+            self.calls += 1
+            raise refusal if request.model.fast_mode else real
+            yield  # pragma: no cover - makes this an async generator
+
+    client = _Client()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return client
+
+    with pytest.raises(ProviderError) as info:
+        async for _e in stream_with_failover(
+            _fast_request(),
+            FakeAuth({"anthropic": ["k1"]}),
+            {"retry": {"enabled": True}},
+            client_for,
+        ):
+            pass
+    assert "max_tokens" in str(info.value)
+    assert "fast mode" not in str(info.value)

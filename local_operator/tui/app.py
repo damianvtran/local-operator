@@ -3297,6 +3297,21 @@ class OperatorApp(App[None]):
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        # Reconcile the remembered fast-mode choice with the SPEC. The session
+        # switches its own dial off when a provider refuses fast mode
+        # (`Session._on_fast_refused`), and a choice remembered here would
+        # otherwise re-arm it on the next `/new`, `/reload` or `/model` — the
+        # user would be re-billed for a tier they were just told they cannot
+        # have. The spec is the truth; this app-side memory only exists to
+        # survive a session being REPLACED, never to override one.
+        selected = getattr(state, "selected_model", None)
+        if (
+            self._fast_choice
+            and selected is not None
+            and getattr(selected, "supports_fast_mode", False)
+            and not getattr(selected, "fast_mode", False)
+        ):
+            self._fast_choice = False
         cost = getattr(state, "cumulative_cost", None)
         knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
         if cost is not None:
@@ -15662,7 +15677,7 @@ class OperatorApp(App[None]):
             target = not current
         else:
             self._system_notice(
-                f"fast mode: {wanted!r} is not on/off — /fast toggles, /fast status reports",
+                f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
                 "warning",
             )
             return
@@ -15673,19 +15688,11 @@ class OperatorApp(App[None]):
             self._system_notice("session cannot change model settings", "warning")
             return
         if target:
-            # The premium is named at the moment it is incurred, not buried in
-            # help: the whole trade of this dial is money for latency, and a
-            # receipt that mentioned only the speed would be selling half of it.
-            # "this session", not "this session only": the longer phrase wrapped
-            # on a 150-cell frame and orphaned the word "only" on a line of its
-            # own (captured before/after). The scope is already unambiguous —
-            # nothing here offers to persist it — so the shorter phrase says the
-            # same thing and fits.
-            self._system_notice(
-                f"fast mode → on for {label} — faster output at premium pricing, this session"
-            )
-        else:
-            self._system_notice(f"fast mode → off for {label} — standard speed and pricing")
+            # An explicit re-ask is the one signal that the account's
+            # entitlement may have changed (credits bought since a refusal),
+            # so the driver's refusal latch is cleared for the next request.
+            _forget_fast_refusal(session)
+        self._system_notice(_fast_receipt(label, target))
 
     def _spec_with_chosen_effort(self, spec: Any) -> Any:
         """``spec`` carrying the level the user picked, when the model takes it.
@@ -20084,7 +20091,7 @@ class OperatorApp(App[None]):
         else:
             return SlashResult(
                 kind="notice",
-                text=f"fast mode: {wanted!r} is not on/off — /fast toggles, /fast status reports",
+                text=f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
                 style="warning",
             )
         if target == current:
@@ -20096,10 +20103,8 @@ class OperatorApp(App[None]):
                 kind="notice", text="session cannot change model settings", style="warning"
             )
         if target:
-            text = f"fast mode → on for {label} — faster output at premium pricing, this session"
-        else:
-            text = f"fast mode → off for {label} — standard speed and pricing"
-        return SlashResult(kind="notice", text=text, style="info")
+            _forget_fast_refusal(session)
+        return SlashResult(kind="notice", text=_fast_receipt(label, target), style="info")
 
     def _effort_slash_result(self, arg: str, SlashResult: Any) -> Any:
         session = self._session
@@ -22701,6 +22706,43 @@ def _effort_unavailable(label: str) -> str:
     return f"reasoning effort: not adjustable on {label}"
 
 
+def _forget_fast_refusal(session: Any) -> None:
+    """Clear the stream driver's fast-refusal latch, where the host has one.
+
+    Reached through the session's stream fn rather than the route state
+    directly, so the app carries no knowledge of failover internals; a host
+    without the hook (pilot fakes, embedders) has no latch to clear.
+    """
+    stream_fn = getattr(session, "_stream_fn", None)
+    forget = getattr(stream_fn, "forget_fast_refusal", None)
+    if callable(forget):
+        try:
+            forget()
+        except Exception:  # noqa: BLE001 — a latch that will not clear must not fail the toggle
+            logger.debug("forget_fast_refusal failed", exc_info=True)
+
+
+def _fast_receipt(label: str, enabled: bool) -> str:
+    """The receipt for a CHANGE, on every dispatch surface.
+
+    Opens with the feature's one subject (``fast mode:``) like the status and
+    refusal lines, then states the transition. The premium is named at the
+    moment it is incurred rather than buried in help — the whole trade of this
+    dial is money for latency.
+
+    No scope clause. "this session" was appended in two spellings and both
+    wrapped: the notice block is ~100 cells and an aggregator label alone can
+    be 40 (design D2), so any trailing clause orphans on a second line for
+    the labels most likely to be fast-capable. The scope is stated where a
+    user asks about it — ``/fast status`` and the command's own description —
+    and nothing here offers to persist the dial, so the receipt loses no fact
+    by stopping at the price.
+    """
+    if enabled:
+        return f"fast mode: off → on for {label} — faster output at premium pricing"
+    return f"fast mode: on → off for {label} — standard speed and pricing"
+
+
 def _fast_unavailable(label: str) -> str:
     """The ONE sentence for "this route has no fast tier", used by command and key.
 
@@ -22722,7 +22764,7 @@ def _fast_status_line(label: str, enabled: bool) -> str:
     """
     if enabled:
         return f"fast mode: on for {label} — faster output at premium pricing"
-    return f"fast mode: off for {label} — /fast turns it on"
+    return f"fast mode: off for {label} — /fast turns it on at premium pricing"
 
 
 def _fast_label(session) -> str:

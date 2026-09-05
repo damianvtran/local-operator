@@ -384,6 +384,17 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
     bad = handle._fast_slash(session, "maybe", SlashResult)
     assert bad.style == "warning" and session.model.fast_mode is False
 
+    # `on` clears the driver's refusal latch through the stream fn hook.
+    class _Stream:
+        forgotten = 0
+
+        def forget_fast_refusal(self) -> None:
+            self.forgotten += 1
+
+    session._stream_fn = _Stream()
+    handle._fast_slash(session, "on", SlashResult)
+    assert session._stream_fn.forgotten == 1
+
     # A route with no fast tier says so rather than taking a state the wire
     # would silently drop.
     session.model = build_model_spec("google", "gemini-3-pro")

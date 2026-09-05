@@ -2035,7 +2035,7 @@ class OwnedSessionHandle(SessionHandle):
             text = (
                 f"fast mode: on for {label} — faster output at premium pricing"
                 if current
-                else f"fast mode: off for {label} — /fast turns it on"
+                else f"fast mode: off for {label} — /fast turns it on at premium pricing"
             )
             return SlashResult(kind="notice", text=text, style="info")
 
@@ -2050,17 +2050,23 @@ class OwnedSessionHandle(SessionHandle):
         else:
             return SlashResult(
                 kind="notice",
-                text=f"fast mode: {wanted!r} is not on/off — /fast toggles, /fast status reports",
+                text=f"fast mode: {wanted!r} is not one of on, off, status — bare /fast toggles",
                 style="warning",
             )
         if target == current:
             return status()
         session.set_model(spec.model_copy(update={"fast_mode": target}))
+        if target:
+            # An explicit re-ask clears the driver's refusal latch (see
+            # `FailoverRouteState.fast_refused`); the terminal does the same.
+            forget = getattr(getattr(session, "_stream_fn", None), "forget_fast_refusal", None)
+            if callable(forget):
+                forget()
         self._notify()
         text = (
-            f"fast mode → on for {label} — faster output at premium pricing, this session"
+            f"fast mode: off → on for {label} — faster output at premium pricing"
             if target
-            else f"fast mode → off for {label} — standard speed and pricing"
+            else f"fast mode: on → off for {label} — standard speed and pricing"
         )
         return SlashResult(kind="notice", text=text, style="info")
 

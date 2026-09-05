@@ -65,6 +65,17 @@ class TestAnthropic:
         """
         assert fast_mode_support("anthropic", model) is None
 
+    @pytest.mark.parametrize("model", ["claude-opus-5-1", "claude-opus-5.1", "claude-opus-4-8-1"])
+    def test_a_point_release_is_not_admitted_by_inference(self, model: str) -> None:
+        """ "Explicit list" has to mean it (review F3): siblings within one
+        generation diverge, so a 5.x point release is added on the vendor's
+        word, never inherited from the generation."""
+        assert fast_mode_support("anthropic", model) is None
+
+    @pytest.mark.parametrize("model", ["claude-opus-5-20260101", "claude-opus-4-8-20260101"])
+    def test_a_dated_snapshot_of_a_listed_model_is_still_that_model(self, model: str) -> None:
+        assert fast_mode_support("anthropic", model) is not None
+
     def test_dotted_aggregator_spelling_resolves_the_same(self) -> None:
         """Anthropic hyphenates its snapshots; aggregators use a dot.
 

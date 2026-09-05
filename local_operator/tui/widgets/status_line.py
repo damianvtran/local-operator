@@ -86,13 +86,16 @@ ICON_EFFORT = "▴"
 #: Fast mode. A CATEGORY marker like every other icon here, and the same
 #: single-cell rule applies (checked ``cell_len`` == 1).
 #:
-#: A chevron because the one thing this segment reports is SPEED, and this is
-#: the fast-forward mark every media surface already taught. Kept out of the
-#: triangle family ``ICON_EFFORT`` owns so a glance cannot confuse the depth
-#: dial with the speed dial — they sit next to each other on the band and mean
-#: different things. ``▸`` was rejected for exactly that collision, and ``⚡``
-#: for the emoji width rule above.
-ICON_FAST = "»"
+#: A lightning bolt, because the one thing this segment reports is SPEED.
+#: ``⚡`` is the obvious glyph and is excluded by the width rule above (2
+#: cells); ``↯`` is its single-cell arrow-family cousin (checked ``cell_len``
+#: == 1). Kept out of the triangle family ``ICON_EFFORT`` owns so a glance
+#: cannot confuse the depth dial with the speed dial — they sit next to each
+#: other on the band and mean different things — and out of the angle-quote
+#: family (``»``, the first choice) because the band's own segment separator
+#: is ``›``, and ``high › » fast`` read as two separators in a row (design
+#: D1).
+ICON_FAST = "↯"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),

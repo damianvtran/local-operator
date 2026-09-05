@@ -173,7 +173,7 @@ async def test_an_unparseable_argument_is_refused_rather_than_guessed() -> None:
         await _submit(pilot, app, "/fast maybe")
 
         assert _fast(app) is False
-        assert "not on/off" in _notices(app)[-1].lower()
+        assert "not one of on, off, status" in _notices(app)[-1].lower()
 
 
 @pytest.mark.asyncio
@@ -231,3 +231,51 @@ async def test_the_command_is_advertised_to_remote_clients() -> None:
     assert len(fast) == 1, "/fast must be advertised exactly once"
     # Authoritative: it mutates the owner's spec, so it cannot be frontend-local.
     assert fast[0].operation == "slash"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_refusal_takes_the_dial_off_the_band_and_the_memory() -> None:
+    """The app's half of review F1.
+
+    When the session switches its own dial off after a provider refusal, the
+    band must stop painting `fast` — and the app's REMEMBERED choice must be
+    dropped too, or the next `/new`/`/model` would re-arm a tier the user was
+    just told they cannot have.
+    """
+    app = OperatorApp(lambda: _factory(FastSession()))
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/fast")
+        assert _fast(app) is True and app._fast_choice is True
+        segment = f"{ICON_FAST} fast"
+        assert segment in _band(app)
+
+        # What `Session._on_fast_refused` does, without a provider in the loop:
+        # the spec's dial comes off and the frontend state is republished.
+        session = app._session
+        assert session is not None
+        session.set_model(session.model.model_copy(update={"fast_mode": False}))
+        app._status.update(fast=_fast_label_for_test(session))
+        app._apply_frontend_state(_State(session.model))
+        for _ in range(4):
+            await pilot.pause()
+
+        assert segment not in _band(app)
+        assert app._fast_choice is False, "the remembered choice must follow the spec"
+
+
+class _State:
+    """The two fields `_apply_frontend_state` reads for the reconciliation."""
+
+    def __init__(self, selected: Any) -> None:
+        self.selected_model = selected
+        self.effective_model = selected
+        self.effective_model_label = f"{selected.provider}/{selected.model_id}"
+        self.jobs: list[Any] = []
+        self.mcp_servers: list[Any] = []
+
+
+def _fast_label_for_test(session: Any) -> str:
+    from local_operator.tui.app import _fast_label
+
+    return _fast_label(session)

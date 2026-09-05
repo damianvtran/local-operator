@@ -116,7 +116,16 @@ _SERVICE_TIER_FAST = FastModeSupport(DIALECT_SERVICE_TIER, SERVICE_TIER_FAST)
 #: ``[.-]`` for the generation separator, for the reason ``model.effort``'s
 #: table records: Anthropic hyphenates its own snapshot ids
 #: (``claude-opus-4-8``) while aggregators spell the same model with a dot.
-_ANTHROPIC_FAST_MODELS = re.compile(r"claude-opus-(?:5(?!\d)|4[.-]8(?!\d))")
+#:
+#: The lookahead refuses a POINT RELEASE (``claude-opus-5-1``, ``5.1``) as
+#: well as a longer digit run, because "explicit list" has to mean it: the
+#: whole reason for a list is that siblings inside one generation diverge
+#: (4.6 silently bills standard, 4.7 errors), so a future 5.x must be added
+#: here on the vendor's word, never admitted by inference (review F3). An
+#: 8-digit date snapshot (``claude-opus-5-20260101``) is still a snapshot of
+#: the listed model and is admitted: a point release is one or two digits,
+#: a date is eight.
+_ANTHROPIC_FAST_MODELS = re.compile(r"claude-opus-(?:5|4[.-]8)(?![.-]\d{1,2}(?!\d))(?!\d)")
 
 #: OpenAI documents Fast mode for the GPT-5 generation and later, and says
 #: plainly that support "isn't guaranteed for every model". A family rule is

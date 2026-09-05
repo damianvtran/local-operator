@@ -1560,6 +1560,12 @@ class Session:
             # is actually serving requests, the session persists that fact and
             # emits the event a front end repaints its model display from.
             route_bridge(self._on_route_settled)
+        fast_bridge = getattr(self._stream_fn, "set_fast_refused_handler", None)
+        if callable(fast_bridge):
+            # The stream fn has already narrated the refusal; the session's
+            # job is to make the SPEC truthful — switch the dial off so the
+            # band and the next request agree with what the provider did.
+            fast_bridge(self._on_fast_refused)
         # Deliberately NO bridge for the prompt-cache TTL hint, unlike the two
         # above: the stream fn is SHARED with subagents, so a registered reader
         # is last-writer-wins — constructing a child overwrote the parent's
@@ -5301,6 +5307,19 @@ class Session:
     ) -> None:
         """Bridge provider-routing diagnostics onto the session event stream."""
         await self._emit(NoticeEvent(text=text, kind=kind))
+
+    async def _on_fast_refused(self, selector: str, message: str) -> None:
+        """A provider refused fast mode; take the session's own dial off.
+
+        Through :meth:`set_model` so every consumer sees it the way a user's
+        ``/fast off`` would be seen: the spec the next request is built from,
+        the frontend state the band repaints from, and a pinned fallback's
+        derived display spec. Not ``explicit`` — this is a knob adjustment on
+        the model that is serving, never a model choice.
+        """
+        if not getattr(self._model, "fast_mode", False):
+            return
+        self.set_model(self._model.model_copy(update={"fast_mode": False}))
 
     async def _on_route_settled(self, target: Any, reason: str) -> None:
         """The stream fn's effective route moved; record it and tell the host.
