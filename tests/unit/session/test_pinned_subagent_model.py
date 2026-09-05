@@ -197,6 +197,26 @@ async def test_start_event_names_the_model_the_child_runs_on(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_wait_names_the_model_a_task_child_ran_on(tmp_path, monkeypatch):
+    """The parent model's own view: ``wait`` reports the harness-recorded
+    model of a settled task child in its header, so a launcher can state
+    which model produced a delegated verdict instead of assuming it."""
+    from local_operator.tools.builtin import execute_wait
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=f"{MODEL.provider}/{MODEL.model_id}")
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(label="review", prompt="review it", effort="hi")
+    await wait_for(lambda: (j := session.jobs.get(job_id)) is not None and j.status == "completed")
+
+    context = ToolContext(jobs=session.jobs, subagent_comms=session.subagent_comms)
+    result = await execute_wait("call-1", {"job_id": job_id, "wait_ms": 1000}, None, None, context)
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+    assert f"[completed] model={MODEL.provider}/{MODEL.model_id}" in text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_task_tool_tells_the_model_not_to_retry_on_another_tier():
     def launcher(label, prompt, *, agent="task", effort=None):
         raise SubagentModelUnavailable("hi", "no model configured at subagents.models.hi")
