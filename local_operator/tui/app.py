@@ -14891,6 +14891,20 @@ class OperatorApp(App[None]):
             and getattr(remote_capability.scope, "value", remote_capability.scope)
             == "authoritative_session"
         ):
+            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+                # A viewer that `/stop` ended keeps the owner's LAST capability
+                # list (the sync that would clear it is never coming), so a
+                # routed command reaches `route_shared_slash` and is refused
+                # with "session is reconnecting; try /<cmd> again" — a wait for
+                # something the row above just said was stopped on purpose
+                # (QA round 2, Q5). Answered here with the stopped-state
+                # notice (`/resume <id>`), the same answer the prompt path and
+                # a second `/stop` give. Gated on `is_cold` as well: the id is
+                # recorded before the socket closes, and a still-connected
+                # facade must keep routing so the owner's own reply lands.
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+                return
             # Bare ``/model`` opens the INVOKING terminal's own picker — there
             # is nothing for the owner to paint, and hosting the widget here is
             # the whole point of the interaction (the old routing opened it in
@@ -15863,6 +15877,19 @@ class OperatorApp(App[None]):
             if self._stopped_session_id:
                 text_line, kind = self._no_session_notice()
                 self._system_notice(text_line, kind)
+            elif bool(getattr(session, "_recovering", False)):
+                # `is_cold` is a superset of the drop: it is also true while
+                # the facade is redialing an owner that died. There "send a
+                # message" is not the lever — the facade's own answer for the
+                # gap is `_unavailable_reason()` ("session owner is
+                # reconnecting"), the sentence the prompt path already uses
+                # (review round 2, R2-M1).
+                reason = getattr(session, "_unavailable_reason", None)
+                self._system_notice(
+                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    "try /model again in a moment",
+                    "warning",
+                )
             else:
                 self._system_notice(
                     "no runtime is running for this session; "
