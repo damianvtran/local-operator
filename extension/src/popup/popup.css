@@ -241,7 +241,11 @@ select {
   margin-top: 6px;
   padding: 7px 10px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 2px;
+  /* 6px to match the .btn stack directly beneath it rather than the 2px well
+   * of a text input: inside one .actions group the select, trough and buttons
+   * sit closer together than input and button ever do elsewhere, so two corner
+   * treatments read as unsettled at this size (D7). */
+  border-radius: 6px;
   background: var(--surface);
   color: var(--ink);
   font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -328,6 +332,35 @@ input:disabled {
 .actions {
   margin-top: 16px;
 }
+/* The all-sites line is the popup's only surface for the mode where the
+ * consent gate is off entirely, so it inherits the options page's danger
+ * vocabulary instead of rendering as the quietest text in the card (D6), and
+ * carries a real control back to the setting rather than naming Settings in
+ * inert prose (U2). */
+.all-sites {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--ink);
+}
+.linkish {
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--danger);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.linkish:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
 /* Allow / Deny side by side under the scope picker. min-width:0 keeps the pair
  * inside 300px (D1). */
 .actions .row {

@@ -38,6 +38,12 @@ export function normalizedHostGrants(value: unknown): HostGrantsState | null {
 /** Site-grant keys are validated per scope: a `domain` key must be the
  * registrable domain of itself (so `co.uk` or `www.x.com` cannot be keys)
  * and a `host` key a literal loopback hostname. Both scheme-less. */
+/** Is `key` one this build would itself mint for `scope`?
+ *
+ * Enforced at WRITE time only (grantSiteLocked). A key is minted from
+ * `broadGrantFor(url)`, so this is a belt-and-braces assertion that the
+ * derivation and the stored shape agree; it must NOT gate reads or
+ * revocation, because the PSL moves under stored keys over time (A2). */
 function validSiteGrantKey(key: string, scope: SiteGrant["scope"]): boolean {
   try {
     const url = new URL(`http://${key}/`);
@@ -55,14 +61,28 @@ function validSiteGrant(value: unknown): value is SiteGrant {
     Number.isFinite((value as { createdAt: number }).createdAt);
 }
 
+/** Normalize a stored `siteGrants` record for a MUTATION.
+ *
+ * Validates the record's SHAPE only. Key derivability is deliberately not
+ * checked here: keys are written under the PSL bundled at grant time, and the
+ * generator refreshes that list every release, so a domain that later becomes
+ * a public suffix (blogspot.com is the worked example) would turn its own
+ * stored key invalid. Re-deriving here made one such key refuse the whole
+ * mutation, which bricked every future grant AND the Remove button for the
+ * very row the user was trying to delete, while the read path kept honouring
+ * the other entries: access stayed granted and the off-switch disappeared
+ * (A2). Losing the ability to revoke is strictly worse than carrying a key
+ * this build cannot re-derive, and carrying it is safe because
+ * `matchingGrantScope` looks grants up by a key derived from the URL under
+ * TODAY's list, so an unrecognised key can only fail to match, never widen.
+ *
+ * One structurally malformed entry still refuses the whole mutation, matching
+ * normalizedHostGrants: a record whose shape we cannot read is one we cannot
+ * safely rewrite. */
 export function normalizedSiteGrants(value: unknown): SiteGrantsState | null {
   if (!validSiteGrantSchema(value)) return null;
   const entries = Object.entries(value.grants);
-  // Same rule as normalizedHostGrants: one malformed entry refuses the whole
-  // mutation rather than silently dropping a record this build cannot read.
-  if (entries.some(([key, grant]) => !validSiteGrant(grant) || !validSiteGrantKey(key, grant.scope))) {
-    return null;
-  }
+  if (entries.some(([, grant]) => !validSiteGrant(grant))) return null;
   return { version: 1, grants: Object.fromEntries(entries) };
 }
 
@@ -102,6 +122,10 @@ export function revokeExactOrigin(origin: string): Promise<boolean> {
 export async function grantSiteLocked(url: URL): Promise<boolean> {
   const broad = broadGrantFor(url);
   if (!broad) return false;
+  // The key this build is about to mint must be one it would recognise. A
+  // stored key that no longer derives is tolerated (A2); a NEW one that does
+  // not derive would be a bug in broadGrantFor, and is refused here.
+  if (!validSiteGrantKey(broad.key, broad.scope)) return false;
   const { siteGrants, origins = {} } = await chrome.storage.local.get(["siteGrants", "origins"]);
   if (siteGrants !== undefined && !normalizedSiteGrants(siteGrants)) return false;
   const current = normalizedSiteGrants(siteGrants) ?? { version: 1 as const, grants: {} };
@@ -140,6 +164,9 @@ export function revokeSiteGrant(key: string): Promise<boolean> {
     const { siteGrants } = await chrome.storage.local.get(["siteGrants"]);
     const current = normalizedSiteGrants(siteGrants);
     if (!current) return false;
+    // Report failure rather than a false "Removed …" for a key that was never
+    // there, so the Settings receipt describes what actually happened (A5).
+    if (!(key in current.grants)) return false;
     const grants = { ...current.grants };
     delete grants[key];
     await chrome.storage.local.set({ siteGrants: { version: 1, grants } });

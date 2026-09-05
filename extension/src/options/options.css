@@ -20,6 +20,10 @@
   --hairline-strong: #d5cfc2;
   --success: #1e7b4e;
   --danger: #b23a31;
+  /* Modal scrim. Named per ramp rather than derived from --ink, which is
+   * near-white on the dark ramp and so painted a WHITE veil that lightened
+   * the page and reversed the modal's depth (D3). */
+  --scrim: rgba(0, 0, 0, 0.45);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -34,6 +38,7 @@
     --hairline-strong: #3b3527;
     --success: #57c785;
     --danger: #ef8078;
+    --scrim: rgba(0, 0, 0, 0.62);
   }
 }
 
@@ -210,6 +215,34 @@ input:focus-visible {
   font-size: 14px;
   color: var(--ink-dim);
 }
+/* The list's superseded state carries the same danger vocabulary as the
+ * banner, because it describes the same condition from the card the user is
+ * actually reading (U2). */
+.notice {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.linkish {
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--danger);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.linkish:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
 
 /* Allowed-sites rows: hairline-separated, the origin in monospace so a long
  * host wraps at sensible points while the Remove action stays put (D8). */
@@ -330,7 +363,7 @@ dialog.card {
   color: var(--ink);
 }
 dialog::backdrop {
-  background: color-mix(in srgb, var(--ink) 40%, transparent);
+  background: var(--scrim);
 }
 dialog h2 {
   font-family: ui-serif, "Iowan Old Style", Georgia, "Palatino Linotype",
@@ -387,8 +420,13 @@ dialog h2 {
 .dialog-actions .btn.danger {
   margin-top: 0;
 }
+/* A disabled control keeps a legible border and label instead of fading the
+ * danger red to a ~2.3:1 pink that scans as decoration rather than as a
+ * control waiting on the acknowledgement (D4). Neutral, not washed-out
+ * danger: the state is "not yet available", not "a faint dangerous action". */
 .btn:disabled {
-  opacity: 0.5;
+  border-color: var(--hairline-strong);
+  color: var(--ink-dim);
   cursor: not-allowed;
 }
 .btn.danger:disabled:hover {

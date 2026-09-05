@@ -162,6 +162,31 @@ test("policyCovers reconciles by domain and loopback host regardless of scheme",
   } finally { await module.close(); }
 });
 
+test("normalizedSiteGrants preserves keys the current PSL cannot re-derive", async () => {
+  const module = await load("src/access-grants.ts");
+  try {
+    const { normalizedSiteGrants } = module.loaded;
+    // A key written under an OLDER bundled PSL, before the name became a
+    // public suffix. Re-deriving it here refused the whole mutation, which
+    // bricked every future grant AND the Remove button for this very row
+    // while the read path kept honouring the rest: access stayed granted and
+    // the off-switch vanished (A2). Carrying the key is safe because lookups
+    // derive their key from the URL, so a stale key can only fail to match.
+    for (const key of ["blogspot.com", "co.uk", "www.gominerva.com"]) {
+      const stale = { version: 1, grants: { [key]: { scope: "domain", createdAt: 1 } } };
+      assert.deepEqual(normalizedSiteGrants(stale), stale, key);
+    }
+    // A scope/key mismatch is likewise preserved, not interpreted: it is the
+    // read path that decides what a record admits, and it checks both.
+    const mismatched = { version: 1, grants: { "example.com": { scope: "host", createdAt: 1 } } };
+    assert.deepEqual(normalizedSiteGrants(mismatched), mismatched);
+    // Likewise a key that is not a bare hostname at all: unreachable by any
+    // lookup, so preserving it costs nothing and keeps Remove working.
+    const urlish = { version: 1, grants: { "https://gominerva.com": { scope: "domain", createdAt: 1 } } };
+    assert.deepEqual(normalizedSiteGrants(urlish), urlish);
+  } finally { await module.close(); }
+});
+
 test("normalizedSiteGrants refuses any record this build cannot preserve", async () => {
   const module = await load("src/access-grants.ts");
   try {
@@ -171,12 +196,28 @@ test("normalizedSiteGrants refuses any record this build cannot preserve", async
     for (const bad of [
       { version: 2, grants: {} },
       { version: 1, grants: { "gominerva.com": { scope: "domain", createdAt: "1" } } },
-      { version: 1, grants: { "co.uk": { scope: "domain", createdAt: 1 } } },
-      { version: 1, grants: { "www.gominerva.com": { scope: "domain", createdAt: 1 } } },
-      { version: 1, grants: { "example.com": { scope: "host", createdAt: 1 } } },
-      { version: 1, grants: { "https://gominerva.com": { scope: "domain", createdAt: 1 } } },
       { version: 1, grants: { "gominerva.com": { scope: "all_ports", createdAt: 1 } } },
     ]) assert.equal(normalizedSiteGrants(bad), null, JSON.stringify(bad));
+  } finally { await module.close(); }
+});
+
+test("a decided origin still echoing renders the ack, not a live prompt", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { originPromptView } = module.loaded;
+    const origin = "https://qa-app.qa.gominerva.com";
+    // The echo window: session storage and /health keep reporting the prompt
+    // until the worker round-trip lands. Redrawing the prompt there reads as
+    // "the click did not work" and invites a second click, which under the
+    // scope model lands on a select reset to the domain default and widens a
+    // deliberate "just this once" to the whole domain (A1/U1).
+    assert.equal(originPromptView(origin, { origin, decision: "once" }), "ack");
+    assert.equal(originPromptView(origin, { origin, decision: "domain" }), "ack");
+    // A DIFFERENT origin is a genuinely new decision and must prompt.
+    assert.equal(originPromptView(origin, { origin: "https://other.example", decision: "once" }), "prompt");
+    assert.equal(originPromptView(origin, null), "prompt");
+    // The echo clearing retires the popup rather than holding a stale ack.
+    assert.equal(originPromptView(undefined, { origin, decision: "once" }), "none");
   } finally { await module.close(); }
 });
 
@@ -191,7 +232,7 @@ test("popup scope options come from the entry and default to the broad grant whe
     assert.deepEqual(domain.options.map((option) => option.detail), [
       "gominerva.com and every subdomain, any port",
       "https://qa-app.qa.gominerva.com",
-      "one navigation within 10 minutes",
+      "one navigation to https://qa-app.qa.gominerva.com, within 10 minutes",
     ]);
     const host = scopeOptions({ origin: "http://localhost:5173", broad: { scope: "host", key: "localhost" } });
     assert.equal(host.options[0].label, "Any port on this host");
@@ -500,9 +541,12 @@ test("origin decision acks render per decision, deny staying neutral", async () 
     const domain = ackForDecision("domain", "domain");
     assert.equal(domain.title, "Domain allowed.");
     assert.match(domain.sub, /Every page on this domain and its subdomains, on any port, stays allowed/);
+    // Both broad scopes share the wire value "domain", but the loopback grant
+    // is a HOST grant and must not be titled as a domain (D1).
     const host = ackForDecision("domain", "host");
-    assert.equal(host.title, "Domain allowed.");
-    assert.match(host.sub, /Every port on this loopback host stays allowed/);
+    assert.equal(host.title, "Host allowed.");
+    assert.match(host.sub, /Every port on this host stays allowed/);
+    assert.notEqual(host.title, domain.title);
     for (const ack of [site, domain, host]) assert.doesNotMatch(ack.sub, /\u2014/, "no em dashes in user copy");
     // Deny is a completed choice, not a failure: neutral, no check.
     const deny = ackForDecision("deny");

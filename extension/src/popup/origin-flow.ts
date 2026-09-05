@@ -49,8 +49,8 @@ export function ackForDecision(decision: OriginDecision, broadScope?: BroadGrant
   // in-flight pass: in the async approval flow the navigation happens a turn
   // or two after the click, so the ack names what the grant actually covers
   // and its bound (10 min unconsumed — see ONCE_GRANT_TTL_MS). The button
-  // label stays "Allow once": it is the one-shot consent vocabulary the
-  // store listing already promises, and the ack carries the nuance (n2).
+  // option label stays "Just this once": it is the one-shot consent
+  // vocabulary the store listing promises, and the ack carries the nuance (n2).
   if (decision === "once") {
     return {
       title: "Site allowed.",
@@ -60,13 +60,20 @@ export function ackForDecision(decision: OriginDecision, broadScope?: BroadGrant
     };
   }
   if (decision === "domain") {
-    const standing =
-      broadScope === "host"
-        ? "Every port on this loopback host stays allowed"
-        : "Every page on this domain and its subdomains, on any port, stays allowed";
+    // Both broad scopes share the wire value "domain", but a loopback grant is
+    // a HOST grant: titling it "Domain allowed." names a scope the user was
+    // never offered and contradicts its own body copy (D1).
+    if (broadScope === "host") {
+      return {
+        title: "Host allowed.",
+        sub: "The agent is continuing. Every port on this host stays allowed; take it back any time in Settings.",
+        tone: "success",
+        check: true,
+      };
+    }
     return {
       title: "Domain allowed.",
-      sub: `The agent is continuing. ${standing}; take it back any time in Settings.`,
+      sub: "The agent is continuing. Every page on this domain and its subdomains, on any port, stays allowed; take it back any time in Settings.",
       tone: "success",
       check: true,
     };
@@ -112,9 +119,19 @@ export function scopeOptions(entry: Pick<AccessQueueEntry, "origin" | "broad"> |
           },
     );
   }
+  const origin = entry?.origin;
   options.push(
-    { value: "site", label: "Only this site", detail: entry?.origin ?? "this exact site" },
-    { value: "once", label: "Just this once", detail: "one navigation within 10 minutes" },
+    { value: "site", label: "Only this site", detail: origin ?? "this exact site" },
+    {
+      value: "once",
+      label: "Just this once",
+      // Every other detail line names the subject as data; a bare quantity
+      // would make this the one option whose trough stops saying what is
+      // being granted (U6).
+      detail: origin
+        ? `one navigation to ${origin}, within 10 minutes`
+        : "one navigation within 10 minutes",
+    },
   );
   return { options, defaultValue: broad ? "domain" : "site" };
 }

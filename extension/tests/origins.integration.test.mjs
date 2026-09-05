@@ -398,6 +398,50 @@ test("persisted loopback host grant survives module restart and admits a second 
   }
 });
 
+test("a stored key the current PSL cannot re-derive stays revocable and does not block writes", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/access-grants.ts");
+  try {
+    const grants = await bundle.import();
+    // blogspot.com is in the PRIVATE section today, so registrableDomain()
+    // returns null for it: a grant written before that entry existed has a key
+    // this build can no longer derive. Re-deriving it during a mutation
+    // refused the WHOLE record, so every later grant failed and the Remove
+    // button for this row reported "try again" forever, while the read path
+    // kept honouring the other entries (A2).
+    await globalThis.chrome.storage.local.set({
+      siteGrants: { version: 1, grants: {
+        "blogspot.com": { scope: "domain", createdAt: 1 },
+        "gominerva.com": { scope: "domain", createdAt: 1 },
+      } },
+    });
+    assert.equal(await grants.revokeSiteGrant("blogspot.com"), true, "the stale row must be removable");
+    assert.equal(await grants.revokeSiteGrant("gominerva.com"), true, "an unrelated row must be removable");
+    assert.equal(await grants.grantSite(url("https://app.example.com")), true, "later grants must still write");
+    assert.deepEqual(Object.keys(chrome.local("siteGrants").grants), ["example.com"]);
+    // A5: removing a key that is not there is not a success.
+    assert.equal(await grants.revokeSiteGrant("never-granted.example"), false);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
+test("an unreadable stored record still refuses the mutation, and clearing recovers", async () => {
+  const chrome = installChromeStub();
+  const bundle = await loadModule("src/access-grants.ts");
+  try {
+    const grants = await bundle.import();
+    // Structurally malformed (no createdAt) is different from "key I cannot
+    // re-derive": a record whose SHAPE is unreadable is one we cannot safely
+    // rewrite, so it still refuses wholesale.
+    await globalThis.chrome.storage.local.set({
+      siteGrants: { version: 1, grants: { "gominerva.com": { scope: "domain" } } },
+    });
+    assert.equal(await grants.grantSite(url("https://app.example.com")), false);
+    assert.equal(await grants.clearAllAccessGrants(), true);
+    assert.equal(chrome.local("siteGrants"), undefined);
+    assert.equal(await grants.grantSite(url("https://app.example.com")), true);
+  } finally { await bundle.close(); chrome.restore(); }
+});
+
 test("revoking a loopback host grant makes a later port prompt again", async () => {
   const chrome = installChromeStub();
   const storeBundle = await loadStore();

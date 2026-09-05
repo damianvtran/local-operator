@@ -11,6 +11,7 @@ const allowAllEnable = document.getElementById("allow-all-enable") as HTMLButton
 const allowAllBanner = document.getElementById("allow-all-banner") as HTMLDivElement;
 const sites = document.getElementById("sites") as HTMLUListElement;
 const sitesEmpty = document.getElementById("sites-empty") as HTMLParagraphElement;
+const sitesSuperseded = document.getElementById("sites-superseded") as HTMLParagraphElement;
 const pairStatus = document.getElementById("pair-status") as HTMLParagraphElement;
 const confirm = document.getElementById("confirm") as HTMLParagraphElement;
 
@@ -90,7 +91,11 @@ async function render(): Promise<void> {
   await renderStatus();
   sites.replaceChildren();
   const entries = grantRows(origins, local.hostGrants, local.siteGrants);
-  sitesEmpty.classList.toggle("hidden", entries.length > 0);
+  // While every website is allowed these rows grant nothing extra, so the
+  // empty note would tell a user hunting for the off-switch that nothing is
+  // granted while the agent in fact has every site (U2).
+  sitesSuperseded.classList.toggle("hidden", !allowAllStored);
+  sitesEmpty.classList.toggle("hidden", entries.length > 0 || allowAllStored);
   for (const entry of entries) {
     const row = document.createElement("li");
     const name = document.createElement("span");
@@ -131,6 +136,12 @@ allowAllDialog.addEventListener("cancel", (event) => {
   void applyAllowAll({ type: "cancel" });
 });
 document.getElementById("allow-all-banner-off")?.addEventListener("click", () => void applyAllowAll({ type: "turn_off" }));
+// The same exit from inside the Allowed sites card, where a user looking for
+// what to revoke actually lands (U2).
+document.getElementById("sites-superseded-off")?.addEventListener("click", async () => {
+  await applyAllowAll({ type: "turn_off" });
+  await render();
+});
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
   const beforeUnpair = await getLocal();

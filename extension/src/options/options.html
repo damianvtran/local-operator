@@ -73,6 +73,14 @@
           covers a whole domain on any port. Any port covers a local host. You can take any of
           them back here.
         </p>
+        <!-- While the all-sites switch is on this list is not in effect, so
+             saying "No sites allowed yet." under a banner reading "All websites
+             are allowed" states the opposite of the truth to exactly the user
+             who came looking for what to undo (U2). -->
+        <p class="notice hidden" id="sites-superseded">
+          These grants are not in effect. All websites are allowed.
+          <button type="button" class="linkish" id="sites-superseded-off">Turn this off</button>
+        </p>
         <ul id="sites"></ul>
         <p class="empty hidden" id="sites-empty">No sites allowed yet.</p>
       </section>
@@ -94,8 +102,12 @@
         <a href="https://local-operator.com/terms" target="_blank" rel="noopener">Terms</a> and
         <a href="https://local-operator.com/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a>.
       </p>
+      <!-- autofocus lands the keyboard on the acknowledgement rather than on
+           the Terms link, which showModal() would otherwise pick as the first
+           tabbable node: the first key a keyboard user could press on a
+           security confirmation would navigate away from it (U3). -->
       <label class="ack" for="allow-all-ack">
-        <input id="allow-all-ack" type="checkbox" />
+        <input id="allow-all-ack" type="checkbox" autofocus />
         <span>I understand the risks</span>
       </label>
       <div class="dialog-actions">

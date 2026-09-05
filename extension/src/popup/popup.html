@@ -38,7 +38,8 @@
                on: the one state where no prompt will ever appear, so the popup
                must say so instead of looking merely idle. -->
           <p class="sub all-sites hidden" id="connected-all-sites">
-            All sites are allowed. Change this in Settings.
+            All sites are allowed.
+            <button type="button" class="linkish" id="connected-all-sites-off">Turn this off</button>
           </p>
           <p class="label" id="connected-label">Driving</p>
           <p class="trough" id="connected-detail"></p>
@@ -132,6 +133,11 @@
           </svg>
           <h1 class="title" id="origin-ack-title"></h1>
           <p class="sub" id="origin-ack-sub"></p>
+          <!-- The value that was granted, in the same monospace trough the
+               prompt quarantines the host into. The prompt pane is gone by
+               now, so a purely deictic "this domain" has no referent left on
+               screen (D2). Hidden for "once", which keeps no standing record. -->
+          <p class="trough hidden" id="origin-ack-granted"></p>
         </section>
 
         <section
@@ -168,8 +174,12 @@
                exact domain or origin before committing. -->
           <div class="actions">
             <label class="label" for="origin-scope">Allow</label>
-            <select id="origin-scope"></select>
-            <p class="trough" id="origin-scope-detail"></p>
+            <!-- aria-describedby ties the select to the trough that states what
+                 the selection actually grants: without it a screen reader
+                 announces the option label but never the consequence, which is
+                 the load-bearing half (D8). -->
+            <select id="origin-scope" aria-describedby="origin-scope-detail"></select>
+            <p class="trough" id="origin-scope-detail" aria-live="polite"></p>
             <div class="row">
               <button id="origin-allow" class="btn primary">Allow</button>
               <button id="origin-deny" class="btn danger">Deny</button>
