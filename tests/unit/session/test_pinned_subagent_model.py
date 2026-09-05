@@ -69,7 +69,14 @@ def make_session(tmp_path) -> Session:
     )
 
 
-def write_tiers(config_dir, **tiers: str) -> None:
+def write_tiers(config_dir, **tiers: object) -> None:
+    """Write ``values.subagents.models`` verbatim.
+
+    Values are ``object`` rather than ``str`` on purpose: the guards under test
+    exist for selectors YAML produced as something other than a string
+    (``lo: 0``, ``lo: []``), and a ``str``-only helper is why those guards went
+    untested through round 1 (review R2-F8).
+    """
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.yml").write_text(
         yaml.safe_dump({"values": {"subagents": {"models": tiers}}})
@@ -117,6 +124,108 @@ def test_strict_launch_fails_on_a_malformed_selector(tmp_path, monkeypatch):
         session._launch_subagent(label="review", prompt="review it", effort="hi")
     assert caught.value.tier == "hi"
     assert "lacks provider/model" in caught.value.reason
+
+
+def test_strict_launch_refuses_a_non_string_selector(tmp_path, monkeypatch):
+    """Q-1's regression guard, made deletable-only-with-a-failure (review
+    R2-F8). A truthy non-string selector must be a NAMED refusal: without the
+    ``isinstance`` check the value flows into ``str.partition`` (or a
+    ``str()`` coercion) and a ``ModelSpec`` gets built out of a list."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=["openrouter/moonshotai/kimi-k3"])
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert caught.value.tier == "hi"
+    assert "lacks provider/model" in caught.value.reason
+    # The refusal names the offending VALUE, so an operator can find it.
+    assert "subagents.models.hi=" in caught.value.reason
+    assert not session.jobs.list()
+
+
+def test_a_falsy_non_string_selector_is_malformed_not_unconfigured(tmp_path, monkeypatch):
+    """Review R2-F7. ``hi: 0`` is a key the operator WROTE, so it must draw the
+    same "lacks provider/model" refusal the tool-argument path
+    (``effort_tier_rejection``) gives it -- not the quiet "not configured"
+    branch, which would put the two user-facing surfaces back into
+    disagreement about the same key."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=0)
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert "lacks provider/model" in caught.value.reason
+    assert "no model configured" not in caught.value.reason
+
+
+#: ``(selector, classification)`` -- every shape ``config.yml`` can hand the
+#: two refusal surfaces, and the ONE verdict both must reach for it. Split by
+#: what the operator did rather than by Python truthiness: a key that is absent
+#: or blank is "unconfigured" (and stays quiet on the lenient path), and a key
+#: that is present with an unusable value is "malformed" however falsy it is.
+SELECTOR_CLASSIFICATIONS: list[tuple[object, str]] = [
+    (0, "malformed"),
+    (False, "malformed"),
+    ([], "malformed"),
+    ({}, "malformed"),
+    (5, "malformed"),
+    (True, "malformed"),
+    (["openrouter/kimi"], "malformed"),
+    ({"provider": "openrouter", "model": "kimi"}, "malformed"),
+    ("no-provider-here", "malformed"),
+    (None, "unconfigured"),
+    ("", "unconfigured"),
+    ("   ", "unconfigured"),
+]
+
+
+def _classify(message: str) -> str:
+    """The verdict a refusal carries, independent of its wording.
+
+    The two surfaces phrase the unconfigured case differently on purpose --
+    the launch says "no model configured at ...", the tool-argument path says
+    "not configured at ..." inside a sentence that also names the working
+    tiers -- so this matches on the CLASSIFICATION both must agree on, not on
+    text neither promises the other. ``lacks provider/model`` is checked first
+    because it is the narrower verdict.
+    """
+    if "lacks provider/model" in message:
+        return "malformed"
+    if "configured at subagents.models" in message:
+        return "unconfigured"
+    return f"unrecognised: {message}"
+
+
+@pytest.mark.parametrize("selector,expected", SELECTOR_CLASSIFICATIONS)
+def test_both_refusal_surfaces_classify_a_selector_the_same(
+    tmp_path, monkeypatch, selector, expected
+):
+    """The invariant this PR exists to hold, asserted directly (review R2-F7).
+
+    ``effort_tier_rejection`` refuses a tool ARGUMENT before a launch exists;
+    ``_resolve_subagent_model(strict=True)`` refuses the LAUNCH. They read the
+    same key through the same reader, so for any value ``config.yml`` can
+    carry they must tell the operator the same story about it -- the drift
+    that motivated this change was two surfaces naming one key differently.
+    """
+    from local_operator.harness.subagent import effort_tier_rejection
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    # A second, WORKING tier is load-bearing: with nothing usable configured,
+    # ``effort_tier_rejection`` short-circuits on "no tiers are configured"
+    # and never reaches the per-key verdict this test compares.
+    write_tiers(tmp_path / "config", hi=selector, lo="openrouter/moonshotai/kimi-k3")
+    session = make_session(tmp_path)
+
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None, "an unusable selector must never validate"
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+
+    assert _classify(rejection) == expected
+    assert _classify(caught.value.reason) == expected
 
 
 def test_a_tier_outside_the_registry_set_never_launches(tmp_path, monkeypatch):

@@ -6112,10 +6112,21 @@ class Session:
             selector = read_effort_tier_selectors().get(wanted)
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
             return _unavailable(f"config could not be read ({exc})")
+        # Type before falsiness, and the ``is not None`` is what makes the two
+        # surfaces agree (review R2-F7). A FALSY non-string (``lo: 0``,
+        # ``lo: []``) is a key the operator DID write, so it must draw the same
+        # "lacks provider/model" refusal that ``effort_tier_rejection`` gives
+        # it — under the old order it fell into the quiet "not configured"
+        # branch and the tool-argument path called the same key malformed,
+        # which is the schema-vs-launch drift this change exists to close,
+        # merely moved into the message text. Only a genuinely absent key
+        # (``None``) or an empty/whitespace-only string (the shared reader
+        # strips) stays quiet: a session with no ``subagents.models`` at all
+        # names itself on the parent model by design and must not warn.
+        if selector is not None and not isinstance(selector, str):
+            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
-        if not isinstance(selector, str):
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         provider, _, model_id = selector.partition("/")
         if not model_id:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
