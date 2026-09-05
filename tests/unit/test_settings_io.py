@@ -61,6 +61,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
+    from local_operator.tools.builtin import BASH_SHELL_DEFAULT
     from local_operator.tui.theme import DEFAULT_THEME
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -84,6 +85,9 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
+        # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
+        # an interpreter, so the consumer's constant is the empty string too.
+        "bash.shell": BASH_SHELL_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "session.cleanup.enabled": DEFAULT_ENABLED,
@@ -338,6 +342,23 @@ def test_no_consumer_reads_a_nested_setting_through_the_flat_accessor() -> None:
                         f"{path.relative_to(package.parent)}:{number}: {match.group(0)}"
                     )
     assert not offenders, "\n".join(offenders)
+
+
+def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None:
+    """The ``bash.shell`` row is pinned to ``builtin.BASH_SHELL_PATH`` and a
+    write lands as a nested ``bash: {shell: ...}`` block the tool reads back.
+    Pinned by test rather than import because ``settings_io`` must stay cheap
+    for the CLI and ``tools.builtin`` is not."""
+    from local_operator.tools.builtin import BASH_SHELL_PATH, _configured_bash_shell
+
+    assert settings_io.BY_KEY["bash.shell"].path == BASH_SHELL_PATH
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.shell"], "/opt/x/bash")
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["bash"]["shell"] == "/opt/x/bash"
+    assert "bash.shell" not in stored
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert _configured_bash_shell() == "/opt/x/bash"
 
 
 def test_cleanup_settings_are_nested_under_session_cleanup(manager: ConfigManager) -> None:

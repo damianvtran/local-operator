@@ -659,7 +659,11 @@ lop config open        # open it in your editor
 Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), and `tui.theme` (any registered theme name — easier to set with
-`/theme`, which previews live).
+`/theme`, which previews live). `bash.shell` picks the interpreter the `bash`
+tool spawns: unset, it runs the first `bash` on `PATH` (Homebrew bash 5 when
+installed, else the system one) and falls back to `/bin/sh` only on a host
+with no bash — so process substitution and other bash syntax work as the
+tool's name promises. Every option is browsable in `/settings`.
 
 Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
