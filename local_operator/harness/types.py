@@ -778,15 +778,17 @@ class ToolContext(BaseModel):
     # single values on demand. ``None`` degrades those tools to the process
     # environment only.
     variables: VariableStoreProtocol | None = None
-    # Startup snapshot used only by the web_search createIf gate. Execution
-    # re-reads config so provider toggles apply to the next call without
-    # rebuilding the session; the master on/off switch removes the advertised
-    # tool on reload.
+    # Snapshot used only by the web_search createIf gate: it decides whether
+    # the tool is IN the inventory being built. Execution re-reads config per
+    # call — provider toggles AND the master ``enabled`` switch — so a
+    # disabled tool refuses at once even while still advertised. A top-level
+    # session rebuilds this from the config watcher's last-good values and
+    # reconciles its inventory at the next turn boundary
+    # (``Session._reconcile_web_tools``); a subagent keeps its spawn snapshot.
     web_search_settings: dict[str, Any] | None = None
-    # Startup snapshot used only by the web_fetch createIf gate, mirroring
-    # web_search: execution re-reads config so knobs (TTL, allow_private) apply
-    # to the next call without rebuilding the session, while the master on/off
-    # switch removes the advertised tool on reload.
+    # Same contract as ``web_search_settings`` for the fetch tool. The per-call
+    # ``enabled`` check lives in ``run_fetch``, so it also covers the
+    # ``read <url>`` sugar, which has no createIf gate of its own.
     web_fetch_settings: dict[str, Any] | None = None
     # Session-owned capability tools that built-ins may delegate to. This is
     # deliberately a mapping rather than a second MCP client: OAuth transports

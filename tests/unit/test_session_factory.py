@@ -178,6 +178,40 @@ def test_resolve_precedence_config_fallback() -> None:
     assert resolve_hosting_model(None, _args(), config) == ("kimi", "moonshot-v1-8k")
 
 
+def test_resolve_with_source_names_where_the_hosting_came_from() -> None:
+    """The third element decides whether a running session later FOLLOWS a
+    ``hosting``/``model_name`` edit (config-sourced only). Keyed on the hosting's
+    source: a model name from config under a flagged hosting is still a flag
+    run, and a model name from a flag under a config hosting is still config."""
+    from local_operator.session_factory import resolve_hosting_model_with_source
+
+    agent = cast("AgentData", SimpleNamespace(hosting="anthropic", model="claude"))
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"}),
+    )
+    assert resolve_hosting_model_with_source(agent, _args(), config) == (
+        "anthropic",
+        "claude",
+        "agent",
+    )
+    assert resolve_hosting_model_with_source(None, _args(hosting="openai"), config) == (
+        "openai",
+        "moonshot-v1-8k",
+        "flag",
+    )
+    assert resolve_hosting_model_with_source(None, _args(model="other"), config) == (
+        "kimi",
+        "other",
+        "config",
+    )
+    assert resolve_hosting_model_with_source(None, _args(), config) == (
+        "kimi",
+        "moonshot-v1-8k",
+        "config",
+    )
+
+
 def test_resolve_missing_values_raise_legacy_messages() -> None:
     from local_operator.session_factory import HostingNotConfiguredError
 

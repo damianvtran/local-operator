@@ -6212,11 +6212,13 @@ class OperatorApp(App[None]):
         # Design review round 1 (D1) / QA round 2 (Q1) drove the real path and
         # proved the gap: an out-of-process write to `hosting` followed by
         # `/new` built with the OLD value. That was survivable while nothing
-        # said otherwise, but the config-change notice now tells the user in so
-        # many words that a NEW_SESSIONS key "takes effect on /new" — including
-        # `tool_approval_mode`, where believing it and being wrong is a safety
-        # problem. Making the promise true is the honest fix; wording around it
-        # would leave `/new` quietly serving stale settings.
+        # said otherwise, but the config-change notice tells the user in so
+        # many words that a NEW_SESSIONS key "takes effect on /new"
+        # (`local_providers` today; `tool_approval_mode` at the time, before
+        # it went LIVE). Making the promise true is the honest fix; wording
+        # around it would leave `/new` quietly serving stale settings — and the
+        # LIVE keys the factory also reads (`hosting`, `web_*.enabled`) must
+        # boot the new session on the current file too.
         # GUARDED, because that reload is destructive on a malformed file
         # (review round 3, B1). In production `_on_config_changed` is
         # `ConfigManager.reload` → `_load_config`, which RAISES on a non-mapping
@@ -6252,19 +6254,20 @@ class OperatorApp(App[None]):
     def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
         """Adopt on-disk config for the session `/new` is about to build.
 
-        Two consumers, both of which `/new` must reach for its own notice to be
-        true, and neither of which the other covers:
+        Two consumers, neither of which the other covers:
 
         * the launch-time ``ConfigManager`` the session factory closed over —
-          `hosting`, `model_name`, `auto_save_conversation`, `web_*.enabled`;
+          `hosting`, `model_name`, `web_*.enabled` and the `local_providers`
+          block. The first three are LIVE now (a running session follows them
+          on the watcher poll), but the factory still reads them at build, so
+          a stale manager would boot the NEW session on values the old one
+          had already moved past;
         * the TUI's own approval gate, which is process state rather than
-          session state and is otherwise written only by
-          ``_load_approvals_default`` at mount (review round 3, Q3). Missing it
-          meant `tool_approval_mode` was the ONE key of the four whose "takes
-          effect on /new" promise was not kept — and the one where believing it
-          and being wrong is a safety problem, in both directions: a tightened
-          `auto → ask` left the new session auto-approving writes with no
-          prompt.
+          session state. ``_on_config_change`` now moves it on every disk
+          change (`tool_approval_mode` is LIVE), so this re-read is the
+          belt-and-braces for a write the watcher never delivered — a file
+          that was unreadable at the tick and fixed since (review round 3,
+          Q3 first found the gap, when the key was still build-time).
 
         Refuses the reload outright when the file on disk is not parseable,
         because `ConfigManager._load_config` would move it aside and continue
@@ -14486,15 +14489,24 @@ class OperatorApp(App[None]):
 
         For a change from another process, ONE notice per change listing the
         registry keys compactly, with the keys whose section is not LIVE named
-        separately as taking effect on ``/new`` — the honest answer for
-        ``tool_approval_mode``, which the design deliberately keeps
-        build-time. ``changed_keys`` is per registry key, so a write that only
-        bumped ``metadata.last_modified`` never reaches here and produces no
-        line. Then the two TUI-owned groups are applied: the display cache is
-        dropped so the next paint re-reads, and the theme is switched through
-        the same orchestrator ``/theme`` uses. An unknown theme name on disk is
-        reported rather than raised — a config bug should not take down the
-        listener.
+        separately as taking effect on ``/new`` or needing a relaunch.
+        ``changed_keys`` is per registry key, so a write that only bumped
+        ``metadata.last_modified`` never reaches here and produces no line.
+        Then the TUI-owned groups are applied: the display cache is dropped so
+        the next paint re-reads, the theme is switched through the same
+        orchestrator ``/theme`` uses, and the approval gate follows
+        ``tool_approval_mode`` through :meth:`_set_approve_all`. An unknown
+        theme name on disk is reported rather than raised — a config bug
+        should not take down the listener.
+
+        The ``model`` section is deliberately LEFT OUT of the line even though
+        it is LIVE. Whether ``hosting``/``model_name`` applied depends on a
+        rule only the SESSION can evaluate (config-sourced and no explicit
+        ``/model`` since boot — see ``Session._apply_config_change``), so an
+        "applied: model_name" printed here would be a claim this process
+        cannot back. The session's own receipt — the model-change repaint plus
+        its notice, or the keep notice — comes from the process that decided
+        and is the one the user should read.
         """
         if getattr(change, "source", "disk") == "local":
             return
@@ -14524,6 +14536,9 @@ class OperatorApp(App[None]):
             scope = scope_of.get(section) if section is not None else None
             if section == "retired":
                 retired.append(key)
+            elif section == "model":
+                # The session's receipt is the receipt (docstring above).
+                continue
             elif scope is settings_io.Scope.LIVE:
                 live.append(key)
             elif scope is settings_io.Scope.NEW_LAUNCH:
@@ -14556,6 +14571,10 @@ class OperatorApp(App[None]):
                 "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
             )
             parts.append(f"{', '.join(retired)} {tail}")
+        if not parts:
+            # Only ``model`` keys moved: nothing this process can truthfully
+            # say, and the session's receipt is already on its way.
+            return
         # The approval mode names its VALUE and raises the severity (design
         # review round 1, D2). "changed" is not actionable for a two-valued
         # safety switch: the user in the other pane cannot tell whether
@@ -14574,13 +14593,25 @@ class OperatorApp(App[None]):
             elif mode == "ask":
                 parts.append("tool approvals now ask — tools prompt before running")
                 kind = "warning"
-            # The running session's gate deliberately does NOT move here: the
-            # key is NEW_SESSIONS and cell A4 of QA round 2 pins that. Only the
-            # cached default is refreshed, so a later bare `/approvals` reports
-            # what a new session would actually boot with instead of the value
-            # this process read at mount.
+            # The running gate FOLLOWS the disk (the key is LIVE): a disk
+            # write is the operator's machine-wide intent and overrides a
+            # per-session `/approvals` toggle — this reverses the A4 pin of QA
+            # round 2, which kept the gate build-time. Through
+            # `_set_approve_all`, the one writer of gate + band, so the band
+            # cannot say something the gate does not do. The cached default
+            # moves first so the band's `always` marker is computed against
+            # the new default. A prompt already on screen is NOT answered
+            # here: `_answer_live_approval_as_allowed` is the `/approvals
+            # auto` COMMAND's gesture, where the human typed the loosening in
+            # this very pane; a write from another process leaves the parked
+            # card for the human to decide. The deny latch IS released on a
+            # tightening, since "tools prompt again" is the promise printed.
             if mode in ("auto", "ask"):
-                self._approvals_default_auto = mode == "auto"
+                wanted_auto = mode == "auto"
+                self._approvals_default_auto = wanted_auto
+                if not wanted_auto:
+                    self._allow_approvals_again()
+                self._set_approve_all(wanted_auto)
         self._system_notice("config.yml changed: " + "; ".join(parts), kind)
 
         if any(key.startswith("display.") for key in changed):

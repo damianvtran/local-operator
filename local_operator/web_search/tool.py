@@ -299,6 +299,15 @@ def _tavily_oauth_delegate(
     return search
 
 
+#: The refusal a call gets while ``web_search.enabled`` is false. Names the
+#: key and the page that flips it, so the model (and the human reading the
+#: card) can tell a policy refusal from a provider outage.
+WEB_SEARCH_DISABLED_MESSAGE = (
+    "web_search is disabled by config (web_search.enabled: false) — "
+    "turn it on in /settings › Web tools"
+)
+
+
 async def execute_web_search(
     tool_call_id: str,
     args: dict[str, Any],
@@ -314,6 +323,15 @@ async def execute_web_search(
 
     manager = ConfigManager(config_dir())
     settings = load_search_settings(manager)
+    # The master switch is re-checked PER CALL, not only at inventory build.
+    # ``web_search.enabled`` is LIVE: a top-level session drops the tool from
+    # its schema at the next turn boundary, but the model may already hold a
+    # call against the old schema, and a subagent keeps its spawn inventory
+    # for its whole life — so this line is what makes "disabled" true from the
+    # moment the file changes. Same per-call manager the other knobs already
+    # use, so no new parse cost and no new malformed-file exposure.
+    if not settings.enabled:
+        return _result(tool_call_id, WEB_SEARCH_DISABLED_MESSAGE, error=True)
     credentials = CredentialManager(config_dir())
     service = WebSearchService(
         settings,

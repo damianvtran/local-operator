@@ -536,3 +536,35 @@ async def test_llms_txt_used_for_site_root(context: ToolContext, monkeypatch) ->
         transport=transport,
     )
     assert "Example Site" in preview
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_fetch_refuses_per_call_without_touching_the_network(
+    context: ToolContext,
+) -> None:
+    """``web_fetch.enabled`` is LIVE: the file is re-read on EVERY call, so a
+    tool still advertised (mid-turn, or in a subagent whose inventory is
+    fixed at spawn) refuses the moment the switch is off. The transport
+    counter is the proof no request left the process."""
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    service.set_fetch_enabled(ConfigManager(config_dir()), False)
+    transport = _CountingTransport(
+        lambda req: httpx.Response(200, text="<p>x</p>", headers={"content-type": "text/html"})
+    )
+    preview, details, is_error = await run_fetch(
+        "https://example.com/", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is True
+    assert preview == tool.WEB_FETCH_DISABLED_MESSAGE
+    assert "web_fetch.enabled: false" in preview
+    assert transport.calls == 0
+
+    # Flip it back on and the very next call fetches — no rebuild, no restart.
+    service.set_fetch_enabled(ConfigManager(config_dir()), True)
+    _p, _d, is_error = await run_fetch(
+        "https://example.com/", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is False
+    assert transport.calls >= 1
