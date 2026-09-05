@@ -4282,14 +4282,15 @@ def restore_todos(session_id: str, phases: list[dict[str, Any]]) -> None:
     mirrors :func:`todo_snapshot`: each phase gets a fresh ``items`` list of
     copied item dicts so the store never aliases the caller's structure.
 
-    A no-op when there is nothing to restore or the id is empty, and it REFUSES
-    to overwrite a list the current session already has: restore runs once at
-    construction, before any turn, so a populated slot means a live list that
-    must win over a stale snapshot.
+    An empty snapshot is authoritative too: keeping its empty slot distinguishes
+    a restored clear from a child whose plan has not been loaded yet. Existing
+    slots, including empty ones, win over a stale on-demand read that raced a
+    live tool call. An empty session id is never a store identity.
     """
-    if not session_id or not phases:
+    if not session_id or session_id in TODO_STORE:
         return
-    if TODO_STORE.get(session_id):
+    if not phases:
+        TODO_STORE[session_id] = []
         return
     TODO_STORE[session_id] = [
         {"name": phase["name"], "items": [dict(item) for item in phase["items"]]}

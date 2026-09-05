@@ -1203,7 +1203,7 @@ DEFAULT_PLACEHOLDER = "Message Local Operator…"
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
 #: being ignored is how to get a composer that accepts them.
-READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
+READ_ONLY_PLACEHOLDER = "Read-only · esc back"
 
 #: What the composer says while the `/btw` aside card owns it — what the FIELD
 #: does, in ``DEFAULT_PLACEHOLDER``'s shape, and nothing about how to leave.

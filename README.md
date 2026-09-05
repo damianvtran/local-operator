@@ -319,6 +319,24 @@ addressable: peek at its transcript, send it a note, ask it a question, steer
 it onto a different course, pause it, or resume it later — all without
 burning its attention on status meetings.
 
+Opening a worker shows its own live todo list and its direct children, not the
+root session's plan or unrelated workers. Click a child to inspect it; `Esc`
+returns one parent at a time, `[` / `]` cycle peers, and `c` opens the first
+child. The reader stays read-only. At shorter terminal heights the disabled
+composer is collapsed so the transcript, child controls, and plan remain useful;
+`ctrl+t` and `ctrl+g` expose the scrollable full plan and child list.
+
+Attached terminals fetch child details only while that worker is open. A plan
+that has not arrived is labeled **Loading todos**; an empty fetched plan says
+**No todos**. Older owners, unavailable history, or a child plan exceeding
+128 KiB of serialized JSON show **Todos unavailable** rather than a partial
+list. The full plan stays on the owner; this limit does not truncate the todo
+store or prevent attaching to the root session. Child plans are not copied into
+the root's durable frontend checkpoint. After an owner restart, saved child
+plans and the recorded child hierarchy/status remain inspectable, but the
+in-memory tool-event window is gone; attached child pages do not yet page the
+full saved transcript and continue to report that history limitation.
+
 **Roles are capability boundaries, not just prompts.** A subagent launched as
 `reviewer` carries vetted review guidance *and loses the tools to edit code*
 — it can read and run tests but cannot alter what it reviews, which is what

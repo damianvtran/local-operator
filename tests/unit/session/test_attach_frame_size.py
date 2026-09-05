@@ -575,6 +575,98 @@ async def test_attach_succeeds_against_a_session_that_exceeded_the_old_limit(
         registrant.close()
 
 
+@pytest.mark.parametrize("invalidate", ["", "epoch", "removed", "identity"])
+@pytest.mark.asyncio
+async def test_watched_todo_fetch_cannot_roll_back_newer_state(tmp_path, monkeypatch, invalidate):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    def plan(text):  # noqa: ANN001, ANN202
+        return [{"name": "Work", "items": [{"text": text, "status": "pending", "reason": ""}]}]
+
+    class DetailHandle(FakeHandle):
+        async def job_trajectory(self, job_id, offset, limit):  # noqa: ANN001, ANN202
+            page = await super().job_trajectory(job_id, offset, limit)
+            snapshot = self._frontend.state
+            job = next(row for row in snapshot.jobs if row.id == job_id)
+            page.update(
+                detail_job_id=job_id,
+                detail_session_id=job.session_id,
+                detail_epoch=snapshot.epoch,
+                detail_sequence=snapshot.sequence,
+                todos=job.model_dump(mode="json")["todos"],
+            )
+            entered.set()
+            await asyncio.to_thread(release.wait, 10)
+            return page
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = DetailHandle()
+    jobs = [
+        row.model_copy(update={"session_id": f"child-{i}", "todos": plan("Earlier")})
+        for i, row in enumerate(_jobs(2, 1))
+    ]
+    handle._frontend.mutate(jobs=jobs)
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        remote = await RemoteSession.connect(
+            await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+
+        def todos_for(job_id: str):  # noqa: ANN202
+            assert remote is not None
+            job = remote.jobs.get(job_id)
+            assert job is not None
+            return job.todos
+
+        assert todos_for("job0") is None
+        loading = asyncio.create_task(remote.load_job_trajectory("job0"))
+        assert await asyncio.to_thread(entered.wait, 10)
+        changed = asyncio.Event()
+        subscription = remote.subscribe_frontend(lambda _: changed.set())
+        try:
+            updated = [job.model_copy(update={"todos": plan("Newer")}) for job in jobs]
+            handle._frontend.mutate(jobs=updated)
+            await asyncio.wait_for(changed.wait(), 10)
+            assert todos_for("job0") == plan("Newer")
+            assert todos_for("job1") is None
+            state = remote.frontend_state
+            if invalidate == "epoch":
+                remote._install_frontend(state.model_copy(update={"epoch": "new-owner"}))
+            elif invalidate == "removed":
+                remote._install_frontend(state.model_copy(update={"jobs": []}))
+            elif invalidate == "identity":
+                remote._install_frontend(
+                    state.model_copy(
+                        update={
+                            "jobs": [
+                                row.model_copy(update={"session_id": "resumed-child"})
+                                for row in state.jobs
+                            ]
+                        }
+                    )
+                )
+            release.set()
+            assert await loading is (not bool(invalidate))
+            if not invalidate:
+                assert todos_for("job0") == plan("Newer")
+                changed.clear()
+                handle._frontend.mutate(jobs=[job.model_copy(update={"todos": []}) for job in jobs])
+                await asyncio.wait_for(changed.wait(), 10)
+                assert todos_for("job0") == []
+        finally:
+            subscription.unsubscribe()
+    finally:
+        release.set()
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
 @pytest.mark.asyncio
 async def test_live_appends_reach_only_the_watched_job(tmp_path: Path, monkeypatch) -> None:
     """``watch_job`` is what makes the delta stream affordable."""

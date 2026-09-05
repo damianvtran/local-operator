@@ -352,6 +352,7 @@ class AsyncJobManager:
         # single call site guards it.
         self._on_roster_change = on_roster_change
         self._on_job_change = on_job_change
+        self._job_listeners: set[Callable[[], None]] = set()
         self._jobs: dict[str, AsyncJob] = {}
         # Historical attempt ids remain valid after a resume replaces the
         # visible row. Values point directly at the current attempt; flattening
@@ -599,9 +600,18 @@ class AsyncJobManager:
         """
         self._notify_job_change(persist_roster=False)
 
+    def subscribe_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Observe descendant lifecycle/progress without taking over its ledger."""
+        self._job_listeners.add(listener)
+        return lambda: self._job_listeners.discard(listener)
+
     def _notify_job_change(self, *, persist_roster: bool) -> None:
         """Publish every job mutation and persist only durable task fields."""
-        callbacks = ([self._on_roster_change] if persist_roster else []) + [self._on_job_change]
+        callbacks = (
+            ([self._on_roster_change] if persist_roster else [])
+            + [self._on_job_change]
+            + list(self._job_listeners)
+        )
         for callback in callbacks:
             if callback is None:
                 continue
