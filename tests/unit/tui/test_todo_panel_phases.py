@@ -1547,3 +1547,24 @@ async def test_expanded_footer_recomposes_when_only_the_width_changes() -> None:
             painted = resized[:cells] if cells else resized
             assert "ctrl+t" in painted, f"w={width}: ctrl+t cropped away from {painted!r}"
         builtin.TODO_STORE.clear()
+
+
+def test_reading_a_childs_todo_snapshot_never_creates_its_directory(tmp_path) -> None:
+    """A pure read of somebody else's session must leave nothing behind.
+
+    ``Transcript`` mkdirs its directory on construction, so this read created
+    an empty session directory whenever the path did not exist. That was
+    harmless while the directory always came from the owner's live registry,
+    and stopped being harmless once a follower can DERIVE one from a
+    ``session_id``: a remote follower would then litter the real store with a
+    phantom directory per page open (review round 1, M1).
+
+    Pinned here rather than at the derivation because the materialising call
+    is the actual defect — any future caller that reads a child's snapshot
+    inherits it.
+    """
+    from local_operator.tui.widgets.todo_panel import _read_restored_todos
+
+    absent = tmp_path / "sessions" / "ffffffffffff"
+    assert _read_restored_todos(str(absent)) == []
+    assert not absent.exists(), "reading a child's snapshot must not create its directory"
