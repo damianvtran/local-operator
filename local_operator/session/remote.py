@@ -733,7 +733,11 @@ class RemoteSession:
             return {}
         # Fresh route metadata outranks an old owner's active window (which
         # may predate maximum-context support or a changed opt-out setting).
-        if configured.default_context_window or configured.max_context_window:
+        if (
+            configured.context_metadata_resolved
+            or configured.default_context_window
+            or configured.max_context_window
+        ):
             return {}
         # Only the window is adopted. Everything else on the configured spec
         # reflects THIS process's config, which is current by definition.
@@ -821,31 +825,34 @@ class RemoteSession:
             # Resolve the same account as dispatch, not a saved denominator
             # from before maximum-context support. Never move account stickiness
             # merely because a viewer opened a cold session.
-            auth: AuthStore | None = None
+            configured_model = state.selected_model
+
+            async def _resolve() -> ModelSpec:
+                # AuthStore's SQLite connection is thread-affine. Creation,
+                # credential resolution and close belong to this ONE worker's
+                # event loop, not separately scheduled default-executor jobs.
+                auth = AuthStore(self._config_dir / "auth.db")
+                try:
+                    access = await _resolve_access_for_provider(
+                        auth,
+                        "openai",
+                        self._session_id,
+                        AuthRetryKeyState(),
+                        None,
+                        read_only=True,
+                        model_id=configured_model.model_id,
+                        scoped_blocks=True,
+                    )
+                    settings = ConfigManager(config_dir=self._config_dir).get_config().values
+                    return context_spec_for_access(configured_model, access, settings)
+                finally:
+                    auth.close()
+
             try:
-                auth = await asyncio.to_thread(AuthStore, self._config_dir / "auth.db")
-                access = await _resolve_access_for_provider(
-                    auth,
-                    "openai",
-                    self._session_id,
-                    AuthRetryKeyState(),
-                    None,
-                    read_only=True,
-                    model_id=state.selected_model.model_id,
-                    scoped_blocks=True,
-                )
-                settings = await asyncio.to_thread(
-                    lambda: ConfigManager(config_dir=self._config_dir).get_config().values
-                )
-                model = await asyncio.to_thread(
-                    context_spec_for_access, state.selected_model, access, settings
-                )
+                model = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
                 logger.debug("cold context metadata unavailable", exc_info=True)
-            finally:
-                if auth is not None:
-                    await asyncio.to_thread(auth.close)
         return state
 
     @property

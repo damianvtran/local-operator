@@ -104,6 +104,47 @@ resume tests passed with the fix. No application resume contract was changed to
 make those tests pass. The effort fixture also isolates cwd so the checkout name
 `context-max` cannot masquerade as an effort label in the status-band assertion.
 
+## Unified review remediation
+
+- **F1:** resolve every selected OpenAI API route, even if the previous OAuth
+  result was unknown and had no positive default/max. Regression exercises
+  public 1,050,000 → unavailable OAuth 128,000 → API 1,050,000.
+- **F2:** `ModelSpec.context_metadata_resolved` explicitly marks fresh route
+  resolution, including unknown and missing-auth results. The marker survives
+  request events and frontend JSON snapshots. Cold resume cannot overwrite it
+  from a legacy checkpoint. Tests cover offline, missing account and missing
+  auth against a legacy 1,050,000-token checkpoint.
+- **Q1:** the cold viewer owns the complete AuthStore lifetime on one worker:
+  creation, asynchronous credential resolution on that worker's event loop,
+  SQLite reads, metadata resolution and close. Separate `to_thread` calls no
+  longer depend on worker reuse. The regression warms four executor workers and
+  checks actual SQLite reads and close occur on the creation thread.
+- **D1:** front-loaded the existing help string; both on/off outcomes are
+  visible at 50 columns without changing the settings widget. The next-request
+  and unchanged-compaction explanation follows at wider widths.
+- Integrated main `3b100234` (#628). Only the project version conflicted;
+  retained reserved 0.46.15. Verified request metadata events coexist with the
+  new replay-prefix preparation path and session snapshot/event folding.
+
+| Settings help before | Settings help after |
+| --- | --- |
+| ![Clipped opt-out consequence](../assets/openai-context-max/before-settings-narrow.png) | ![Both outcomes visible](../assets/openai-context-max/after-settings-narrow.png) |
+
+Settings before/after screen and virtual size are both 48×32, no screen
+scrollbar; settings region 48×27 and virtual content 46×25 are unchanged.
+The tracked local HTTP harness was rerun after integration: catalogue GET200,
+Codex POST200, 34.4%/872k, explicit 400k trigger, no maximum wire flag.
+Independent remediation QA executed 20 successful observations with actual
+loopback HTTP, persisted legacy checkpoints, real AuthStore and repeated
+`RemoteSession.cold` calls after an assembled app warmed the executor. The
+online cold composer remains 34.4%/872k; offline/missing-account/missing-auth
+legacy 1,050,000-token checkpoints retain the fresh conservative 128,000 limit.
+The resulting 234.4% reading is intentionally not clamped. Both PNGs were viewed.
+
+| Online cold resume | Offline cold resume |
+| --- | --- |
+| ![Online cold maximum](../assets/openai-context-max/cold-online.png) | ![Conservative offline cold limit](../assets/openai-context-max/cold-offline.png) |
+
 ## Regression coverage
 
 `tests/unit/model/test_openai_context.py` covers default/max parsing and cache

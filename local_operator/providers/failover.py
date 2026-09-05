@@ -2433,9 +2433,15 @@ async def stream_with_failover(
                 # Resolve after EVERY account selection, even when the selector
                 # is unchanged. Metadata is local budget, not a provider wire flag.
                 resolved = await asyncio.to_thread(context_spec_for_access, spec, access, settings)
-                if resolved != spec or access.kind == "oauth":
-                    spec = resolved
-                    current_request = current_request.model_copy(update={"model": spec})
+                changed_budget = any(
+                    getattr(resolved, key) != getattr(spec, key)
+                    for key in ("context_window", "default_context_window", "max_context_window")
+                )
+                spec = resolved
+                current_request = current_request.model_copy(update={"model": spec})
+                # An API request whose budget did not move remains a transparent
+                # stream. OAuth still publishes unknown-resolution provenance.
+                if changed_budget or access.kind == "oauth":
                     yield StreamModelEvent(model=spec)
 
             forwarded_any = False

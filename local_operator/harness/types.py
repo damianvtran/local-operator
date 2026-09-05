@@ -705,6 +705,14 @@ class ToolContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     cwd: str = "."
+    # Session-owned transport and duplicate-read coordinator. Kept off wire
+    # payloads; its lifecycle belongs to the session that constructs tools.
+    web_io: Any | None = Field(default=None, exclude=True)
+    # Request-bound bridge reusing the harness's validation, approval and event
+    # pipeline. Programmatic calls must never bypass ordinary tool policy.
+    dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     session_id: str = ""
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
@@ -925,6 +933,11 @@ class AgentTool(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     approval_tier: Literal["read", "write", "exec"] = "exec"
     concurrency: Literal["shared", "exclusive"] = "shared"
+    # Canonical resources locked by this call, derived from validated args and
+    # cwd. An exclusive tool without this contract remains a global barrier.
+    resource_keys: Callable[[dict[str, Any], str], tuple[str, ...]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     interruptible: bool = False
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
@@ -1410,6 +1423,7 @@ class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
     default_context_window: int | None = None
     max_context_window: int | None = None
     context_metadata: bool = False
+    context_metadata_resolved: bool = False
 
 
 class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
@@ -1423,6 +1437,9 @@ EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 # ---------------------------------------------------------------------------
 # Loop configuration — the host extension surface
 # ---------------------------------------------------------------------------
+
+
+DEFAULT_MAX_PARALLEL_TOOLS = 8
 
 
 class LoopConfig(BaseModel):
@@ -1584,23 +1601,10 @@ class LoopConfig(BaseModel):
     # steering alone.
     has_pending_fork: Callable[[], bool] | None = Field(default=None, exclude=True)
 
-    # The provider-reported context size (``Usage.context_tokens``) of this
-    # conversation's last call BEFORE this run — the cross-turn seed. The loop
-    # reads it for the run's first request and stamps it as
-    # ``ChatRequest.context_tokens_hint``; from the second request on, the
-    # count the previous call of the SAME run reported wins, because a long
-    # tool loop grows past the TTL threshold long before the host's figure is
-    # next refreshed. Per-CONVERSATION, stamped per REQUEST by the loop that
-    # owns the call — never remembered on the stream fn: subagents share the
-    # parent's stream fn (one httpx pool, one failover cascade), so a hint
-    # held there is last-writer-wins between the parent and every child, and
-    # a child's construction would silently downgrade the parent's next
-    # request to 5m on its large context (the exact expiry this hint exists
-    # to dodge) while the child's tiny first request inherits the parent's
-    # 300k count and pays 2x write rates on a fresh ~10k prefix. The loop asks
-    # the HOST (which owns the conversation), exactly as it does for the
-    # model and the system blocks. ``None`` (no callback, or nothing reported
-    # yet) means no hint and the client's own byte estimate decides.
+    # The host's last reported input count, used as a coarse cache-TTL seed
+    # across runs and resume. It excludes all subsequently appended content.
+    # SessionStreamFn reconciles admission against its conversation-owned
+    # counted boundary; this scalar alone cannot authorize an input budget.
     get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
@@ -1609,6 +1613,8 @@ class LoopConfig(BaseModel):
 
     # Guardrails.
     max_paused_turn_continuations: int = 8
+    # Bound live tool work even when the model emits a very wide batch.
+    max_parallel_tools: int = Field(default=DEFAULT_MAX_PARALLEL_TOOLS, ge=1)
 
 
 # ---------------------------------------------------------------------------
@@ -1622,6 +1628,9 @@ class ModelSpec(BaseModel):
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
     context_window: int = 128_000
+    # A conservative unknown route is still freshly resolved; absence of
+    # positive provider limits must not let a legacy checkpoint override it.
+    context_metadata_resolved: bool = False
     # context_window remains the active budget; these retain provider provenance.
     default_context_window: int | None = None
     max_context_window: int | None = None
@@ -1719,29 +1728,36 @@ class ChatRequest(BaseModel):
     # the override exists to hold a classification steady, not to undo a
     # retreat the loop made because the higher rung produced nothing.
     effort_ceiling: str | None = None
+    # Helpers may deliberately choose a supported effort without changing the
+    # user's frozen effort for the surrounding tool loop.
+    effort_override: str | None = None
+    purpose: str = "turn"
+    preparation_ms: float = Field(default=0, exclude=True, repr=False)
     # Stable request-prefix identity used by providers' server-side prompt
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
-    #: The provider-reported size of this session's context on its LAST call
-    #: (``Usage.context_tokens``), when the host knows it. A HINT, not wire
-    #: content: the Anthropic client reads it to decide whether the request is
-    #: large enough for the 1-hour prompt-cache TTL (see
-    #: ``AnthropicClient._cache_ttl_for``). The client cannot measure this
-    #: itself without a tokenizer, and the provider's own count from the
-    #: previous turn is the most accurate figure anyone has. ``None`` on a
-    #: session's first call and on paths that never saw a usage event (a fork's
-    #: first request, one-shot errands); the client then falls back to a byte
-    #: estimate of the serialized body. Stamped by the OWNER of the
-    #: conversation the call belongs to — the harness loop for turn calls
-    #: (``LoopConfig.get_context_tokens_hint`` seeds it, then the run's own
-    #: usage events advance it) and the session for its direct calls (asides,
-    #: the compaction advisor) — never by the shared stream fn, which merely
-    #: passes through what the request carries: subagents share one stream
-    #: fn, so any memory held there is last-writer-wins across conversations.
-    #: Retries and fallback clones keep it, and an EXPLICIT ``0`` suppresses
-    #: the hint (a one-shot prompt that is a fresh write-once prefix).
+    #: Coarse context-size hint for optional cache TTL, never wire content.
+    #: The host seeds this from its last Usage; SessionStreamFn replaces it
+    #: with the counted prefix plus estimated appended content when possible.
+    #: Admission uses it only with matching context_tokens_hint_model below.
+    #: On cold resume the scalar can still guide TTL, while admission measures
+    #: the actual request until a counted boundary is available. ``0`` denotes
+    #: an unrelated fresh one-shot prompt, whose own estimate should decide.
     context_tokens_hint: int | None = None
+    # Admission trusts a hint only after the conversation owner reconciles it
+    # against this request and names the provider/model it measured. A fallback
+    # to another model must use its own tokenizer estimate instead.
+    context_tokens_hint_model: str | None = None
+    # The same measured prefix plus the unscaled local suffix. Output sizing
+    # may use a conservative margin; refusal must use this uninflated evidence.
+    context_tokens_hint_measured: int | None = None
+    # Local, request-owned binding of the counted boundary to the native
+    # protocol and credential selected by the wire client. Never serialized.
+    context_binding: Any = Field(default=None, exclude=True, repr=False)
+    # Native reasoning is opaque: use provider-reported token counts rather
+    # than treating encrypted bytes as text. Populated only after replay checks.
+    native_context_tokens: int = Field(default=0, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:

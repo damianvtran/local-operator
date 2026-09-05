@@ -309,6 +309,103 @@ def test_missing_account_never_reads_public_api_cache(tmp_path, monkeypatch):
     assert all(row.context_window == 0 for row in rows)
 
 
+def test_api_route_recovers_public_limit_after_unavailable_oauth(monkeypatch):
+    monkeypatch.setattr(discovery, "available_models", lambda *args, **kwargs: ([], "static"))
+    public = ModelSpec(provider="openai", model_id="gpt-5.6-sol", context_window=1050000)
+    unknown = configure.context_spec_for_access(
+        public, OAuthAccess("oauth", 1, account_id="missing"), {}
+    )
+    assert unknown.context_window == 128000
+    assert unknown.default_context_window is None
+    assert unknown.max_context_window is None
+    restored = configure.context_spec_for_access(unknown, OAuthAccess("api", 2, kind="api_key"), {})
+    assert restored.context_window == 1050000
+    assert restored.context_metadata_resolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access_kind", ["offline", "missing-account", "missing-auth"])
+async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkeypatch, access_kind):
+    from local_operator.config import ConfigManager
+    from local_operator.providers import failover
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.remote import RemoteSession
+
+    monkeypatch.setattr(discovery, "available_models", lambda *args, **kwargs: ([], "static"))
+    config = ConfigManager(config_dir=tmp_path)
+    config.set_config_value("hosting", "openai")
+    config.set_config_value("model_name", "gpt-5.6-sol")
+
+    async def resolve(*args, **kwargs):
+        if access_kind == "missing-auth":
+            return None
+        return OAuthAccess("oauth", 1, account_id="account" if access_kind == "offline" else None)
+
+    monkeypatch.setattr(failover, "_resolve_access_for_provider", resolve)
+    remote = RemoteSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
+    state = await remote._synthesise_cold_state(str(tmp_path))
+    assert state.selected_model is not None
+    assert state.selected_model.context_window == 128000
+    assert state.selected_model.context_metadata_resolved
+    legacy = FrontendSessionState(
+        session_id="cold",
+        epoch="legacy",
+        selected_model=FrontendModelSpec(
+            provider="openai", model_id="gpt-5.6-sol", context_window=1050000
+        ),
+    )
+    assert remote._restored_model_specs(state, legacy) == {}
+    # JSON snapshots must preserve provenance through attach/replay, including
+    # the absence of positive provider limit metadata.
+    restored = FrontendSessionState.model_validate_json(state.model_dump_json())
+    assert remote._restored_model_specs(restored, legacy) == {}
+
+
+@pytest.mark.asyncio
+async def test_cold_auth_lifetime_stays_on_one_worker(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from local_operator.config import ConfigManager
+    from local_operator.providers import auth_store, failover
+    from local_operator.session.remote import RemoteSession
+
+    owners = []
+
+    class ThreadCheckedAuth(AuthStore):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.owner = threading.get_ident()
+            owners.append(self.owner)
+
+        def close(self):
+            assert threading.get_ident() == self.owner
+            super().close()
+
+    async def resolve(auth, *args, **kwargs):
+        assert threading.get_ident() == auth.owner
+        # This real SQLite read catches both event-loop and executor handoffs.
+        auth.list_credentials("openai")
+        await asyncio.sleep(0)
+        return None
+
+    monkeypatch.setattr(auth_store, "AuthStore", ThreadCheckedAuth)
+    monkeypatch.setattr(failover, "_resolve_access_for_provider", resolve)
+    config = ConfigManager(config_dir=tmp_path)
+    config.set_config_value("hosting", "openai")
+    config.set_config_value("model_name", "gpt-5.6-sol")
+    barrier = threading.Barrier(4)
+    await asyncio.gather(*(asyncio.to_thread(barrier.wait) for _ in range(4)))
+    remote = RemoteSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
+    state = await remote._synthesise_cold_state(str(tmp_path))
+    assert state.selected_model is not None
+    assert state.selected_model.context_metadata_resolved
+    assert owners and owners[0] != threading.get_ident()
+
+
 def test_wire_identity_wins_over_other_account_field(monkeypatch):
     catalogue(monkeypatch)
     spec = ModelSpec(provider="openai", model_id="gpt-5.6-sol")

@@ -25,6 +25,7 @@ import math
 import os
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
@@ -2304,10 +2305,20 @@ def context_spec_for_access(
     No wire override exists: Codex's maximum is a local budgeting ceiling.
     Sampling, effort and public API routing stay on the caller's original spec.
     """
-    if spec.provider != "openai" or access is None:
+    if spec.provider != "openai":
         return spec
-    if access.kind != "oauth" and not (spec.default_context_window or spec.max_context_window):
-        return spec
+    if access is None:
+        return spec.model_copy(
+            update={
+                "context_window": UNKNOWN_CONTEXT_WINDOW,
+                "default_context_window": None,
+                "max_context_window": None,
+                "context_metadata_resolved": True,
+            }
+        )
+    # Always resolve the selected route: an unavailable OAuth listing has no
+    # positive default/max fields, but switching to an API key must recover
+    # the public limit rather than retaining that conservative unknown budget.
     # Codex dispatch's account header is org_id; older records may retain only
     # account_id, so use it only when the wire identity is absent.
     credential = (access.access_token, access.kind == "oauth", access.org_id or access.account_id)
@@ -2324,6 +2335,7 @@ def context_spec_for_access(
             "context_window": window,
             "default_context_window": info.default_context_window,
             "max_context_window": info.max_context_window,
+            "context_metadata_resolved": True,
         }
     )
 
@@ -2371,8 +2383,20 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class _SessionTransport:
+    """Share connection pools, never conversation routing state.
+
+    A parent may finish before a child. Reference ownership keeps the pool
+    usable until the last session closes, with no extra pool per fork.
+    """
+
+    http: Any
+    owners: int = 1
+
+
 class SessionStreamFn:
-    """One session's shared client pool and stateful failover router.
+    """One conversation's stateful router over a shareable client pool.
 
     Hard fallback stays pinned for the rest of a user message, so tool loops,
     compaction and naming do not re-send a warm prompt to a provider that just
@@ -2412,14 +2436,18 @@ class SessionStreamFn:
         settings: Mapping[str, Any] | None,
         session_id: str | None,
         cache_lineage_id: str | None = None,
+        *,
+        _transport: _SessionTransport | None = None,
     ) -> None:
         import httpx
 
+        from local_operator.providers.context import ContextTokenTracker
         from local_operator.providers.failover import FailoverRouteState
 
         self._auth_store = auth_store
         self._settings = settings
         self._session_id = session_id
+        self._parent_session_id: str | None = None
         # The identity this session's PROVIDER CACHE is keyed under, which is
         # the session id for an ordinary session and the PARENT's id for a fork.
         #
@@ -2431,7 +2459,12 @@ class SessionStreamFn:
         # routing hint and nothing else — in particular it does not share a
         # pinned credential row. Unifying the two would silently make it do so.
         self._cache_lineage_id = cache_lineage_id or session_id
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+        self._transport = _transport or _SessionTransport(
+            httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+        )
+        self._http = self._transport.http
+        self._closed = False
+        self._context_tracker = ContextTokenTracker()
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
         # (or None on recovery) so the host can keep its model display and its
@@ -2505,13 +2538,9 @@ class SessionStreamFn:
         # config. Duck-typed (``getattr``) because the test doubles handed in
         # as ``auth_store`` implement only the failover protocol.
         self._push_usage_aware_pick(settings)
-        # Deliberately NO prompt-cache TTL hint memory (or reader registry)
-        # here: subagents share the parent's stream fn (``harness/subagent.py``),
-        # so any per-conversation state held on this object — even a
-        # registered reader — is last-writer-wins between the parent and every
-        # child. ``ChatRequest.context_tokens_hint`` is stamped by the call's
-        # OWNER (the harness loop, or the session for its direct calls) and
-        # ``__call__`` only passes it through.
+        # Forks get independent state and retain only this object's transport.
+        # The context tracker can therefore retain a counted boundary without
+        # one child's tiny completion overwriting its parent's calibration.
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
@@ -2524,6 +2553,26 @@ class SessionStreamFn:
                 self._settings
             ),
         )
+
+    def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
+        """Create a conversation owner sharing only auth and HTTP transport.
+
+        Route pins, callbacks, effort decisions and usage attribution are local
+        to the child. Cache lineage sharing is opt-in for true transcript forks;
+        a fresh delegated prompt does not inherit a parent's cache identity.
+        """
+        if self._closed:
+            raise RuntimeError("cannot fork a closed session stream")
+        child = SessionStreamFn(
+            self._auth_store,
+            self._settings,
+            session_id,
+            cache_lineage_id,
+            _transport=self._transport,
+        )
+        self._transport.owners += 1
+        child._parent_session_id = self._session_id
+        return child
 
     @property
     def routing_settings(self) -> Mapping[str, Any]:
@@ -2582,8 +2631,9 @@ class SessionStreamFn:
         for a reason ``_effort_for`` documents. Those reset on their own
         boundaries.
 
-        Called from ``Session._apply_config_change``. A subagent shares its
-        parent's stream fn, so one rebind covers the whole tree.
+        Called from ``Session._apply_config_change``. Child sessions subscribe
+        to the process config watcher too, publishing the same settings into
+        their independently owned streams.
         """
         self._settings = values
         self._push_usage_aware_pick(values)
@@ -4292,7 +4342,56 @@ class SessionStreamFn:
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
+        # A session's old hint describes its preceding request, not this one.
+        # Only the counted boundary held by this conversation can reconcile it
+        # with appended assistant/tool/user content. Cold tokenization stays off
+        # the shared event loop; the estimator memoizes settled old messages.
+        import asyncio
+
+        from local_operator.providers.clients import _estimate_slope
+        from local_operator.providers.context import (
+            ContextBinding,
+            measure_request,
+            model_key,
+        )
         from local_operator.providers.failover import stream_with_failover
+
+        preparation_started = time.perf_counter()
+        measured = await asyncio.to_thread(measure_request, request)
+        tracks_context = not request.isolated and request.purpose == "turn"
+        binding = ContextBinding(self._context_tracker, measured) if tracks_context else None
+        reconciled = (
+            self._context_tracker.reconcile(measured, _estimate_slope(request.model))
+            if tracks_context
+            else None
+        )
+        hint = reconciled[0] if reconciled is not None else None
+        request = request.model_copy(
+            update={
+                # A restored session's scalar remains useful for the optional
+                # cache-TTL policy, whose decision is coarse. It cannot admit
+                # a request until the counted boundary exists; the provenance
+                # field below deliberately stays empty on that first call.
+                "context_tokens_hint": (
+                    request.context_tokens_hint
+                    if request.context_tokens_hint == 0 or not tracks_context
+                    else (
+                        hint
+                        if hint is not None
+                        else (
+                            request.context_tokens_hint
+                            if self._context_tracker.baseline is None
+                            else None
+                        )
+                    )
+                ),
+                "context_tokens_hint_model": model_key(request) if hint is not None else None,
+                "context_tokens_hint_measured": reconciled[1] if reconciled is not None else None,
+                "context_binding": binding,
+                "preparation_ms": request.preparation_ms
+                + (time.perf_counter() - preparation_started) * 1000,
+            }
+        )
 
         if request.isolated:
             # Decoration runs alongside the turn, so it must not consume or move
@@ -4334,7 +4433,11 @@ class SessionStreamFn:
         # effort for every tool-loop request under it. The tiny local linear
         # model is sub-millisecond / zero tokens — an extra "small LLM" call
         # would erase the saving on the short prompts most likely to go low.
-        if self._message_boundary_pending:
+        if (
+            self._message_boundary_pending
+            and request.purpose == "turn"
+            and request.effort_override is None
+        ):
             from local_operator.model.effort_classifier import auto_effort_for
 
             last_user = next(
@@ -4360,7 +4463,7 @@ class SessionStreamFn:
         # under it — by the user's switch, or by the loop's resolver falling back
         # to the run's snapshot. Applying the stored level blind would send a rung
         # the current model may not have (review F9).
-        effort = self._effort_for(request.model)
+        effort = request.effort_override or self._effort_for(request.model)
         # The harness loop steps the effort down one rung when a reasoning
         # model spends its whole output budget thinking and produces nothing
         # (empty ``length`` truncation); that retreat rides on the request as
@@ -4394,7 +4497,11 @@ class SessionStreamFn:
             # alone and is unaffected either way.
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
-        await self.preflight_usage(request.model)
+        # Helpers may run before the user's first generation. They inherit the
+        # established hard-fallback route but must not spend the user-message
+        # boundary (which owns quota recovery and auto-effort classification).
+        if request.purpose == "turn":
+            await self.preflight_usage(request.model)
         async for event in self._record_stream(
             request,
             stream_with_failover(
@@ -4407,6 +4514,9 @@ class SessionStreamFn:
                 route_state=self._route_state,
             ),
         ):
+            usage = getattr(event, "usage", None)
+            if tracks_context and usage is not None:
+                self._context_tracker.record(binding.measured if binding else measured, usage)
             yield event
 
     async def _record_stream(
@@ -4430,6 +4540,10 @@ class SessionStreamFn:
         on the recorder's background thread. Everything is wrapped so a failure
         in analytics can never break a turn.
         """
+        started_at = time.monotonic()
+        request_id = uuid.uuid4().hex
+        first_token_at: float | None = None
+        outcome = "incomplete"
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
@@ -4438,24 +4552,48 @@ class SessionStreamFn:
 
             component_chars = snapshot_component_chars(request)
         except Exception:  # noqa: BLE001 — analytics must never break a turn
-            component_chars = None
+            component_chars = {}
 
         final_usage: Usage | None = None
         ok = True
         try:
             async for event in stream:
+                if first_token_at is None and getattr(event, "type", "") in (
+                    "text_delta",
+                    "tool_call_delta",
+                ):
+                    first_token_at = time.monotonic()
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     final_usage = usage
                 stop_reason = getattr(event, "stop_reason", None)
+                if stop_reason is not None:
+                    outcome = str(stop_reason)
                 if stop_reason in ("error", "aborted") or getattr(event, "error", None):
                     ok = False
                 yield event
+        except BaseException as exc:
+            ok = False
+            # Store only the exception class, never a message containing a URL,
+            # prompt fragment, or credential-bearing provider diagnostic.
+            outcome = type(exc).__name__
+            raise
         finally:
             # In a ``finally`` so an aborted/failed stream (which still cost
             # input tokens) is recorded too — best-effort and never raising.
-            if component_chars is not None and final_usage is not None:
-                self._record_usage(request, component_chars, final_usage, ok)
+            self._record_usage(
+                request,
+                component_chars,
+                final_usage or Usage(),
+                ok and outcome != "incomplete",
+                request_id=request_id,
+                duration_ms=(time.monotonic() - started_at) * 1000,
+                ttft_ms=(
+                    (first_token_at - started_at) * 1000 if first_token_at is not None else -1
+                ),
+                outcome=outcome,
+                usage_reported=final_usage is not None,
+            )
 
     def _record_usage(
         self,
@@ -4463,6 +4601,12 @@ class SessionStreamFn:
         component_chars: dict[str, int],
         usage: Usage,
         ok: bool,
+        *,
+        request_id: str = "",
+        duration_ms: float = -1,
+        ttft_ms: float = -1,
+        outcome: str = "unknown",
+        usage_reported: bool = True,
     ) -> None:
         """Enqueue one call sample. Off the hot path; never raises."""
         try:
@@ -4470,19 +4614,6 @@ class SessionStreamFn:
 
             from local_operator.analytics import CallSnapshot, record_call
 
-            context_tokens = usage.context_tokens
-            if not context_tokens:
-                # Providers that omit an explicit context size: reconstruct the
-                # full input the same way the wire clients normalise
-                # ``context_tokens`` (clients.py) — input plus BOTH cache
-                # halves — so the component split has the right denominator and
-                # the headline total is not short by the cache-write volume on
-                # a cache-writing provider (review A2). Cache-inclusive
-                # providers report ``context_tokens`` directly, so this fallback
-                # only fires when nothing was reported at all.
-                context_tokens = (
-                    usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
-                )
             # Cost is NOT priced here (review C1). The snapshot carries the
             # provider, model id, and every token count, which is everything
             # ``cost_for_usage`` needs — so the pricing (including the
@@ -4511,6 +4642,14 @@ class SessionStreamFn:
             # billable provider as their storage id. Canonicalize at record
             # time so By-provider does not split one vendor into two rows.
             serving_provider = credential_provider_id(serving_provider)
+            context_tokens = usage.context_tokens
+            if not context_tokens:
+                # Use the serving wire's convention even when an adapter omits
+                # context_tokens. OpenAI/Gemini input already includes caches;
+                # only Anthropic's disjoint buckets need adding together.
+                context_tokens = usage.input_tokens
+                if not _cache_tokens_are_inside_input(serving_provider):
+                    context_tokens += usage.cache_read_tokens + usage.cache_write_tokens
             record_call(
                 CallSnapshot(
                     ts_ms=int(_time.time() * 1000),
@@ -4527,13 +4666,30 @@ class SessionStreamFn:
                     component_chars=component_chars,
                     ok=ok,
                     usd_cost=getattr(usage, "usd_cost", None),
+                    request_id=request_id,
+                    parent_session_id=getattr(self, "_parent_session_id", "") or "",
+                    purpose=request.purpose,
+                    duration_ms=duration_ms,
+                    ttft_ms=ttft_ms,
+                    preparation_ms=request.preparation_ms,
+                    outcome=outcome,
+                    usage_reported=usage_reported,
+                    # A failed request with no usage is unknown spend, not a
+                    # known zero-dollar call. Keep it visible without pricing
+                    # invented token counts on the background writer.
+                    priced=not usage_reported,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
     async def close(self) -> None:
-        await self._http.aclose()
+        if self._closed:
+            return
+        self._closed = True
+        self._transport.owners -= 1
+        if self._transport.owners == 0:
+            await self._http.aclose()
         if self._usage_cache is not None:
             try:
                 self._usage_cache.close()

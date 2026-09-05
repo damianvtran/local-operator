@@ -54,7 +54,13 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+from local_operator.providers.context import bind_native_context
 from local_operator.providers.failover import ProviderError
+from local_operator.providers.replay import (
+    credential_scope,
+    native_payload,
+    replay_items,
+)
 
 if TYPE_CHECKING:
     from local_operator.providers.auth_store import OAuthAccess
@@ -1394,8 +1400,10 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
       inflation: that is what wedged sessions that were fine and blocked the
       compaction pass that would have rescued them.
 
-    On the hinted branch the two are equal, because there is nothing to be
-    uncertain about.
+    On the hinted branch both retain the conversation's measured provider
+    prefix. Output sizing adds a margin to the appended local suffix; refusal
+    uses the separate unscaled suffix so that margin cannot refuse a prompt
+    that still has measured headroom.
 
     The hint is used WHOLE. ``Usage.context_tokens`` is normalized in this file
     as ``input + cache_read + cache_write`` — the entire prompt the provider
@@ -1404,18 +1412,19 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
     (R7).
     """
     hint = request.context_tokens_hint
-    window = request.model.context_window
-    if hint is not None and hint > 0 and not (window > 0 and hint > window):
-        # Already a provider figure, and about a model this size: no slope, no
-        # prefix, nothing to add. A hint LARGER than the window is deliberately
-        # excluded — it cannot describe this request, so believing it would
-        # refuse a session whose real context fits. That state is reachable two
-        # ways, both reproduced by reviewers: `Session.set_model` swaps to a
-        # smaller-window model without clearing the hint (a `/model` down-switch),
-        # and the failover clone keeps the primary's hint while moving to a
-        # smaller fallback spec. Falling through to the local estimate re-measures
-        # the messages actually in hand, which is the only honest answer.
-        return hint, hint
+    if (
+        hint is not None
+        and hint > 0
+        and request.context_tokens_hint_model
+        == f"{request.model.provider}/{request.model.model_id}"
+    ):
+        # The conversation owner already added the appended suffix. No second
+        # slope or prefix term. A calibrated same-model count above the window
+        # is evidence of overflow, not evidence that the calibration is stale.
+        # Model switches are rejected by provenance above; discarding a valid
+        # oversized hint would lose the measured prefix and admit an overflow.
+        measured_hint = request.context_tokens_hint_measured
+        return hint, measured_hint if measured_hint is not None else hint
 
     local = estimate_messages_tokens(request.messages)
 
@@ -1428,8 +1437,9 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
         extra_chars += len(tool.name) + len(tool.description) + len(str(tool.parameters))
     prefix = int(extra_chars / _CHARS_PER_TOKEN)
 
-    measured = local + prefix
-    return int(measured * _estimate_slope(request.model)), measured
+    visible = local + prefix
+    native = request.native_context_tokens
+    return int(visible * _estimate_slope(request.model)) + native, visible + native
 
 
 def _reasoning_effort(request: ChatRequest) -> str | None:
@@ -1644,10 +1654,20 @@ def _tool_output_to_openai_responses(
     return blocks
 
 
-def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str, Any]]:
+def _messages_to_openai_responses(
+    messages: Sequence[Message],
+    model: ModelSpec | None = None,
+    endpoint: str = "",
+    scope: str | None = None,
+) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
     items: list[dict[str, Any]] = []
     for message in messages:
+        if model is not None:
+            native = replay_items(message, model, endpoint, "openai-responses", scope)
+            if native is not None:
+                items.extend(native)
+                continue
         # Same normalization as chat/completions: an errored/aborted turn's
         # empty assistant message is dead weight a strict provider rejects.
         if _is_empty_assistant(message):
@@ -2058,12 +2078,23 @@ class OpenAICompatClient:
             and request.model.supports_responses_api
         )
 
-    def _build_responses_body(self, request: ChatRequest) -> dict[str, Any]:
+    def _build_responses_body(
+        self, request: ChatRequest, *, endpoint: str | None = None, scope: str | None = None
+    ) -> dict[str, Any]:
         """Public Responses body using native input items and flat tools."""
+        request = bind_native_context(
+            request,
+            endpoint or f"{self._base_url}/responses",
+            "openai-responses",
+            scope,
+            _estimate_slope(request.model),
+        )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
-            "input": _messages_to_openai_responses(request.messages),
+            "input": _messages_to_openai_responses(
+                request.messages, request.model, endpoint or f"{self._base_url}/responses", scope
+            ),
         }
         if request.system_blocks:
             # The stable system prefix rides top-level ``instructions``, exactly
@@ -2086,19 +2117,9 @@ class OpenAICompatClient:
         effort = _reasoning_effort(request)
         if effort is not None:
             body["reasoning"] = {"effort": effort}
-            # Defect #2: mirror OpenAI Codex (client.rs L720-724), which requests
-            # encrypted reasoning items whenever reasoning is enabled. On the
-            # ``store:false`` codex backend these ``reasoning.encrypted_content``
-            # items are what let the SAME response reuse its reasoning KV state,
-            # and they cost nothing when reasoning is off — so this is gated on
-            # reasoning being present, not on the model version. See
-            # ``_stream_responses`` for how the resulting reasoning items are
-            # handled on the wire (safely skipped; we do not yet replay them).
-            #
-            # Extend rather than assign: nothing else sets ``include`` on this
-            # path today, but a future include-bearing field must not be
-            # silently clobbered by this line (review round 1, N1). Dedupe so a
-            # re-entry cannot list the same value twice.
+            # Stateless Responses needs these opaque items on the next input
+            # to continue reasoning through function calls. They are persisted
+            # in provider_payload and replayed only to the same endpoint/model.
             include = body.setdefault("include", [])
             if "reasoning.encrypted_content" not in include:
                 include.append("reasoning.encrypted_content")
@@ -2109,7 +2130,9 @@ class OpenAICompatClient:
             body["prompt_cache_retention"] = "24h"
         return body
 
-    def _build_codex_responses_body(self, request: ChatRequest) -> dict[str, Any]:
+    def _build_codex_responses_body(
+        self, request: ChatRequest, *, scope: str | None = None
+    ) -> dict[str, Any]:
         """ChatGPT Codex body: Responses-shaped, on the ``store:false`` backend.
 
         Reuses the public Responses body, then strips the fields the codex
@@ -2125,7 +2148,7 @@ class OpenAICompatClient:
         the codex backend is ``store:false``, so public retention does not
         apply.
         """
-        body = self._build_responses_body(request)
+        body = self._build_responses_body(request, endpoint=CODEX_RESPONSES_URL, scope=scope)
         body["store"] = False
         body.pop("prompt_cache_retention", None)
         body.pop("max_output_tokens", None)
@@ -2309,10 +2332,11 @@ class OpenAICompatClient:
     ) -> AsyncIterator[StreamEvent]:
         """Normalize public OpenAI and private ChatGPT Responses SSE."""
         url = CODEX_RESPONSES_URL if codex else f"{self._base_url}/responses"
+        scope = credential_scope(api_key, oauth_access)
         body = (
-            self._build_codex_responses_body(request)
+            self._build_codex_responses_body(request, scope=scope)
             if codex
-            else self._build_responses_body(request)
+            else self._build_responses_body(request, scope=scope)
         )
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
@@ -2326,6 +2350,7 @@ class OpenAICompatClient:
         streamed_text = False
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
+        output_items: dict[int, dict[str, Any]] = {}
 
         async with self._http.stream(
             "POST",
@@ -2353,25 +2378,13 @@ class OpenAICompatClient:
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id"))
                     )
-                # Requesting ``include: ["reasoning.encrypted_content"]`` (defect
-                # #2) makes the stream carry ``reasoning`` output items and their
-                # ``response.reasoning*`` deltas that a non-reasoning include
-                # never produced. We deliberately DROP them: the harness has no
-                # channel to replay an OpenAI encrypted reasoning item back on
-                # the next turn's ``input`` (unlike Anthropic's thinking blocks,
-                # which ride ``provider_payload``), and wiring that state through
-                # the loop is out of this fix's scope. The include still earns
-                # its keep — encrypted reasoning improves SAME-response cache
-                # reuse — but cross-turn reasoning replay is intentionally not
-                # attempted here. Skipping is explicit rather than incidental so
-                # a future ``else`` branch cannot accidentally render a reasoning
-                # item's encrypted blob as assistant text. (Called out for review.)
+                # Encrypted reasoning stays opaque. Complete output items are
+                # retained below; deltas never enter the user-visible transcript.
                 if event_type.startswith("response.reasoning"):
                     continue
                 if event_type == "response.output_item.added":
                     item = payload.get("item") or {}
                     if item.get("type") == "reasoning":
-                        # Same rationale as above: acknowledge the item, drop it.
                         continue
                     if item.get("type") == "function_call":
                         index = tool_call_count
@@ -2383,6 +2396,10 @@ class OpenAICompatClient:
                         if item_id:
                             call_indexes[item_id] = index
                         yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
+                elif event_type == "response.output_item.done":
+                    item = payload.get("item")
+                    if isinstance(item, dict):
+                        output_items[int(payload.get("output_index", len(output_items)))] = item
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
@@ -2405,6 +2422,58 @@ class OpenAICompatClient:
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
+                    native = response_obj.get("output")
+                    if not isinstance(native, list) or not native:
+                        native = [output_items[index] for index in sorted(output_items)]
+                    # Terminal output is authoritative; .done events cover
+                    # compatible endpoints whose terminal omits output.
+                    replay_text: list[str] = []
+                    replay_calls: list[dict[str, Any]] = []
+                    valid_native = bool(native)
+                    for item in native:
+                        if not isinstance(item, dict):
+                            valid_native = False
+                            break
+                        if item.get("type") == "reasoning" and not item.get("encrypted_content"):
+                            # An id alone depends on provider-side storage and
+                            # credential identity. Resumes/account rotation and
+                            # Codex store:false cannot rely on either. Fall back
+                            # to ordinary visible replay instead of sending an
+                            # unusable reasoning reference.
+                            valid_native = False
+                            break
+                        if item.get("type") == "message":
+                            replay_text.extend(
+                                part.get("text", "")
+                                for part in item.get("content", [])
+                                if part.get("type") == "output_text"
+                            )
+                        elif item.get("type") == "function_call":
+                            try:
+                                arguments = json.loads(item.get("arguments") or "{}")
+                            except (TypeError, ValueError):
+                                valid_native = False
+                                break
+                            replay_calls.append(
+                                {
+                                    "id": item.get("call_id") or item.get("id") or "",
+                                    "name": item.get("name"),
+                                    "args": arguments,
+                                }
+                            )
+                    if valid_native:
+                        provider_payload = {
+                            **(provider_payload or {}),
+                            **native_payload(
+                                request.model,
+                                url,
+                                "openai-responses",
+                                native,
+                                "".join(replay_text),
+                                replay_calls,
+                                scope,
+                            ),
+                        }
                     raw = response_obj.get("usage") or {}
                     if raw:
                         details = raw.get("input_tokens_details") or {}
@@ -3180,9 +3249,23 @@ class GoogleClient:
         if self._owns_client:
             await self._http.aclose()
 
-    def _build_body(self, request: ChatRequest) -> dict[str, Any]:
+    def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
+        request = bind_native_context(
+            request, self._base_url, "google-content", scope, _estimate_slope(request.model)
+        )
         contents: list[dict[str, Any]] = []
+        last_tool_result = False
+        rendered_call_ids: dict[str, str | None] = {}
         for message in request.messages:
+            if message.role != "tool":
+                last_tool_result = False
+            native = replay_items(message, request.model, self._base_url, "google-content", scope)
+            if native is not None:
+                native_calls = [part["functionCall"] for part in native if "functionCall" in part]
+                for call, wire_call in zip(message.tool_calls, native_calls):
+                    rendered_call_ids[call.id] = wire_call.get("id")
+                contents.append({"role": "model", "parts": native})
+                continue
             # The `if parts or ...` guard below already skips an assistant
             # turn with NO parts, but a whitespace-only text still renders
             # one. Route through the shared predicate so all three clients
@@ -3198,24 +3281,51 @@ class GoogleClient:
                         {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                     )
             if message.role == "assistant" and message.tool_calls:
-                parts.extend(
-                    {"functionCall": {"name": call.name, "args": call.arguments}}
+                call_parts: list[dict[str, Any]] = [
+                    {"functionCall": {"id": call.id, "name": call.name, "args": call.arguments}}
                     for call in message.tool_calls
-                )
+                ]
+                rendered_call_ids.update((call.id, call.id) for call in message.tool_calls)
+                if request.model.model_id.startswith("gemini-3"):
+                    # Imported/model-switched history has no valid signature.
+                    # Google's documented migration marker avoids a 400 while
+                    # making no claim to preserve another model's reasoning.
+                    # Real same-route signatures take the native path above.
+                    call_parts[0]["thoughtSignature"] = "skip_thought_signature_validator"
+                parts.extend(call_parts)
             if message.role == "tool":
-                contents.append(
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": message.tool_name or "",
-                                    "response": {"content": self._tool_response_content(message)},
-                                }
-                            }
-                        ],
-                    }
-                )
+                response_part: dict[str, Any] = {
+                    "name": message.tool_name or "",
+                    "response": {"content": self._tool_response_content(message)},
+                }
+                # Gemini 3 supports images inside functionResponse. Older
+                # models accept image parts alongside it in the user content.
+                # Both paths preserve actual image bytes; prose saying an
+                # image existed leaves screenshot-driven loops blind.
+                images = [
+                    {"inlineData": {"mimeType": block.mime_type, "data": block.data}}
+                    for block in message.content
+                    if isinstance(block, ImageContent)
+                ]
+                result_parts: list[dict[str, Any]] = [{"functionResponse": response_part}]
+                if images and request.model.model_id.startswith("gemini-3"):
+                    response_part["parts"] = images
+                else:
+                    result_parts.extend(images)
+                # Pair against the actual rendered call, not an id-prefix
+                # heuristic: native ids may start with fc_, and imported calls
+                # acquire explicit ids during normalized rendering above.
+                wire_id = rendered_call_ids.get(message.tool_call_id or "")
+                if wire_id is not None:
+                    response_part["id"] = wire_id
+                # Parallel calls require their results together in the next
+                # user content, in original call order, rather than separate
+                # user turns each answering only part of the batch.
+                if last_tool_result:
+                    contents[-1]["parts"].extend(result_parts)
+                else:
+                    contents.append({"role": "user", "parts": result_parts})
+                last_tool_result = True
                 continue
             if parts or message.role == "user":
                 contents.append({"role": role, "parts": parts or [{"text": ""}]})
@@ -3277,7 +3387,7 @@ class GoogleClient:
         """Render a tool result from its content blocks — never ``message.text``.
 
         Same policy as the other two clients: text blocks concatenated,
-        image-only results summarized, empty results backfilled so the
+        image-only results identified, empty results backfilled so the
         provider never receives an empty ``functionResponse``.
         """
         texts: list[str] = []
@@ -3291,7 +3401,7 @@ class GoogleClient:
         if texts and not has_image:
             return "".join(texts)
         if texts:
-            return "".join(texts) + "\n[attached image content omitted]"
+            return "".join(texts)
         if has_image:
             return "[tool returned image content]"
         return EMPTY_TOOL_RESULT_TEXT
@@ -3308,6 +3418,7 @@ class GoogleClient:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["x-goog-api-key"] = api_key
+        scope = credential_scope(api_key, oauth_access)
         usage: Usage | None = None
         stop_reason = "stop"
         # Gemini's abnormal finish reasons split into two families, and the
@@ -3333,9 +3444,12 @@ class GoogleClient:
         # only one did. The index doubles as the stream slot used to assemble
         # argument deltas, matching the OpenAI per-index contract.
         call_index = 0
+        native_parts: list[dict[str, Any]] = []
+        visible_text: list[str] = []
+        replay_calls: list[dict[str, Any]] = []
 
         async with self._http.stream(
-            "POST", url, json=self._build_body(request), headers=headers
+            "POST", url, json=self._build_body(request, scope=scope), headers=headers
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -3358,16 +3472,29 @@ class GoogleClient:
                     yield StreamStartEvent(response_id=None)
                 for candidate in chunk.get("candidates") or []:
                     for part in (candidate.get("content") or {}).get("parts") or []:
+                        # Keep signature-only chunks and the exact original
+                        # part boundaries. Combining them invalidates Gemini's
+                        # signatures, even when the visible text is identical.
+                        native_parts.append(part)
                         text = part.get("text")
-                        if text:
+                        if text and not part.get("thought"):
                             streamed_text = True
+                            visible_text.append(text)
                             yield StreamTextDelta(delta=text)
                         function_call = part.get("functionCall")
                         if function_call:
                             name = function_call.get("name")
+                            call_id = function_call.get("id") or f"fc_{call_index}_{name or 'call'}"
+                            replay_calls.append(
+                                {
+                                    "id": call_id,
+                                    "name": name,
+                                    "args": function_call.get("args") or {},
+                                }
+                            )
                             yield StreamToolCallDelta(
                                 index=call_index,
-                                id=f"fc_{call_index}_{name or 'call'}",
+                                id=call_id,
                                 name=name,
                                 argument_delta=json.dumps(function_call.get("args") or {}),
                             )
@@ -3431,7 +3558,24 @@ class GoogleClient:
             )
         elif stop_reason == "error":
             error = f"model call failed ({defect_marker or 'unknown finishReason'})"
-        yield StreamEndEvent(stop_reason=stop_reason, usage=usage, error=error)
+        yield StreamEndEvent(
+            stop_reason=stop_reason,
+            usage=usage,
+            error=error,
+            provider_payload=(
+                native_payload(
+                    request.model,
+                    self._base_url,
+                    "google-content",
+                    native_parts,
+                    "".join(visible_text),
+                    replay_calls,
+                    scope,
+                )
+                if native_parts
+                else None
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

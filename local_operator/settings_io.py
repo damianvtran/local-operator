@@ -440,8 +440,8 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=(
-            "Use the account's supported maximum; off uses its provider default. "
-            "Compaction settings stay unchanged."
+            "Off: provider default. On: supported max. "
+            "Applies next request; compaction unchanged."
         ),
     ),
     Setting(
