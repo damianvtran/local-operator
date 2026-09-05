@@ -14,6 +14,7 @@ from local_operator.providers.registry import (
     credential_provider_id,
     env_key_name,
     get_provider_definition,
+    resolve_env_key,
 )
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -83,6 +84,12 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     "id": method.id,
                     "label": method.name,
                     "kind": method.login_kind,
+                    # Registry-declared flavours already carry distinct ids
+                    # (`openai-device`, `zai-oauth`), so their chooser key is
+                    # just that id. The field exists so EVERY method has one
+                    # stable key, rather than the renderer guessing which
+                    # providers happen to need one.
+                    "method_id": method.id,
                     "requires_secret_input": method.paste_prompt_required,
                     "paste_fallback": method.paste_code_flow,
                 }
@@ -90,9 +97,24 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                 if credential_provider_id(method.id) == storage_id and method.login is not None
             ]
             if storage.env_keys is not None and not any(m["kind"] == "api_key" for m in methods):
+                # A SYNTHESIZED method, so it needs a key distinct from the
+                # browser/device method it sits beside. Both used to be `id:
+                # provider.id`, so anthropic shipped two methods called
+                # "anthropic": the React key collided and
+                # `find(c => c.id === methodId)` always resolved the FIRST
+                # match, leaving the API-key panel unreachable (design D2).
+                #
+                # `method_id` is the CHOOSER identity; `id` stays the provider
+                # the flow acts on. They are genuinely two different things and
+                # were only ever equal by coincidence -- `auth.key` and
+                # `auth.start` resolve a PROVIDER through
+                # `credential_provider_id`, which knows nothing about a
+                # per-method suffix, so overloading `id` here would send a saved
+                # key to a provider that does not exist.
                 methods.append(
                     {
                         "id": provider.id,
+                        "method_id": f"{provider.id}:api-key",
                         "label": "API key",
                         "kind": "api_key",
                         "requires_secret_input": True,
@@ -115,6 +137,19 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     # Configured is not verified: this census never refreshes a
                     # grant or contacts a provider just because Settings opened.
                     "configured": controller.is_usable(provider.id),
+                    # `configured` for a LOCAL provider means only "needs no
+                    # credential", which is not "reachable" -- nothing here has
+                    # contacted the server. Rendering the two as one fact put a
+                    # green "Connected" badge on five local providers with
+                    # nothing listening (design D1 / UX U1). Callers that want
+                    # to state reachability must probe, on an explicit action.
+                    "credential_optional": provider.allows_missing_api_key,
+                    # A credential the app could actually run on, from the store
+                    # OR the environment -- `stored_credentials` counts only the
+                    # store, so an env-key provider reads as 0 while being fully
+                    # usable, and grouping on that count alone would mislabel it.
+                    "has_credential": controller.has_any_credential(provider.id)
+                    or bool(resolve_env_key(storage_id)),
                     "stored_credentials": len(host.store.list_credentials(storage_id)),
                     "base_url": provider.base_url,
                 }
@@ -224,6 +259,47 @@ async def save_key(
 
     _invalidate_cached_listing(storage_id)
     return _reply({}, "API key saved.")
+
+
+@router.post("/v1/auth/providers/{provider_id}/probe", response_model=CRUDResponse)
+async def probe_provider(provider_id: str, host: DesktopAuth = Depends(get_desktop_auth)):
+    """Actually contact a LOCAL provider's server and report what happened.
+
+    Exists because the provider grid must not claim reachability it never
+    checked (design D1 / UX U1). Reachability is a fact with a cost -- a
+    network round trip that can hang -- so it is an EXPLICIT action rather
+    than something a render triggers: "no network call behind first paint" is
+    the binding constraint from that review.
+
+    Restricted to `allows_missing_api_key` providers, whose base URL is a
+    loopback/LAN server the user runs. The renderer names a provider; it never
+    supplies a URL, so this cannot become a general request forwarder.
+    """
+    import httpx
+
+    definition = get_provider_definition(credential_provider_id(provider_id))
+    if definition is None or not definition.allows_missing_api_key:
+        raise HTTPException(422, "Only a local provider's server can be tested.")
+    base_url = definition.base_url
+    if not base_url:
+        raise HTTPException(422, "This provider has no server address to test.")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(base_url.rstrip("/") + "/models")
+    except httpx.HTTPError:
+        # The exception text can carry the resolved endpoint and proxy details.
+        # The user needs the verdict and the address they configured, which the
+        # grid already shows, not a transport dump.
+        return _reply(
+            {"reachable": False, "detail": "No server answered at this address."},
+            "Provider not reachable.",
+        )
+    # Any HTTP answer proves something is listening and speaking HTTP, which is
+    # the question asked. A 401/404 from a running server is still "running".
+    return _reply(
+        {"reachable": True, "detail": f"A server answered ({response.status_code})."},
+        "Provider reachable.",
+    )
 
 
 @router.delete("/v1/auth/providers/{provider_id}/credentials", response_model=CRUDResponse)
