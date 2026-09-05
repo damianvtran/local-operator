@@ -1640,6 +1640,19 @@ class _CredentialHandle(FakeHandle):
         return {"ok": True}
 
 
+async def _reply_to(reader: asyncio.StreamReader, req: int, n: int = 30) -> dict[str, Any]:
+    """The first ``result`` or ``error`` frame carrying ``req``, skipping broadcasts."""
+    for _ in range(n):
+        raw = await asyncio.wait_for(reader.readline(), timeout=5)
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("req") == req and frame.get("op") in ("result", "error"):
+            return frame
+    raise AssertionError(f"no reply to req {req} arrived")
+
+
 async def _credential(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, req: int, **fields: object
 ) -> dict[str, Any]:
@@ -1713,7 +1726,12 @@ async def test_a_credential_frame_with_a_non_string_value_is_refused() -> None:
             + b"\n"
         )
         await writer.drain()
-        frame = await _until(reader, "error", 14)
+        # Whichever frame answers req 14: the mutant (validator removed)
+        # STORES the coerced repr and answers ``result``, so waiting on
+        # ``error`` alone would fail as a 5 s timeout with no message (round
+        # 2, N4). Read the reply and assert on its shape.
+        frame = await _reply_to(reader, 14)
+        assert frame.get("op") == "error", f"a non-string value was accepted: {frame}"
         assert "value must be a string" in frame.get("message", ""), frame
         assert handle.verbs == []
     finally:

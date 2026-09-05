@@ -112,9 +112,11 @@ def _stub_engage(monkeypatch: pytest.MonkeyPatch, server: RuntimeServer) -> list
 
     async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
         engagements.append(1)
-        # The measured engage takes over a second; a stub that binds
-        # instantly would never let Enter beat it, and the race is the test.
-        await asyncio.sleep(0.2)
+        # The measured engage takes 1.1–2.8 s. The race IS the test: at 0.2 s
+        # the mount engage (#622) usually won against the paste+Enter, and
+        # two of the three cold cells stayed green with the fix removed
+        # (review round 2, R6). One second makes all three red deterministically.
+        await asyncio.sleep(1.0)
         server.start()
         marker = config_dir / "sessions" / session_id / ".session.pid"
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -355,3 +357,40 @@ async def test_listings_and_chart_stay_local_and_engage_nothing_extra(
             assert not any(c[0] == "run_slash_authoritative" for c in handle.calls)
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_attached_receipt_syncs_the_agent_segment(tmp_path, monkeypatch) -> None:
+    """Review round 1 N1 / round 2 N5: ``agent_attached`` must paint the AGENT band.
+
+    The receipt handler synced the team segment for both attach receipts;
+    the post-op push repaints both a tick later, which is why nothing caught
+    it. Pinned by driving the renderer directly on a session whose
+    ``active_agent`` changed but whose ``active_team_name`` did not, and
+    reading the band's own fields — the wrong sync leaves the agent segment
+    empty at the moment the receipt scrolls in.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    session._active_agent = "reviewer"  # what FakeSession.active_agent reads
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._status is not None
+        app._status.update(agent_profile="", team="")
+        app._render_authoritative_slash(
+            "/agent",
+            "reviewer",
+            {
+                "kind": "notice",
+                "text": "agent reviewer is active",
+                "style": "info",
+                "data": {"type": "agent_attached", "agent": "reviewer", "request": ""},
+            },
+        )
+        assert app._status._agent_profile == "reviewer", "the agent segment was not synced"
+        assert app._status._team == "", "the team segment must not have been what was synced"
