@@ -13566,6 +13566,17 @@ class OperatorApp(App[None]):
         # limit. Started before the first paint so the fetch overlaps the
         # mount, and the page shows its loading row meanwhile.
         self._load_subagent_trajectory(job_id)
+        # The dock is re-scoped to THIS child's direct children the moment the
+        # page exists, in the same handler, and through `_refresh_band` rather
+        # than a bare panel `sync`. A leaf child has no roster, so the panel
+        # hides; only `_refresh_band` also re-decides the band's `has-slot`
+        # inset from that visibility. Leaving either half to the deferred
+        # refresh below (or to the 1 Hz poll, which is where the inset used to
+        # catch up) posts a four-widget `messages.Layout` cascade on whichever
+        # later frame happens to run it — a reflow the reader sees as the dock
+        # jumping after the page has already painted, and one the spinner-tick
+        # budget test caught only under xdist contention.
+        self._refresh_band()
         # Enter paints the new mode first; folding and mounting a retained
         # 500-event trajectory on the same key handler made the key appear lost
         # for about a second. The next refresh fills the already-visible page.

@@ -329,3 +329,72 @@ async def test_late_durable_todo_read_cannot_retarget_selected_owner(monkeypatch
     await asyncio.gather(*pending)
     assert panel._selection == ("child-b", None)
     assert "Old child" not in str(panel._body.content)
+
+
+def _dock_state(app: OperatorApp) -> tuple[bool, bool, bool]:
+    band = app.query_one("#band")
+    panel = app.query_one(SubagentPanel)
+    todos = app.query_one(TodoPanel)
+    return (panel.display, todos.display, band.has_class("has-slot"))
+
+
+@pytest.mark.parametrize("leaf_has_plan", [True, False])
+@pytest.mark.asyncio
+async def test_opening_a_leaf_settles_the_dock_in_the_same_handler(leaf_has_plan: bool) -> None:
+    """Re-scoping the dock to a leaf's (empty) roster must not straddle frames.
+
+    Opening a leaf hides the child panel and re-decides the band's
+    ``has-slot`` inset from whatever is STILL docked (the leaf's todo panel:
+    a plan, or the authoritative "No todos" of an empty one). Both are decided
+    inside ``_open_subagent_view`` itself, through ``_refresh_band``. A bare panel
+    ``sync`` deferred to the next refresh left the inset to the 1 Hz poll, so
+    the dock reflowed twice (panel hides; poll drops the inset a frame or a
+    second later) and posted a four-widget ``messages.Layout`` cascade on
+    whichever later frame ran it. That is what made a spinner tick "post
+    layout" under xdist contention and the dock visibly jump after the page
+    had painted.
+
+    The invariant is stated as "what ``open`` returns with is what every later
+    refresh reaches", read on the frame ``open`` returns on: that is the only
+    place where "settled in the handler" is distinguishable from "settled
+    eventually". Parametrised on the leaf's plan so both todo-panel branches
+    (a rendered list, and the one-row empty state) are shown to settle with
+    the roster in the same handler.
+    """
+    state = scoped_state()
+    if not leaf_has_plan:
+        state = state.model_copy(
+            update={
+                "jobs": [
+                    job.model_copy(update={"todos": []}) if job.id == "leaf" else job
+                    for job in state.jobs
+                ]
+            }
+        )
+    session = FakeSession()
+    install(session, state)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._refresh_band()
+        await pilot.pause()
+        panel_shown, _, inset = _dock_state(app)
+        assert panel_shown and inset, "fixture must start with a docked roster"
+
+        app._open_subagent_view("leaf")
+        # No pause: the dock has to be right on the frame that opened the page.
+        settled = _dock_state(app)
+        panel_shown, todos_shown, inset = settled
+        assert panel_shown is False, "a leaf has no children to dock"
+        assert inset is (panel_shown or todos_shown), "the inset follows what is still docked"
+
+        # Nothing left over for a later frame to flip: the handler's answer is
+        # the answer the deferred refresh and the poll both arrive at.
+        for _ in range(3):
+            await pilot.pause()
+            assert _dock_state(app) == settled
+        app._refresh_band()
+        assert _dock_state(app) == settled
