@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -183,7 +184,7 @@ def _lease_holder(config_dir: Path, session_id: str) -> int | None:
 
 def _spawn_runtime(
     session_id: str, cwd: str, *, defer_materialise: bool
-) -> "subprocess.Popen[bytes]":
+) -> tuple["subprocess.Popen[bytes]", Path]:
     """Start one detached runtime candidate for ``session_id``.
 
     Returns the ``Popen`` so the engage loop can tell a candidate that is
@@ -191,6 +192,16 @@ def _spawn_runtime(
     hundred milliseconds after the exec, and in that window (no record) and
     (no lease) is true of a perfectly healthy candidate — so liveness of the
     process we spawned is the only sound death signal (round 2, Q8).
+
+    Also returns the path its stdio was captured to. Both streams USED to go
+    to ``DEVNULL``, which made a candidate that died before
+    ``logging.basicConfig`` ran completely silent — the failure had no
+    traceback, no message and no exit reason anywhere on the system, so a
+    session that could never start looked identical to a slow one. That
+    silence is what turned a clear "hosting is not configured" into a
+    30-second wait and an unexplained 503 (QA Q1).
+
+    The file is small, per-candidate, and unlinked as soon as it is read.
 
     Only routing data enters the environment — prompt text, images and command
     identity travel over the authenticated loopback socket, never through
@@ -207,14 +218,85 @@ def _spawn_runtime(
         # A parent that set this for an earlier speculative engage must not
         # leak it into a runtime that has real work to do.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
-    return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, "-m", "local_operator.session.runtime.process"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    capture = Path(tempfile.gettempdir()) / f"lop-runtime-{session_id}-{uuid.uuid4().hex[:8]}.log"
+    handle = capture.open("wb")
+    try:
+        process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, "-m", "local_operator.session.runtime.process"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        # The child holds its own duplicated descriptor; this one is ours to
+        # drop so the file is not kept open for the life of the server.
+        handle.close()
+    return process, capture
+
+
+#: Upper bound on captured child output quoted back to a caller. Enough for a
+#: traceback's final frames, small enough that a runaway child cannot turn an
+#: error message into a memory problem.
+_CAPTURE_TAIL_BYTES = 4096
+
+#: Startup conditions whose cause is CONFIGURATION the user can act on, mapped
+#: to the sentence to show them. A curated map rather than the child's raw text
+#: because a construction failure can quote a provider endpoint or a filesystem
+#: path, and an error surface is not the place to discover that. Anything not
+#: listed stays generic; the full traceback is in the runtime log either way.
+_ACTIONABLE_STARTUP_REASONS = {
+    "HostingNotConfiguredError": (
+        "No model provider is configured yet. Connect one in Settings > Providers, "
+        "then send the message again."
+    ),
+    "HostingUnknownError": (
+        "This session's model provider is not recognised. Choose a provider in "
+        "Settings > Providers, then send the message again."
+    ),
+    "ModelNotConfiguredError": (
+        "No model is selected for this session. Pick one with /model, then send "
+        "the message again."
+    ),
+}
+
+
+class RuntimeStartupError(RuntimeError):
+    """No runtime could be started, with a reason worth showing a person.
+
+    Distinct from ``TimeoutError`` (nothing answered in time) because the two
+    call for opposite responses: a timeout invites a retry, whereas this says
+    retrying changes nothing until something is configured.
+    """
+
+    def __init__(self, message: str, *, actionable: str = "") -> None:
+        super().__init__(message)
+        #: A vetted, user-facing sentence, or "" when the cause was not one of
+        #: the known configuration conditions.
+        self.actionable = actionable
+
+
+def _spawn_failure_reason(capture: Path) -> tuple[str, str]:
+    """The child's last words: ``(log_detail, user_facing)``.
+
+    ``log_detail`` is the traceback's terminal line, for the server log. The
+    second element is filled only when that line names one of the known
+    configuration conditions, so nothing unvetted reaches a user surface.
+    """
+    try:
+        raw = capture.read_bytes()[-_CAPTURE_TAIL_BYTES:].decode("utf-8", "replace")
+    except OSError:
+        return "", ""
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    for line in reversed(lines):
+        # A traceback's terminal line is "module.QualifiedError: message".
+        if line.startswith(("Traceback", "  ", "File ")) or ": " not in line:
+            continue
+        qualified, _, _message = line.partition(": ")
+        name = qualified.rsplit(".", 1)[-1].strip()
+        return line, _ACTIONABLE_STARTUP_REASONS.get(name, "")
+    return (lines[-1] if lines else ""), ""
 
 
 async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, bool]:
@@ -267,9 +349,10 @@ async def engage_runtime(
     why the lease rather than a pre-spawn check decides who runs.
 
     Raises ``TimeoutError`` if no runtime could be reached within the
-    deadline. Every other failure (a refused op, a dead socket) surfaces as
-    the underlying error from the delivery attempt, since those are the
-    caller's to report.
+    deadline, and ``RuntimeError`` — carrying the child's own reason — as soon
+    as every candidate it is allowed to start has died. Every other failure (a
+    refused op, a dead socket) surfaces as the underlying error from the
+    delivery attempt, since those are the caller's to report.
     """
     from local_operator.mobile.attach_client import find_owner_record
 
@@ -284,6 +367,13 @@ async def engage_runtime(
     # The Popen of the most recent candidate, so the respawn branch can tell
     # a live constructor from a dead one without reading the lease.
     candidate: "subprocess.Popen[bytes] | None" = None
+    # Where the current candidate's stdio is being captured, so a death can be
+    # reported with the child's own reason instead of a generic timeout.
+    capture: Path | None = None
+    # The child's terminal traceback line (for the log) and, when the cause was
+    # a known configuration condition, the sentence to show the user.
+    spawn_reason = ""
+    spawn_actionable = ""
     # Counted separately from ``spawned`` because a respawn after a candidate
     # died mid-construction is a different event from the first spawn, and
     # only the retries need a cap. See the respawn branch below.
@@ -299,6 +389,11 @@ async def engage_runtime(
         if record is not None:
             try:
                 detail, duplicate = await _deliver(record, session_id, work)
+                if capture is not None:
+                    # The candidate became the owner (or someone else's did);
+                    # its captured stdio has served its purpose.
+                    capture.unlink(missing_ok=True)
+                    capture = None
                 return EngageOutcome(
                     session_id=session_id,
                     detail=detail,
@@ -321,7 +416,7 @@ async def engage_runtime(
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
             elif not spawned:
                 logger.debug("engage: spawning a runtime for %s", session_id)
-                candidate = await asyncio.to_thread(
+                candidate, capture = await asyncio.to_thread(
                     _spawn_runtime, session_id, cwd, defer_materialise=defer
                 )
                 spawned = True
@@ -348,21 +443,53 @@ async def engage_runtime(
                 # Bounded because a session that cannot construct at all
                 # (missing credential, unreadable transcript) would otherwise
                 # respawn until the deadline, turning one clear failure into a
-                # crash loop. After the cap the loop waits out the deadline as
-                # before and reports the original error.
+                # crash loop. Past the cap the loop STOPS rather than waiting
+                # out the deadline: see the fast-fail below.
+                if capture is not None:
+                    reason, actionable = await asyncio.to_thread(_spawn_failure_reason, capture)
+                    spawn_reason = reason or spawn_reason
+                    spawn_actionable = actionable or spawn_actionable
+                    capture.unlink(missing_ok=True)
                 logger.info(
-                    "engage: the candidate for %s died during construction (rc=%s); respawning",
+                    "engage: the candidate for %s died during construction (rc=%s): %s",
                     session_id,
                     candidate.returncode,
+                    spawn_reason or "no output captured",
                 )
-                candidate = await asyncio.to_thread(
+                candidate, capture = await asyncio.to_thread(
                     _spawn_runtime, session_id, cwd, defer_materialise=defer
                 )
                 spawns += 1
 
+        if (
+            spawned
+            and spawns >= _MAX_SPAWNS
+            and candidate is not None
+            and candidate.poll() is not None
+        ):
+            # FAIL FAST. Every candidate we are allowed to start has died, and
+            # nobody else holds the lease, so no amount of further waiting can
+            # produce a runtime. Blocking out the rest of the deadline turned a
+            # diagnosable startup failure into ~30 s of apparent hang followed
+            # by a generic 503 (QA Q1); the caller can now say WHAT failed,
+            # immediately, using the child's own message.
+            if capture is not None:
+                reason, actionable = await asyncio.to_thread(_spawn_failure_reason, capture)
+                spawn_reason = reason or spawn_reason
+                spawn_actionable = actionable or spawn_actionable
+                capture.unlink(missing_ok=True)
+                capture = None
+            raise RuntimeStartupError(
+                f"could not start a runtime for session {session_id}"
+                + (f": {spawn_reason}" if spawn_reason else ""),
+                actionable=spawn_actionable,
+            ) from last_error
+
         await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
         delay = min(delay * _POLL_FACTOR, _POLL_CAP_S)
 
+    if capture is not None:
+        capture.unlink(missing_ok=True)
     raise TimeoutError(
         f"could not reach a runtime for session {session_id} within {deadline_s:.0f}s"
     ) from last_error

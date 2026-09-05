@@ -155,8 +155,18 @@ async def errors() -> AsyncIterator[None]:
         raise HTTPException(404, "Session or subscription not found") from None
     except (ReceiptConflict, ValueError) as error:
         raise HTTPException(409, str(error)) from None
-    except (ConnectionError, RuntimeError, asyncio.TimeoutError):
-        # Owner/provider errors can contain endpoint bodies and credentials.
+    except ConnectionError as error:
+        # A cold session that cannot start an owner reports WHY, when the cause
+        # was one of the vetted configuration conditions
+        # (`launch._ACTIONABLE_STARTUP_REASONS`). Everything else keeps the
+        # generic sentence: owner/provider errors can otherwise carry endpoint
+        # bodies and credentials into a user-visible surface.
+        detail = str(error).strip()
+        raise HTTPException(
+            503,
+            detail or "Session owner is unavailable. Reconnect and reconcile before retrying.",
+        ) from None
+    except (RuntimeError, asyncio.TimeoutError):
         raise HTTPException(
             503, "Session owner is unavailable. Reconnect and reconcile before retrying."
         ) from None
