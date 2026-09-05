@@ -2733,10 +2733,14 @@ class SessionStreamFn:
     async def _on_fast_refused(self, selector: str, message: str) -> None:
         # The provider's own words are the useful half ("Usage credits are
         # required for fast mode."); the clause after names what the session
-        # did about it. Warning, not error: the turn is being served.
+        # did about it. Warning, not error: the turn is being served. Opens
+        # with the feature's `fast mode:` subject like every other line of
+        # it, and the fixed text is kept short (design D7): with Anthropic's
+        # measured message the line is 129 cells, inside the 140-cell notice
+        # budget at the 150-cell reference frame.
         await self._notice(
-            f"fast mode refused by {selector} — {message.strip().rstrip('.')}; "
-            "serving at standard speed and switching fast mode off",
+            f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
+            "switched off, serving at standard speed",
             "warning",
         )
         if self._fast_refused_handler is None:

@@ -3879,8 +3879,8 @@ async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session
 
     assert (first, second) == (True, False), "latched: the second report is silent"
     assert notices == [
-        "warning:fast mode refused by anthropic/claude-opus-5 — Usage credits are "
-        "required for fast mode; serving at standard speed and switching fast mode off"
+        "warning:fast mode: refused by anthropic/claude-opus-5 — Usage credits are "
+        "required for fast mode; switched off, serving at standard speed"
     ]
     assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
     assert state.fast_refused_for("anthropic/claude-opus-5")

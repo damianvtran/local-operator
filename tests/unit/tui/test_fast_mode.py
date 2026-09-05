@@ -256,7 +256,8 @@ async def test_a_provider_refusal_takes_the_dial_off_the_band_and_the_memory() -
         assert session is not None
         session.set_model(session.model.model_copy(update={"fast_mode": False}))
         app._status.update(fast=_fast_label_for_test(session))
-        app._apply_frontend_state(_State(session.model))
+        app._pending_frontend_state = _State(session.model)
+        app._apply_pending_frontend_state(getattr(app, "_frontend_session_generation", 0))
         for _ in range(4):
             await pilot.pause()
 
@@ -279,3 +280,78 @@ def _fast_label_for_test(session: Any) -> str:
     from local_operator.tui.app import _fast_label
 
     return _fast_label(session)
+
+
+class PublishingFastSession(FastSession):
+    """A ``FastSession`` that publishes frontend state like the real Session.
+
+    The round-2 F6 defect only reproduces when the app receives a frontend
+    snapshot on adoption: `FastSession` publishes nothing, so a test built on
+    it cannot see the reconciliation reading a fresh session's spec (dial
+    off by default) as a provider refusal.
+    """
+
+    def __init__(self, provider: str = "anthropic", model_id: str = "claude-opus-5") -> None:
+        super().__init__(provider, model_id)
+        from local_operator.session.frontend_state import FrontendSessionState, FrontendStateStore
+
+        self._store = FrontendStateStore(
+            FrontendSessionState(session_id="fast-pub", epoch="e1", selected_model=self._spec)
+        )
+
+    @property
+    def frontend_state(self) -> Any:
+        return self._store.state
+
+    def subscribe_frontend(self, handler: Any) -> Any:
+        return self._store.subscribe(handler)
+
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+        self._spec = model
+        self._store.mutate(selected_model=model, effective_model=model)
+
+
+@pytest.mark.asyncio
+async def test_the_choice_survives_a_session_rebuild_that_publishes_state() -> None:
+    """Round-2 F6: `/reload` on a state-publishing session must keep the dial.
+
+    The adoption snapshot is painted BEFORE the remembered choice is restored
+    onto the fresh spec, and that spec's dial defaults off — reconciling
+    against the snapshot dropped the choice on every `/new` and `/reload`.
+    """
+    sessions = [PublishingFastSession(), PublishingFastSession()]
+    app = OperatorApp(lambda: _factory(sessions.pop(0)))
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/fast")
+        assert _fast(app) is True
+        app._session_factory = lambda: _factory(sessions.pop(0))  # type: ignore[assignment]
+        await app._reload_session(keep_context=True)
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None and not sessions:
+                break
+        for _ in range(6):
+            await pilot.pause()
+        assert _fast(app) is True, "the rebuild dropped the dial"
+        assert app._fast_choice is True
+        assert f"{ICON_FAST} fast" in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_a_published_refusal_drops_the_remembered_choice() -> None:
+    """The reconciliation still does its job on an ORDERED update: when the
+    session takes the dial off (as `Session._on_fast_refused` does) after
+    adoption, the app forgets the choice so the next rebuild cannot re-arm it."""
+    app = OperatorApp(lambda: _factory(PublishingFastSession()))
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/fast")
+        assert app._fast_choice is True
+        session = app._session
+        assert session is not None
+        session.set_model(session.model.model_copy(update={"fast_mode": False}))
+        for _ in range(6):
+            await pilot.pause()
+        assert app._fast_choice is False
+        assert f"{ICON_FAST} fast" not in _band(app)

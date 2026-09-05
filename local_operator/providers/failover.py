@@ -2683,10 +2683,10 @@ async def stream_with_failover(
                             "model": current_request.model.model_copy(update={"fast_mode": False})
                         }
                     )
-                    selector = f"{spec.provider}/{spec.model_id}"
+                    refused_selector = f"{spec.provider}/{spec.model_id}"
                     logger.info(
                         "fast mode refused by %s (%s); retrying at standard speed",
-                        selector,
+                        refused_selector,
                         exc.status,
                     )
                     if route_state is not None and not request.isolated:
@@ -2695,7 +2695,7 @@ async def stream_with_failover(
                         # them everywhere else — so the latch and the notice
                         # are the turn's to record. An errand that hits the
                         # refusal simply retries at standard speed silently.
-                        await route_state.record_fast_refusal(selector, exc.message)
+                        await route_state.record_fast_refusal(refused_selector, exc.message)
                     retry_same_key = True
                     continue
                 record(exc, primary=is_primary)

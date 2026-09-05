@@ -2063,10 +2063,13 @@ class OwnedSessionHandle(SessionHandle):
             if callable(forget):
                 forget()
         self._notify()
+        # Same receipt as the terminal's `_fast_receipt` (design D2/D6): no
+        # label, because an aggregator label pushes the line past the notice
+        # width and orphans the last word.
         text = (
-            f"fast mode: off → on for {label} — faster output at premium pricing"
+            "fast mode: off → on — faster output at premium pricing"
             if target
-            else f"fast mode: on → off for {label} — standard speed and pricing"
+            else "fast mode: on → off — standard speed and pricing"
         )
         return SlashResult(kind="notice", text=text, style="info")
 

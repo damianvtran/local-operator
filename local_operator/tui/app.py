@@ -3292,19 +3292,31 @@ class OperatorApp(App[None]):
         self._frontend_apply_scheduled = False
         state = getattr(self, "_pending_frontend_state", None)
         self._pending_frontend_state = None
+        # ONLY on an ordered update, never on the adoption snapshot painted by
+        # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
+        # is restored onto the fresh session's spec (whose dial defaults off),
+        # so reconciling against it read every `/new` and `/reload` as a
+        # provider refusal and dropped the dial the restore was about to put
+        # back (review round 2, F6). An update arrives only after adoption has
+        # finished, so by then a spec with the dial off means someone turned
+        # it off — the user, or `Session._on_fast_refused`.
+        self._reconcile_fast_choice(state)
         self._apply_frontend_state(state)
 
-    def _apply_frontend_state(self, state: Any) -> None:
-        if self._status is None or state is None:
-            return
-        # Reconcile the remembered fast-mode choice with the SPEC. The session
-        # switches its own dial off when a provider refuses fast mode
-        # (`Session._on_fast_refused`), and a choice remembered here would
-        # otherwise re-arm it on the next `/new`, `/reload` or `/model` — the
-        # user would be re-billed for a tier they were just told they cannot
-        # have. The spec is the truth; this app-side memory only exists to
-        # survive a session being REPLACED, never to override one.
-        selected = getattr(state, "selected_model", None)
+    def _reconcile_fast_choice(self, state: Any) -> None:
+        """Drop the remembered fast-mode choice when the SPEC has the dial off.
+
+        The session switches its own dial off when a provider refuses fast
+        mode (`Session._on_fast_refused`), and a choice remembered here would
+        otherwise re-arm it on the next `/new`, `/reload` or `/model` — the
+        user would be re-billed for a tier they were just told they cannot
+        have. The spec is the truth; this app-side memory exists only to
+        survive a session being REPLACED, never to override one. Guarded on
+        the model SUPPORTING the dial, so a switch to a route with no fast
+        tier (where `_spec_with_chosen_fast_mode` already forgets the choice)
+        is not double-handled here.
+        """
+        selected = getattr(state, "selected_model", None) if state is not None else None
         if (
             self._fast_choice
             and selected is not None
@@ -3312,6 +3324,10 @@ class OperatorApp(App[None]):
             and not getattr(selected, "fast_mode", False)
         ):
             self._fast_choice = False
+
+    def _apply_frontend_state(self, state: Any) -> None:
+        if self._status is None or state is None:
+            return
         cost = getattr(state, "cumulative_cost", None)
         knowledge = getattr(getattr(state, "cost_knowledge", "unknown"), "value", "unknown")
         if cost is not None:
@@ -22730,17 +22746,19 @@ def _fast_receipt(label: str, enabled: bool) -> str:
     moment it is incurred rather than buried in help — the whole trade of this
     dial is money for latency.
 
-    No scope clause. "this session" was appended in two spellings and both
-    wrapped: the notice block is ~100 cells and an aggregator label alone can
-    be 40 (design D2), so any trailing clause orphans on a second line for
-    the labels most likely to be fast-capable. The scope is stated where a
-    user asks about it — ``/fast status`` and the command's own description —
-    and nothing here offers to persist the dial, so the receipt loses no fact
-    by stopping at the price.
+    No label and no scope clause, and both were measured off (design D2,
+    D6): the notice block is ~94 cells and an aggregator label alone is up to
+    40 (``openrouter/anthropic/claude-opus-4.8``), so a receipt carrying
+    either orphaned its last word on a second row for exactly the labels
+    most likely to be fast-capable. The band names the model the dial is on
+    one row below, ``/fast status`` states the label and the scope for a user
+    who asks, and nothing here offers to persist the dial — so the receipt
+    loses no fact by stopping at the price.
     """
+    del label  # kept in the signature so every surface calls it the same way
     if enabled:
-        return f"fast mode: off → on for {label} — faster output at premium pricing"
-    return f"fast mode: on → off for {label} — standard speed and pricing"
+        return "fast mode: off → on — faster output at premium pricing"
+    return "fast mode: on → off — standard speed and pricing"
 
 
 def _fast_unavailable(label: str) -> str:
