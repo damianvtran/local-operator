@@ -159,6 +159,7 @@ def run_login(
                 storage_provider, {"key": result, "source": "login", "type": "api_key"}
             )
             _invalidate_cached_listing(storage_provider)
+            _invalidate_cached_usage(storage_provider, auth_store)
             print(f"Stored API key for '{storage_provider}'.")
             _apply_login_defaults(storage_provider)
         return 0
@@ -167,6 +168,7 @@ def run_login(
     result.setdefault("authorized_at", int(time.time() * 1000))
     row = auth_store.upsert_credential(storage_provider, result)
     _invalidate_cached_listing(storage_provider)
+    _invalidate_cached_usage(storage_provider, auth_store)
     identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
@@ -211,6 +213,42 @@ def _invalidate_cached_listing(provider_id: str) -> None:
         invalidate_model_info_cache()
     except Exception:  # noqa: BLE001 - same rule as the listing drop above
         logger.debug("model-info invalidation failed for %s", provider_id, exc_info=True)
+
+
+def _invalidate_cached_usage(provider_id: str, auth_store: "AuthStore") -> None:
+    """Drop the provider's cached usage row after a shell login.
+
+    The TUI's ``/login`` already does this (``ProviderController.login``): a
+    completed login is positive evidence the grant is alive, which contradicts
+    any ``sign-in expired`` (``credential_invalid``) verdict the cached row
+    still carries, and re-authenticating an already-stored account keeps the
+    cache key unchanged so nothing else observes the event. Without this the
+    shell path kept showing the dead-grant note for the cache TTL (~5 min)
+    after ``local-operator login <provider>`` had fixed it (#618 R11).
+
+    Routed through the controller rather than re-deriving the cache key here:
+    the key folds in storage-id aliasing and the account fingerprint, and the
+    fingerprint is a projection of the rows ``auth_store`` now holds -- so the
+    controller has to be built over THIS store, after the upsert, to compute
+    the same key the TUI would. Login callbacks are not needed for that and
+    are left ``None``. Imported lazily, for the same reason as the listing
+    drop: the CLI top level must not pay for the provider stack on
+    ``--help``.
+
+    Best-effort by construction, like its listing twin: a failure costs a
+    stale row until the TTL lapses, whereas raising would fail a login that
+    actually succeeded.
+    """
+    try:
+        from local_operator.providers.controller import ProviderController
+
+        controller = ProviderController(auth_store, login_callbacks=None)
+        try:
+            controller.invalidate_cached_usage(provider_id)
+        finally:
+            controller.close()
+    except Exception:  # noqa: BLE001 - never fail a successful login over a cache
+        logger.debug("usage-cache invalidation failed for %s", provider_id, exc_info=True)
 
 
 def _apply_login_defaults(provider_id: str) -> None:

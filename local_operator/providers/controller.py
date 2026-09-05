@@ -505,7 +505,7 @@ class ProviderController:
         # still carries. Re-authenticating an ALREADY-stored account keeps the
         # account fingerprint (and so the cache key) identical, so nothing else
         # in the system observes this event -- see ``UsageCacheStore.invalidate``.
-        self._invalidate_cached_usage(storage)
+        self.invalidate_cached_usage(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
@@ -649,7 +649,7 @@ class ProviderController:
                 reports.extend(cached)
         return reports
 
-    def _invalidate_cached_usage(self, storage_id: str) -> None:
+    def invalidate_cached_usage(self, storage_id: str) -> None:
         """Best-effort drop of ``storage_id``'s cached usage row after a login.
 
         Never raises, for the reason ``_invalidate_cached_listing`` gives: a
@@ -657,6 +657,15 @@ class ProviderController:
         cache write went wrong afterwards. The next fetch re-derives the state
         from a live refresh either way; this only removes the stale answer that
         would otherwise be served ahead of it.
+
+        Public because the shell ``local-operator login`` (``auth_cli.run_login``)
+        has to drop the same row: it writes the credential through a bare
+        ``AuthStore`` with no controller of its own, and a ``sign-in expired``
+        verdict that ``/login`` clears but a shell login leaves standing for the
+        cache TTL is the R1 asymmetry in its other entry point (#618 R11). The
+        key is derived HERE rather than re-spelled by the CLI because it folds
+        in the storage-id aliasing and the account fingerprint
+        (:meth:`_usage_cache_key`); a second derivation would drift.
         """
         try:
             cache = self._usage_cache_store()
@@ -1230,11 +1239,18 @@ class ProviderController:
                 access = accesses_by_id.get(identity)
                 if access is None:
                     continue
-                if getattr(access, "credential_invalid", False):
+                if access.credential_invalid:
                     # The store minted no bearer and said why: the grant is
                     # dead. Record that verdict instead of probing with an
                     # empty token, which would fail as a generic 401 and land
                     # this account back in the transient-failure path.
+                    #
+                    # Direct access, not ``getattr(..., False)``: every access
+                    # here is an ``OAuthAccess`` row from ``list_oauth_accesses``,
+                    # where the field always exists (default ``False``). The
+                    # defensive spelling only ever covered test doubles that
+                    # omitted the field, and ``configure.py`` reads the same
+                    # field the same way (#618 R12).
                     live[identity] = self._mark_account_invalid(
                         prior, provider=provider, identity=identity, now_ms=now_ms
                     )
