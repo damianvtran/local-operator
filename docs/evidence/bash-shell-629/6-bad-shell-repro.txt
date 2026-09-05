@@ -1,0 +1,25 @@
+$ lop config edit bash.shell '/nonexistent/qa-shell'
+# execute_bash({'command': 'echo hello'})
+is_error: True
+bash.shell: cannot execute '/nonexistent/qa-shell' (No such file or directory). Point it at a real interpreter with `lop config edit bash.shell <path>`, or clear it with `lop config edit bash.shell ''` to auto-resolve bash on PATH.
+
+$ lop config edit bash.shell '/tmp/qa/not-executable-shell'
+# execute_bash({'command': 'echo hello'})
+is_error: True
+bash.shell: cannot execute '/tmp/qa/not-executable-shell' (Permission denied). Point it at a real interpreter with `lop config edit bash.shell <path>`, or clear it with `lop config edit bash.shell ''` to auto-resolve bash on PATH.
+
+$ lop config edit bash.shell '~/nonexistent/bash'
+# execute_bash({'command': 'echo hello'})
+is_error: True
+bash.shell: cannot execute '/tmp/iso-629-home/nonexistent/bash' (No such file or directory). Point it at a real interpreter with `lop config edit bash.shell <path>`, or clear it with `lop config edit bash.shell ''` to auto-resolve bash on PATH.
+
+$ lop config edit bash.shell ''
+# execute_bash({'command': 'echo hello'})
+is_error: False
+exit code: 0
+--- stdout ---
+hello
+
+--- stderr ---
+(empty)
+
