@@ -416,3 +416,82 @@ async def test_a_deliberate_stop_ends_the_turn_in_both_states(
     # lets a message reach it instead of the silent steer queue.
     with pytest.raises(ConnectionError, match="stopped"):
         await remote.prompt("the message typed after the stop")
+
+
+@pytest.mark.asyncio
+async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch) -> None:
+    """#642 (UX U11 from #619): a viewer going cold mid-turn gets a terminal state.
+
+    ``_go_cold`` cleared ``_streaming`` without emitting an ``AgentEndEvent``,
+    so the app — which keeps its working line, band and title open until an
+    end reaches it — held a spinner forever with the toast suppressed too.
+
+    The end must be delivered DIRECTLY, not buffered: a failed successor
+    ``_dial`` leaves ``_ready_for_events`` False, and a buffered end would be
+    drained by the NEXT bind's ``_finish_sync`` behind that bind's seeded
+    ``AgentStartEvent``, where the controller (which drops only ``gen <
+    current``) would let it tear down the fresh turn. So the assertion is on
+    both sides: exactly one aborted end reached the handler, and nothing was
+    left in the buffer for a later runtime to inherit.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = False
+    received: list[Any] = []
+    remote.subscribe(received.append)
+
+    remote._go_cold()
+
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1 and ends[0].aborted is True and ends[0].error is None
+    assert remote._buffered_events == []
+    assert remote.is_streaming is False
+    assert remote.is_cold
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
+    tmp_path, monkeypatch
+) -> None:
+    """The common path: ``_on_disconnected`` already ended the turn, so the
+    go-cold end is a no-op rather than a second "interrupted" notice.
+
+    ``_end_turn_locally`` returns on ``not self._streaming``, which is what
+    makes the two callers safe to stack — pinned here so a later rewrite of
+    either does not turn one owner loss into two aborted ends on the app.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = True
+    received: list[Any] = []
+    remote.subscribe(received.append)
+
+    remote._on_disconnected("owner exited")
+    if remote._recovery_task is not None:
+        remote._recovery_task.cancel()
+        try:
+            await remote._recovery_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — teardown only
+            pass
+    remote._go_cold()
+
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1, f"one owner loss produced {len(ends)} aborted ends"
+    assert remote._buffered_events == []
+    assert remote.is_streaming is False

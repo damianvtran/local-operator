@@ -1545,6 +1545,10 @@ class RemoteSession:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
             return
+        self._deliver(event)
+
+    def _deliver(self, event: AgentEvent[Any]) -> None:
+        """Hand ``event`` to every subscribed handler now, buffering nothing."""
         for handler in list(self._handlers):
             result = handler(event)
             if inspect.isawaitable(result):
@@ -1690,18 +1694,36 @@ class RemoteSession:
         self._end_turn_locally()
         self._recovery_task = asyncio.create_task(self._recover_owner())
 
-    def _end_turn_locally(self) -> None:
+    def _end_turn_locally(self, *, direct: bool = False) -> None:
         """End an in-flight turn the owner can no longer end itself.
 
-        Both terminal outcomes need it and neither can get it from the owner:
-        a killed owner factually aborted the turn, and a stopped one ended the
-        whole session under it. Marked through the normal event path so no
+        All three terminal outcomes need it and none can get it from the
+        owner: a killed owner factually aborted the turn, a stopped one ended
+        the whole session under it, and a viewer going cold has no runtime
+        left to hear from. Marked through the normal event path so no
         card/banner or attach vocabulary appears — the transcript reads as an
         ordinary aborted turn, which is what it is.
+
+        ``direct`` bypasses the sync buffer and hands the end straight to the
+        subscribed handlers (dropping it when there are none). The go-cold
+        caller needs this: a failed successor ``_dial`` leaves
+        ``_ready_for_events`` False, so a BUFFERED end would sit until the
+        NEXT bind's ``_finish_sync`` drained it — behind that bind's seeded
+        ``AgentStartEvent``, and stamped with a generation the fresh runtime
+        does not necessarily exceed (the controller drops only ``gen <
+        current``). Delivered late it would tear down the new turn it never
+        belonged to; delivered now it ends the one it does. A handler-less
+        drop is correct on that path too: with nobody subscribed there is no
+        spinner to stop, and parking the end for a later subscriber recreates
+        the same stale-end hazard one seam over.
         """
         if not self._streaming:
             return
-        self._emit_or_buffer(AgentEndEvent(aborted=True, generation=self._generation, error=None))
+        end = AgentEndEvent(aborted=True, generation=self._generation, error=None)
+        if direct:
+            self._deliver(end)
+        else:
+            self._emit_or_buffer(end)
         self._streaming = False
 
     async def _session_was_stopped(self) -> bool:
@@ -1753,6 +1775,22 @@ class RemoteSession:
         ``_owner_ready`` is SET rather than left clear because a cold viewer is
         ready — the next prompt engages a runtime through ``_ensure_bound``
         instead of waiting for one that is never coming back.
+
+        A turn still in flight is ENDED through the event path, not merely
+        flagged off (#642, UX U11). Clearing ``_streaming`` alone told the
+        facade the turn was over while the app — which holds its working line,
+        band and title open until an ``AgentEndEvent`` reaches it — was never
+        told anything, so a viewer that went cold mid-turn held a spinner
+        forever with no toast and no notice. On the common path this is a
+        no-op: ``_on_disconnected`` already ended the turn before
+        ``_recover_owner`` started. The case it exists for is a SUCCESSOR
+        dying mid-reattach — ``_on_disconnected`` returns early while
+        ``_recovering``, and ``_apply_frontend_facades`` has just re-marked
+        the turn live from the successor's snapshot — which leaves
+        ``_streaming`` True with nothing else on the way to clear it.
+        Delivered ``direct`` for the reason on ``_end_turn_locally``: the
+        failed dial left the sync buffer closed, and a buffered end would land
+        on the NEXT runtime's turn instead of this one.
         """
         client, self._client = self._client, None
         if client is not None:
@@ -1760,7 +1798,7 @@ class RemoteSession:
                 client.close()
             except Exception:  # noqa: BLE001 — teardown of a dead socket
                 logger.debug("closing the lost owner connection failed", exc_info=True)
-        self._streaming = False
+        self._end_turn_locally(direct=True)
         self._owner_ready.set()
         callback = self._went_cold_callback
         if callback is None:
