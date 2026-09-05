@@ -349,12 +349,23 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     # Uses this computer's Radient login and user service. The final setup or
     # status notice is its receipt, so the command has no model-facing echo.
-    # The desktop hosts it in the same Radient account surface the proxies
-    # serve, rather than shelling the terminal-only setup flow.
+    #
+    # NOT offered on the desktop: `desktop_destination` is deliberately unset,
+    # which keeps it out of `command_catalogue()` and therefore out of the
+    # command palette and the slash popup. It previously advertised
+    # `radient.mobile`, a destination the renderer has no adapter for, so the
+    # command was fully discoverable and then dead-ended in an error naming an
+    # internal id (code review 8, design D4, UX U8).
+    #
+    # Offered-but-broken is the worst of the three options. The remaining two
+    # are to build it or to withhold it, and building it is not a remediation:
+    # phone provisioning has no proxy behind `/v1/desktop/radient` (which
+    # serves account, billing, usage and agent catalogue only), so a desktop
+    # host would have to invent an upstream contract. The terminal command is
+    # untouched and still does the whole job.
     SlashCommand(
         "mobile",
         "Radient phone access: status, enable, stop, billing",
-        desktop_destination="radient.mobile",
     ),
     # The listing (or the masked paste prompt) is the receipt. The argument is
     # a KEY NAME, never the secret, so echoing it would only restate the
