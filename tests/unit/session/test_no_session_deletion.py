@@ -60,17 +60,34 @@ _NAMES = frozenset(
 #: Modules whose functions of those names hit the filesystem.
 _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 
-#: ``(path::function, call-label, reason)`` — why this call can never touch a
-#: directory under ``sessions/``. ``<module>`` is module scope. Keep the
-#: reasons honest: a reviewer reading a new row should be able to open the
-#: line and agree.
-_ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
+#: ``(path::function, call-label, reason[, count])`` — why this call can never
+#: touch a directory under ``sessions/``. ``<module>`` is module scope. Keep
+#: the reasons honest: a reviewer reading a new row should be able to open
+#: the line and agree.
+#:
+#: ``count`` (default 1) is how many calls of that shape the function holds.
+#: A label is a shape, not a site, so without the count a SECOND
+#: ``<path>.replace`` added to an excused function matched the existing row
+#: silently (review round 3, R3-3). Now the live count must EQUAL the
+#: declared one: a new same-shape call fails until a reviewer bumps the
+#: count with a reason, and a removed one fails as stale.
+_ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
         "shutil.rmtree",
         "THE session remover: guarded by the store marker, the config dir, "
         "the hard guards and the cleanup log",
+    ),
+    (
+        "local_operator/session/cleanup.py::_write_record",
+        "os.replace",
+        "tmp FILE -> last-cleanup.json FILE beside the session dirs (R3-4)",
+    ),
+    (
+        "local_operator/session/cleanup.py::_write_record",
+        "<path>.unlink",
+        "the tmp FILE of a failed record write",
     ),
     # -- agent / team storage (agents/<id>/, teams/<name>/), never sessions/ --
     ("local_operator/agents.py::AgentRegistry.delete_agent", "shutil.rmtree", "agents/<id>"),
@@ -110,6 +127,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/teams.py::TeamRegistry._save_team_locked",
         "shutil.rmtree",
         "teams/<name> staging swap",
+        2,
     ),
     (
         "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
@@ -120,11 +138,13 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
         "shutil.rmtree",
         "teams/<name> staging swap",
+        2,
     ),
     (
         "local_operator/teams.py::TeamRegistry._swap_row_directory_locked",
         "os.replace",
         "teams/<name> staging swap",
+        3,
     ),
     (
         "local_operator/teams.py::TeamRegistry._recover_interrupted_swap_locked",
@@ -141,6 +161,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/server/routes/transcription.py::create_transcription_endpoint",
         "shutil.rmtree",
         "mkdtemp upload dir",
+        2,
     ),
     # -- file-level atomic writes: temp FILE -> its final FILE name ---------
     # These write a file that may live INSIDE a session directory (transcript,
@@ -195,6 +216,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/skills/index.py::SkillIndex._persist_cache",
         "os.replace",
         "temp FILEs -> index cache",
+        2,
     ),
     ("local_operator/tools/spill.py::_atomic_write_bytes", "os.replace", "temp FILE -> spill"),
     ("local_operator/tools/spill.py::_atomic_write_bytes", "<path>.unlink", "temp FILE -> spill"),
@@ -265,6 +287,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",
         "<path>.replace",
         "facade .replace() on in-memory state",
+        4,
     ),
     (
         "local_operator/evaluation/runner/provider_client.py::ProviderModelClient._maybe_compact",
@@ -289,6 +312,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/browser_bridge/install.py::uninstall",
         "<path>.unlink",
         "plist/unit FILEs; state_store.remove()",
+        2,
     ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
@@ -388,6 +412,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
         "stale runtime/<pid>.json FILE",
+        2,
     ),
     (
         "local_operator/session/runtime/registry.py::unpublish",
@@ -408,11 +433,13 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/session_lease.py::SessionLease.release",
         "<path>.unlink",
         "own lease + mirror FILEs",
+        2,
     ),
     (
         "local_operator/session_lease.py::reap_proven_dead_session_claim",
         "<path>.unlink",
         "a dead owner's lease + mirror FILEs; the directory is kept (QA N1)",
+        2,
     ),
     (
         "local_operator/tools/group_reaper.py::_rewrite_without_pgid_locked",
@@ -432,9 +459,9 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "<path>.unlink",
         "build marker FILE",
     ),
-    ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs"),
+    ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
-    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs"),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
     ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
@@ -535,6 +562,7 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/tui/app.py::OperatorApp._recall_queued_steers",
         "<path>.remove",
         "widget.remove() / list.remove",
+        3,
     ),
     ("local_operator/tui/app.py::OperatorApp._unmount_prompt", "<path>.remove", "widget.remove()"),
     (
@@ -551,10 +579,14 @@ _ALLOWED_ROWS: tuple[tuple[str, str, str], ...] = (
         "local_operator/tui/widgets/transcript.py::TranscriptView.remove_block",
         "<path>.remove",
         "widget.remove()",
+        2,
     ),
 )
 
-_ALLOWED: dict[str, str] = {f"{fn}::{label}": reason for fn, label, reason in _ALLOWED_ROWS}
+_ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
+_ALLOWED_COUNTS: dict[str, int] = {
+    f"{row[0]}::{row[1]}": int(row[3]) if len(row) > 3 else 1 for row in _ALLOWED_ROWS
+}
 
 
 def _qualname_index(tree: ast.Module) -> dict[int, str]:
@@ -721,17 +753,53 @@ def test_no_session_directory_removal_outside_cleanup() -> None:
     )
 
 
-def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
-    """Belt for the allow-list itself: a DIRECTORY remover (``rmtree``/
-    ``rmdir``/``removedirs``) under ``local_operator/session/``,
-    ``session_factory.py``, ``resume.py`` and ``session_lease.py`` may appear
-    in exactly ONE function — the cleanup remover — allow-listed or not."""
-    near = {
+#: Functions near the session store that DISPLACE a path (``rename``/
+#: ``replace``/``renames``/``move``), each with the receiver it displaces.
+#: Every one is a tmp-file-to-file atomic write or an in-memory facade; a
+#: session DIRECTORY rename is a deletion of the original by another name,
+#: and none of these can reach one. A new displacer in the neighbourhood
+#: fails here even if allow-listed above (R3-3, I5: a ``session_dir.replace``
+#: in ``write_session_title`` rode on that function's existing row).
+_NEAR_DISPLACERS: frozenset[str] = frozenset(
+    {
+        "local_operator/resume.py::write_session_title",  # tmp -> title.json
+        "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
+        "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
+        "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
+        "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
+        "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
+        "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
+        "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
+        "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
+        "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
+        "local_operator/session/remote.py::RemoteSession._install_frontend",  # facade
+        "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",  # facade
+        "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
+        "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
+        "local_operator/session/search_index.py::_save",  # tmp -> index FILE
+        "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
+        "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
+    }
+)
+
+
+def _near_sessions() -> set[str]:
+    return {
         *sorted(p.relative_to(ROOT).as_posix() for p in (PACKAGE / "session").rglob("*.py")),
         "local_operator/session_factory.py",
         "local_operator/resume.py",
         "local_operator/session_lease.py",
     }
+
+
+def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
+    """Belt for the allow-list itself: a DIRECTORY remover (``rmtree``/
+    ``rmdir``/``removedirs``) under ``local_operator/session/``,
+    ``session_factory.py``, ``resume.py`` and ``session_lease.py`` may appear
+    in exactly ONE function — the cleanup remover — allow-listed or not."""
+    near = _near_sessions()
     hits = sorted(
         f"{rel}::{owner}"
         for rel, _line, label, owner in _call_sites()
@@ -740,12 +808,48 @@ def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
     assert hits == [f"{CLEANUP_MODULE}::remove_session_dir"], hits
 
 
+def test_displacers_near_sessions_are_the_named_set() -> None:
+    """Second belt (R3-3): a ``rename``/``replace``/``renames``/``move`` in the
+    same neighbourhood must be one of :data:`_NEAR_DISPLACERS` — by function,
+    so the allow-list's shape key cannot excuse a session-directory rename
+    added to a function that already replaces a sidecar file."""
+    near = _near_sessions()
+    hits = {
+        f"{rel}::{owner}"
+        for rel, _line, label, owner in _call_sites()
+        if rel in near and label.rsplit(".", 1)[-1] in ("rename", "replace", "renames", "move")
+    }
+    unexpected = sorted(hits - _NEAR_DISPLACERS)
+    assert not unexpected, (
+        "a path displacer appeared near the session store; if it cannot reach a "
+        f"session directory add it to _NEAR_DISPLACERS with its receiver: {unexpected}"
+    )
+    gone = sorted(_NEAR_DISPLACERS - hits)
+    assert not gone, f"_NEAR_DISPLACERS entries with no call any more: {gone}"
+
+
 def test_allow_list_is_not_stale() -> None:
-    """Every allow-list entry must still name a real call site, so a removed
-    call cannot leave a dangling permission behind for the next one."""
-    live = {f"{rel}::{owner}::{label}" for rel, _line, label, owner in _call_sites()}
-    stale = sorted(set(_ALLOWED) - live)
+    """Every allow-list entry must name EXACTLY as many live call sites as it
+    declares: a removed call cannot leave a dangling permission behind for
+    the next one, and a NEW same-shape call in an excused function cannot
+    ride on the existing row (R3-3). The message names the key, the declared
+    and the live count, and every line, so the fix is one edit."""
+    live: dict[str, list[int]] = {}
+    for rel, line, label, owner in _call_sites():
+        live.setdefault(f"{rel}::{owner}::{label}", []).append(line)
+    stale = sorted(set(_ALLOWED) - set(live))
     assert not stale, f"allow-list entries with no call site any more: {stale}"
+    drift = [
+        f"{key}: declared {_ALLOWED_COUNTS[key]}, live {len(live[key])} "
+        f"at lines {sorted(live[key])}"
+        for key in sorted(_ALLOWED)
+        if len(live[key]) != _ALLOWED_COUNTS[key]
+    ]
+    assert not drift, (
+        "allow-list rows whose call count changed; a NEW call needs its own review "
+        "(bump the count with a reason) and a removed one needs the row trimmed:\n  "
+        + "\n  ".join(drift)
+    )
 
 
 _MUTANTS = [

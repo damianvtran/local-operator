@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -300,13 +301,12 @@ def test_never_active_directories_are_outside_the_ranked_set(tmp_path: Path) -> 
 
 
 def test_the_recent_guard_is_the_pickers_first_page(tmp_path: Path) -> None:
-    """QA round 2, Q8. The 10 newest directories are subagent-origin or
-    empty; the 10 rows the user sees on ``/resume`` are OLDER user-origin
-    transcripts. ``max_sessions: 12`` must keep every picker row: the
-    recent-N guard is ``recent_sessions(limit=10)`` itself, not a ranking
-    of every directory. Subagent-origin transcripts still rank under the
-    cap by activity — they are real transcripts, never "empty" — so the
-    12 kept are the 10 picker rows plus the 2 most recent subagent runs."""
+    """QA round 2, Q8 + UX round 3, U15. The 10 newest directories are
+    subagent-origin or empty; the 10 rows the user sees on ``/resume`` are
+    OLDER user-origin transcripts. ``max_sessions: 12`` must keep every
+    picker row — the recent-N guard is ``recent_sessions(limit=10)``
+    itself — and, since the cap counts in the picker's unit, must touch
+    NO subagent-origin directory at all: 10 conversations is under 12."""
     from local_operator.resume import (
         ORIGIN_SUBAGENT,
         mark_session_origin,
@@ -324,17 +324,68 @@ def test_the_recent_guard_is_the_pickers_first_page(tmp_path: Path) -> None:
     picker = [name for name, _stamp in recent_sessions(tmp_path, limit=10)]
     assert picker == [f"user{i:02d}" for i in range(9, -1, -1)]
     result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=12), now=NOW)
-    survivors = _names(tmp_path)
-    assert {f"user{i:02d}" for i in range(10)} <= survivors, "a picker row was removed"
-    assert {f"empty{i:02d}" for i in range(3)} <= survivors
-    # Ranked set = 17 transcripts; cap 12; guard protects the 10 user rows;
-    # the 5 oldest subagent runs go (sub00..sub04), sub05/sub06 stay.
-    assert {c.session for c in result.removed} == {f"sub{i:02d}" for i in range(5)}
-    assert all(c.policy == "max_sessions" for c in result.removed)
-    assert {"sub05", "sub06"} <= survivors
-    # The guard rows are reported as the picker's, by name.
+    assert result.removed == []
+    assert len(_names(tmp_path)) == 20
+    # The guard rows are reported as the picker's, by name — none needed here.
     guarded = {name for name, guard in result.protected if guard.startswith("one of the 10")}
     assert guarded <= set(picker)
+
+
+def _operator_shaped_store(tmp_path: Path) -> tuple[list[str], list[str]]:
+    """UX round 3's store: 210 directories, 31 user conversations, 179
+    subagent-origin runs interleaved by age so the subagent runs are mostly
+    NEWER than the conversations (as on the operator's real store)."""
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    mark_store(tmp_path / "sessions")
+    users: list[str] = []
+    subs: list[str] = []
+    for index in range(31):  # 62..2 d old, every other day
+        users.append(_session(tmp_path, f"user{index:02d}", age_days=62 - 2 * index).name)
+    for index in range(179):  # 0.1..17.9 d old — the newest 179 directories
+        directory = _session(tmp_path, f"sub{index:03d}", age_days=0.1 * (index + 1))
+        mark_session_origin(directory, ORIGIN_SUBAGENT)
+        subs.append(directory.name)
+    return users, subs
+
+
+def test_max_sessions_counts_in_the_pickers_unit(tmp_path: Path) -> None:
+    """UX round 3, U15: ``/resume`` says "31 sessions"; ``max_sessions: 50``
+    must therefore remove NOTHING — 31 is under 50 — and no subagent-origin
+    directory is a ``max_sessions`` candidate at any N. Before: 159 removed,
+    21 of them the user's own conversations, the picker held at 10 only by
+    the guard floor."""
+    from local_operator.resume import recent_sessions
+
+    users, subs = _operator_shaped_store(tmp_path)
+    assert len(recent_sessions(tmp_path)) == 31
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=50), now=NOW)
+    assert result.removed == []
+    assert len(_names(tmp_path)) == 210
+
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=20), now=NOW)
+    # The 11 OLDEST conversations go; the 20 newest survive; every subagent
+    # run is untouched whatever its age.
+    assert {c.session for c in result.removed} == set(users[:11])
+    assert all(c.policy == "max_sessions" and c.origin == "user" for c in result.removed)
+    survivors = _names(tmp_path)
+    assert set(users[11:]) <= survivors
+    assert set(subs) <= survivors
+    assert [name for name, _ in recent_sessions(tmp_path)] == list(reversed(users[11:]))
+
+
+def test_age_and_byte_limits_still_consider_subagent_runs(tmp_path: Path) -> None:
+    """U15 narrows ``max_sessions`` only: staleness and disk are about the
+    directory, not about whose it is, so ``max_inactive_days`` takes an old
+    subagent run and labels its origin on the row."""
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    mark_store(tmp_path / "sessions")
+    _session(tmp_path, "conv", age_days=2)
+    old = _session(tmp_path, "oldsub", age_days=90)
+    mark_session_origin(old, ORIGIN_SUBAGENT)
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_inactive_days=30), now=NOW)
+    assert [(c.session, c.origin) for c in result.removed] == [("oldsub", "subagent")]
 
 
 def test_equal_stamps_are_stable_across_consecutive_runs(tmp_path: Path) -> None:
@@ -734,19 +785,44 @@ def test_a_removing_startup_pass_leaves_a_last_cleanup_record(tmp_path: Path) ->
     )
 
     _store(tmp_path, 12, transcript=True, age_days=1)
-    _session(tmp_path, "doomed", transcript=False, age_days=400)
+    _session(tmp_path, "doomed", transcript=True, age_days=400)
     manager = ConfigManager(tmp_path)
-    manager.update_config({"session": {"cleanup": {"enabled": True, "remove_empty": True}}})
+    manager.update_config({"session": {"cleanup": {"enabled": True, "max_inactive_days": 30}}})
     result = cleanup_from_config(ConfigManager(tmp_path), tmp_path)
     assert [c.session for c in result.removed] == ["doomed"]
     record = json.loads((tmp_path / "sessions" / LAST_CLEANUP_NAME).read_text())
-    assert record["removed"] == 1 and record["policies"] == {"remove_empty": 1}
+    assert record["removed"] == 1 and record["policies"] == {"max_inactive_days": 1}
+    assert record["origins"] == {"user": 1} and record["quiet"] is None
     assert record["actor"] == "startup" and record["acknowledged"] is False
-    # First reader takes it; second reader gets nothing — one announcement.
+    # The writer is THIS process, so this viewer takes it; a second reader
+    # gets nothing — one announcement.
     taken = take_unannounced_cleanup(tmp_path / "sessions")
     assert taken is not None and taken["removed"] == 1
     assert take_unannounced_cleanup(tmp_path / "sessions") is None
     assert json.loads((tmp_path / "sessions" / LAST_CLEANUP_NAME).read_text())["acknowledged"]
+
+
+def test_a_never_active_only_pass_is_recorded_but_quiet(tmp_path: Path) -> None:
+    """Design round 3, N6: the record is written (the jsonl and the WARNING
+    still say what went) but pre-acknowledged, with the reason, so no viewer
+    announces an idle open-and-quit directory's removal."""
+    from local_operator.session.cleanup import (
+        LAST_CLEANUP_NAME,
+        cleanup_from_config,
+        take_unannounced_cleanup,
+    )
+
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    _session(tmp_path, "doomed", transcript=False, age_days=400)
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": True, "remove_empty": True}}}
+    )
+    result = cleanup_from_config(ConfigManager(tmp_path), tmp_path)
+    assert [(c.session, c.active) for c in result.removed] == [("doomed", False)]
+    record = json.loads((tmp_path / "sessions" / LAST_CLEANUP_NAME).read_text())
+    assert record["removed"] == 1 and record["acknowledged"] is True
+    assert record["quiet"] == "only never-active directories were removed"
+    assert take_unannounced_cleanup(tmp_path / "sessions") is None
 
 
 def test_a_pass_that_removed_nothing_writes_no_record(tmp_path: Path) -> None:
@@ -775,3 +851,300 @@ def test_the_notice_names_count_policy_record_and_preview() -> None:
     assert "7 by max_inactive_days" in text and "2 by remove_empty" in text
     assert "~/.local-operator/sessions/.cleanup-log.jsonl" in text
     assert "lop sessions cleanup --dry-run" in text and "/settings" in text
+
+
+# ---------------------------------------------------------------------------
+# Every guard fails CLOSED (review round 3, R3-1)
+# ---------------------------------------------------------------------------
+
+
+def _aggressive_store(tmp_path: Path, count: int = 15) -> None:
+    """A store every limit would gut: old, small, transcripted, unguarded."""
+    _store(tmp_path, count, transcript=True, age_days=400)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["_claimed", "_lease_owner_alive", "_has_wake", "_has_spooled_mail"],
+)
+def test_a_guard_that_raises_keeps_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """Each hard guard, made to raise something it did not anticipate: the
+    directory is KEPT, the refusal names the guard, nothing is removed."""
+    _aggressive_store(tmp_path)
+
+    def boom(*_args: object, **_kwargs: object) -> bool:
+        raise MemoryError("probe exploded")
+
+    monkeypatch.setattr(cleanup, target, boom)
+    result = run_cleanup(tmp_path, dataclasses.replace(AGGRESSIVE, enabled=True), now=NOW)
+    assert result.removed == []
+    assert len(_names(tmp_path)) == 15
+    # The 10 picker rows are kept by the recent guard first; the other 5 reach
+    # the hard guards and must be kept BY the failure, named.
+    failed = {name for name, guard in result.protected if guard == "guard failed: MemoryError"}
+    assert failed == {f"s{i:03d}" for i in range(10, 15)}  # s000..s009 tie-break as recent
+
+
+def test_an_unreadable_claim_marker_keeps_the_directory(tmp_path: Path) -> None:
+    """A PRESENT marker that cannot be read is "claimed", not "unclaimed":
+    ``retention._is_claimed`` answers False to EACCES because it serves
+    liveness questions where "assume dead" is right; the cleanup wrapper
+    must not inherit that default."""
+    import stat
+
+    _aggressive_store(tmp_path, 12)  # s010/s011 sit outside the recent 10
+    marker = tmp_path / "sessions" / "s011" / LIVE_MARKER_NAME
+    marker.write_text("1", encoding="utf-8")
+    marker.chmod(0)
+    if os.access(marker, os.R_OK):  # root, or a filesystem without modes
+        pytest.skip("cannot make the marker unreadable here")
+    try:
+        result = run_cleanup(tmp_path, dataclasses.replace(AGGRESSIVE, enabled=True), now=NOW)
+    finally:
+        marker.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    assert "s011" in _names(tmp_path)
+    assert ("s011", "claimed by a live process") in result.protected
+    assert {c.session for c in result.removed} == {"s010"}
+
+
+def test_a_picker_that_cannot_be_listed_refuses_the_whole_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1's reproduction: ``recent_sessions`` raising used to yield an
+    EMPTY recent set and the run proceeded with zero recent protection
+    (5 -> 12 of 15 removable, nothing logged). Now the run is SKIPPED with
+    the cause named, and nothing is removed — in a dry run or a real one."""
+    from unittest import mock
+
+    from local_operator import resume
+
+    _store(tmp_path, 15, transcript=True)
+    with mock.patch.object(resume, "recent_sessions", side_effect=RuntimeError("readdir")):
+        preview = run_cleanup(
+            tmp_path, CleanupPolicy(enabled=True, max_sessions=3), now=NOW, dry_run=True
+        )
+        real = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=3), now=NOW)
+    for result in (preview, real):
+        assert result.removed == [] and result.chosen == []
+        assert result.skipped is not None and result.skipped.startswith("guard unavailable")
+        assert "RuntimeError" in result.skipped and result.errors == 1
+    assert len(_names(tmp_path)) == 15
+
+
+def test_a_picker_import_failure_refuses_the_whole_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lazy ``import local_operator.resume`` failing is the same shape."""
+    import builtins
+    import sys
+
+    _store(tmp_path, 15, transcript=True)
+    real_import = builtins.__import__
+
+    def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "local_operator.resume":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "local_operator.resume", raising=False)
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=3), now=NOW)
+    assert result.removed == []
+    assert result.skipped is not None and "ImportError" in result.skipped
+    assert len(_names(tmp_path)) == 15
+
+
+def test_an_unresolvable_live_dir_still_protects_nothing_extra_but_removes_nothing_live(
+    tmp_path: Path,
+) -> None:
+    """``live_dir`` that cannot be resolved: the current session is found by
+    identity, so an unresolvable path means "no current session here" — the
+    hard guards (a live claim) still protect the directory the caller meant."""
+    _aggressive_store(tmp_path, 12)
+    (tmp_path / "sessions" / "s011" / LIVE_MARKER_NAME).write_text(str(os.getpid()))
+    result = run_cleanup(
+        tmp_path,
+        dataclasses.replace(AGGRESSIVE, enabled=True),
+        live_dir=tmp_path / "sessions" / "does-not-exist",
+        now=NOW,
+    )
+    assert "s011" in _names(tmp_path)
+    assert ("s011", "claimed by a live process") in result.protected
+    assert {c.session for c in result.removed} == {"s010"}
+
+
+# ---------------------------------------------------------------------------
+# The notice record is read defensively (review round 3, R3-2 / QA Q11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"removed": "many", "acknowledged": False},
+        {"removed": 2, "policies": "remove_empty"},
+        {"removed": 2, "policies": {"remove_empty": "two"}},
+        {"removed": 2, "policies": {3: 1, None: 2}},
+        {"removed": 2, "origins": ["user"]},
+        {"removed": 2.5, "record": 12},
+        {"removed": None},
+        {"removed": True, "policies": {"x": True}},
+        {"removed": [1, 2]},
+        "not even a dict",
+        None,
+        [],
+    ],
+)
+def test_the_notice_formats_any_record_shape(payload: object) -> None:
+    """A hand-edited or newer-schema record must format, never raise: the
+    formatter runs at boot and took the first frame down on
+    ``"removed": "many"`` (R3-2)."""
+    from local_operator.session.cleanup import format_cleanup_notice
+
+    text = format_cleanup_notice(payload)
+    assert text.startswith("session cleanup removed ")
+    assert "lop sessions cleanup --dry-run" in text
+
+
+def test_the_notice_labels_origins() -> None:
+    """U15: the notice says whose sessions went, not only how many."""
+    from local_operator.session.cleanup import format_cleanup_notice
+
+    text = format_cleanup_notice(
+        {"removed": 5, "policies": {"max_sessions": 5}, "origins": {"user": 2, "subagent": 3}}
+    )
+    assert "5 by max_sessions" in text and "3 subagent" in text and "2 user" in text
+
+
+def test_the_record_is_written_atomically_and_a_stuck_one_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R3-4: tmp + replace, so a viewer never reads a torn record; a record
+    that cannot be flipped announces again and says so at debug."""
+    from local_operator.session.cleanup import (
+        LAST_CLEANUP_NAME,
+        Candidate,
+        CleanupResult,
+        take_unannounced_cleanup,
+        write_last_cleanup,
+    )
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    result = CleanupResult(scanned=3)
+    result.removed = [Candidate("a", "remove_empty", "no transcript")]
+    write_last_cleanup(sessions, result, actor="startup")
+    assert not (sessions / (LAST_CLEANUP_NAME + ".tmp")).exists()
+    payload = json.loads((sessions / LAST_CLEANUP_NAME).read_text())
+    assert payload["origins"] == {"user": 1} and payload["acknowledged"] is False
+    sessions.chmod(0o500)
+    if os.access(sessions, os.W_OK):
+        sessions.chmod(0o700)
+        pytest.skip("cannot make the store read-only here")
+    try:
+        with caplog.at_level(logging.DEBUG, logger="local_operator.session.cleanup"):
+            first = take_unannounced_cleanup(sessions)
+            second = take_unannounced_cleanup(sessions)
+    finally:
+        sessions.chmod(0o700)
+    assert first is not None and second is not None, "still announced: the facts are true"
+    assert "will repeat" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The picker, ``@latest`` and ``resume_dir`` agree on membership (R3-5)
+# ---------------------------------------------------------------------------
+
+
+def test_an_inbox_only_session_is_listed_latest_and_resumable(tmp_path: Path) -> None:
+    """A peer's message spooled into an idle launch: the picker ranks it
+    first (a spooled message is a reason to come back), ``@latest`` picks
+    the same row, and ``resume_dir`` opens it rather than refusing."""
+    from local_operator.resume import RESUME_LATEST, recent_sessions, resume_dir
+    from local_operator.session.runtime.inbox import INBOX_NAME
+
+    mark_store(tmp_path / "sessions")
+    _session(tmp_path, "conv", age_days=3)
+    mailonly = tmp_path / "sessions" / "mailonly"
+    mailonly.mkdir()
+    (mailonly / INBOX_NAME).write_text('{"from": "peer"}\n', encoding="utf-8")
+    stamp = NOW - DAY
+    os.utime(mailonly / INBOX_NAME, (stamp, stamp))
+
+    picker = [name for name, _ in recent_sessions(tmp_path)]
+    assert picker == ["mailonly", "conv"]
+    assert resume_dir(tmp_path, RESUME_LATEST).name == "mailonly"
+    assert resume_dir(tmp_path, "mailonly") == mailonly
+    # And it is kept by the policy: a picker row first, and behind that a
+    # hard-guarded one (never a remove_empty candidate while mail is spooled).
+    result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, remove_empty=True), now=NOW)
+    assert result.removed == []
+    assert ("mailonly", "one of the 10 most recent") in result.protected
+    assert cleanup._guard(mailonly, tmp_path, NOW) == "has unread spooled mail"
+
+
+def test_latest_breaks_equal_stamps_the_way_the_picker_does(tmp_path: Path) -> None:
+    """Same clock, same tie-break: with equal stamps ``@latest`` is the
+    picker's first row (ascending id), not ``max``'s largest id."""
+    from local_operator.resume import RESUME_LATEST, recent_sessions, resume_dir
+
+    mark_store(tmp_path / "sessions")
+    for name in ("b", "c", "a"):
+        _session(tmp_path, name, age_days=3)
+    assert [n for n, _ in recent_sessions(tmp_path)] == ["a", "b", "c"]
+    assert resume_dir(tmp_path, RESUME_LATEST).name == "a"
+
+
+# ---------------------------------------------------------------------------
+# The removing runtime's viewer announces (UX round 3, U14)
+# ---------------------------------------------------------------------------
+
+
+def _record(sessions: Path, pid: int) -> None:
+    from local_operator.session.cleanup import LAST_CLEANUP_NAME
+
+    sessions.mkdir(exist_ok=True)
+    (sessions / LAST_CLEANUP_NAME).write_text(
+        json.dumps({"removed": 2, "pid": pid, "acknowledged": False, "policies": {}})
+    )
+
+
+def test_the_viewer_of_the_removing_runtime_takes_the_record(tmp_path: Path) -> None:
+    """While the removing runtime lives, only a viewer dialed into THAT pid
+    announces; every other viewer (another terminal's runtime, a cold
+    viewer) defers and leaves the record unacknowledged."""
+    import subprocess
+    import sys
+
+    from local_operator.session.cleanup import take_unannounced_cleanup
+
+    sessions = tmp_path / "sessions"
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _record(sessions, writer.pid)
+        assert take_unannounced_cleanup(sessions, runtime_pid=None) is None, "cold viewer"
+        assert take_unannounced_cleanup(sessions, runtime_pid=writer.pid + 100_000) is None
+        taken = take_unannounced_cleanup(sessions, runtime_pid=writer.pid)
+        assert taken is not None and taken["removed"] == 2
+        assert take_unannounced_cleanup(sessions, runtime_pid=writer.pid) is None, "once"
+    finally:
+        writer.kill()
+        writer.wait()
+
+
+def test_any_viewer_takes_the_record_once_the_writer_is_gone(tmp_path: Path) -> None:
+    """A runtime that exited before its viewer looked (headless, crashed): the
+    fact must still reach a screen, so the first reader announces."""
+    import subprocess
+    import sys
+
+    from local_operator.session.cleanup import take_unannounced_cleanup
+
+    sessions = tmp_path / "sessions"
+    writer = subprocess.Popen([sys.executable, "-c", "pass"])
+    writer.wait()
+    _record(sessions, writer.pid)
+    taken = take_unannounced_cleanup(sessions, runtime_pid=None)
+    assert taken is not None and taken["removed"] == 2

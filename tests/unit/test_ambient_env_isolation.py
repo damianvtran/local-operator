@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -114,16 +115,24 @@ def _module_constants(tree: ast.Module) -> dict[str, str]:
     return found
 
 
-def _env_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
-    """Local names bound to ``os.environ`` and to ``os.getenv`` in ``tree``.
+def _env_aliases(tree: ast.Module) -> tuple[set[str], set[str], set[str]]:
+    """Local names bound to ``os``, ``os.environ`` and ``os.getenv`` in ``tree``.
 
     ``from os import environ``, ``from os import environ as env``,
-    ``from os import getenv`` and ``env = os.environ`` at module scope all
-    make a later ``env.get("X")`` / ``getenv("X")`` an environment read that
-    the ``os.``-prefixed matcher alone would miss (review round 2, R2-5).
+    ``from os import getenv``, ``import os as o`` and ``env = os.environ`` at
+    module scope all make a later ``env.get("X")`` / ``getenv("X")`` /
+    ``o.getenv("X")`` an environment read that the ``os.``-prefixed matcher
+    alone would miss (review rounds 2 and 3, R2-5 / R3-6). ``dict(os.environ)``
+    copies are also followed: ``dict(os.environ).get("X")`` is an env read.
     """
+    oses: set[str] = {"os"}
     environs: set[str] = set()
     getenvs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    oses.add(alias.asname or "os")
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "os":
             for alias in node.names:
@@ -138,16 +147,73 @@ def _env_aliases(tree: ast.Module) -> tuple[set[str], set[str]]:
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "environ"
             and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == "os"
+            and node.value.value.id in oses
         ):
             environs.add(node.targets[0].id)
-    return environs, getenvs
+    return oses, environs, getenvs
 
 
 def _is_environ(node: ast.AST, aliases: set[str] = frozenset()) -> bool:  # type: ignore[assignment]
     if isinstance(node, ast.Attribute) and node.attr == "environ":
         return True
-    return isinstance(node, ast.Name) and node.id in aliases
+    if isinstance(node, ast.Name) and node.id in aliases:
+        return True
+    # ``dict(os.environ)`` / ``dict(environ)``: a copy is still the environment.
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dict"
+        and len(node.args) == 1
+        and _is_environ(node.args[0], aliases)
+    )
+
+
+def _env_read_sites(
+    tree: ast.Module, resolve: Callable[[ast.AST], str | None]
+) -> list[tuple[str, int]]:
+    """Every ``(variable, line)`` the module reads from the environment.
+
+    ONE walker, used by the package audit AND the shape tests: a shape test
+    over a private copy of the walker proves the copy, not the audit (R3-6
+    found the two had already drifted on ``getenv``). ``resolve`` turns a key
+    node into a variable name or ``None``; the caller decides how a name
+    resolves (module-local constants only, or the package-wide set).
+    """
+    oses, environs, getenvs = _env_aliases(tree)
+    found: list[tuple[str, int]] = []
+
+    def note(name: str | None, node: ast.AST) -> None:
+        if name is not None:
+            found.append((name, getattr(node, "lineno", 0)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if not node.args:
+                continue
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "getenv"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in oses
+            ) or (isinstance(func, ast.Name) and func.id in getenvs):
+                note(resolve(node.args[0]), node)
+            elif isinstance(func, ast.Attribute) and func.attr in ("get", "pop", "setdefault"):
+                if _is_environ(func.value, environs):
+                    note(resolve(node.args[0]), node)
+                else:
+                    # ``env.get(WORKSPACE_ENV)``: a mapping parameter that
+                    # defaults to os.environ. Only a CONSTANT key counts;
+                    # a literal here would be a dict lookup, not the env.
+                    if isinstance(node.args[0], (ast.Name, ast.Attribute)):
+                        note(resolve(node.args[0]), node)
+        elif isinstance(node, ast.Subscript) and _is_environ(node.value, environs):
+            note(resolve(node.slice), node)
+        elif isinstance(node, ast.Compare) and any(
+            _is_environ(c, environs) for c in node.comparators
+        ):
+            note(resolve(node.left), node)
+    return found
 
 
 def env_reads() -> dict[str, set[str]]:
@@ -167,11 +233,7 @@ def env_reads() -> dict[str, set[str]]:
     reads: dict[str, set[str]] = {}
 
     for rel, tree, local in trees:
-        environs, getenvs = _env_aliases(tree)
 
-        # The defining module wins: three modules each spell ``_ENV_DISABLE``
-        # with a different value, and the cross-module map exists only for
-        # constants imported from elsewhere (``terminals.CMUX_SURFACE_ENV``).
         def resolve(key: ast.AST, _local: dict[str, str] = local) -> str | None:
             if isinstance(key, ast.Constant) and isinstance(key.value, str):
                 return key.value if _ENV_SHAPE.match(key.value) else None
@@ -181,46 +243,15 @@ def env_reads() -> dict[str, set[str]]:
                 return _local.get(key.attr) or shared.get(key.attr)
             return None
 
-        def note(name: str | None, node: ast.AST, _rel: str = rel) -> None:
-            if name is not None:
-                reads.setdefault(name, set()).add(f"{_rel}:{getattr(node, 'lineno', 0)}")
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                func = node.func
-                if not node.args:
-                    continue
-                if (
-                    isinstance(func, ast.Attribute)
-                    and func.attr == "getenv"
-                    and isinstance(func.value, ast.Name)
-                    and func.value.id == "os"
-                ) or (isinstance(func, ast.Name) and func.id in getenvs):
-                    note(resolve(node.args[0]), node)
-                elif isinstance(func, ast.Attribute) and func.attr in ("get", "pop", "setdefault"):
-                    if _is_environ(func.value, environs):
-                        note(resolve(node.args[0]), node)
-                    else:
-                        # ``env.get(WORKSPACE_ENV)``: a mapping parameter that
-                        # defaults to os.environ. Only a CONSTANT key counts;
-                        # a literal here would be a dict lookup, not the env.
-                        if isinstance(node.args[0], (ast.Name, ast.Attribute)):
-                            note(resolve(node.args[0]), node)
-            elif isinstance(node, ast.Subscript) and _is_environ(node.value, environs):
-                note(resolve(node.slice), node)
-            elif isinstance(node, ast.Compare) and any(
-                _is_environ(c, environs) for c in node.comparators
-            ):
-                note(resolve(node.left), node)
+        for name, line in _env_read_sites(tree, resolve):
+            reads.setdefault(name, set()).add(f"{rel}:{line}")
     return reads
 
 
 def _reads_in(source: str) -> set[str]:
     """The walker's verdict on a synthetic module (for the shape tests)."""
     tree = ast.parse(source)
-    environs, getenvs = _env_aliases(tree)
     local = _module_constants(tree)
-    found: set[str] = set()
 
     def resolve(key: ast.AST) -> str | None:
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
@@ -229,29 +260,7 @@ def _reads_in(source: str) -> set[str]:
             return local.get(key.id)
         return None
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and node.args:
-            func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "getenv"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "os"
-            ) or (isinstance(func, ast.Name) and func.id in getenvs):
-                found.add(resolve(node.args[0]) or "")
-            elif isinstance(func, ast.Attribute) and func.attr in ("get", "pop", "setdefault"):
-                if _is_environ(func.value, environs):
-                    found.add(resolve(node.args[0]) or "")
-                elif isinstance(node.args[0], (ast.Name, ast.Attribute)):
-                    found.add(resolve(node.args[0]) or "")
-        elif isinstance(node, ast.Subscript) and _is_environ(node.value, environs):
-            found.add(resolve(node.slice) or "")
-        elif isinstance(node, ast.Compare) and any(
-            _is_environ(c, environs) for c in node.comparators
-        ):
-            found.add(resolve(node.left) or "")
-    found.discard("")
-    return found
+    return {name for name, _line in _env_read_sites(tree, resolve)}
 
 
 @pytest.mark.parametrize(
@@ -268,6 +277,11 @@ def _reads_in(source: str) -> set[str]:
         "import os\nenv = os.environ\nx = env.get('CMUX_SURFACE_ID')\n",
         "import os\nK = 'CMUX_SURFACE_ID'\nx = os.environ.get(K)\n",
         "K = 'CMUX_SURFACE_ID'\ndef f(env):\n    return env.get(K)\n",
+        "import os as o\nx = o.getenv('CMUX_SURFACE_ID')\n",
+        "import os as o\nx = o.environ.get('CMUX_SURFACE_ID')\n",
+        "import os as o\nenv = o.environ\nx = env['CMUX_SURFACE_ID']\n",
+        "import os\nx = dict(os.environ).get('CMUX_SURFACE_ID')\n",
+        "from os import environ\nx = dict(environ)['CMUX_SURFACE_ID']\n",
     ],
 )
 def test_the_walker_sees_every_read_shape(source: str) -> None:

@@ -76,6 +76,7 @@ from typing import Any, Callable
 
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
+    LIVE_MARKER_NAME,
     SESSIONS_DIRNAME,
     TRANSCRIPT_FILENAME,
     _is_claimed,
@@ -174,6 +175,18 @@ class Candidate:
     title: str = ""
     idle_days: float = 0.0
     size_bytes: int = 0
+    #: ``"user"`` for the user's own conversation (no origin marker),
+    #: otherwise the recorded origin (``"subagent"``, ``"fork"``). Shown on
+    #: every dry-run row and counted in the launch notice because a store
+    #: that is 85% subagent-origin reads as "159 removed" without it, and
+    #: the user cannot tell whether those were theirs (UX round 3, U15).
+    origin: str = "user"
+    #: False for a directory that was never worked in (no transcript, no
+    #: spool — an idle open-and-quit launch). The launch notice is silent
+    #: when EVERY removal was one of these: a "removed 1 session" on every
+    #: open-and-quit would train the user to ignore the one notice that
+    #: matters (design round 3, N6). The record and the jsonl still say.
+    active: bool = True
 
 
 @dataclass
@@ -390,6 +403,38 @@ def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+# EVERY GUARD FAILS CLOSED. A guard answers "may this directory be removed?"
+# and the only safe answer to "I could not find out" is NO: the cost of a
+# kept directory is bytes, the cost of a removed one is the incident. So
+# each probe below treats any failure — an unreadable file, a corrupt
+# payload, a missing module, a bug in the callee — as "keep", and
+# :func:`_guard` wraps the lot so that an exception a probe did not
+# anticipate is still "keep", named. Review round 3 (R3-1) found the
+# recent-N guard returning an EMPTY set on failure and the run proceeding
+# with zero recent protection; that shape is what this block forbids.
+
+
+def _claimed(directory: Path, now: float) -> bool:
+    """:func:`_is_claimed`, closed: an unreadable or unparseable marker keeps.
+
+    ``_is_claimed`` itself reads a missing marker as "not claimed" — correct,
+    absence is the common case — but an EACCES on a present marker also
+    comes back as False there, because that function serves liveness
+    questions where "assume dead" is the right default. Here it is not.
+    """
+    marker = directory / LIVE_MARKER_NAME
+    try:
+        if not marker.exists():
+            return False
+    except OSError:
+        return True
+    try:
+        marker.read_text(encoding="utf-8")
+    except OSError:
+        return True  # present but unreadable: assume claimed
+    return _is_claimed(directory, now)
+
+
 def _lease_owner_alive(directory: Path) -> bool | None:
     """Whether the ``.execution-lease`` names a live pid; ``None`` = no lease."""
     lease = directory / ".execution-lease"
@@ -429,19 +474,25 @@ def _has_spooled_mail(directory: Path) -> bool:
 
 def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
     """The hard guards, in one place. Returns the guard's name when the
-    directory must be kept, ``None`` when the policy may consider it."""
+    directory must be kept, ``None`` when the policy may consider it.
+
+    Closed on every path: each probe already answers "keep" to its own
+    failures, and the outer ``except`` makes an exception NONE of them
+    anticipated (a bug in ``_process_alive``, a ``MemoryError`` mid-read)
+    also "keep", with the probe named so the refusal is diagnosable.
+    """
     try:
-        if _is_claimed(directory, now):
+        if _claimed(directory, now):
             return "claimed by a live process"
-    except OSError:
-        return "claim unreadable"
-    owned = _lease_owner_alive(directory)
-    if owned:
-        return "leased by a live process"
-    if _has_wake(config_dir, directory.name):
-        return "has an armed wake"
-    if _has_spooled_mail(directory):
-        return "has unread spooled mail"
+        if _lease_owner_alive(directory):
+            return "leased by a live process"
+        if _has_wake(config_dir, directory.name):
+            return "has an armed wake"
+        if _has_spooled_mail(directory):
+            return "has unread spooled mail"
+    except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
+        logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)
+        return f"guard failed: {type(exc).__name__}"
     return None
 
 
@@ -479,22 +530,43 @@ class _Entry:
     size: int
 
 
-def _picker_first_page(config_dir: Path) -> set[str]:
-    """The ids on the first :data:`RECENT_KEEP` rows of ``/resume``.
+class GuardUnavailable(Exception):
+    """A guard could not be evaluated, so the run must not proceed.
+
+    Raised, not swallowed, because the alternative — an empty protected set
+    — is a run with the guard silently gone: review round 3 (R3-1) measured
+    5 → 12 of 15 removable with no ``skipped`` and nothing logged when the
+    picker raised. :func:`run_cleanup` turns this into ``skipped`` + an
+    ``errors`` count and removes nothing.
+    """
+
+
+def _picker_rows(config_dir: Path) -> list[str]:
+    """Every id ``/resume`` would list, in the picker's order.
 
     Owned by ``resume.recent_sessions`` — ONE ranking, consumed by the picker
     and by this policy — and imported lazily because ``resume`` is heavier
-    than this module wants at import. A picker that cannot be listed (an
-    unreadable store) protects nothing extra rather than failing the pass;
-    the hard guards still apply.
+    than this module wants at import. The first :data:`RECENT_KEEP` are the
+    recent guard; the whole list is the unit ``max_sessions`` counts in. A
+    picker that cannot be listed is a guard that cannot be evaluated:
+    :class:`GuardUnavailable`, never an empty list.
     """
     try:
         from local_operator.resume import recent_sessions
 
-        return {name for name, _stamp in recent_sessions(config_dir, limit=RECENT_KEEP)}
-    except Exception:  # noqa: BLE001 — best-effort guard, never a reason to fail
-        logger.debug("session cleanup: cannot list the picker's first page", exc_info=True)
-        return set()
+        return [name for name, _stamp in recent_sessions(config_dir, limit=None)]
+    except Exception as exc:  # noqa: BLE001 — re-raised as the typed refusal
+        raise GuardUnavailable(f"recent-session picker: {type(exc).__name__}: {exc}") from exc
+
+
+def _origin_label(directory: Path) -> str:
+    """``"user"`` or the recorded origin, for a row a human has to judge."""
+    try:
+        from local_operator.resume import session_origin
+
+        return session_origin(directory) or "user"
+    except Exception:  # noqa: BLE001 — a label, never a reason to fail
+        return "user"
 
 
 def _session_title(directory: Path) -> str:
@@ -546,17 +618,26 @@ def run_cleanup(
     2. ``max_inactive_days`` — last activity (:func:`session_activity`: the
        transcript's or the mail spool's mtime, never a sidecar's, never the
        directory's) older than the limit.
-    3. ``max_sessions`` — beyond the N most recently active, oldest first.
+    3. ``max_sessions`` — beyond the N most recently active CONVERSATIONS
+       SHOWN BY ``/resume``, oldest first.
     4. ``max_total_bytes`` — least recently active first until under budget.
 
     Only directories WITH activity are ranked; a never-active directory is
     outside the ranked set, never counts toward ``max_sessions`` or
     :data:`RECENT_KEEP`, and is only a ``remove_empty`` candidate (U11). The
     first :data:`RECENT_KEEP` rows of ``/resume`` — exactly what
-    ``resume.recent_sessions`` lists, so user-origin transcripts only — are
-    excluded from every limit (Q8). Subagent-origin transcripts rank under
-    ``max_sessions`` by activity like any other session but are not on the
-    picker and so are not covered by that guard.
+    ``resume.recent_sessions`` lists — are excluded from every limit (Q8).
+
+    ``max_sessions`` COUNTS IN THE PICKER'S UNIT. "Keep 50 sessions" to a
+    user means the 50 conversations ``/resume`` shows; on a store that is
+    85% subagent-origin, counting every transcript made ``max_sessions: 50``
+    remove 21 of the user's 31 conversations while the picker read
+    "31 sessions" (UX round 3, U15). So the cap ranks ONLY the rows
+    ``recent_sessions`` lists (user-origin, with activity); a subagent-origin
+    transcript is never a ``max_sessions`` candidate — a cap on those, if
+    ever wanted, is a separately named setting. The age and byte limits are
+    about staleness and disk, not about "how many conversations", and still
+    consider every ranked directory.
     Ties on the activity clock break on the directory NAME so a dry run and
     the real run pick the same directories on any filesystem (R1-11).
 
@@ -627,7 +708,15 @@ def run_cleanup(
     # are real transcripts and rank under ``max_sessions`` by activity like
     # any other — they are never "empty" — but they are not on the picker,
     # so they are not what this guard protects.
-    recent = _picker_first_page(config_dir)
+    try:
+        picker = _picker_rows(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to run, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
+    recent = set(picker[:RECENT_KEEP])
+    visible = set(picker)
     chosen: dict[str, Candidate] = {}
 
     # A directory several limits would take is reported once, under the first
@@ -659,6 +748,8 @@ def run_cleanup(
             title=_session_title(entry.path) if entry.has_transcript else "",
             idle_days=idle,
             size_bytes=entry.size,
+            origin=_origin_label(entry.path),
+            active=entry.activity is not None,
         )
         return True
 
@@ -672,11 +763,13 @@ def run_cleanup(
         for entry in ranked:
             activity = entry.activity or 0.0
             if activity < cutoff:
-                idle_days = (moment - activity) / 86400.0
+                # The row already carries the exact idle age; repeating it
+                # rounded here read as `idle 10d > 10d` on a 10.0001-day
+                # session. The reason states the LIMIT, the column the fact.
                 consider(
                     entry,
                     "max_inactive_days",
-                    f"idle {idle_days:.0f}d > {policy.max_inactive_days}d",
+                    f"idle over {policy.max_inactive_days}d",
                 )
 
     if policy.max_sessions:
@@ -686,8 +779,13 @@ def run_cleanup(
         # shield everything newer than it from ever being considered, and
         # the cap would silently not apply (Q8's scenario: 10 older picker
         # rows guarded, 7 newer subagent runs, cap 12 -> the 5 oldest
-        # subagent runs must go).
-        survivors = [entry for entry in ranked if entry.path.name not in chosen]
+        # subagent runs must go). Ranked over the PICKER'S rows only (U15):
+        # ``kept`` is the number the user would read off ``/resume``.
+        survivors = [
+            entry
+            for entry in ranked
+            if entry.path.name in visible and entry.path.name not in chosen
+        ]
         kept = len(survivors)
         for entry in reversed(survivors):  # oldest first
             if kept <= policy.max_sessions:
@@ -708,7 +806,7 @@ def run_cleanup(
             if consider(
                 entry,
                 "max_total_bytes",
-                f"store {total // 1024} kB > {policy.max_total_bytes // 1024} kB",
+                f"store over {policy.max_total_bytes // 1024} kB",
             ):
                 total -= entry.size
 
@@ -807,8 +905,14 @@ def cleanup_from_config(
 def write_last_cleanup(sessions_dir: Path, result: CleanupResult, *, actor: str) -> None:
     """Record a removing pass in :data:`LAST_CLEANUP_NAME` for the TUI to announce."""
     policies: dict[str, int] = {}
+    origins: dict[str, int] = {}
     for candidate in result.removed:
         policies[candidate.policy] = policies.get(candidate.policy, 0) + 1
+        origins[candidate.origin] = origins.get(candidate.origin, 0) + 1
+    # A pass that only swept never-active directories is recorded but
+    # pre-acknowledged: nothing a user worked in went, so there is nothing
+    # to announce (N6). ``quiet`` says why the flag is already set.
+    quiet = bool(result.removed) and all(not candidate.active for candidate in result.removed)
     payload = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "actor": actor,
@@ -816,25 +920,55 @@ def write_last_cleanup(sessions_dir: Path, result: CleanupResult, *, actor: str)
         "removed": len(result.removed),
         "scanned": result.scanned,
         "policies": policies,
+        "origins": origins,
         "record": str(sessions_dir / CLEANUP_LOG_NAME),
-        "acknowledged": False,
+        "acknowledged": quiet,
+        "quiet": "only never-active directories were removed" if quiet else None,
     }
+    _write_record(sessions_dir / LAST_CLEANUP_NAME, payload)
+
+
+def _write_record(path: Path, payload: dict[str, Any]) -> bool:
+    """tmp + ``os.replace``: a viewer never reads a half-written record.
+
+    Same shape as ``resume._save_origin_cache``. The ``os.replace`` here is
+    on a FILE beside the session directories, never on one of them; the
+    deletion guard allow-lists this call by name for that reason (R3-4).
+    """
+    tmp = path.with_name(path.name + ".tmp")
     try:
-        (sessions_dir / LAST_CLEANUP_NAME).write_text(
-            json.dumps(payload, sort_keys=True), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
     except OSError as exc:
-        logger.warning("session cleanup: cannot write %s: %s", LAST_CLEANUP_NAME, exc)
+        logger.warning("session cleanup: cannot write %s: %s", path.name, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
 
 
-def take_unannounced_cleanup(sessions_dir: Path) -> dict[str, Any] | None:
+def take_unannounced_cleanup(
+    sessions_dir: Path, *, runtime_pid: int | None = None
+) -> dict[str, Any] | None:
     """The last removing pass if no viewer has announced it yet, marking it
     announced; ``None`` otherwise.
 
-    Read-then-rewrite without a lock: two viewers adopting the same store in
-    the same instant could both announce, which is the harmless direction.
-    A malformed or unreadable file is treated as "nothing to announce" — the
-    jsonl and the WARNING still hold the facts.
+    WHO ANNOUNCES: the viewer attached to the runtime that did the removing,
+    when there is one. The record names the removing ``pid``; a caller whose
+    ``runtime_pid`` is that pid takes the record outright. Any OTHER viewer
+    defers while that pid is still alive — its own viewer is about to look
+    — and takes it only once the writer is gone (a headless run, a runtime
+    that exited before its viewer attached). Without this rule the notice
+    went to whichever terminal read the file first: term2 announced what
+    term1's runtime had removed while term1 stayed blank (UX round 3, U14).
+    ``runtime_pid=None`` (a cold viewer, no runtime yet) defers the same way.
+
+    Read-then-rewrite without a lock: two viewers of the SAME runtime
+    adopting in the same instant could both announce, which is the harmless
+    direction. A malformed or unreadable file is treated as "nothing to
+    announce" — the jsonl and the WARNING still hold the facts.
     """
     path = sessions_dir / LAST_CLEANUP_NAME
     try:
@@ -843,28 +977,71 @@ def take_unannounced_cleanup(sessions_dir: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, dict) or payload.get("acknowledged") or not payload.get("removed"):
         return None
+    writer = payload.get("pid")
+    if isinstance(writer, int) and not isinstance(writer, bool) and writer != runtime_pid:
+        if _process_alive(writer) and writer != os.getpid():
+            # The removing runtime is still up: its own viewer announces.
+            return None
     payload["acknowledged"] = True
-    try:
-        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    except OSError:
-        pass
+    if not _write_record(path, payload):
+        # Announced anyway — the facts are true — but a record that cannot be
+        # flipped announces on every boot, which is worth one diagnosable line.
+        logger.debug("session cleanup: %s is not writable; the notice will repeat", path)
     return payload
 
 
-def format_cleanup_notice(payload: dict[str, Any]) -> str:
-    """The one-line transcript notice for a removing pass."""
-    removed = int(payload.get("removed") or 0)
-    policies = payload.get("policies") or {}
-    by = ", ".join(f"{count} by {name}" for name, count in sorted(policies.items()))
+def _counts(value: Any, joiner: str) -> str:
+    """``"3 by remove_empty, 2 by max_sessions"`` (``joiner=" by "``) or
+    ``"2 user, 3 subagent"`` (``joiner=" "``) from a ``{name: count}``
+    mapping, tolerating any shape: a hand-edited or newer-schema record must
+    still format (R3-2)."""
+    if not isinstance(value, dict):
+        return ""
+    parts: list[str] = []
+    for name, count in sorted(value.items(), key=lambda item: str(item[0])):
+        if isinstance(count, bool) or not isinstance(count, (int, float)):
+            continue
+        parts.append(f"{int(count)}{joiner}{name}")
+    return ", ".join(parts)
+
+
+def format_cleanup_notice(payload: Any) -> str:
+    """The one-line transcript notice for a removing pass.
+
+    Total, not partial: every field is read defensively because this runs at
+    boot and a malformed record must never take the app down (review round
+    3, R3-2: ``"removed": "many"`` crashed the first frame). ``payload`` is
+    typed ``Any`` for the same reason — the caller has already checked it is
+    a dict, but this function must not depend on that.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        removed = int(payload.get("removed") or 0)
+    except (TypeError, ValueError):
+        removed = 0
+    by = _counts(payload.get("policies"), " by ")
+    origins = _counts(payload.get("origins"), " ")
     noun = "session" if removed == 1 else "sessions"
-    record = str(payload.get("record") or CLEANUP_LOG_NAME)
+    record = payload.get("record")
+    record = str(record) if isinstance(record, str) and record else CLEANUP_LOG_NAME
     home = os.path.expanduser("~")
     if record.startswith(home + os.sep):
         record = "~" + record[len(home) :]
-    return (
-        f"session cleanup removed {removed} {noun} at launch"
-        + (f" ({by})" if by else "")
-        + f" — record: {record}"
-        + " · preview next time: lop sessions cleanup --dry-run"
-        + " · turn off: /settings › Session cleanup"
+    detail = "; ".join(part for part in (by, origins) if part)
+    # Authored rows, one per clause: a NoticeBlock treats a newline as a row
+    # boundary and wraps each row on its own, so the count, the record, the
+    # preview command and the off-switch each keep their words together.
+    # Left to the fold, 100 columns broke `lop / sessions cleanup` across
+    # rows and stranded `/settings › Session cleanup` alone on the last one
+    # (design round 3, N7). A clause that is still too wide for the column
+    # wraps inside itself, which is the least bad break.
+    return "\n".join(
+        (
+            f"session cleanup removed {removed} {noun} at launch"
+            + (f" ({detail})" if detail else ""),
+            f"record: {record}",
+            "preview next time: lop sessions cleanup --dry-run",
+            "turn off: /settings › Session cleanup",
+        )
     )

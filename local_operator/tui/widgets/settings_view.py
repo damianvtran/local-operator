@@ -3214,34 +3214,60 @@ class SettingsView(Vertical):
             )
             width = self._detail_width()
             help_text = row.setting.help
-            # Shed order: help, then the key path, then the clause. The
-            # clause is the safety-relevant fact ("would remove 9 at next
-            # launch") and at 80 cols it was the FIRST thing dropped because
-            # the key path was kept ahead of it — for a row whose key the
-            # user is looking at (design round 2, D7). `default: N` keeps
-            # the same rank on purpose: it is what an unconfirmed `r`
-            # restores, and review round 1 (U2/U3) settled that it outranks
-            # the help; UX round 2 U12 is deferred in-thread on that basis.
-            if clause:
-                both = cell_len(help_text) + cell_len(f" · {clause}") + cell_len(key_suffix)
-                clause_and_key = cell_len(clause) + cell_len(key_suffix)
-                if both <= width:
-                    text.append(help_text, style=faint)
-                    text.append(f" · {clause}", style=clause_style)
-                    text.append(key_suffix, style=key_style)
-                elif clause_and_key <= width:
-                    text.append(clause, style=clause_style)
-                    text.append(key_suffix, style=key_style)
-                elif cell_len(clause) <= width:
-                    text.append(clause, style=clause_style)
-                else:
-                    text.append(help_text, style=faint)
-                    text.append(key_suffix, style=key_style)
-            else:
-                text.append(help_text, style=faint)
-                text.append(key_suffix, style=key_style)
+            # THE SHED LADDER, one rule for every row (design round 3, D12):
+            # the key path sheds first; the state clause is never shed while
+            # anything else remains; help sheds after the key. Walked top to
+            # bottom, first rung that fits wins:
+            #
+            #   help · clause · key → help · clause → clause · key → clause
+            #   → help · key → help
+            #
+            # The clause is the safety-relevant fact ("would remove 9 at
+            # next launch", "default: 0") and was once the FIRST thing
+            # dropped at 80 cols because the key path was kept ahead of it
+            # (design round 2, D7); dropping the key BEFORE the help is what
+            # lets a child row keep "Keep N newest…" beside "default: 0"
+            # at 110 cols (UX round 2, U12). `default: N` is present at
+            # every clause rung, so an unconfirmed `r` still names what it
+            # restores (review round 1, U2/U3) — the ladder reverses nothing.
+            help_part = (help_text, faint, False)
+            clause_part = (clause, clause_style, False)
+            key_part = (key_suffix.strip(), key_style, True)
+            rungs: list[list[tuple[str, Style, bool]]] = (
+                [
+                    [help_part, clause_part, key_part],
+                    [help_part, clause_part],
+                    [clause_part, key_part],
+                    [clause_part],
+                    [help_part, key_part],
+                    [help_part],
+                ]
+                if clause
+                else [[help_part, key_part], [help_part]]
+            )
+            for rung in rungs:
+                rendered = self._join_detail(rung)
+                if cell_len(rendered.plain) <= width or rung is rungs[-1]:
+                    text.append_text(rendered)
+                    break
         self._detail_text = text
         self._detail.update(text)
+
+    @staticmethod
+    def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
+        """Assemble one rung of the shed ladder with its separators.
+
+        ``parts`` are ``(text, style, is_key)``. Help and clause are joined
+        by `` · ``; the key path is set off by three spaces, the same gutter
+        the collapsed row uses. The separators live here, once, so a rung
+        that drops a part cannot leave a dangling dot behind.
+        """
+        out = Text()
+        for index, (body, style, is_key) in enumerate(parts):
+            if index:
+                out.append("   " if is_key else " · ", style=style)
+            out.append(body, style=style)
+        return out
 
     def _detail_clause(self, row: "_Row") -> str:
         """The state-dependent clause appended to a setting row's help.

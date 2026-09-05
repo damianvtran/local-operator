@@ -1564,14 +1564,17 @@ class _HeldAnswerKey:
 
 RESIZE_REFIT_DELAY_S = 0.05
 
-#: How long after adoption to re-check ``sessions/last-cleanup.json``. The
-#: startup cleanup pass is dispatched at session construction and waits
-#: ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS`` (0.75 s) before
-#: touching the disk, then walks the store; the recheck must land after that
-#: on a large store yet soon enough that the notice is still "at launch".
-#: Generous rather than tight: a late notice is still a notice, a missed one
-#: is the incident's silent splash.
-STARTUP_CLEANUP_RECHECK_S = 5.0
+#: How often, and for how long, to re-check ``sessions/last-cleanup.json``
+#: after adoption. The startup cleanup pass is dispatched at session
+#: construction and waits ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS``
+#: (0.75 s) before touching the disk, then walks the store — sub-second on
+#: a small store, longer on a large one — so no single fixed delay is right:
+#: a 5 s timer lagged ~4 s on small stores and silently deferred a pass that
+#: took longer than 5 s to the NEXT boot (UX round 3, U16/U17). Polled at
+#: the interval until the window closes; a late notice is still a notice, a
+#: missed one is the incident's silent splash.
+STARTUP_CLEANUP_RECHECK_S = 1.0
+STARTUP_CLEANUP_RECHECK_WINDOW_S = 30.0
 
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
 #: is wide enough for the boot input to read as a CARD rather than as a bar. It
@@ -3304,8 +3307,7 @@ class OperatorApp(App[None]):
         # again after the pass's idle window (this process's own pass runs in
         # the background AFTER the first frame). Both read one file; the
         # first to find it unacknowledged announces it.
-        self._report_startup_cleanup()
-        self.set_timer(STARTUP_CLEANUP_RECHECK_S, self._report_startup_cleanup)
+        self._report_startup_cleanup(rechecks_left=STARTUP_CLEANUP_RECHECK_WINDOW_S)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -7763,18 +7765,24 @@ class OperatorApp(App[None]):
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
 
-    def _report_startup_cleanup(self) -> None:
+    def _report_startup_cleanup(self, *, rechecks_left: float = 0.0) -> None:
         """Announce a startup cleanup pass that removed sessions, once.
 
         The pass runs in the runtime process, in the background, after the
         first frame — so neither "the session object" nor "this process" is a
         place the fact reliably lives when the TUI paints. It lives on disk:
         ``sessions/last-cleanup.json``, written by the removing pass and
-        flipped to acknowledged by the first viewer that reports it (see
-        ``session.cleanup.take_unannounced_cleanup``). Routed through
-        :meth:`_system_notice` so it lands under the splash without ending the
-        empty state, the same channel an MCP startup failure uses; WARNING
-        kind because sessions are gone, whatever the policy said.
+        flipped to acknowledged by the viewer that reports it (see
+        ``session.cleanup.take_unannounced_cleanup`` for WHICH viewer: the
+        one attached to the removing runtime, while that runtime lives).
+        Routed through :meth:`_system_notice` so it lands under the splash
+        without ending the empty state, the same channel an MCP startup
+        failure uses; WARNING kind because sessions are gone, whatever the
+        policy said.
+
+        Polls rather than fires once: the pass finishes whenever the store
+        walk finishes, so the check repeats every ``STARTUP_CLEANUP_RECHECK_S``
+        until it has announced or ``rechecks_left`` seconds have elapsed.
         """
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import (
@@ -7783,13 +7791,29 @@ class OperatorApp(App[None]):
             take_unannounced_cleanup,
         )
 
+        # The FORMAT is inside the try too: a hand-edited or newer-schema
+        # record (`"removed": "many"`) crashed the first frame when only the
+        # read was guarded (review round 3, R3-2). The formatter is total on
+        # its own; this is the belt to its braces.
         try:
-            payload = take_unannounced_cleanup(config_dir() / SESSIONS_DIRNAME)
+            runtime_pid = getattr(self._session, "runtime_pid", None)
+            payload = take_unannounced_cleanup(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            body = None if payload is None else format_cleanup_notice(payload)
         except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("startup cleanup notice could not be built", exc_info=True)
             return
-        if payload is None:
+        if body is not None:
+            self._system_notice(body, "warning")
             return
-        self._system_notice(format_cleanup_notice(payload), "warning")
+        if rechecks_left > 0:
+            remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
+            self.set_timer(
+                STARTUP_CLEANUP_RECHECK_S,
+                lambda: self._report_startup_cleanup(rechecks_left=remaining),
+            )
 
     def _report_attachment_restore(self, session: SessionProtocol) -> None:
         """Say so when a resumed session's team/agent could not be re-attached.

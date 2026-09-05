@@ -44,7 +44,7 @@ async def main() -> None:
             }
         )
         toggle = False
-    if mode == "armed":
+    if mode in ("armed", "child"):
         # SEEDED, never empty: an empty-store frame showed `would remove 0`
         # and proved nothing (design round 2, D7). 15 real 40-day transcripts
         # + 3 empties, `max_inactive_days: 7` -> the 10 most recent are
@@ -67,7 +67,15 @@ async def main() -> None:
         for index in range(3):
             (sessions / f"e{index:02d}").mkdir(exist_ok=True)
         ConfigManager(config_dir()).update_config(
-            {"session": {"cleanup": {"enabled": True, "max_inactive_days": 7}}}
+            {
+                "session": {
+                    "cleanup": (
+                        {"enabled": True, "max_inactive_days": 7}
+                        if mode == "armed"
+                        else {"enabled": True, "max_sessions": 5}
+                    )
+                }
+            }
         )
         toggle = False
     if mode == "expand":
@@ -98,6 +106,13 @@ async def main() -> None:
             await pilot.pause()
         if mode == "stale":
             # Land on a sub-row so its "inert" clause is the one on screen.
+            view._select_setting_row("session.cleanup.max_sessions")
+            view._land()
+            await pilot.pause()
+        if mode == "child":
+            # A child at a NON-default value under an armed master: the row
+            # whose detail must show help AND `default: 0` at 110 cols (UX
+            # round 2 U12 / design round 3 D12 — the key path sheds first).
             view._select_setting_row("session.cleanup.max_sessions")
             view._land()
             await pilot.pause()

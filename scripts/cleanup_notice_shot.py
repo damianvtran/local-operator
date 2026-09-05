@@ -4,22 +4,32 @@
 
 Seeds a marked store with 15 real 40-day transcripts and 3 empty directories
 under the ``isolate_capture`` sandbox, enables ``session.cleanup`` with
-``remove_empty: true``, boots the REAL ``OperatorApp`` over a session built by
-the REAL ``create_session`` (so the real maintenance pass runs, in the
-background, after the first frame), waits for the pass, and captures. The
-frame must carry the "session cleanup removed 3 sessions at launch" notice;
-the same driver with ``--second-boot`` boots again and must NOT repeat it.
+``max_inactive_days: 30`` and ``remove_empty: true``, boots the REAL
+``OperatorApp`` over a session built by the REAL ``create_session`` (so the
+real maintenance pass runs, in the background, after the first frame), and
+lets the app's OWN recheck timer find the record — nothing here calls
+``_report_startup_cleanup`` by hand. A hand call proved the wrong delivery
+path in round 3 (design D11: the timer-delivered block was 3 rows taller than
+its content and scrolled the wordmark off at 80x24), so the script drives the
+path the user gets and asserts its geometry: the notice's region height must
+equal its content height, and the wordmark must still be in the frame.
+
+Boot 1's frame must carry the "session cleanup removed 5 sessions at launch"
+notice (5 by max_inactive_days: the 15 transcripts less the picker's recent
+10; the 3 empties go too but never-active removals do not announce, N6). Boot
+2 must show no cleanup notice (the record was acknowledged, and boot 1's own
+idle launch directory is a never-active removal). A ``.next.svg`` is captured
+one frame after the first so the pair can be diffed for motion.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
 import time
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
@@ -48,17 +58,22 @@ def _seed(config_dir: Path) -> None:
         {
             "hosting": "test",
             "model_name": "test-model",
-            "session": {"cleanup": {"enabled": True, "remove_empty": True}},
+            "session": {
+                "cleanup": {"enabled": True, "max_inactive_days": 30, "remove_empty": True}
+            },
         }
     )
 
 
 async def main() -> None:
-    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("out")
+    parser.add_argument("size", nargs="?", default="100x30")
+    args = parser.parse_args()
+    width, height = (int(part) for part in args.size.split("x"))
+    size = (width, height)
+    out = args.out
 
-    from local_operator.agents import AgentRegistry
-    from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.session_factory import (
         await_store_maintenance_for_tests,
@@ -66,14 +81,17 @@ async def main() -> None:
         reset_store_maintenance_for_tests,
     )
     from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.transcript import NoticeBlock
 
-    out = sys.argv[1]
-    size = tuple(int(part) for part in (sys.argv[2] if len(sys.argv) > 2 else "100x30").split("x"))
     root = config_dir()
     root.mkdir(parents=True, exist_ok=True)
     _seed(root)
 
-    def args() -> argparse.Namespace:
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    def args_ns() -> argparse.Namespace:
         return argparse.Namespace(
             hosting="test",
             model="test-model",
@@ -85,7 +103,7 @@ async def main() -> None:
 
     async def factory():
         return await create_session(
-            args(),
+            args_ns(),
             ConfigManager(root),
             CredentialManager(root),
             AgentRegistry(root),
@@ -93,6 +111,7 @@ async def main() -> None:
             defer_mcp_wiring=True,
         )
 
+    failures: list[str] = []
     for boot in (1, 2):
         reset_store_maintenance_for_tests()
         app = OperatorApp(factory)
@@ -102,9 +121,17 @@ async def main() -> None:
                 if app._session is not None:
                     break
             await await_store_maintenance_for_tests()
-            await asyncio.sleep(0.2)
-            app._report_startup_cleanup()  # what the 5 s timer does; not waiting 5 s here
-            await pilot.pause()
+            # THE REAL PATH: the app's own recheck timer. Wait for it, never
+            # call the report by hand (D11).
+            blocks: list[NoticeBlock] = []
+            for _ in range(60):
+                await asyncio.sleep(0.1)
+                await pilot.pause()
+                blocks = [
+                    b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")
+                ]
+                if blocks:
+                    break
             await pilot.pause()
             target = out if boot == 1 else out.replace(".svg", ".second.svg")
             save_capture(app, target)
@@ -113,14 +140,38 @@ async def main() -> None:
                 # is motion the user sees (AGENTS.md "Visual validation" §5).
                 await pilot.pause()
                 save_capture(app, out.replace(".svg", ".next.svg"))
-            from local_operator.tui.widgets.transcript import NoticeBlock
+            print(f"boot {boot}: {len(blocks)} cleanup notice block(s)")
+            for block in blocks:
+                content = block.get_content_height(
+                    block.size, block.container_size, block.size.width
+                )
+                print(
+                    f"   region.height={block.region.height} content={content} "
+                    f"width={block.size.width} styles.height={block.styles.height}"
+                )
+                if block.region.height != content:
+                    failures.append(
+                        f"boot {boot}: region {block.region.height} != content {content}"
+                    )
+                print("  ", (block.text() or "")[:160])
+            # The wordmark is the top of the splash: off-frame means the
+            # notice's dead rows scrolled the composition (D11).
+            from local_operator.tui.widgets.welcome import WelcomeView
 
-            texts = [block.text() or "" for block in app.query(NoticeBlock)]
-            print(f"boot {boot}: {len(texts)} notice block(s)")
-            for text in texts:
-                print("  ", str(text)[:160])
+            for splash in app.query(WelcomeView):
+                y = splash.region.y
+                print(f"   splash y={y} welcome={app._welcome_visible}")
+                if boot == 1 and y < 0:
+                    failures.append(f"boot {boot}: splash scrolled off (y={y})")
             remaining = sum(1 for p in (root / "sessions").iterdir() if p.is_dir())
             print(f"boot {boot}: {remaining} session dirs remain")
+            if boot == 1 and not blocks:
+                failures.append("boot 1: no notice via the timer path")
+            if boot == 2 and blocks:
+                failures.append("boot 2: the notice repeated")
+    if failures:
+        print("FAIL:", *failures, sep="\n  ")
+        sys.exit(1)
 
 
 asyncio.run(main())

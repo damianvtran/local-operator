@@ -1764,16 +1764,24 @@ def _non_negative_int(text: str) -> int:
 
 def _cleanup_row(candidate: Any, verb: str) -> str:
     """One decision, with what a user needs to judge it: name, age, size."""
-    # Budgeted to 100 columns with a 12-hex id and the longest reason
-    # (`[max_inactive_days] idle 400d > 30d`): title 28 cells, one space
-    # between columns. At 110 cols a 48-char title wrapped every row and a
-    # 9-row list read as 13 lines (UX round 2, U13).
+    # Budgeted to 100 columns with a 12-hex id, the origin column and the
+    # longest reason (`[max_inactive_days] idle over 365d`): title 16 cells,
+    # one space between columns. At 110 cols a 48-char title wrapped every
+    # row and a 9-row list read as 13 lines (UX round 2, U13). The reasons
+    # state the LIMIT; the age and size columns state the fact.
     title = candidate.title or "(no title)"
-    if len(title) > 22:
-        title = title[:21] + "…"
-    age = f"{candidate.idle_days:.0f}d" if candidate.idle_days >= 1 else "<1d"
+    if len(title) > 16:
+        title = title[:15] + "…"
+    # One decimal under 100 d so a session just past a whole-day limit does
+    # not print the same figure as the limit it exceeded.
+    days = candidate.idle_days
+    age = f"{days:.1f}d" if days < 100 else f"{days:.0f}d"
+    # ``origin`` says whose the row is: on a store that is mostly subagent
+    # runs, a list of ids and titles cannot tell the user which rows are
+    # their own conversations (UX round 3, U15). 8 cells: "subagent".
+    origin = getattr(candidate, "origin", "user") or "user"
     return (
-        f"  {verb:<12} {candidate.session:<12} {title:<22} {age:>4} "
+        f"  {verb:<12} {candidate.session:<12} {origin:<8} {title:<16} {age:>5} "
         f"{_format_bytes(candidate.size_bytes):>6} [{candidate.policy}] {candidate.reason}"
     )
 

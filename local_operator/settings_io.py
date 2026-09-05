@@ -794,7 +794,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="↳ max sessions",
         kind=Kind.INT,
         default=0,
-        help="Needs cleanup on. Keep the N most recently active; 0 = no cap.",
+        help="Needs cleanup on. Keep N newest /resume sessions; 0 = no cap.",
         minimum=0,
         gated_by="session.cleanup.enabled",
     ),

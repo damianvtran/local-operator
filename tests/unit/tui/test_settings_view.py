@@ -4137,6 +4137,76 @@ async def test_the_detail_clause_sheds_whole_rather_than_clipping(
         assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
 
 
+def test_the_shed_ladder_is_one_rule_for_every_row() -> None:
+    """Design round 3, D12: `help · clause · key → help · clause → clause · key
+    → clause → help · key → help`. The key sheds first, the clause is never
+    shed while anything else remains, help sheds after the key. Driven
+    through ``_join_detail`` with the rung list the page builds, at widths
+    chosen to land on each rung in turn."""
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import SettingsView
+
+    faint = Style()
+    help_part: tuple[str, Style, bool] = (
+        "Keep N newest /resume sessions; 0 = no cap.",
+        faint,
+        False,
+    )
+    clause_part: tuple[str, Style, bool] = ("default: 0", faint, False)
+    key_part: tuple[str, Style, bool] = ("session.cleanup.max_sessions", faint, True)
+    rungs: list[list[tuple[str, Style, bool]]] = [
+        [help_part, clause_part, key_part],  # 43 + 3 + 10 + 3 + 28 = 87
+        [help_part, clause_part],  # 56
+        [clause_part, key_part],  # 41
+        [clause_part],  # 10
+        [help_part, key_part],  # 74
+        [help_part],  # 43
+    ]
+
+    def rendered_at(width: int) -> str:
+        for rung in rungs:
+            text = SettingsView._join_detail(rung)
+            if cell_len(text.plain) <= width or rung is rungs[-1]:
+                return text.plain
+        raise AssertionError
+
+    assert rendered_at(90) == (
+        "Keep N newest /resume sessions; 0 = no cap. · default: 0   session.cleanup.max_sessions"
+    )
+    # The key sheds FIRST: help and clause survive together at 60 cols (U12).
+    assert rendered_at(60) == "Keep N newest /resume sessions; 0 = no cap. · default: 0"
+    # Then help: the clause keeps the key while both fit.
+    assert rendered_at(45) == "default: 0   session.cleanup.max_sessions"
+    # Then the key: the clause alone.
+    assert rendered_at(12) == "default: 0"
+    # No clause: help · key, then help.
+    assert (
+        SettingsView._join_detail([help_part, key_part]).plain
+        == "Keep N newest /resume sessions; 0 = no cap.   session.cleanup.max_sessions"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_gated_child_at_non_default_keeps_its_help_at_110_cols(tmp_path: Path) -> None:
+    """UX round 2 U12 / design round 3 D12: with the master on and a child at
+    a non-default value, 110 cols shows the help AND `default: 0` — the key
+    path is what sheds, not the help — and `r` still names its target."""
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": True, "max_sessions": 5}}}
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.max_sessions")
+        await pilot.pause()
+        detail = view.render_lines_for_test()[-1]
+        assert "Keep N newest /resume sessions" in detail, detail
+        assert "default: 0" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+
+
 # ---------------------------------------------------------------------------
 # Click-selection frame suppression (Issue 1) and the provider/model
 # suggestion dropdowns with inline ghost text (Issue 2).

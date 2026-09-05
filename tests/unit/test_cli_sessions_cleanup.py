@@ -154,7 +154,11 @@ def test_rows_carry_title_age_and_size(store: Path, capsys: Any) -> None:
     out = capsys.readouterr().out
     # 15 transcripts 40 d idle, the 10 most recent spared -> s00..s04.
     assert out.count("would remove s0") == 5
-    assert "40d" in out and "(no title)" in out and "[max_inactive_days]" in out
+    assert "40.0d" in out and "(no title)" in out and "[max_inactive_days]" in out
+    # U15: every row says whose it is, and U13: every row fits 100 columns.
+    rows = [line for line in out.splitlines() if "would remove" in line and "s0" in line]
+    assert rows and all(" user " in row for row in rows), rows
+    assert max(len(row) for row in rows) <= 100, max(rows, key=len)
 
 
 def test_negative_limits_are_rejected_by_the_parser() -> None:
