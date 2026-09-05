@@ -1506,7 +1506,7 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     # 12 since `zai-oauth` joined: the Z.AI browser sign-in is its own provider
     # id, like `xai-oauth`, and needs its own route or a signed-in account
     # reports no usage at all.
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 12
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 13
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
@@ -1775,3 +1775,76 @@ class TestZaiSignInReportsUsage:
         # The control: a provider with no quota endpoint answers False/False on
         # the same instrument, so the assertions above can distinguish the two.
         assert usage_kinds("ollama") == (False, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("balance", [12.34, 0, -0.5, "2.50"])
+async def test_radient_usage_resolves_authenticated_tenant_without_tunnel_billing(balance):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.headers["authorization"] == "Bearer selected-login"
+        assert request.url.host == "api.radienthq.com"
+        if request.url.path == "/v1/me":
+            return httpx.Response(200, json={"result": {"account": {"tenant_id": "tenant-123"}}})
+        assert request.url.path == "/v1/tenants/tenant-123/billing/credits"
+        return httpx.Response(200, json={"result": {"balance": balance}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        report = await fetch_usage(
+            client, "radient", access_token="selected-login", api_key="ignored"
+        )
+    assert report is not None and report.provider == "radient"
+    assert report.limits[0].amount.remaining == float(balance)
+    assert report.limits[0].amount.limit is None
+    assert report.limits[0].effective_status() == ("ok" if float(balance) > 0 else "exhausted")
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("balance", [None, True, False, "bad", "NaN", "Infinity", {}, []])
+async def test_radient_usage_never_treats_invalid_credit_as_available(balance):
+    def handler(request):
+        body = (
+            {"account": {"tenant_id": "tenant-123"}}
+            if request.url.path == "/v1/me"
+            else {"balance": balance}
+        )
+        return httpx.Response(200, json={"result": body})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await fetch_usage(client, "radient", access_token="selected-login") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,body", [(401, {}), (200, {"result": {"account": {"tenant_id": "../other"}}}), (200, [])]
+)
+async def test_radient_invalid_account_does_not_probe_another_tenant(status, body):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await fetch_usage(client, "radient", access_token="selected-login") is None
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_radient_balance_does_not_follow_redirects_or_use_plain_api_keys():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "https://unrelated.invalid"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=True
+    ) as client:
+        assert await fetch_usage(client, "radient", api_key="not-an-oauth-login") is None
+        assert not requests
+        assert await fetch_usage(client, "radient", access_token="selected-login") is None
+    assert len(requests) == 1

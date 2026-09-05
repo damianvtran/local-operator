@@ -43,6 +43,9 @@ def add_parser(subparsers: Any) -> None:
         )
     billing = actions.add_parser("billing", help="Show the server's current monthly cost and price")
     billing.add_argument("--credential-id", type=int)
+    billing.add_argument(
+        "--json", action="store_true", help="Fresh account, balance and setup readiness as JSON"
+    )
     activate = actions.add_parser(
         "activate", help="Activate tunnel billing at an explicitly accepted price"
     )

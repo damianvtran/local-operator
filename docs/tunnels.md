@@ -13,16 +13,28 @@ harnesses must remain running and connected to the internet.
 
 ## First setup
 
-1. Sign in using `/login radient` or `lop login radient`.
+1. Sign in or create an account using `/login radient` or `lop login radient`.
+   New users review and acknowledge the linked terms and privacy policy in
+   the browser, then return through native authorization. Existing users sign
+   in with their current account. `lop login-status` shows the credential ID.
 2. Install `cloudflared` 2025.4.0 or later through your platform's package
    manager. The connector uses its token-file option; no Cloudflare account
    login or administrative API key is needed on your computer.
-3. Run `lop tunnel billing` to see the current monthly price. Billing uses
+3. Run `lop tunnel billing --credential-id <id> --json` to verify that exact
+   login and a strictly positive credit balance. `/usage` displays Radient
+   credits too, but its cache is not used to authorize setup. If credit is
+   zero or negative, add credit in the console and repeat the fresh check.
+   Existing starter credit counts; there is no required purchase when the
+   balance is already positive. Check the current monthly price (currently
+   **USD 0/month**, subject to the live quote). Billing uses
    Radient's configured allocation of actual infrastructure cost with an 80%
    gross margin, rather than a Cloudflare Access seat fee. The quote is one
    owner-level monthly amount; it is not multiplied by the number of tunnels.
-4. Run `lop tunnel create --accept-monthly-price <quoted-USD-amount>`, then
-   `lop tunnel install`. The amount must match the server's current quote.
+4. Run `lop tunnel create --credential-id <id>`, then `lop tunnel install`.
+   If activation is required, add `--accept-monthly-price <quoted-USD-amount>`
+   only after accepting that exact quote. Positive credit is shared account
+   credit, not an additional tunnel fee. Initial setup requires positive
+   credit; existing subscriptions keep their −USD 1 suspension floor.
 5. Run `lop tunnel status`. Open the printed harness URL on your phone and
    sign in with the same Radient account.
 
