@@ -420,15 +420,30 @@ def resolve_hosting_model(
 def resolve_hosting_model_with_source(
     agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str, str]:
-    """``resolve_hosting_model`` plus WHERE the hosting came from.
+    """``resolve_hosting_model`` plus WHERE the model SELECTION came from.
 
-    The third element is ``"agent"``, ``"flag"`` or ``"config"`` — the same
-    classification ``HostingUnknownError.source`` carries for the repair
-    prompt. The session stores it as ``model_source``: only a
-    ``"config"``-sourced session switches when the file's default changes,
-    because for the other two the file never chose the model (see
-    ``Session._apply_config_change``). Keyed on the HOSTING's source: a model
-    name from config under a flagged hosting is still a flag-chosen run.
+    The third element is ``"agent"``, ``"flag"`` or ``"config"``. The session
+    stores it as ``model_source``: only a ``"config"``-sourced session switches
+    when the file's default changes, because for the other two the file never
+    chose the model (see ``Session._apply_config_change``).
+
+    Keyed on EITHER field of the pair, not on the hosting alone (review round
+    1, R3). Both directions have to classify as chosen: a model name from
+    config under a flagged hosting is a flag-chosen run, and — the harmful
+    direction — ``--model X`` with no ``--hosting`` is equally chosen, because
+    ``cli.py`` registers the two flags independently and ``lop exec --model
+    <pinned>`` is the spelling a user reaches for to pin a run. Keyed on
+    hosting only, that run classified ``"config"`` and another pane's ``/model
+    default`` moved it off the model the flag named — a file default silently
+    overriding an explicit flag, which is the converse of the rule this source
+    exists to enforce.
+
+    The HOSTING's own origin stays separate and narrower, because
+    :class:`HostingUnknownError` uses it to name the place the bad value came
+    from ("passed with --hosting", "on the agent record"). Widening that one
+    would have ``--model gpt-5`` under a config hosting report the config's
+    typo as having been passed on a flag the user never typed — a repair
+    instruction pointing at the wrong file.
     """
     # The SOURCE is tracked alongside the value, not just the value: the repair
     # offered when this turns out to be unusable writes the config file, which
@@ -436,10 +451,21 @@ def resolve_hosting_model_with_source(
     agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
     flag_hosting: str | None = getattr(args, "hosting", None)
     hosting = agent_hosting or flag_hosting or config_manager.get_config_value("hosting")
+    agent_model: str | None = getattr(agent, "model", None) if agent is not None else None
+    flag_model: str | None = getattr(args, "model", None)
+    # WHERE THE HOSTING VALUE CAME FROM — the repair prompt's subject, so it
+    # stays keyed on the hosting fields alone.
     hosting_source = "agent" if agent_hosting else "flag" if flag_hosting else "config"
-    model_name: str | None = getattr(agent, "model", None) if agent is not None else None
-    model_name = (
-        model_name or getattr(args, "model", None) or config_manager.get_config_value("model_name")
+    # WHAT CHOSE THE RUN — the returned source, and the one the live-config
+    # rule reads. An agent profile outranks a flag outranks the file, exactly
+    # as for the values: naming EITHER field is choosing.
+    model_source = (
+        "agent"
+        if (agent_hosting or agent_model)
+        else "flag" if (flag_hosting or flag_model) else "config"
+    )
+    model_name: str | None = (
+        agent_model or flag_model or config_manager.get_config_value("model_name")
     )
     if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")
@@ -485,7 +511,7 @@ def resolve_hosting_model_with_source(
             # repaired. The message is unchanged -- it names concrete model ids,
             # and the fail-fast paths still print exactly it.
             raise ModelNotConfiguredError(_no_model_message(hosting), hosting)
-    return hosting, model_name, hosting_source
+    return hosting, model_name, model_source
 
 
 def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:

@@ -320,9 +320,14 @@ async def _fetch_or_abort(coro, signal: AbortSignal | None):
 #: The refusal a call gets while ``web_fetch.enabled`` is false. Returned
 #: through ``run_fetch`` so ``web_fetch`` and ``read <url>`` refuse with one
 #: sentence, naming the key and the page that flips it.
+#
+# Names the KEY without its VALUE (design round 1, D4). The key is what the
+# user greps for in ``config.yml`` and it is what distinguishes a policy
+# refusal from a provider outage; ``: false`` only restates the condition the
+# user is already living through, and being hardcoded rather than read from the
+# value that triggered the refusal, it is the one fragment that can go stale.
 WEB_FETCH_DISABLED_MESSAGE = (
-    "web_fetch is disabled by config (web_fetch.enabled: false) — "
-    "turn it on in /settings › Web tools"
+    "web_fetch is disabled by config (web_fetch.enabled) — " "turn it on in /settings › Web tools"
 )
 
 
@@ -354,7 +359,17 @@ async def run_fetch(
     # with no createIf gate in front of them. "Disabled" now means no fetching
     # through any spelling; before, ``read https://…`` fetched regardless.
     if not settings.enabled:
-        return WEB_FETCH_DISABLED_MESSAGE, {"url": url, "cache": "miss"}, True
+        # NO details mapping (UX round 1, U3). ``tool_card`` turns any details
+        # carrying a ``url`` into a row reading ``Fetched: <url> · cache miss``,
+        # so the refusal card told the user a request had gone out and
+        # something downstream had refused it — for a call that never opened a
+        # connection. That misreport matters most on exactly this key:
+        # ``web_fetch.enabled: false`` is the switch a privacy- or
+        # airgap-minded user flips, and the card claimed the URL was fetched.
+        # ``web_search``'s refusal already returns no details and reads
+        # correctly; this matches it, so the card shows the refusal sentence
+        # and nothing else.
+        return WEB_FETCH_DISABLED_MESSAGE, {}, True
 
     try:
         normalized = normalize_url(url)

@@ -666,3 +666,235 @@ async def test_no_config_watch_listener_path_constructs_a_config_manager(
         "the B1/B3 defect class reopening. Read the watcher's validated snapshot "
         "(existing_watcher().values) instead."
     )
+
+
+@pytest.mark.asyncio
+async def test_a_page_write_in_this_pane_moves_this_pane_own_gate(monkeypatch, tmp_path) -> None:
+    """Review round 1, R1 — the BLOCKER, in its unsafe direction.
+
+    ``SettingsView._write`` goes through ``settings_io.write_setting``, which
+    notifies the watcher locally, so a ``tool_approval_mode`` set on the
+    ``/settings`` page arrived as ``source="local"`` — the one delivery the
+    listener blanket-returned on. The approvals section is labelled LIVE and
+    its help promises every running session follows from its next call, so the
+    page painted a claim it did not keep: reproduced with the page set to
+    ``ask`` while ``request_tool_approval`` went on auto-approving a command
+    tool with no prompt.
+
+    The write stays SILENT (the page is its own receipt) but no longer inert.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        assert app._approve_all is True, "the app did not boot on the saved default"
+
+        # EXACTLY what the page does: the facade write, which notifies locally.
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        settings_io.write_setting(ConfigManager(tmp_path), setting, "ask")
+        await pilot.pause()
+
+        assert app._approve_all is False, (
+            "a /settings page write did not move this pane's own gate; the page "
+            "paints a LIVE claim it does not keep"
+        )
+        assert app._status is not None and app._status._approvals_auto is False
+        # Silent: the page already showed the user its result.
+        assert not [n for n in _notices(app) if "config.yml changed" in n]
+
+        # And the page can loosen its own pane back, even though that write
+        # records an explicit choice: a choice made HERE replaces it.
+        settings_io.write_setting(ConfigManager(tmp_path), setting, "auto")
+        await pilot.pause()
+        assert app._approve_all is True
+
+
+@pytest.mark.asyncio
+async def test_a_loosening_does_not_revoke_an_explicit_approvals_ask(monkeypatch, tmp_path) -> None:
+    """THE ASYMMETRIC RULE, loosening half (review R1, UX U1).
+
+    A human who typed ``/approvals ask`` in this pane keeps that gate when the
+    FILE later says ``auto``, and reads a keep notice naming the way to adopt
+    it. The operator asked for settings to REACH running sessions; they did not
+    ask for a file write to revoke a hardening a human typed into a specific
+    pane thirty seconds earlier. Mirrors the model half of this same change
+    (``_explicit_model_choice`` and its ``keeping …`` notice) on the more
+    dangerous of the two keys.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        app._cmd_approvals("ask", app._notice)
+        assert app._approve_all is False
+        assert app._explicit_approvals_choice is True
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        assert app._approve_all is False, "a file write revoked a hardening the human typed"
+        keep = [n for n in _notices(app) if "keeping tool approvals" in n]
+        assert keep and "/approvals auto adopts it" in keep[-1], _notices(app)
+        # The saved default DID follow the file — the pair is allowed to
+        # disagree, which is what `/approvals` now reports.
+        assert app._approvals_default_auto is True
+
+
+@pytest.mark.asyncio
+async def test_a_tightening_follows_the_file_over_an_explicit_choice(monkeypatch, tmp_path) -> None:
+    """THE ASYMMETRIC RULE, tightening half. Safety propagates without
+    exception: a pane that explicitly chose ``auto`` still follows the file to
+    ``ask``. This is the direction the rule does NOT make conditional, because
+    a user who ends up safer than they asked is never the wrong surprise."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        app._cmd_approvals("auto", app._notice)
+        assert app._approve_all is True and app._explicit_approvals_choice is True
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        assert app._approve_all is False, "a tightening was refused; safety must always propagate"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_approvals_reports_the_divergence_against_the_file(
+    monkeypatch, tmp_path
+) -> None:
+    """The reporting half (UX U1 step 3, U2).
+
+    With the asymmetric rule a pane can legitimately hold a mode the file
+    disagrees with. Compared against the cached default — which the same tick
+    moves — ``_report_approvals`` reported a MATCHED PAIR for exactly the state
+    it exists to disclose, so no surface in the app would admit that a
+    deliberate `ask` had been kept. It compares against the FILE now.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        app._cmd_approvals("ask", app._notice)
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        reported: list[str] = []
+        app._report_approvals(lambda body, kind="info": reported.append(body))
+        assert reported, "the bare report printed nothing"
+        assert "tool approvals: ask (this session)" in reported[-1], reported
+        assert "config.yml says auto" in reported[-1], reported
+
+
+@pytest.mark.asyncio
+async def test_the_web_tool_notice_says_which_way_the_switch_went(monkeypatch, tmp_path) -> None:
+    """UX round 1, U4. Both directions produced a byte-identical
+    ``applied: web_search.enabled``, so a user in another pane could not tell
+    whether their agent had just lost web access or just gained it — the same
+    reasoning that already made ``tool_approval_mode`` name its value."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "web_search.enabled", False)
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        off = [n for n in _notices(app) if "config.yml changed" in n][-1]
+        assert "web search off" in off and "refused" in off, off
+
+        _write_elsewhere(tmp_path, "web_search.enabled", True)
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        on = [n for n in _notices(app) if "config.yml changed" in n][-1]
+        assert "web search on" in on and "next turn" in on, on
+        assert on != off, "both directions still print the same line"
+
+
+@pytest.mark.asyncio
+async def test_only_the_process_that_owns_the_gate_prints_the_value(monkeypatch, tmp_path) -> None:
+    """Design round 1, D1 — one receipt per event.
+
+    With a runtime attached, ``OwnedSessionHandle.follow_config`` moves the
+    real gate and emits the accurate line every attached viewer and the phone
+    see. The TUI's own value clause then made one fact into two sentences in
+    two vocabularies ("tool approvals now auto" over "tool approvals: auto"),
+    which reads as two separate events with the accurate one second, looking
+    like an echo. Exactly the rule the ``model`` section already follows.
+
+    ``tool_approval_mode`` stays in the ``applied:`` key list either way: that
+    clause is about WHICH KEYS moved, not what the gate now does.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+
+    class AttachedSession(FakeSession):
+        is_remote = True
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        notices = [n for n in _notices(app) if "config.yml changed" in n]
+        assert notices == ["config.yml changed: applied: tool_approval_mode"], notices
+        assert "every tool runs without asking" not in notices[-1]
+        # The apply still happened here — this pane's widgets and band track
+        # the mode even though the engine's gate lives in the runtime.
+        assert app._approve_all is True
+
+
+@pytest.mark.asyncio
+async def test_a_parked_approval_card_says_why_it_still_asks(monkeypatch, tmp_path) -> None:
+    """UX round 1, U6. The card is deliberately NOT auto-answered — the human
+    did not type this loosening in this pane — but nothing told the card, so
+    the frame said "every tool runs without asking" two lines above "the agent
+    needs your approval", with a visible ``Allow all — stop asking for this
+    session`` row describing a state the session was already in."""
+    import asyncio
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _adopted(app, pilot)
+        assert app._approve_all is False
+
+        parked = asyncio.ensure_future(app.request_tool_approval("bash", "rm -rf build/"))
+        for _ in range(50):
+            await pilot.pause()
+            if app._approval is not None:
+                break
+        assert app._approval is not None, "no card was parked"
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        question = app._approval.question.question
+        assert "this call still needs your answer" in question, question
+        assert "later calls will not" in question, question
+        # Still parked, still the human's to answer.
+        assert not parked.done(), "a loosening auto-answered a card on screen"
+        app._approval.resolve(False, answer="n")
+        assert await parked is False

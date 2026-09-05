@@ -178,11 +178,16 @@ def test_resolve_precedence_config_fallback() -> None:
     assert resolve_hosting_model(None, _args(), config) == ("kimi", "moonshot-v1-8k")
 
 
-def test_resolve_with_source_names_where_the_hosting_came_from() -> None:
+def test_resolve_with_source_names_what_chose_the_run() -> None:
     """The third element decides whether a running session later FOLLOWS a
-    ``hosting``/``model_name`` edit (config-sourced only). Keyed on the hosting's
-    source: a model name from config under a flagged hosting is still a flag
-    run, and a model name from a flag under a config hosting is still config."""
+    ``hosting``/``model_name`` edit (config-sourced only).
+
+    Keyed on EITHER field of the pair (review round 1, R3). Naming the model is
+    choosing just as much as naming the hosting is: ``cli.py`` registers
+    ``--model`` independently of ``--hosting``, so ``lop exec --model <pinned>``
+    is a reachable spelling, and keyed on the hosting alone it classified
+    ``config`` — letting another pane's ``/model default`` move a run off the
+    model a flag had explicitly pinned."""
     from local_operator.session_factory import resolve_hosting_model_with_source
 
     agent = cast("AgentData", SimpleNamespace(hosting="anthropic", model="claude"))
@@ -200,16 +205,46 @@ def test_resolve_with_source_names_where_the_hosting_came_from() -> None:
         "moonshot-v1-8k",
         "flag",
     )
+    # The R3 case: `--model` with no `--hosting` is flag-chosen, not config.
     assert resolve_hosting_model_with_source(None, _args(model="other"), config) == (
         "kimi",
         "other",
-        "config",
+        "flag",
+    )
+    # An agent record naming only the model is agent-chosen, for the same
+    # reason and by the same precedence.
+    model_only_agent = cast("AgentData", SimpleNamespace(hosting=None, model="claude"))
+    assert resolve_hosting_model_with_source(model_only_agent, _args(), config) == (
+        "kimi",
+        "claude",
+        "agent",
     )
     assert resolve_hosting_model_with_source(None, _args(), config) == (
         "kimi",
         "moonshot-v1-8k",
         "config",
     )
+
+
+def test_an_unknown_hosting_still_names_where_the_HOSTING_came_from() -> None:
+    """The returned source widened for R3; the REPAIR PROMPT's did not.
+
+    ``HostingUnknownError.source`` picks the sentence that tells the user where
+    the bad value lives ("in your configuration" / "passed with --hosting"), so
+    it stays keyed on the hosting fields alone. Widened along with the model
+    source, ``--model gpt-5`` over a config hosting with a typo in it would
+    report that typo as having been passed on a flag the user never typed —
+    pointing the repair at the wrong file."""
+    from local_operator.session_factory import (
+        HostingUnknownError,
+        resolve_hosting_model_with_source,
+    )
+
+    config = cast("ConfigManager", FakeConfigManager({"hosting": "nosuchprovider"}))
+    with pytest.raises(HostingUnknownError) as caught:
+        resolve_hosting_model_with_source(None, _args(model="gpt-5"), config)
+    assert caught.value.source == "config"
+    assert "in your configuration" in str(caught.value)
 
 
 def test_resolve_missing_values_raise_legacy_messages() -> None:

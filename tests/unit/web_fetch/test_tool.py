@@ -558,7 +558,16 @@ async def test_a_disabled_fetch_refuses_per_call_without_touching_the_network(
     )
     assert is_error is True
     assert preview == tool.WEB_FETCH_DISABLED_MESSAGE
-    assert "web_fetch.enabled: false" in preview
+    # The KEY, without its value: the key is what the user greps for, while
+    # `: false` restates the condition they are living through and is the one
+    # fragment that can go stale (design round 1, D4).
+    assert "web_fetch.enabled" in preview
+    assert "false" not in preview
+    # NO details mapping (UX round 1, U3). `tool_card` renders any details
+    # carrying a `url` as `Fetched: <url> · cache miss`, which told the user a
+    # request had gone out for a call that never opened a connection — on
+    # exactly the key a privacy- or airgap-minded user flips.
+    assert not details
     assert transport.calls == 0
 
     # Flip it back on and the very next call fetches — no rebuild, no restart.

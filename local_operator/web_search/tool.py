@@ -302,9 +302,14 @@ def _tavily_oauth_delegate(
 #: The refusal a call gets while ``web_search.enabled`` is false. Names the
 #: key and the page that flips it, so the model (and the human reading the
 #: card) can tell a policy refusal from a provider outage.
+#:
+#: The KEY without its VALUE (design round 1, D4). The key is the thing the
+#: user greps for in ``config.yml``; ``: false`` only restates the condition
+#: they are already living through, and being hardcoded rather than read from
+#: the value that triggered the refusal, it is the one fragment that can go
+#: stale. Kept byte-parallel with ``WEB_FETCH_DISABLED_MESSAGE``.
 WEB_SEARCH_DISABLED_MESSAGE = (
-    "web_search is disabled by config (web_search.enabled: false) — "
-    "turn it on in /settings › Web tools"
+    "web_search is disabled by config (web_search.enabled) — " "turn it on in /settings › Web tools"
 )
 
 

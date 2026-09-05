@@ -274,4 +274,10 @@ async def test_a_disabled_search_refuses_per_call(tmp_path, monkeypatch) -> None
     result = await search_tool.execute_web_search("t1", {"query": "anything"}, None, None, None)
     assert result.is_error is True
     assert result.text == search_tool.WEB_SEARCH_DISABLED_MESSAGE
-    assert "web_search.enabled: false" in result.text
+    # The KEY, without its value (design round 1, D4) — see the twin assertion
+    # in `tests/unit/web_fetch/test_tool.py`.
+    assert "web_search.enabled" in result.text
+    assert "false" not in result.text
+    # Already correct before this round, and pinned so it stays the shape
+    # `web_fetch`'s refusal was brought into line with (UX round 1, U3).
+    assert result.details is None

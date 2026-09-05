@@ -106,26 +106,123 @@ async def test_a_disk_write_tightens_the_gate_and_the_next_decision_parks(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_the_disk_overrides_a_per_session_approvals_toggle(tmp_path) -> None:
-    """A pane the operator put in ``ask`` with ``/approvals ask`` flips to
-    ``auto`` when the FILE says auto: the disk write is the machine-wide
-    intent, and the alternative makes "all my agents" false in exactly the
-    case the operator described. ``/approvals ask`` restores it in one step."""
-    handle, session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+async def test_a_loosening_does_not_revoke_an_explicit_per_session_ask(tmp_path) -> None:
+    """THE ASYMMETRIC RULE, loosening half (review R1, UX U1).
+
+    A human who typed ``/approvals ask`` in this session keeps that gate when
+    the FILE later says ``auto``, and reads a keep notice naming the way to
+    adopt the file. The operator asked for settings to REACH running sessions;
+    they did not ask for a file write to revoke a hardening a human typed into
+    a specific pane. This mirrors the model half of the same change
+    (``Session._explicit_model_choice`` and its ``keeping …`` notice) on the
+    more dangerous of the two keys.
+    """
+    handle, session, watcher, emitted = _handle(tmp_path, auto_approve=False)
 
     from local_operator.session.frontend_state import SlashResult
 
-    # /approvals auto in this session, then /approvals ask again — per-session.
-    handle._approvals_slash(session, "auto", SlashResult)
-    assert handle._auto_approve is True
     handle._approvals_slash(session, "ask", SlashResult)
     assert handle._auto_approve is False
+    emitted.clear()
+
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+
+    assert handle._auto_approve is False, "a file write revoked a hardening the human typed"
+    # The gate really is still armed, not merely flagged: a decision parks.
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "rm -rf build/"))
+    await asyncio.sleep(0)
+    assert handle._fold.projection.pending is not None
+    await handle.approval_answer(handle._fold.projection.pending.request_id, False, False)
+    assert await parked is False
+
+    texts = [getattr(e, "text", "") for e in emitted]
+    assert any(
+        "keeping tool approvals: ask" in t and "/approvals auto adopts it" in t for t in texts
+    ), texts
+    # And the named way out works in one step.
+    handle._approvals_slash(session, "auto", SlashResult)
+    assert handle._auto_approve is True
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tightening_follows_the_file_even_over_an_explicit_choice(tmp_path) -> None:
+    """THE ASYMMETRIC RULE, tightening half. Safety propagates without
+    exception: a session that explicitly chose ``auto`` still follows the file
+    to ``ask``, because a user who ends up safer than they asked is never the
+    wrong surprise. This is the direction the rule does NOT make conditional."""
+    # File AND gate start at `auto`, so the disk write below is a real
+    # transition; the session's own `/approvals auto` is what records the
+    # explicit choice the tightening then has to override.
+    handle, session, watcher, emitted = _handle(tmp_path, auto_approve=True)
+
+    from local_operator.session.frontend_state import SlashResult
+
+    handle._approvals_slash(session, "auto", SlashResult)
+    assert handle._auto_approve is True
+    assert handle._explicit_approvals_choice is True
+    emitted.clear()
+
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+    assert handle._auto_approve is False, "a tightening was refused; safety must always propagate"
+    texts = [getattr(e, "text", "") for e in emitted]
+    assert any("tool approvals: ask" in t and "config.yml changed" in t for t in texts), texts
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_chose_follows_the_file_in_both_directions(tmp_path) -> None:
+    """The operator's own case, unchanged: a pane nobody typed ``/approvals``
+    into is exactly the "goes into effect for all my agents" pane, and it
+    follows the file loosening AND tightening. The keep rule is scoped to a
+    deliberate in-session choice and must not leak into this path."""
+    handle, _session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
 
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
     watcher.poll_now()
     assert handle._auto_approve is True
-    handle._approvals_slash(session, "ask", SlashResult)
+
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
+    watcher.poll_now()
     assert handle._auto_approve is False
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_approvals_reports_a_divergence_against_the_file(
+    tmp_path, monkeypatch
+) -> None:
+    """The reporting half (UX U1 step 3 / U2). With the asymmetric rule a
+    session can legitimately hold a mode the file disagrees with, so the one
+    surface whose job is "what is in effect and why" compares against the FILE
+    rather than a cached default — otherwise it reports a matched pair for
+    exactly the state it exists to disclose."""
+    handle, session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    from local_operator.config_watch import process_watcher
+    from local_operator.session.frontend_state import SlashResult
+
+    # The report reads the REGISTERED watcher's last-good snapshot (never a
+    # fresh `ConfigManager`, which could move a malformed file aside from a
+    # print path) and resolves it through `paths.config_dir()`, so the env var
+    # has to name this scratch dir. `_handle`'s own bare watcher stays the one
+    # driving the gate; this one is what the REPORT reads.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
+    registered = process_watcher(watcher.config_dir)
+
+    handle._approvals_slash(session, "ask", SlashResult)
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    registered.poll_now()
+    watcher.poll_now()  # the gate's own watcher; the keep rule holds `ask`
+
+    reported = handle._approvals_slash(session, "", SlashResult)
+    text = getattr(reported, "text", "")
+    assert "tool approvals: ask (this session)" in text, text
+    assert "config.yml says auto" in text, text
     await handle.dispose()
 
 

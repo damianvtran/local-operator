@@ -342,7 +342,10 @@ SECTIONS: tuple[Section, ...] = (
         "session",
         "Session storage",
         Scope.NEW_LAUNCH,
-        "Autosave and the cleanup policy — read once at launch.",
+        # The scope tag one column away already says "takes effect: new
+        # launch", so restating "read once at launch" here said "launch" twice
+        # within one row (design round 1, D7).
+        "Autosave and the cleanup policy.",
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
@@ -502,7 +505,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default provider",
         kind=Kind.TEXT,
         default="",
-        help="Provider sessions run on unless chosen with /model. Set here or by /model default.",
+        # 72 cells. Every help string on this page has to clear the ~76-cell
+        # footer budget at 80 columns: past it the shed ladder drops the YAML
+        # key path (the thing a user maps a row to the file by) and then the
+        # sentence itself is clipped mid-clause with no ellipsis (design round
+        # 1, D2). Measure any edit to these four before landing it.
+        help="Provider sessions run on unless chosen with /model. Also /model default.",
         empty_unsets=True,
     ),
     Setting(
@@ -512,7 +520,8 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default model",
         kind=Kind.TEXT,
         default="",
-        help="Model id sessions run on unless chosen with /model. Set here or by /model default.",
+        # 72 cells — see the note on `hosting` above.
+        help="Model id sessions run on unless chosen with /model. Also /model default.",
         empty_unsets=True,
     ),
     # -- providers ----------------------------------------------------------
@@ -819,7 +828,8 @@ SETTINGS: tuple[Setting, ...] = (
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        help="How every running session treats write and exec tools, from its next decision.",
+        # 74 cells — see the note on `hosting`.
+        help="How every running session treats write and exec tools, from its next call.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),
@@ -1213,7 +1223,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Web fetch",
         kind=Kind.BOOL,
         default=True,
-        help="Offer the fetch tool (and `read <url>`) and let it run; off refuses every call.",
+        # 60 cells — see the note on `hosting`. No BACKTICKS: the footer is a
+        # plain `Text`, so they render as literal characters, and this was the
+        # only one of 57 help strings carrying any (design round 1, D5).
+        help="Offer the fetch tool and read <url>; off refuses every call.",
         choices=_bool_choices("fetch available", "fetch disabled"),
     ),
     Setting(

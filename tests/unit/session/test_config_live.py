@@ -1084,3 +1084,219 @@ async def test_a_child_keeps_its_spawn_inventory(tmp_path, monkeypatch) -> None:
         assert "web_search" in _offered(session)
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_model_choice_during_a_parked_adopt_is_not_undone(tmp_path, monkeypatch) -> None:
+    """Review round 1, R2 — the race, reproduced and closed.
+
+    ``_adopt_configured_model`` awaits ``build_model_spec`` on a thread (it may
+    fetch a provider listing), and on return re-checked only ``_disposed``. A
+    ``/model`` choice made inside that window was silently undone AND
+    ``_explicit_model_choice`` was reset to ``False``, which disabled the keep
+    rule for every LATER edit — so one race cost the user their pick and their
+    protection from the next edit too.
+
+    The spec build is held open here so the window is deterministic rather than
+    timing-dependent.
+    """
+    import asyncio
+
+    from local_operator.model import configure as configure_mod
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _slow_build(hosting: str, model_id: str, *a, **k):
+        # Runs on the thread `to_thread` put it on; hop back to signal.
+        loop.call_soon_threadsafe(entered.set)
+        asyncio.run_coroutine_threadsafe(_wait_release(), loop).result(timeout=5)
+        return MODEL.model_copy(update={"provider": hosting, "model_id": model_id})
+
+    async def _wait_release() -> None:
+        await release.wait()
+
+    monkeypatch.setattr(configure_mod, "build_model_spec", _slow_build)
+    try:
+        write_from_another_process(config_dir, "model_name", "m-from-config")
+        watcher.poll_now()
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # The user chooses WHILE the adopt is parked on its thread hop.
+        session.set_model(MODEL.model_copy(update={"model_id": "m-user-chose"}), explicit=True)
+        assert session._explicit_model_choice is True
+
+        release.set()
+        await _settle(session)
+
+        assert (
+            session.model.model_id == "m-user-chose"
+        ), "a parked adopt landed a stale spec over a newer explicit /model choice"
+        assert session._explicit_model_choice is True, (
+            "the adopt cleared _explicit_model_choice, disabling the keep rule "
+            "for every later config edit"
+        )
+        # The abandon is silent: no receipt for a switch that did not happen.
+        assert not [n for n in _notices(session) if "m-from-config" in n], _notices(session)
+
+        # And the keep rule really is still in force for the NEXT edit.
+        write_from_another_process(config_dir, "model_name", "m-later")
+        watcher.poll_now()
+        await _settle(session)
+        assert session.model.model_id == "m-user-chose"
+    finally:
+        release.set()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_newer_config_edit_wins_over_an_in_flight_adopt(tmp_path, monkeypatch) -> None:
+    """R2, second half. Two edits arriving inside one ``build_model_spec``
+    used to be two tasks with no ordering — last writer wins, which is
+    whichever thread happened to finish, not whichever edit the operator made
+    last. The generation guard makes the NEWER edit the one that lands."""
+    import asyncio
+
+    from local_operator.model import configure as configure_mod
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+
+    entered_first = asyncio.Event()
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    seen: list[str] = []
+
+    def _build(hosting: str, model_id: str, *a, **k):
+        seen.append(model_id)
+        if model_id == "m-first":
+            loop.call_soon_threadsafe(entered_first.set)
+            asyncio.run_coroutine_threadsafe(_wait_release(), loop).result(timeout=5)
+        return MODEL.model_copy(update={"provider": hosting, "model_id": model_id})
+
+    async def _wait_release() -> None:
+        await release.wait()
+
+    monkeypatch.setattr(configure_mod, "build_model_spec", _build)
+    try:
+        write_from_another_process(config_dir, "model_name", "m-first")
+        watcher.poll_now()
+        await asyncio.wait_for(entered_first.wait(), timeout=5)
+
+        # A SECOND edit lands while the first is still resolving.
+        write_from_another_process(config_dir, "model_name", "m-second")
+        watcher.poll_now()
+        release.set()
+        await _settle(session)
+
+        assert "m-second" in seen, seen
+        assert (
+            session.model.model_id == "m-second"
+        ), "the older in-flight adopt overwrote the newer edit"
+    finally:
+        release.set()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_lost_reconcile_is_retried_at_the_next_turn_boundary(tmp_path, monkeypatch) -> None:
+    """Review round 1, R5. The dirty flag was cleared BEFORE the work, so a
+    pass that returned early (no watcher) or raised dropped the pending
+    reconcile — leaving the inventory out of line with a file that had already
+    changed until the operator edited the key a second time."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        write_from_another_process(config_dir, "web_search.enabled", False)
+        watcher.poll_now()
+        assert session._web_tools_dirty is True
+
+        # A pass that cannot do the work must not consume the flag. Patched
+        # and restored by hand rather than through `monkeypatch.undo()`, which
+        # would also revert the LOCAL_OPERATOR_CONFIG_DIR this test runs in.
+        import local_operator.config_watch as watch_mod
+
+        real_existing = watch_mod.existing_watcher
+        watch_mod.existing_watcher = lambda *_a, **_k: None  # type: ignore[assignment]
+        try:
+            session._reconcile_web_tools()
+        finally:
+            watch_mod.existing_watcher = real_existing  # type: ignore[assignment]
+        assert session._web_tools_dirty is True, (
+            "an early return consumed the dirty flag; the reconcile is lost until "
+            "the operator edits the key again"
+        )
+
+        # The next boundary, with the watcher reachable, does the work and
+        # only then clears it.
+        session._reconcile_web_tools()
+        assert session._web_tools_dirty is False
+        assert "web_search" not in {t.name for t in session._tools}
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_re_enabled_web_tool_returns_to_its_registry_position(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, R4. The tools array rides in the same prompt-cache
+    prefix as the system prompt and ``tools/registry.py`` builds it in a stable
+    order precisely so that prefix stays cache-stable (AGENTS.md, "the
+    tool-surface footprint ladder"). A re-enabled tool appended to the END
+    costs a prefix miss on every later call of the session."""
+    from local_operator.tools.registry import DEFAULT_TOOL_NAMES
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        before = [t.name for t in session._tools]
+        assert "web_search" in before
+
+        write_from_another_process(config_dir, "web_search.enabled", False)
+        watcher.poll_now()
+        session._reconcile_web_tools()
+        assert "web_search" not in {t.name for t in session._tools}
+
+        write_from_another_process(config_dir, "web_search.enabled", True)
+        watcher.poll_now()
+        session._reconcile_web_tools()
+
+        after = [t.name for t in session._tools]
+        assert after == before, f"the cycle reordered the inventory: {before} -> {after}"
+        # And specifically at its REGISTRY position relative to its web sibling
+        # — measured in review, the append landed it dead last:
+        # `['web_fetch','task',…,'web_search']`. Compared against `web_fetch`
+        # rather than against the whole array because a session's inventory is
+        # not globally registry-ordered to begin with (the capability tools are
+        # merged in afterwards by `_merge_capability_tools`), so a whole-array
+        # sortedness assertion would pin something this code never promised.
+        assert DEFAULT_TOOL_NAMES.index("web_search") < DEFAULT_TOOL_NAMES.index("web_fetch")
+        assert after.index("web_search") < after.index("web_fetch"), after
+        assert after[-1] != "web_search", "the re-enabled tool was appended"
+    finally:
+        await session.dispose()

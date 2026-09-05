@@ -255,6 +255,45 @@ _MAX_CONTINUATIONS = 8
 SESSION_CAPABILITY_TOOLS: tuple[str, ...] = ("task", "wait", "jobs", "wake", "hub", "ask")
 
 
+def _splice_in_registry_order(existing: Sequence[Any], fresh: Sequence[Any]) -> list[Any]:
+    """Insert ``fresh`` tools at their ``DEFAULT_TOOL_NAMES`` positions.
+
+    The tools array rides in the same prompt-cache prefix as the system prompt,
+    and ``tools/registry.py`` builds it in a stable order precisely so that
+    prefix stays cache-stable (AGENTS.md, "the tool-surface footprint ladder").
+    Appending a re-enabled tool therefore costs a prefix miss on every
+    remaining call of the session, which is why a live ``web_search.enabled``
+    flip has to put the tool BACK where it was rather than merely put it back
+    (review round 1, R4).
+
+    Each fresh tool is placed before the first existing tool that ranks after
+    it in the registry order; anything the registry does not name (an MCP tool,
+    a host extension) sorts last and is never reordered relative to its
+    neighbours, so a session whose inventory was customised keeps that shape.
+    Same-name replacement is NOT this function's job \u2014 the caller has already
+    established that these names are absent.
+    """
+    from local_operator.tools.registry import DEFAULT_TOOL_NAMES
+
+    # Unknown names rank past every known one, and stably among themselves, so
+    # the merge cannot shuffle tools the registry has no opinion about.
+    last = len(DEFAULT_TOOL_NAMES)
+
+    def rank(tool: Any) -> int:
+        name = getattr(tool, "name", "")
+        return DEFAULT_TOOL_NAMES.index(name) if name in DEFAULT_TOOL_NAMES else last
+
+    merged = list(existing)
+    for tool in sorted(fresh, key=rank):
+        position = len(merged)
+        for index, present in enumerate(merged):
+            if rank(present) > rank(tool):
+                position = index
+                break
+        merged.insert(position, tool)
+    return merged
+
+
 class _PeerArrival:
     """Session-owned :class:`PeerArrivalProtocol` behind ``ToolContext``.
 
@@ -1706,6 +1745,14 @@ class Session:
         #: only by :meth:`_adopt_configured_model` itself, so a session that
         #: is following config keeps following it across successive edits.
         self._explicit_model_choice = False
+        #: Bumped by :meth:`_on_configured_model_changed` on every dispatch, and
+        #: captured by :meth:`_adopt_configured_model` before its thread hop.
+        #: An adopt whose generation is stale when it returns has been
+        #: superseded by a newer ``hosting``/``model_name`` edit and abandons,
+        #: so two edits arriving inside one ``build_model_spec`` resolve in
+        #: EDIT order rather than in whichever-thread-finished-first order
+        #: (review round 1, R2).
+        self._configured_model_generation = 0
         #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
         #: ``web_fetch.enabled`` moved; consumed at the next TURN boundary by
         #: :meth:`_reconcile_web_tools`. Deferred rather than applied on the
@@ -10299,10 +10346,17 @@ class Session:
                             "/model saved adopts it"
                         ),
                         kind="info",
+                        # A glance for the boot toast, so it does not fall
+                        # through to a blind cut landing mid-phrase (design
+                        # round 1, D3). See ``NoticeEvent.headline``.
+                        headline="Model unchanged",
                     )
                 )
             )
             return
+        # Bumped BEFORE the spawn so an adopt already parked on its thread hop
+        # sees a generation newer than the one it captured and stands down.
+        self._configured_model_generation += 1
         self._spawn_background(self._adopt_configured_model(values))
 
     async def _adopt_configured_model(self, values: Mapping[str, Any]) -> None:
@@ -10318,14 +10372,40 @@ class Session:
 
         Goes through :meth:`set_model` with ``explicit=True`` so a pinned
         fallback is withdrawn (the default the fallback was rescuing is gone),
-        then clears ``_explicit_model_choice`` again: adopting the file is not
-        the user choosing, and the next edit must keep applying. The boot
-        selector is re-based too, so a ``selected_model`` journal row written
-        for this switch is skipped on resume (the new default IS the boot).
+        then RESTORES ``_explicit_model_choice`` to what it was before the
+        call rather than assigning ``False``: adopting the file is not the user
+        choosing, so a session that was following config keeps following it —
+        but a session that had already recorded a real ``/model`` choice must
+        not have that record erased by an adopt (review round 1, R2, second
+        half). The boot selector is re-based too, so a ``selected_model``
+        journal row written for this switch is skipped on resume (the new
+        default IS the boot).
+
+        **The apply is guarded against the await.** ``build_model_spec`` may
+        fetch a provider listing, so the thread hop below is a real window in
+        which the user can type ``/model`` and a second config edit can land.
+        Reproduced in review: a ``/model`` choice made during a parked adopt
+        was silently undone AND its ``_explicit_model_choice`` reset, which
+        disabled the keep rule for every later edit. Two guards close it, both
+        re-checked AFTER the await:
+
+        * ``_explicit_model_choice`` — a user choice that landed while this was
+          in flight outranks the file, the same rule
+          :meth:`_on_configured_model_changed` applies before spawning; and
+        * ``_configured_model_generation`` — bumped by every dispatch, so a
+          NEWER adopt (a second edit while the first was resolving) wins and
+          the older task abandons rather than last-writer-wins between two
+          tasks with no ordering.
+
+        Both abandon silently: the newer decision emits its own receipt, and a
+        second line about a switch that did not happen is noise.
+
         Reads ``values`` — the watcher's validated snapshot — never a fresh
         ``ConfigManager`` (the module docstring of ``config_watch`` explains
         why a listener must not construct one).
         """
+        generation = self._configured_model_generation
+        explicit_before = self._explicit_model_choice
         hosting = str(values.get("hosting") or "").strip().lower()
         model_name = str(values.get("model_name") or "").strip()
         if not hosting:
@@ -10377,17 +10457,30 @@ class Session:
             return
         if self._disposed:
             return
+        if self._explicit_model_choice and not explicit_before:
+            # The user chose while this adopt was resolving. Their pick is
+            # newer and explicit; applying the file's spec now would undo it.
+            return
+        if self._configured_model_generation != generation:
+            # A newer config edit has already been dispatched. It resolves
+            # against the newer values and owns the receipt.
+            return
         chosen_effort = current.reasoning_effort
         if chosen_effort and chosen_effort in tuple(spec.reasoning_efforts or ()):
             spec = spec.model_copy(update={"reasoning_effort": chosen_effort})
         previous_label = self.model_label
         self.set_model(spec, explicit=True)
-        self._explicit_model_choice = False
+        # RESTORED, not cleared: see the docstring. ``set_model(explicit=True)``
+        # sets the flag as a side effect of withdrawing a pinned fallback, and
+        # this call is the file's decision rather than the user's — so the flag
+        # goes back to whatever the user's own history had made it.
+        self._explicit_model_choice = explicit_before
         self._boot_selector = f"{spec.provider}/{spec.model_id}"
         await self._emit(
             NoticeEvent(
                 text=f"model: {previous_label} → {self.model_label} — config.yml default changed",
                 kind="info",
+                headline=f"model: {self.model_label}",
             )
         )
 
@@ -10401,17 +10494,28 @@ class Session:
         watcher's last-good snapshot (``existing_watcher().values``) — the
         one source a config-driven path may read without risking the
         move-aside a fresh ``ConfigManager`` performs on a malformed file.
-        Missing tools are merged in through :meth:`_merge_capability_tools`
-        (same-name replacement, stable order); disabled ones are dropped
-        through :meth:`refresh_tools`, the committed inventory-swap hook.
+        Disabled tools are dropped through :meth:`refresh_tools`, the committed
+        inventory-swap hook; a re-enabled one is spliced back at its
+        ``DEFAULT_TOOL_NAMES`` POSITION rather than appended (review round 1,
+        R4). Order is not cosmetic here: ``tools/registry.py`` builds the array
+        in a stable order precisely so the tools array — which rides in the
+        same cache prefix as the system prompt — stays cache-stable, and an
+        appended tool costs a prompt-cache prefix miss on every later call of
+        the session (AGENTS.md, "the tool-surface footprint ladder").
 
         Never mid-turn: the loop reads ``context.tools`` per model call, and a
         tool removed between a model's call and its dispatch comes back "Tool
         not found" — the per-call gate in the tool gives a better answer.
+
+        The dirty flag is cleared only once the reconcile has actually HAPPENED
+        (review round 1, R5). Cleared up front, a pass that returned early
+        (``watcher is None``) or was swallowed by the ``except`` dropped the
+        pending work, and the inventory then stayed out of line with a file
+        that had already changed until the operator edited the key a second
+        time. Left set, the next turn boundary simply tries again.
         """
         if not self._web_tools_dirty or self._job_id is not None:
             return
-        self._web_tools_dirty = False
         try:
             from local_operator.config_watch import existing_watcher
             from local_operator.paths import config_dir
@@ -10444,7 +10548,8 @@ class Session:
                 )
                 fresh = create_tools(context, enabled=to_add)
                 if fresh:
-                    self.refresh_tools(list(self._tools) + fresh)
+                    self.refresh_tools(_splice_in_registry_order(self._tools, fresh))
+            self._web_tools_dirty = False
         except Exception:  # noqa: BLE001 — the inventory is never worth a broken turn
             logger.warning("web tool inventory could not be reconciled", exc_info=True)
 

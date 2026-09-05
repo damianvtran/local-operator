@@ -1237,6 +1237,23 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
+    #: A SHORT glance for the boot toast, when the emitter knows the state.
+    #:
+    #: While the splash is up a notice is shown twice — as a durable splash row
+    #: carrying the full sentence, and as a toast, which is one clause with no
+    #: wrap. A toast with no headline falls through to a blind 35-cell cut
+    #: (``tui/app.py:_splash_toast_headline``), which lands mid-phrase:
+    #: ``tool approvals: auto — config.yml c…``. That fallback has already
+    #: regressed once when a sibling message was added without a headline, and
+    #: the fix recorded there is that callers which KNOW the state pass one
+    #: rather than have prose re-parsed for a magic phrase.
+    #:
+    #: On the event rather than at the terminal because these notices are
+    #: emitted by the RUNTIME, one process away: a headline derived at the
+    #: viewer could only be derived by matching on the sentence, which is the
+    #: fragile thing this field exists to replace. Empty means "no opinion" and
+    #: the existing fallback applies, so every other emitter is unaffected.
+    headline: str = ""
 
 
 class WakeDeliveredEvent(AgentEvent[Literal["wake_delivered"]]):
