@@ -215,12 +215,16 @@ def test_max_inactive_days_uses_last_activity_not_creation(tmp_path: Path) -> No
     # A sidecar written yesterday must NOT count as activity.
     (old / ".session.pid").write_text("0", encoding="utf-8")
     touched = _session(tmp_path, "touched", age_days=40)
-    (touched / "notes.txt").write_text("recent", encoding="utf-8")
+    (touched / "transcript.jsonl").write_text("x" * 100, encoding="utf-8")  # written now
+    # A backfill sentinel written yesterday must NOT count as activity either.
+    stale = _session(tmp_path, "stale", age_days=40)
+    (stale / "title-scan.json").write_text("{}", encoding="utf-8")
+    (stale / "notes.txt").write_text("unknown file, also not activity", encoding="utf-8")
 
     result = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_inactive_days=30), now=NOW)
 
-    assert {c.session for c in result.removed} == {"old"}
-    assert result.removed[0].policy == "max_inactive_days"
+    assert {c.session for c in result.removed} == {"old", "stale"}
+    assert all(c.policy == "max_inactive_days" for c in result.removed)
     assert touched.exists()
 
 
@@ -297,9 +301,12 @@ def test_a_dead_claim_does_not_protect(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_removes_nothing_but_reports_and_records(
+def test_dry_run_removes_nothing_and_records_nothing(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A rehearsal is reported through the result, never through the log:
+    a WARNING per dry-run line doubled the CLI's output (U3) and rehearsals
+    in the jsonl made the record of real losses unreadable (U6/R1-12)."""
     _store(tmp_path, 12, transcript=True, age_days=1)
     _session(tmp_path, "doomed", transcript=False, age_days=400)
     with caplog.at_level(logging.WARNING, logger="local_operator.session.cleanup"):
@@ -308,20 +315,45 @@ def test_dry_run_removes_nothing_but_reports_and_records(
         )
     assert [c.session for c in result.removed] == ["doomed"]
     assert (tmp_path / "sessions" / "doomed").exists()
-    assert any("dry run" in r.message and "doomed" in r.message for r in caplog.records)
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
-    ]
-    assert rows == [
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not (tmp_path / "sessions" / CLEANUP_LOG_NAME).exists()
+
+
+def test_dry_run_with_the_switch_off_lists_but_reports_disabled(tmp_path: Path) -> None:
+    """The safe, useful half of the old CLI bypass: a dry run may show what
+    the config's limits WOULD take while the switch is off, and says so."""
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    _session(tmp_path, "doomed", transcript=False, age_days=400)
+    result = run_cleanup(
+        tmp_path, CleanupPolicy(enabled=False, remove_empty=True), now=NOW, dry_run=True
+    )
+    assert [c.session for c in result.removed] == ["doomed"]
+    assert result.skipped == "disabled"
+    assert (tmp_path / "sessions" / "doomed").exists()
+
+
+def test_candidates_carry_title_age_and_size(tmp_path: Path) -> None:
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    old = _session(tmp_path, "old", age_days=40, size=2048)
+    row = json.dumps(
         {
-            "at": rows[0]["at"],
-            "session": "doomed",
-            "policy": "remove_empty",
-            "reason": "no transcript",
-            "dry_run": True,
+            "type": "message",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Research thread seven"}],
+            },
         }
-    ]
+    )
+    (old / "transcript.jsonl").write_text(row + "\n" + "x" * 2000, encoding="utf-8")
+    os.utime(old / "transcript.jsonl", (NOW - 40 * DAY, NOW - 40 * DAY))
+    result = run_cleanup(
+        tmp_path, CleanupPolicy(enabled=True, max_inactive_days=30), now=NOW, dry_run=True
+    )
+    (candidate,) = result.removed
+    assert candidate.session == "old"
+    assert "Research thread seven" in candidate.title
+    assert 39.9 < candidate.idle_days < 40.1
+    assert candidate.size_bytes > 2000
 
 
 def test_every_removal_is_logged_at_warning_with_policy_and_reason(
@@ -333,21 +365,126 @@ def test_every_removal_is_logged_at_warning_with_policy_and_reason(
         run_cleanup(tmp_path, CleanupPolicy(enabled=True, remove_empty=True), now=NOW)
     lines = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "removing doomed" in m and "policy=remove_empty" in m and "reason=no transcript" in m
+        "removing doomed" in m
+        and "policy=remove_empty" in m
+        and "reason=no transcript" in m
+        and "actor=startup" in m
+        and CLEANUP_LOG_NAME in m
         for m in lines
     ), lines
     row = json.loads((tmp_path / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
-    assert row["session"] == "doomed" and row["dry_run"] is False
+    assert row["session"] == "doomed"
+    assert row["actor"] == "startup" and row["pid"] == os.getpid()
+    assert "dry_run" not in row
 
 
-def test_explicit_run_does_not_need_enabled(tmp_path: Path) -> None:
-    """The CLI path: the command is the consent, the guards still apply."""
+def test_the_switch_governs_every_caller_including_the_cli(tmp_path: Path) -> None:
+    """Round 1 let a caller pass ``explicit=True`` to bypass the switch; that
+    was the incident's shape (Q1/U2/R1-5). There is no such flag now: with
+    ``enabled: false`` a non-dry run removes nothing, whoever calls."""
+    import inspect
+
+    from local_operator.session import cleanup as cleanup_mod
+
+    assert "explicit" not in inspect.signature(run_cleanup).parameters
     _store(tmp_path, 12, transcript=True, age_days=1)
     _session(tmp_path, "doomed", transcript=False, age_days=400)
     result = run_cleanup(
-        tmp_path, CleanupPolicy(enabled=False, remove_empty=True), now=NOW, explicit=True
+        tmp_path, CleanupPolicy(enabled=False, remove_empty=True), now=NOW, actor="cli"
+    )
+    assert result.skipped == "disabled" and result.removed == []
+    assert (tmp_path / "sessions" / "doomed").exists()
+    assert not (tmp_path / "sessions" / cleanup_mod.CLEANUP_LOG_NAME).exists()
+
+
+def test_force_overrides_the_switch_and_is_recorded_as_the_actor(tmp_path: Path) -> None:
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    _session(tmp_path, "doomed", transcript=False, age_days=400)
+    result = run_cleanup(
+        tmp_path,
+        CleanupPolicy(enabled=False, remove_empty=True),
+        now=NOW,
+        force=True,
+        actor="cli",
     )
     assert [c.session for c in result.removed] == ["doomed"]
+    row = json.loads((tmp_path / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()[0])
+    assert row["actor"] == "cli"
+
+
+def test_a_boot_does_not_move_the_activity_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q2: the startup backfills write ``title-scan.json`` /
+    ``origin-scan.json`` into every transcript directory, and the old clock
+    (newest non-sidecar file) read a 40-day session as active NOW after one
+    boot. Run the REAL maintenance pass, then assert every session's activity
+    is unchanged and ``max_inactive_days`` still finds the old ones."""
+    import asyncio
+
+    from local_operator import session_factory
+    from local_operator.session.retention import _activity_mtime
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    made = _store(tmp_path, 15, transcript=True)  # ages 16d .. 2d
+    row = json.dumps({"type": "message", "payload": {"role": "user", "content": "hello"}})
+    for path in made:
+        (path / "transcript.jsonl").write_text(row + "\n", encoding="utf-8")
+        stamp = path.stat().st_mtime
+        os.utime(path / "transcript.jsonl", (stamp, stamp))
+    before = {p.name: _activity_mtime(p, 0.0) for p in made}
+    manager = ConfigManager(tmp_path)
+
+    async def no_wait() -> None:
+        return None
+
+    monkeypatch.setattr(session_factory, "_wait_for_store_maintenance_idle_window", no_wait)
+    asyncio.run(session_factory._run_store_maintenance(manager, tmp_path, live_dir=None))
+
+    stamped = [p for p in made if (p / "title-scan.json").exists() or (p / "origin.json").exists()]
+    assert stamped, "the backfills did not run; the test proves nothing"
+    after = {p.name: _activity_mtime(p, 0.0) for p in made}
+    assert after == before
+    result = run_cleanup(
+        tmp_path, CleanupPolicy(enabled=True, max_inactive_days=10), now=NOW, dry_run=True
+    )
+    # Ages 16..11 d are older than 10 d: s000..s005; the 10 most recent are
+    # s005..s014 by the transcript clock, so s000..s004 are chosen.
+    assert {c.session for c in result.removed} == {f"s{i:03d}" for i in range(5)}
+
+
+def test_ties_break_on_name_so_dry_run_and_real_run_agree(tmp_path: Path) -> None:
+    mark_store(tmp_path / "sessions")
+    for index in range(15):
+        _session(tmp_path, f"t{index:02d}", age_days=30)  # all the same stamp
+    dry = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=10), now=NOW, dry_run=True)
+    assert [c.session for c in dry.removed] == ["t14", "t13", "t12", "t11", "t10"]
+    real = run_cleanup(tmp_path, CleanupPolicy(enabled=True, max_sessions=10), now=NOW)
+    assert [c.session for c in real.removed] == [c.session for c in dry.removed]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (True, True),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("yes", True),
+        (1, True),
+        (0, False),
+        ("banana", False),
+        ([], False),
+        ({"x": 1}, False),
+        (2, False),
+    ],
+)
+def test_the_master_switch_is_parsed_strictly(tmp_path: Path, raw: object, expected: bool) -> None:
+    """``enabled: "false"`` in a hand-edited YAML must not enable cleanup
+    (R1-6): anything that is not a recognisable boolean reads as OFF."""
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"session": {"cleanup": {"enabled": raw}}})
+    assert policy_from_config(ConfigManager(tmp_path)).enabled is expected
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +498,7 @@ def test_remover_refuses_an_unmarked_store(
     target = tmp_path / "sessions" / "abc"
     target.mkdir(parents=True)
     with caplog.at_level(logging.WARNING, logger="local_operator.session.cleanup"):
-        done = remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r")
+        done = remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
     assert done is False and target.exists()
     assert any("REFUSED" in r.message and STORE_MARKER_NAME in r.message for r in caplog.records)
 
@@ -370,7 +507,10 @@ def test_remover_refuses_a_directory_not_under_sessions(tmp_path: Path) -> None:
     target = tmp_path / "agents" / "abc"
     target.mkdir(parents=True)
     (tmp_path / "agents" / STORE_MARKER_NAME).write_text("x")
-    assert remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r") is False
+    assert (
+        remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
+        is False
+    )
     assert target.exists()
 
 
@@ -381,7 +521,9 @@ def test_remover_refuses_another_config_dirs_store(tmp_path: Path) -> None:
     mark_store(other / "sessions")
     mine = tmp_path / "mine"
     (mine / "sessions").mkdir(parents=True)
-    assert remove_session_dir(target, config_dir=mine, policy="p", reason="r") is False
+    assert (
+        remove_session_dir(target, config_dir=mine, policy="p", reason="r", actor="test") is False
+    )
     assert target.exists()
 
 
@@ -393,7 +535,9 @@ def test_remover_refuses_a_symlink_into_a_store(tmp_path: Path) -> None:
     mark_store(scratch / "sessions")
     link = scratch / "sessions" / "abc"
     link.symlink_to(victim)
-    assert remove_session_dir(link, config_dir=scratch, policy="p", reason="r") is False
+    assert (
+        remove_session_dir(link, config_dir=scratch, policy="p", reason="r", actor="test") is False
+    )
     assert victim.exists()
 
 
@@ -402,7 +546,10 @@ def test_remover_removes_a_marked_store_entry(tmp_path: Path) -> None:
     target = tmp_path / "sessions" / "abc"
     target.mkdir()
     (target / "transcript.jsonl").write_text("row\n")
-    assert remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r") is True
+    assert (
+        remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
+        is True
+    )
     assert not target.exists()
 
 

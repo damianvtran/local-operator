@@ -44,21 +44,30 @@ the real store**, and refuses on the actor's behalf:
   stat error, import failure) keeps the directory.
 
 The enforcement is ``tests/unit/session/test_no_session_deletion.py``: it
-walks ``local_operator/`` and fails, naming file:line, on any ``rmtree``/
-``rmdir``/``rename``/``replace``/``move`` outside this module whose
-argument could be a session directory; and it asserts this module removes
-nothing when disabled, with every limit set to 1 over a 50-session store.
+walks ``local_operator/`` and fails, naming file:line, on any call named
+``rmtree``/``rmdir``/``removedirs``/``rename``/``renames``/``replace``/
+``move``/``unlink``/``remove`` outside this module — through any import
+alias and on any receiver — unless allow-listed with a reason; and it
+asserts this module removes nothing when disabled, with every limit set to
+1 over a 50-session store.
 
 The policy is also runnable by hand: ``lop sessions cleanup --dry-run``
-prints what it WOULD remove, and ``lop sessions cleanup`` runs it. Neither
-requires ``enabled`` — an explicit command is the user's judgement — but
-both honour every hard guard.
+lists what the limits WOULD remove (it may do so with the switch off, and
+says so), and ``lop sessions cleanup`` runs it — only with ``enabled:
+true``, or with ``--force`` after listing and a typed confirmation. Both
+honour every hard guard.
+
+The store marker is a guard against foreign and unmarked targets and the
+CLI on a store nothing has booted; it is NOT a second gate on the harness's
+own startup pass, which marks its store in ``_prepare`` before maintenance
+runs. That pass is gated by ``enabled`` alone (QA round 1, Q4).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -101,8 +110,13 @@ DEFAULT_REMOVE_EMPTY = False
 #: reads as a session id to a listing.
 STORE_MARKER_NAME = ".local-operator-store"
 
-#: Append-only record of every removal, inside the store it describes. One
-#: JSON object per line: ``{"at", "session", "policy", "reason", "dry_run"}``.
+#: Append-only record of every REAL removal, inside the store it describes.
+#: One JSON object per line: ``{"at", "session", "title", "policy", "reason",
+#: "actor", "pid"}``. Dry runs are NOT recorded — a rehearsal in the same file
+#: as the losses made the log unreadable (13 of 22 rows in one QA store were
+#: rehearsals). ``actor`` is ``"startup"`` (the maintenance pass, gated on
+#: ``enabled``) or ``"cli"`` (``lop sessions cleanup``), which is the first
+#: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
 
 #: The N most recently active sessions are never candidates, whatever the
@@ -132,11 +146,19 @@ class CleanupPolicy:
 @dataclass(frozen=True)
 class Candidate:
     """One directory the policy chose, and why. Returned so the CLI's dry run
-    and the tests can assert on decisions rather than scrape log lines."""
+    and the tests can assert on decisions rather than scrape log lines.
+
+    Carries what a user needs to JUDGE the decision, not only the id: a
+    12-hex id says nothing, "Research thread 7 · 29d · 28 kB" does (UX round
+    1, U4). ``title`` is resolved the way the resume picker resolves it.
+    """
 
     session: str
     policy: str
     reason: str
+    title: str = ""
+    idle_days: float = 0.0
+    size_bytes: int = 0
 
 
 @dataclass
@@ -161,11 +183,36 @@ class CleanupResult:
 
 
 def _coerce_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
     try:
         number = int(value)
     except (TypeError, ValueError):
         return default
     return number if number >= 0 else default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """A REAL boolean or the default — never ``bool(value)``.
+
+    ``enabled: "false"`` in a hand-edited YAML is a non-empty string, and
+    ``bool("false")`` is True: the one leaf where "garbage means the default"
+    did not hold was the master switch (review round 1, R1-6). An operator
+    frightened by the incident will hand-edit exactly this key, so anything
+    that is not literally ``true``/``false`` (or the YAML 1.1 spellings a
+    human types: yes/no/on/off, 0/1) reads as the default, which is OFF.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    return default
 
 
 def policy_from_config(config_manager: Any) -> CleanupPolicy:
@@ -188,7 +235,7 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
             return default
 
     return CleanupPolicy(
-        enabled=bool(leaf("enabled", DEFAULT_ENABLED)),
+        enabled=_coerce_bool(leaf("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
         max_sessions=_coerce_int(leaf("max_sessions", DEFAULT_MAX_SESSIONS), DEFAULT_MAX_SESSIONS),
         max_inactive_days=_coerce_int(
             leaf("max_inactive_days", DEFAULT_MAX_INACTIVE_DAYS), DEFAULT_MAX_INACTIVE_DAYS
@@ -196,7 +243,7 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
         max_total_bytes=_coerce_int(
             leaf("max_total_bytes", DEFAULT_MAX_TOTAL_BYTES), DEFAULT_MAX_TOTAL_BYTES
         ),
-        remove_empty=bool(leaf("remove_empty", DEFAULT_REMOVE_EMPTY)),
+        remove_empty=_coerce_bool(leaf("remove_empty", DEFAULT_REMOVE_EMPTY), DEFAULT_REMOVE_EMPTY),
     )
 
 
@@ -268,16 +315,21 @@ def remove_session_dir(
     config_dir: Path | None,
     policy: str,
     reason: str,
+    actor: str,
+    title: str = "",
     dry_run: bool = False,
 ) -> bool:
     """THE ONLY ``rmtree`` OF A SESSION DIRECTORY IN THIS CODEBASE.
 
     Refuses unless :func:`_refusal` clears the target; logs the refusal at
     WARNING so an attempt against an unmarked or foreign store is visible.
-    Logs every removal at WARNING and appends it to the store's
-    :data:`CLEANUP_LOG_NAME` BEFORE the ``rmtree``, so a crash mid-removal
-    still leaves the record. Returns whether the directory was (or, in a dry
-    run, would have been) removed.
+    Logs every real removal at WARNING (naming the record file) and appends
+    it to the store's :data:`CLEANUP_LOG_NAME` BEFORE the ``rmtree``, so a
+    crash mid-removal still leaves the record. A dry run refuses and decides
+    exactly as a real run would but writes nothing and logs at DEBUG — the
+    CLI prints the decisions itself, and a WARNING per rehearsal doubled
+    every line in a terminal (UX round 1, U3). Returns whether the directory
+    was (or, in a dry run, would have been) removed.
     """
     why_not = _refusal(target, config_dir)
     if why_not is not None:
@@ -289,23 +341,33 @@ def remove_session_dir(
             reason,
         )
         return False
-    record = {
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "session": target.name,
-        "policy": policy,
-        "reason": reason,
-        "dry_run": dry_run,
-    }
-    _append_cleanup_log(target.parent, record)
     if dry_run:
-        logger.warning(
+        logger.debug(
             "session cleanup (dry run): would remove %s; policy=%s reason=%s",
             target.name,
             policy,
             reason,
         )
         return True
-    logger.warning("session cleanup: removing %s; policy=%s reason=%s", target.name, policy, reason)
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": target.name,
+        "title": title,
+        "policy": policy,
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+    }
+    _append_cleanup_log(target.parent, record)
+    logger.warning(
+        "session cleanup: removing %s%s; policy=%s reason=%s actor=%s (record: %s)",
+        target.name,
+        f" ({title})" if title else "",
+        policy,
+        reason,
+        actor,
+        target.parent / CLEANUP_LOG_NAME,
+    )
     shutil.rmtree(target)
     return True
 
@@ -415,6 +477,21 @@ class _Entry:
     size: int
 
 
+def _session_title(directory: Path) -> str:
+    """The name ``/resume`` would show for this directory, or ``""``.
+
+    Resolved through ``resume.session_name`` so the CLI list and the picker
+    agree on what a session is called. Import-lazy: ``resume`` is heavy and
+    this runs only for the directories the policy CHOSE, never for the scan.
+    """
+    try:
+        from local_operator.resume import session_name
+
+        return session_name(directory, max_chars=48)
+    except Exception:  # noqa: BLE001 — a name is a courtesy, never a reason to fail
+        return ""
+
+
 def run_cleanup(
     config_dir: Path,
     policy: CleanupPolicy,
@@ -422,27 +499,42 @@ def run_cleanup(
     live_dir: Path | None = None,
     now: float | None = None,
     dry_run: bool = False,
-    explicit: bool = False,
+    force: bool = False,
+    actor: str = "startup",
 ) -> CleanupResult:
     """Apply ``policy`` to ``config_dir/sessions``.
 
-    ``explicit`` is the CLI's flag: the user typed the command, so
-    ``policy.enabled`` is not consulted — the command IS the consent. Every
-    other caller leaves it False and gets nothing unless the config says so.
+    THE MASTER SWITCH GOVERNS EVERY CALLER. Round 1 let the CLI run with
+    ``enabled: false`` on the theory that typing the command was consent;
+    QA (Q1), UX (U2) and review (R1-5) each showed why that is the incident's
+    shape: ``/settings`` leaves the limits in the file when the switch is
+    turned OFF, so a user who read "off: nothing ever removes a session
+    directory" and then ran the command "to see what it would do" lost 16 of
+    34 sessions. Now ``enabled: false`` means nothing is removed by anyone
+    unless ``force`` is set — and the CLI sets it only for ``--force``, after
+    listing and confirming. A dry run with the switch off still LISTS what
+    the limits would take (safe and useful) and reports ``skipped`` so the
+    caller can say the switch is off.
+
+    ``actor`` is recorded in the cleanup log: ``"startup"`` for the
+    maintenance pass, ``"cli"`` for ``lop sessions cleanup``.
 
     Selection order, deliberately from least to most aggressive, with each
     limit re-checking the guards on its own candidates:
 
     1. ``remove_empty`` — directories with no non-empty transcript.
-    2. ``max_inactive_days`` — last activity (:func:`_activity_mtime`, which
-       ignores sidecars) older than the limit.
+    2. ``max_inactive_days`` — last activity (:func:`_activity_mtime`: the
+       transcript's or the mail spool's mtime, never a sidecar's) older than
+       the limit.
     3. ``max_sessions`` — beyond the N most recently active, oldest first.
     4. ``max_total_bytes`` — least recently active first until under budget.
 
     The :data:`RECENT_KEEP` newest sessions are excluded from every limit.
+    Ties on the activity clock break on the directory NAME so a dry run and
+    the real run pick the same directories on any filesystem (R1-11).
     """
     result = CleanupResult(dry_run=dry_run)
-    if not explicit and not policy.enabled:
+    if not policy.enabled and not force and not dry_run:
         result.skipped = "disabled"
         return result
     if not policy.has_any_limit:
@@ -480,7 +572,9 @@ def run_cleanup(
         except OSError:
             continue
 
-    entries.sort(key=lambda entry: entry.activity, reverse=True)
+    # Newest first; equal stamps fall back to the name so the order is a
+    # property of the store, not of ``iterdir`` on this filesystem.
+    entries.sort(key=lambda entry: (-entry.activity, entry.path.name))
     recent = {entry.path.name for entry in entries[:RECENT_KEEP]}
     chosen: dict[str, Candidate] = {}
 
@@ -505,7 +599,14 @@ def run_cleanup(
         if guard is not None:
             protect(name, guard)
             return False
-        chosen[name] = Candidate(name, policy_name, reason)
+        chosen[name] = Candidate(
+            name,
+            policy_name,
+            reason,
+            title=_session_title(entry.path) if entry.has_transcript else "",
+            idle_days=max(0.0, (moment - entry.activity) / 86400.0),
+            size_bytes=entry.size,
+        )
         return True
 
     if policy.remove_empty:
@@ -548,6 +649,9 @@ def run_cleanup(
                 total -= entry.size
 
     result.chosen = list(chosen.values())
+    if dry_run and not policy.enabled and not force:
+        # Listed, not removed, and the caller is told why: the switch is off.
+        result.skipped = "disabled"
     for candidate in result.chosen:
         target = sessions_dir / candidate.session
         try:
@@ -556,6 +660,8 @@ def run_cleanup(
                 config_dir=config_dir,
                 policy=candidate.policy,
                 reason=candidate.reason,
+                actor=actor,
+                title=candidate.title,
                 dry_run=dry_run,
             )
         except OSError as exc:
@@ -589,7 +695,7 @@ def cleanup_from_config(
     policy = policy_from_config(config_manager)
     if not policy.enabled:
         return CleanupResult(skipped="disabled")
-    result = run_cleanup(config_dir, policy, live_dir=live_dir)
+    result = run_cleanup(config_dir, policy, live_dir=live_dir, actor="startup")
     if result.removed:
         logger.warning(
             "session cleanup: removed %d of %d sessions (see %s)",

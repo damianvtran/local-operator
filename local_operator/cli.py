@@ -491,42 +491,68 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     sessions_parser = subparsers.add_parser(
         "sessions",
-        help="List active lop sessions and their resource usage",
+        help=(
+            "List active lop sessions and their resource usage; "
+            "`sessions cleanup` previews or runs the session cleanup policy"
+        ),
         parents=[parent_parser],
     )
     sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
-    # bare `lop sessions` keeps listing. Running it by hand is the user's
-    # consent, so `session.cleanup.enabled` is not required — but every hard
-    # guard (live claim/lease, armed wake, unread mail, the 10 most recent)
-    # still applies, and `--dry-run` shows the decisions without acting.
+    # bare `lop sessions` keeps listing.
+    #
+    # THE MASTER SWITCH GOVERNS THIS COMMAND. With `session.cleanup.enabled`
+    # false the non-dry run refuses (rc 2) and says where to turn it on;
+    # `--dry-run` still lists what the limits would take and says the switch
+    # is off. `--force` overrides the switch, but only after printing the
+    # list and reading a typed confirmation (`--yes` skips the prompt for
+    # scripts). Round 1 let the bare command run past an OFF switch on the
+    # theory that typing it was consent — /settings leaves the limits in the
+    # file when the switch is turned off, so that was the incident's shape
+    # (QA Q1, UX U2, review R1-5). Every hard guard (live claim/lease, armed
+    # wake, unread mail, the 10 most recent) applies whatever the flags.
     sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
         help="Run the session cleanup policy now (use --dry-run to preview)",
+        description=(
+            "Apply session.cleanup.* from config (each limit overridable below) to the "
+            "session store. Requires session.cleanup.enabled: true unless --force. "
+            "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
+        ),
         parents=[parent_parser],
     )
     cleanup_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print what would be removed and why, without removing anything",
+        help="list what would be removed and why, without removing anything",
+    )
+    cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="run even when session.cleanup.enabled is false (lists first, then asks)",
+    )
+    cleanup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask for confirmation before removing",
     )
     cleanup_parser.add_argument(
         "--max-sessions",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="keep only the N most recently active sessions (overrides config)",
     )
     cleanup_parser.add_argument(
         "--max-inactive-days",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="remove sessions idle longer than N days (overrides config)",
     )
     cleanup_parser.add_argument(
         "--max-total-bytes",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="trim the least recently active sessions past this store size (overrides config)",
     )
@@ -1727,19 +1753,43 @@ def send_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def sessions_cleanup_command(args: argparse.Namespace) -> int:
-    """``lop sessions cleanup [--dry-run]`` — run the cleanup policy explicitly.
+def _non_negative_int(text: str) -> int:
+    """argparse type for the cleanup limits: `/settings` enforces `minimum=0`
+    on every one of them and the CLI must not be the lax door (UX U7)."""
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
 
-    The limits come from ``session.cleanup.*`` in config, each overridable on
-    the command line for a one-off run. ``enabled`` is NOT consulted: typing
-    the command is the consent. With no limit configured or given there is
-    nothing to apply, and the command says so rather than inventing one.
+
+def _cleanup_row(candidate: Any, verb: str) -> str:
+    """One decision, with what a user needs to judge it: name, age, size."""
+    title = f'"{candidate.title}"' if candidate.title else "(no title)"
+    age = f"{candidate.idle_days:.0f}d" if candidate.idle_days >= 1 else "<1d"
+    return (
+        f"  {verb:<12} {candidate.session}  {title}  {age}  "
+        f"{_format_bytes(candidate.size_bytes)}  [{candidate.policy}] {candidate.reason}"
+    )
+
+
+def sessions_cleanup_command(args: argparse.Namespace) -> int:
+    """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
+
+    Order of operations for a real run is LIST, CONFIRM, REMOVE — never the
+    reverse (UX U2). The listing is the dry run over the same policy, so what
+    the user confirms is exactly what goes.
+
+    Exit codes: 0 ran (or dry run); 1 nothing to apply (no limits); 2 refused
+    (switch off without ``--force``, or confirmation declined); 3 ran with
+    errors. ``--json`` always emits a JSON object on stdout, whatever the
+    outcome, and carries ``enabled`` so a script can see the switch state.
     """
     import dataclasses
     import json as _json
 
     from local_operator.session.cleanup import (
         CLEANUP_LOG_NAME,
+        CleanupResult,
         policy_from_config,
         run_cleanup,
     )
@@ -1757,20 +1807,19 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         if value is not None
     }
     policy = dataclasses.replace(policy, **overrides)
-    if not policy.has_any_limit:
-        print(
-            "no cleanup limits configured: set session.cleanup.* in /settings "
-            "or pass --max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty",
-            file=sys.stderr,
-        )
-        return 1
+    record_path = root / "sessions" / CLEANUP_LOG_NAME
+    switch_hint = (
+        "session.cleanup.enabled is off - turn it on in /settings (Session > Session cleanup) "
+        "or pass --force to run once anyway"
+    )
 
-    result = run_cleanup(root, policy, dry_run=bool(args.dry_run), explicit=True)
-    verb = "would remove" if args.dry_run else "removed"
-    if args.json:
+    def emit_json(result: CleanupResult, *, outcome: str, confirmed: bool | None = None) -> None:
         print(
             _json.dumps(
                 {
+                    "outcome": outcome,
+                    "enabled": policy.enabled,
+                    "forced": bool(args.force),
                     "dry_run": result.dry_run,
                     "scanned": result.scanned,
                     "removed": [dataclasses.asdict(c) for c in result.removed],
@@ -1779,28 +1828,114 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     ],
                     "errors": result.errors,
                     "skipped": result.skipped,
+                    "confirmed": confirmed,
+                    "record": str(record_path),
                 },
                 indent=2,
             )
         )
-        return 0
-    if result.skipped:
-        print(f"nothing to do: {result.skipped}")
-        return 0
-    print(
-        f"policy: max_sessions={policy.max_sessions} max_inactive_days={policy.max_inactive_days} "
-        f"max_total_bytes={policy.max_total_bytes} remove_empty={policy.remove_empty}"
+
+    if not policy.has_any_limit:
+        message = (
+            "no cleanup limits configured: set session.cleanup.* in /settings or pass "
+            "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
+        )
+        if not policy.enabled:
+            message += f"\n{switch_hint}"
+        if args.json:
+            emit_json(CleanupResult(skipped="no limits configured"), outcome="nothing-to-do")
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    if not policy.enabled and not args.force and not args.dry_run:
+        if args.json:
+            emit_json(CleanupResult(skipped="disabled"), outcome="refused")
+        else:
+            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+            print("preview what the limits would remove with --dry-run", file=sys.stderr)
+        return 2
+
+    # The LISTING is always a dry run first, so a real run shows the user the
+    # same rows before anything is removed.
+    preview = run_cleanup(root, policy, dry_run=True, force=bool(args.force), actor="cli")
+    policy_line = (
+        f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
+        f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
+        f"remove_empty={policy.remove_empty}"
     )
-    print(f"scanned {result.scanned} sessions; {verb} {len(result.removed)}")
+
+    if args.dry_run:
+        if args.json:
+            emit_json(preview, outcome="dry-run")
+            return 0
+        print(policy_line)
+        if not policy.enabled:
+            print(f"note: {switch_hint}; this is a preview only")
+        print(f"scanned {preview.scanned} sessions; would remove {len(preview.removed)}")
+        for candidate in preview.removed:
+            print(_cleanup_row(candidate, "would remove"))
+        for name, guard in preview.protected:
+            print(f"  kept         {name}  ({guard})")
+        print("nothing was removed (dry run); the record of real removals is " f"{record_path}")
+        return 0
+
+    if not args.json:
+        print(policy_line)
+        if not policy.enabled:
+            print(f"WARNING: {switch_hint}; running because --force was given")
+        print(f"scanned {preview.scanned} sessions; about to remove {len(preview.removed)}")
+        for candidate in preview.removed:
+            print(_cleanup_row(candidate, "will remove"))
+        for name, guard in preview.protected:
+            print(f"  kept         {name}  ({guard})")
+    if not preview.removed:
+        if args.json:
+            emit_json(preview, outcome="nothing-to-do")
+        else:
+            print("nothing to remove")
+        return 0
+
+    confirmed: bool | None = None
+    if not args.yes:
+        if not sys.stdin.isatty():
+            if args.json:
+                emit_json(preview, outcome="refused", confirmed=False)
+            else:
+                print(
+                    "refusing: not a terminal and --yes was not given, so nothing was removed",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            answer = input(f"remove {len(preview.removed)} session(s)? type 'yes' to confirm: ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        confirmed = answer.strip().lower() == "yes"
+        if not confirmed:
+            if args.json:
+                emit_json(preview, outcome="refused", confirmed=False)
+            else:
+                print("not confirmed; nothing was removed")
+            return 2
+
+    # The removal WARNINGs go to the rotating file (`local-operator.log`),
+    # not the console: the stdout listing below already carries every fact
+    # and the console copy doubled each line in a terminal (UX U3, QA Q7).
+    # ``file_logging`` detaches the console handlers for the block and puts
+    # them back afterwards.
+    with file_logging():
+        result = run_cleanup(root, policy, force=bool(args.force), actor="cli")
+    if args.json:
+        emit_json(result, outcome="removed", confirmed=confirmed)
+        return 3 if result.errors else 0
+    print(f"removed {len(result.removed)} session(s)")
     for candidate in result.removed:
-        print(f"  {verb:<12} {candidate.session}  [{candidate.policy}] {candidate.reason}")
-    for name, guard in result.protected:
-        print(f"  kept         {name}  ({guard})")
+        print(_cleanup_row(candidate, "removed"))
     if result.errors:
         print(f"  {result.errors} error(s); see the log", file=sys.stderr)
-    if not args.dry_run and result.removed:
-        print(f"record: {root / 'sessions' / CLEANUP_LOG_NAME}")
-    return 0
+    print(f"record: {record_path}")
+    return 3 if result.errors else 0
 
 
 def sessions_command(args: argparse.Namespace) -> int:

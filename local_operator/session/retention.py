@@ -60,13 +60,39 @@ LIVE_MARKER_NAME = ".session.pid"
 ATTACHMENT_SIDECAR_FILENAME = "attachment.json"
 
 #: Files a session directory may hold that are bookkeeping ABOUT the run rather
-#: than content produced BY it: the liveness marker, and the attachment sidecar
-#: naming the ``/team``, ``/agent`` and ``/goal`` a resume re-stamps. Excluded
-#: from the activity clock (:func:`_activity_mtime`) because writing either
-#: says nothing about when the user last worked here. Exported so
-#: :mod:`local_operator.session.cleanup` uses the same list when it decides
-#: what "last activity" means — two lists would drift.
-_SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME, ATTACHMENT_SIDECAR_FILENAME})
+#: than content produced BY it. None of them says anything about when the user
+#: last worked here, so none may move the activity clock
+#: (:func:`_activity_mtime`):
+#:
+#: - the liveness marker and the lease/its recovery lock and tombstones;
+#: - the attachment sidecar naming the ``/team``, ``/agent`` and ``/goal`` a
+#:   resume re-stamps;
+#: - ``origin.json`` / ``title.json`` and the two SCAN SENTINELS the startup
+#:   backfills write into every directory with a transcript. The sentinels
+#:   are the important ones: QA round 1 (Q2) found that one boot stamped
+#:   ``title-scan.json`` into every session, after which a 40-day transcript
+#:   read as idle for 0.0007 days, ``max_inactive_days`` became a no-op and
+#:   the "10 most recent" guard no longer matched the picker's first page.
+#:   The operator's real store has ``title-scan.json`` in 174 of 196 entries.
+#: - the subagent roster sidecar and the origin-verdict cache.
+#:
+#: Spelled here as literals for the same import-weight reason as
+#: :data:`TRANSCRIPT_FILENAME`; ``resume.py`` and ``session.py`` keep the
+#: canonical constants and ``test_retention.py`` pins the two lists together.
+_SIDECAR_NAMES = frozenset(
+    {
+        LIVE_MARKER_NAME,
+        ATTACHMENT_SIDECAR_FILENAME,
+        ".execution-lease",
+        ".execution-lease.recovery",
+        "origin.json",
+        "title.json",
+        "origin-scan.json",
+        "title-scan.json",
+        "subagent-roster.v1.json",
+        "origin-verdicts.json",
+    }
+)
 
 #: The transcript file's name, exported for the cleanup policy's "has this
 #: session got a transcript at all" question.
@@ -80,6 +106,12 @@ _SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME, ATTACHMENT_SIDECAR_FILENAME})
 #: is the on-disk format's name — and a change to it would break far more than
 #: this constant.
 TRANSCRIPT_FILENAME = "transcript.jsonl"
+
+#: The files whose mtime IS "when the user last worked here": the transcript
+#: (every turn appends to it) and the peer-message spool (a note the user has
+#: not read yet is activity waiting for them). Nothing else counts — see
+#: :func:`_activity_mtime`.
+_ACTIVITY_FILES = frozenset({TRANSCRIPT_FILENAME, "inbox.jsonl"})
 
 #: This module's view of the platform. A module-local copy rather than reading
 #: ``sys.platform`` at the point of use, so a test can steer the Windows branch
@@ -257,29 +289,33 @@ def _is_claimed(directory: Path, now: float) -> bool:
 
 
 def _activity_mtime(directory: Path, fallback: float) -> float:
-    """When this session was last WRITTEN to, ignoring the liveness marker.
+    """When the user last worked in this session.
 
     Used on the unverifiable-platform branch of :func:`_is_claimed` to bound
     how long a claim is trusted after real activity, and by the cleanup policy
-    as its definition of "last activity" for the inactivity limit. The liveness marker
-    is excluded (via :data:`_SIDECAR_NAMES`) for the same reason it is not
-    charged as bytes: it is written once at claim time and would otherwise peg
-    "last activity" to the moment the session started, expiring a long but
-    quiet session's claim while it is still alive.
+    as its definition of "last activity" for the inactivity limit and the
+    "most recently active" ordering.
 
-    A directory with no non-marker content falls back to ``fallback`` (the
-    marker's own mtime), which is the best signal available there.
+    THE CLOCK IS THE TRANSCRIPT (and the unread-mail spool), NOTHING ELSE. An
+    earlier version took the newest non-sidecar file anywhere under the
+    directory, which meant any bookkeeping the harness wrote — the startup
+    backfills' ``title-scan.json`` above all — restamped "last activity" to
+    "now" on every boot, so ``max_inactive_days`` silently stopped matching
+    anything and the recent-N guard drifted away from what ``/resume`` shows
+    (QA round 1, Q2). Reading only :data:`_ACTIVITY_FILES` at the top level
+    is also what ``resume.recent_sessions`` does (it sorts on the transcript's
+    mtime), so the picker and the policy agree by construction. The directory
+    mtime is deliberately not consulted either: it moves whenever any entry
+    is added or removed.
+
+    A directory with neither file falls back to ``fallback`` — the caller's
+    best remaining signal (the marker's mtime, or the directory's own).
     """
     newest: float | None = None
-    try:
-        for entry in directory.rglob("*"):
-            try:
-                if entry.name in _SIDECAR_NAMES or not entry.is_file():
-                    continue
-                stamp = entry.stat().st_mtime
-            except OSError:
-                continue
-            newest = stamp if newest is None else max(newest, stamp)
-    except OSError:
-        return fallback
+    for name in _ACTIVITY_FILES:
+        try:
+            stamp = (directory / name).stat().st_mtime
+        except OSError:
+            continue
+        newest = stamp if newest is None else max(newest, stamp)
     return fallback if newest is None else newest

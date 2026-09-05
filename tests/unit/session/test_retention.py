@@ -247,3 +247,55 @@ async def test_store_maintenance_ignores_aggressive_limits_when_disabled(
 
     survivors = {p.name for p in (tmp_path / "sessions").iterdir() if p.is_dir()}
     assert survivors == expected
+
+
+# ---------------------------------------------------------------------------
+# The activity clock
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
+    """``_SIDECAR_NAMES`` spells the names as literals (import weight); this
+    pins them to the canonical constants so a renamed sidecar cannot quietly
+    start counting as activity again."""
+    from local_operator import resume
+    from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
+    from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
+
+    expected = {
+        MIRROR_NAME,
+        LEASE_NAME,
+        RECOVERY_LOCK_NAME,
+        resume.ATTACHMENT_SIDECAR_NAME,
+        resume.ORIGIN_NAME,
+        resume.TITLE_SIDECAR_NAME,
+        resume.ORIGIN_SCAN_SENTINEL_NAME,
+        resume.TITLE_SCAN_SENTINEL_NAME,
+        resume.ORIGIN_CACHE_NAME,
+        SUBAGENT_ROSTER_SIDECAR,
+    }
+    assert retention._SIDECAR_NAMES == frozenset(expected)
+
+
+def test_activity_is_the_transcript_or_spool_and_nothing_else(tmp_path: Path) -> None:
+    from local_operator.session.retention import _activity_mtime
+
+    session = tmp_path / "sessions" / "abc"
+    session.mkdir(parents=True)
+    old = time.time() - 40 * 86400
+    (session / "transcript.jsonl").write_text("row\n")
+    os.utime(session / "transcript.jsonl", (old, old))
+    # Every sidecar, an unknown file, a nested output file and the directory
+    # itself are all "now" — none may move the clock.
+    for name in sorted(retention._SIDECAR_NAMES) + ["notes.unknown"]:
+        (session / name).write_text("x")
+    (session / "attachments").mkdir()
+    (session / "attachments" / "shot.png").write_bytes(b"png")
+    assert abs(_activity_mtime(session, 0.0) - old) < 1.0
+    # The spool DOES count: an unread note is activity waiting for the user.
+    (session / "inbox.jsonl").write_text('{"from":"peer"}\n')
+    assert _activity_mtime(session, 0.0) > time.time() - 5
+    # Neither file: the fallback.
+    bare = tmp_path / "sessions" / "bare"
+    bare.mkdir()
+    assert _activity_mtime(bare, 12345.0) == 12345.0
