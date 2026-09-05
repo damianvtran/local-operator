@@ -38,6 +38,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+from local_operator.herdr.reporter import HerdrReporter, state_from_title
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
     format_context_tokens as _format_context_tokens,
@@ -1048,6 +1049,24 @@ class StatusLine:
         #: attaches one, which keeps the band usable by the lightweight test
         #: hosts that have no terminal to write to.
         self._title: TerminalTitle | None = None
+        #: The Herdr Agents-panel reporter, driven from the same place as the
+        #: title and for the same reason: the band is the one object that
+        #: already coalesces ``streaming`` and ``attention`` into ONE external
+        #: run state, and a second derivation is a second thing to disagree.
+        #: ``None`` outside Herdr (the common case) and for every test host.
+        self._herdr: HerdrReporter | None = None
+
+    def set_herdr_reporter(self, reporter: HerdrReporter | None) -> None:
+        """Attach (or detach) the Herdr reporter and report the current state once.
+
+        Mirrors :meth:`set_terminal_title`. The immediate sync is what emits
+        the INITIAL report: the reporter itself sends nothing on construction,
+        so the first thing Herdr hears is the band's actual state — ``idle``
+        at a prompt, but ``working`` if the app attached it mid-turn (a
+        ``/resume`` that adopts a session whose turn is already running).
+        """
+        self._herdr = reporter
+        self._sync_terminal_title()
 
     def set_terminal_title(self, title: TerminalTitle | None) -> None:
         """Attach (or detach) the window-title writer and paint it once.
@@ -1152,6 +1171,14 @@ class StatusLine:
         rendered string, so a redundant sync costs three comparisons and
         writes nothing.
         """
+        # BEFORE the title's own early-return, deliberately. The title is
+        # gated by `LOCAL_OPERATOR_NO_TERMINAL_TITLE` / `display.terminal_title`
+        # and is never attached headless; the Herdr row must not go silent
+        # because a user turned off a different feature. The state is the
+        # title's derivation either way — only the sink differs.
+        herdr = self._herdr
+        if herdr is not None:
+            herdr.report(state_from_title(self._title_state()))
         title = self._title
         if title is None:
             return
