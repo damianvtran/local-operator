@@ -30,3 +30,22 @@ tree, per `AGENTS.md` §"Evidence goes on the PR, never into the repository".
 
 The `deadend` pair is the one to read closely: on `before`, `/model default` is
 printed twice (notice and footer) in a state where no `/model` route resolves.
+
+## Remediation round 1 (`r1-*`)
+
+Re-rendered after the round-1 remediation commit for the three findings that
+changed user-visible copy. Same apparatus as above; the `r1-before-*` half is
+the PR head **`9e830ff97`** (i.e. the frames the review rounds looked at), not
+`f4e9613a9`, because these three findings are about the state this PR shipped.
+
+| Pair | Finding | What changed |
+| --- | --- | --- |
+| `r1-*-notice-100x30.png` | D1 / U3 | On `before`, row 2 ends on the bare token `/model` and row 3 opens `saved reverts to it` — the command name split across the fold, in the frame originally attached as D8's evidence. `/model saved` now sits at its clause's end and reads whole. |
+| `r1-after-notice-{80,120}x30.png` | D1 / U3 | The other two reviewed widths, both clean. |
+| `r1-*-u3-50x30.png` | D2 | On `before`, the keyword row is 49 cells against a 47-cell budget and truncates to `…not a model — enter…`, cutting the actionable half. Now `default is a command — enter runs it`, whole at 50 columns. |
+| `r1-*-u3-prefix-100x30.png` | U1 | `/model defaul`, one keystroke short of the word. On `before` the list says `no matching models` directly above a footer advertising `/model default`; now the row reads `default is a command — keep typing`. |
+| `r1-after-u3-100x30.png` | U3 | The settled state at the reviewed width, unchanged in behaviour and re-captured against the new copy. |
+
+Frames unaffected by this round (`*-help-80x44`, `*-setup-100x30`,
+`*-deadend-100x30`) are **not** re-rendered: the remediation does not touch the
+`/help` row, and the setup/dead-end notice variants keep the clause they had.
