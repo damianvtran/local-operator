@@ -15831,6 +15831,18 @@ class OperatorApp(App[None]):
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
         old_label = session.model_label
+        # The DESTINATION is derived from the spec this command resolved, never
+        # re-read from ``session.model_label`` after ``set_model``. On a local
+        # ``Session`` the two agree — ``set_model`` assigns synchronously — but
+        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # session) ``set_model`` only schedules the request as a task and
+        # ``model_label`` keeps reading the owner's frontend-state sync, which
+        # lands on a later tick. Re-reading there printed
+        # ``model: X → X (this session)`` for a switch that DID happen: the
+        # band and the incident were right and the receipt named the old
+        # model. The effort/fast-mode copies below change neither half of the
+        # identity, so this is the same pair ``set_model`` is asked for.
+        new_label = f"{spec.provider}/{spec.model_id}"
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
         # what makes "switches nothing" a true statement rather than a summary
@@ -15843,7 +15855,7 @@ class OperatorApp(App[None]):
         # has the plain `/model <p>/<id>` spelling for exactly that gesture.
         # Compared on the joined label because that is what the elided form was
         # derived from, so the two halves cannot disagree by case or spacing.
-        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        write_only = persist_default and new_label == old_label
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a
             # user who dropped to `low` for cost did not mean "until I switch
@@ -15967,10 +15979,7 @@ class OperatorApp(App[None]):
             # run-on. "(this session)" is the half that answers "for how long";
             # "from the next turn" answered "starting when", which nothing had
             # asked and which the very next receipt demonstrates anyway.
-            notice(
-                f"model: {old_label} → {session.model_label} "
-                f"(this session){suffix} — {PERSIST_HINT}"
-            )
+            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -15985,12 +15994,16 @@ class OperatorApp(App[None]):
         # new model. Every spelling that switches the session owes the same
         # answer to "starting when".
         #
-        # ``old_label != session.model_label`` because re-selecting the model
-        # already in force is a no-op, and promising that "this one finishes on
-        # the old model" describes a handover that will not happen (D4). The
-        # session layer already declines to re-derive anything for a same-model
-        # write; this is the UI half of that rule.
-        if session.is_streaming and old_label != session.model_label:
+        # ``old_label != new_label`` because re-selecting the model already in
+        # force is a no-op, and promising that "this one finishes on the old
+        # model" describes a handover that will not happen (D4). The session
+        # layer already declines to re-derive anything for a same-model write;
+        # this is the UI half of that rule. Compared against the RESOLVED
+        # label, not a re-read of ``session.model_label``: on a remote session
+        # the re-read still equals ``old_label`` (see ``new_label`` above), so
+        # the mid-turn row never printed for exactly the switches it exists to
+        # qualify.
+        if session.is_streaming and old_label != new_label:
             # ``info``, matching the receipt it qualifies, NOT ``note`` (design
             # review D3). Both rows answer one action, and at ``note`` the
             # subordinate half measured 8.62:1 against the receipt's 4.55:1 —
@@ -21390,6 +21403,10 @@ class OperatorApp(App[None]):
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
             )
         old_label = session.model_label
+        # Destination from the RESOLVED spec, not a re-read of the session's
+        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # ``set_model`` asynchronously and its label follows the owner's sync.
+        new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
             self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
             explicit=True,
@@ -21402,10 +21419,7 @@ class OperatorApp(App[None]):
         # repaints from the canonical update — the receipt below only has to
         # reach the invoker. Mid-turn timing is stated by the owner-side
         # notice path (the streamed turn's own events carry it).
-        text = (
-            f"model: {old_label} → {session.model_label} "
-            f"(this session){suffix} — {PERSIST_HINT}"
-        )
+        text = f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}"
         if warning:
             text = f"{text}\n{warning}"
         return SlashResult(kind="notice", text=text, style="info")
