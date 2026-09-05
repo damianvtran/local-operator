@@ -29,7 +29,7 @@ from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
 
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -49,6 +49,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import image_blocks as _image_blocks
+from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
@@ -1580,6 +1581,7 @@ class OwnedSessionHandle(SessionHandle):
         images: list[dict[str, str]] | None = None,
         *,
         locality: str = "local",
+        consumers: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -1606,11 +1608,103 @@ class OwnedSessionHandle(SessionHandle):
         exists today reaches this runtime over loopback. Only ``/mcp``'s grant
         verbs read it, to decide whether opening a browser here would put the
         tab in front of the person who typed the command.
+
+        ``consumers`` is which action-carrying receipts the invoking client
+        renders itself (``SLASH_ACTION_RECEIPTS``); ``None`` means it declared
+        nothing, which is what every client built before the field looks like
+        on the wire. See :meth:`_complete_unconsumed_action`.
         """
         from local_operator.session.frontend_state import SlashResult
 
         result = await self._slash_result(command, args, SlashResult, locality)
+        result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
+
+    async def _complete_unconsumed_action(
+        self,
+        result: Any,
+        images: list[dict[str, str]] | None,
+        consumers: Iterable[str] | None,
+    ) -> Any:
+        """Run an attach receipt's request here when the client will not.
+
+        THE INCIDENT THIS REPAIRS. ``/team <name> <request>`` on a viewer
+        attaches the team on this runtime and returns a ``team_attached``
+        receipt carrying the request; since #624 the VIEWER is expected to
+        submit that request as a user turn. A viewer older than #624 prints
+        the receipt text and has no consumer for ``data["request"]`` — so the
+        team was attached, "sending to <team>. <manager> is coordinating."
+        was printed, and the request was dropped with no user row, no turn and
+        no error. Skew makes that reachable at any time: the on-disk install
+        is replaced under long-lived TUIs several times a day, and the runtime
+        a stale TUI spawns is built from the NEW install.
+
+        The rule is ``type not in declared``, never "declared is None": a
+        client that declared the type submits the request itself and the
+        runtime must NEVER also run it (that would be a double turn), while
+        both ``None`` (absent field, older viewer) and ``[]`` (declared, but
+        consumes nothing) mean the request has no other home and is admitted
+        here.
+
+        Admission goes through the same ``_PromptCommand`` path the ``prompt``
+        op uses, so the durable append resolves ``admitted``, the drain emits
+        the user ``MessageStartEvent``, and an old viewer — which already
+        subscribes with ``events=True`` — paints the user row from that event
+        through its existing echo path. No renderer change is required on the
+        old viewer, which is the point: the fix reaches TUIs that are already
+        running and cannot be updated in place.
+
+        KNOWN DEGRADATION: the viewer expands collapsed pastes into the
+        request text at submit time, and those payloads live in the VIEWER's
+        composer — they cannot cross the wire retroactively. A request
+        admitted here that cites ``<[Paste #1, 240 lines]>`` reaches the
+        manager as the chip label rather than the body. Images are unaffected
+        (they are already on the wire in the ``slash_result`` frame and are
+        passed into the admission unchanged). That is strictly better than the
+        silent drop, and the skew notice the viewer paints names ``/reload``
+        as the way back to full fidelity.
+        """
+        if getattr(result, "kind", None) != "notice":
+            return result
+        data = getattr(result, "data", None) or {}
+        receipt_type = data.get("type")
+        if receipt_type not in SLASH_ACTION_RECEIPTS:
+            return result
+        request = str(data.get("request") or "")
+        if not request:
+            # ``/agent clear`` returns ``agent_attached`` with an empty
+            # request: a detach is a receipt with no action behind it.
+            return result
+        if receipt_type in (consumers or ()):
+            # The client renders this type and will submit the request itself.
+            # Admitting here too is the double-submission failure, which is
+            # worse than the bug being fixed: the user sees one command run
+            # twice with no way to tell which turn is which.
+            return result
+        try:
+            # Mirrors the viewer's own submit split (``app.py::_submit_prompt``):
+            # a turn already running is STEERED, because ``prompt`` rejects a
+            # concurrent call outright and the text would be thrown away. The
+            # steer is delivered at the engine's next tool/message boundary,
+            # which is the existing mid-turn channel rather than a new queue.
+            if self._session.is_streaming:
+                await self.steer(request, images=images, command_id=str(uuid.uuid4()))
+            else:
+                await self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+        except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
+            # The attach ALREADY landed and stays; only the turn failed to
+            # start (session closing, queue full, a rejected prompt). Reporting
+            # that as a warning is the whole difference from the original
+            # defect: the user learns the request did not run and can resend,
+            # instead of watching nothing happen.
+            logger.debug("completing an unconsumed slash action failed", exc_info=True)
+            return result.model_copy(
+                update={
+                    "text": f"{result.text} — but the request was not sent: {exc}",
+                    "style": "warning",
+                }
+            )
+        return result
 
     async def _slash_result(
         self, command: str, args: str, SlashResult: Any, locality: str = "local"

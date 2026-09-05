@@ -95,6 +95,45 @@ class VersionCheck:
     behind: bool
 
 
+@dataclass(frozen=True)
+class BuildStamp:
+    """One comparable build token: distribution version plus the git ref of
+    the install, when ``lop-update`` recorded one.
+
+    Two long-lived populations coexist on a developer host — viewer TUIs and
+    the runtime processes they spawn — while ``lop-update`` replaces the
+    on-disk install under them, often several times a day. Comparing what a
+    process LOADED with what is on disk now is how that skew becomes visible
+    instead of silent.
+
+    The ref is the primary key and the version the fallback, because this
+    host's common drift is a same-version rebuild: ``lop-update`` builds from
+    ``main`` while ``pyproject.toml`` still names the last released version,
+    so two genuinely different builds share one version string and only the
+    recorded commit tells them apart. Installs with no ``.lop-source`` (PyPI
+    wheels, pipx, editable checkouts) carry ``""`` and compare on version
+    alone — dev-tree skew is out of scope by design.
+
+    Frozen so a snapshot taken at process start cannot be mutated by the code
+    that later compares against it.
+    """
+
+    version: str
+    source_ref: str = ""
+
+    def label(self) -> str:
+        """How this build is named in a user-facing notice.
+
+        ``0.49.0`` when there is no ref to disambiguate, ``0.49.0@4d3ce1d``
+        when there is — short-form because a notice line is read, not copied,
+        and seven characters is the length git itself abbreviates to.
+        """
+        base = self.version or "unknown"
+        if not self.source_ref:
+            return base
+        return f"{base}@{self.source_ref[:7]}"
+
+
 def installed_version() -> str:
     """Distribution version, or ``""`` when this interpreter has no install.
 
@@ -401,6 +440,44 @@ def is_git_snapshot(prefix: str | Path | None = None) -> bool:
     """
     root = Path(prefix) if prefix is not None else Path(sys.prefix)
     return (root / ".lop-source").is_file()
+
+
+def source_ref(prefix: str | Path | None = None) -> str:
+    """The git ref ``lop-update`` recorded for this install, or ``""``.
+
+    ``lop-update`` writes ``<git-sha> <tag>`` into ``.lop-source`` at the same
+    root :func:`is_git_snapshot` probes, so the FIRST whitespace-separated
+    token is the commit the install was built from. Only that token is kept:
+    the tag half is a label that repeats across rebuilds of one release and
+    therefore cannot distinguish two builds, which is the whole job here.
+
+    Absent (a PyPI wheel, a pipx install, an editable checkout) is ``""``
+    rather than an error — those installs have no second token and fall back
+    to the distribution version alone.
+    """
+    root = Path(prefix) if prefix is not None else Path(sys.prefix)
+    try:
+        raw = (root / ".lop-source").read_text(encoding="utf-8")
+    except OSError:
+        # Missing, unreadable, or a directory. A build token is decoration on
+        # a diagnostic path; it must never raise into an adopt or a bind.
+        return ""
+    parts = raw.split()
+    return parts[0] if parts else ""
+
+
+def installed_build(prefix: str | Path | None = None) -> BuildStamp:
+    """This interpreter's comparable build token, read fresh from disk.
+
+    Called at the seams that spawn or bind a runtime (adopt, engage, bind) —
+    a handful of times per process, never on a hot path — because that is
+    exactly where a stale in-memory build meets a newer on-disk one. Both
+    reads are deliberately live: ``importlib.metadata.version`` re-reads the
+    dist-info directory (verified on this project's 3.12 and on 3.14.3: the
+    directory NAME carries the version, so even a path-keyed cache misses),
+    and ``.lop-source`` is one small file read.
+    """
+    return BuildStamp(version=installed_version(), source_ref=source_ref(prefix))
 
 
 def installer_argv(

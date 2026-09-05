@@ -38,7 +38,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
@@ -141,6 +141,7 @@ class AttachClient:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
         locality: str = "local",
+        slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -159,6 +160,14 @@ class AttachClient:
         self._events = events
         self._on_event = on_event
         self._frontend_state = frontend_state
+        # Which action-carrying slash receipts THIS client renders itself (see
+        # ``SLASH_ACTION_RECEIPTS``). Declaring them is what stops the runtime
+        # from also submitting the request: a client that says nothing is
+        # treated as one built before the field, whose request the runtime
+        # completes on its behalf. ``None`` is therefore meaningfully
+        # different from ``[]`` only to a reader of the frame -- both mean the
+        # type was not declared, which is the one rule the runtime applies.
+        self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         self._frontend_epoch: str | None = None
@@ -206,6 +215,12 @@ class AttachClient:
             auth["events"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
+        if self._slash_consumers is not None:
+            # Additive and advisory, exactly the shape ``events`` and
+            # ``frontend_state`` are: an older owner ignores the unknown auth
+            # field and behaves as it always did, and no PROTOCOL_VERSION bump
+            # is warranted for a field nobody is required to read.
+            auth["slash_consumers"] = list(self._slash_consumers)
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         # The welcome projection doubles as the identity check: it names the
