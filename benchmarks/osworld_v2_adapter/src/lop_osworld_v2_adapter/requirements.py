@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import ast
 
+from lop_osworld_v2_adapter.provisioning import resolve_proxy_policy
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
-from local_operator.evaluation.adapters.api import Requirement
+from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
 
 # ---------------------------------------------------------------------------
 # Always-on requirements. These exist because the worker environment is
@@ -81,6 +82,7 @@ _ALWAYS_INFRA = (
 _OPTIONAL_INFRA = (
     "AWS_INSTANCE_TYPE",
     "AWS_ROOT_VOLUME_SIZE",
+    "OSWORLD_ENABLE_PROXY",
     "OSWORLD_INPUTS_ROOT",
     "OSWORLD_TTL_SECONDS",
 )
@@ -185,9 +187,12 @@ def _evaluator_text(descriptor: TaskDescriptor) -> str:
     return repr(descriptor.evaluator) if descriptor.evaluator is not None else ""
 
 
-def derive_requirements(descriptor: TaskDescriptor) -> tuple[Requirement, ...]:
-    """Return the exact requirement set for one task, in deterministic order."""
+def derive_requirements(
+    descriptor: TaskDescriptor, *, infra_values: tuple[ScopedInfraValue, ...] = ()
+) -> tuple[Requirement, ...]:
+    """Derive requirements after policy, retaining legacy behavior on omission."""
 
+    enable_proxy = resolve_proxy_policy(infra_values, task_proxy=bool(descriptor.proxy))
     out: list[Requirement] = []
 
     for name in _AWS_SECRETS:
@@ -206,9 +211,10 @@ def derive_requirements(descriptor: TaskDescriptor) -> tuple[Requirement, ...]:
 
     # --- Conditional on the task -------------------------------------------
 
-    if descriptor.proxy:
-        # The DataImpulse proxy needs credentials and an endpoint; both are
-        # task-declared needs but account-declared values.
+    if descriptor.proxy and enable_proxy:
+        # Legacy declarations retained for compatibility, NOT working setup:
+        # upstream needs a ProxyPool and these inputs do not construct one.
+        # System-disabled mode must not demand credentials it cannot consume.
         out.append(_requirement("OSWORLD_PROXY_CREDENTIALS", kind="secret", required=True))
         out.append(_requirement("OSWORLD_PROXY_ENDPOINT", kind="infra", required=True))
 

@@ -393,8 +393,16 @@ class OSWorldV2Adapter:
                 instruction="",
                 source_sha256="0" * 64,
             )
-            return RequirementsResult(requirements=requirements_mod.derive_requirements(baseline))
-        return RequirementsResult(requirements=requirements_mod.derive_requirements(self._task))
+            return RequirementsResult(
+                requirements=requirements_mod.derive_requirements(
+                    baseline, infra_values=self._infra_values
+                )
+            )
+        return RequirementsResult(
+            requirements=requirements_mod.derive_requirements(
+                self._task, infra_values=self._infra_values
+            )
+        )
 
     # ------------------------------------------------------------------
     # prepare: declarative, allocates nothing
@@ -407,6 +415,7 @@ class OSWorldV2Adapter:
         # a pure plan (when the task is already known), mints the deterministic
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
+        provisioning.resolve_proxy_policy(params.infra_values)
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)

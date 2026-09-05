@@ -29,8 +29,9 @@ Inputs, all explicit:
   never reachable, however it is spelled. Anything not listed is resolved
   from the credential store (``CredentialStoreResolver``), the same store the
   model client is built from.
-* ``--infra NAME=VALUE`` (repeatable) -- non-secret infra values
-  (``AWS_REGION``, ``AWS_SUBNET_ID``, ...) with ``--infra-purpose``.
+* ``--infra [purpose:]NAME=VALUE`` (repeatable) -- non-secret infra values
+  (``AWS_REGION``, ``AWS_SUBNET_ID``, ...) default to ``--infra-purpose``;
+  a per-value purpose permits compute and simulator inputs in one episode.
 * Budget and step caps (``--max-steps``, ``--max-usd``, ``--max-wall-s``,
   ``--max-cycle-usd``), all explicit; the defaults are conservative because
   a paid episode with no cap is the one thing this script must not run.
@@ -58,10 +59,11 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, get_args
 
 from local_operator.evaluation.adapters.api import (
     AdapterSelector,
+    InfraPurpose,
     ResolvedSecret,
     ScopedInfraValue,
     SecretRef,
@@ -452,21 +454,38 @@ def _outcome_json(outcome: EpisodeOutcome) -> dict[str, Any]:
 
 
 def _parse_infra(values: Sequence[str], purpose: str) -> tuple[ScopedInfraValue, ...]:
-    out: list[ScopedInfraValue] = []
+    if purpose not in get_args(InfraPurpose):
+        raise ValueError("--infra-purpose must be a supported infrastructure purpose")
+    out: dict[str, ScopedInfraValue] = {}
     for item in values:
-        name, sep, value = item.partition("=")
-        if not sep or not name:
-            raise SystemExit(f"--infra expects NAME=VALUE, got {item!r}")
-        # ``purpose`` is validated by the model against the closed InfraPurpose
-        # vocabulary; argparse hands it over as a plain string.
-        out.append(
-            ScopedInfraValue.model_validate({"name": name, "purpose": purpose, "value": value})
-        )
-    return tuple(out)
+        scoped_name, sep, value = item.partition("=")
+        scope, scope_sep, name = scoped_name.partition(":")
+        if not scope_sep:
+            scope, name = purpose, scoped_name
+        try:
+            if not sep:
+                raise ValueError
+            parsed = ScopedInfraValue.model_validate(
+                {"name": name, "purpose": scope, "value": value}
+            )
+        except ValueError:
+            # ValidationError includes the raw input, which can contain a
+            # misplaced secret. CLI failures must never print that payload.
+            raise ValueError(
+                "--infra expects [purpose:]NAME=VALUE with a valid name, purpose and value"
+            ) from None
+        # Adapter lookups use NAME, not (purpose, NAME). Two differently scoped
+        # values of the same name would otherwise depend on iteration order.
+        if parsed.name in out and parsed != out[parsed.name]:
+            raise ValueError("--infra has conflicting entries for the same name")
+        out.setdefault(parsed.name, parsed)
+    return tuple(out.values())
 
 
-def _infra_disclosure_metadata(infra: Sequence[str]) -> dict[str, Any]:
-    """Manifest metadata disclosing every infra override that changes the hardware.
+def _infra_disclosure_metadata(
+    infra: Sequence[str], purpose: str = "benchmark_compute"
+) -> dict[str, Any]:
+    """Manifest metadata disclosing infra overrides that change the apparatus.
 
     Driven by ``DISCLOSED_INFRA_METADATA_KEYS`` rather than by a list of names
     repeated here. That table is also what
@@ -491,21 +510,16 @@ def _infra_disclosure_metadata(infra: Sequence[str]) -> dict[str, Any]:
     values is supplied to an adapter build that does not declare it. Requested
     and applied can therefore differ only on a run that produced no bundle.
 
-    Reads the raw ``--infra NAME=VALUE`` strings rather than the parsed
-    ``ScopedInfraValue`` tuple so this stays a pure function of the CLI input
-    and can be tested without building a whole spec. Reporting an unparseable
-    value verbatim is correct: the run fails at prepare, and a bundle, if one
-    exists at all, should still show what was asked for. First occurrence wins,
-    matching ``_parse_infra``'s own left-to-right handling of a repeated name.
+    Use the same parser as the episode spec: a per-value purpose prefix must
+    not hide a requested override from disclosure. Identical duplicates are
+    coalesced; conflicting names and malformed entries fail before the run.
     """
 
-    metadata: dict[str, Any] = {}
-    for item in infra:
-        name, sep, value = item.partition("=")
-        key = DISCLOSED_INFRA_METADATA_KEYS.get(name)
-        if sep and key is not None and value and key not in metadata:
-            metadata[key] = value
-    return metadata
+    return {
+        DISCLOSED_INFRA_METADATA_KEYS[item.name]: item.value
+        for item in _parse_infra(infra, purpose)
+        if item.name in DISCLOSED_INFRA_METADATA_KEYS
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -531,7 +545,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="read this secret from the process environment instead of the store",
     )
-    parser.add_argument("--infra", action="append", default=[], metavar="NAME=VALUE")
+    parser.add_argument(
+        "--infra",
+        action="append",
+        default=[],
+        metavar="[purpose:]NAME=VALUE",
+        help="Non-secret infrastructure input; optional purpose overrides --infra-purpose",
+    )
     parser.add_argument("--infra-purpose", default="benchmark_compute")
     parser.add_argument("--config-dir", type=Path, default=None, help="lop config dir")
     parser.add_argument("--max-steps", type=int, default=25)
@@ -592,6 +612,11 @@ class _ScriptedFinish:
 
 
 async def run(args: argparse.Namespace) -> int:
+    try:
+        infra_values = _parse_infra(args.infra, args.infra_purpose)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
     selector = AdapterSelector.model_validate(json.loads(args.selector.read_text()))
     provider, model = args.route
     route = _route_identity(provider, model)
@@ -631,7 +656,7 @@ async def run(args: argparse.Namespace) -> int:
         benchmark_id=args.benchmark_id,
         benchmark_release=args.benchmark_release,
         secret_refs=secret_refs,
-        infra_values=_parse_infra(args.infra, args.infra_purpose),
+        infra_values=infra_values,
         max_usd_micros=max_usd_micros,
         max_wall_ms=args.max_wall_s * 1000,
         max_steps=args.max_steps,
@@ -649,9 +674,9 @@ async def run(args: argparse.Namespace) -> int:
             # read as a result.
             "model_client": args.model_client,
             "script": "scripts/run_episode.py",
-            # Hardware disclosure: the infra overrides REQUESTED for this run
-            # (instance type, root volume size). A score produced on
-            # non-default hardware is not comparable to one produced on the
+            # Apparatus disclosure: the infra overrides REQUESTED for this run
+            # (instance type, root volume size, system proxy policy). A score on
+            # non-default apparatus is not comparable to one produced on the
             # release default, so the bundle has to say so on its own --
             # reading it must not depend on operator memory of which --infra
             # flags were passed. Only OVERRIDES are stamped, and only when
@@ -663,7 +688,7 @@ async def run(args: argparse.Namespace) -> int:
             # through the manifest. Requested can only differ from applied on
             # an episode that produced no bundle: the runner refuses an
             # override an adapter build does not declare.
-            **_infra_disclosure_metadata(args.infra),
+            **_infra_disclosure_metadata(args.infra, args.infra_purpose),
         },
     )
 

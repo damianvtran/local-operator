@@ -25,6 +25,7 @@ _ALWAYS = {
     "HF_TOKEN",  # optional at episode time: the corpus is pre-materialised
     "AWS_INSTANCE_TYPE",  # optional: escape hatch from the burstable default
     "AWS_ROOT_VOLUME_SIZE",  # optional: escape hatch from recorder disk exhaustion
+    "OSWORLD_ENABLE_PROXY",  # optional: explicit upstream system proxy policy
     "OSWORLD_INPUTS_ROOT",  # optional: the durable root the assets live in
     "OSWORLD_TTL_SECONDS",  # optional: lease-length override
 }
