@@ -358,7 +358,60 @@ build that does not declare it fails the episode before `prepare` with
 disclosure is a false statement sealed in a `verify_bundle`-valid bundle. Both
 the gate and the stamp derive from a single table
 (`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
-so a future third value cannot be gated without being disclosed or vice versa.
+so a future value cannot be gated without being disclosed or vice versa.
+
+### Explicit system proxy policy
+
+`--infra OSWORLD_ENABLE_PROXY=false` in `benchmark_compute` scope selects
+upstream's supported system-disabled mode. Only the exact lowercase strings
+`true` and `false` are accepted; malformed values or the wrong scope fail at
+`prepare`, before provider construction or allocation, even before a task is
+loaded. This is apparatus policy, not a task edit or a task-ID exception.
+
+For episodes that also need simulator configuration, the generic CLI accepts
+an optional per-value purpose prefix, without changing the global default:
+
+```sh
+--infra-purpose benchmark_compute \
+  --infra AWS_REGION=us-east-1 \
+  --infra benchmark_compute:OSWORLD_ENABLE_PROXY=false \
+  --infra benchmark_user_simulator:OSWORLD_USER_SIM_MODEL=<simulator-model>
+```
+
+Legacy `NAME=VALUE` entries still use `--infra-purpose` (default
+`benchmark_compute`). A prefix applies only to that entry. Unknown purposes,
+empty names/values, and conflicting entries for the same name (including across
+scopes) fail cleanly before selector loading/allocation without printing their
+values; identical duplicates coalesce. Purpose-prefixed policy and hardware
+inputs receive the same manifest disclosures as unprefixed inputs. Values stay
+non-secret; simulator API keys still travel through the existing secret path.
+
+Omitting the value preserves the adapter's existing behavior:
+`enable_proxy=bool(task.proxy)`. Explicit `true` sets the upstream system switch
+on; upstream still combines it with the task's proxy hint. Explicit `false`
+sets the switch off regardless of that hint, and post-policy requirements no
+longer demand `OSWORLD_PROXY_CREDENTIALS` or `OSWORLD_PROXY_ENDPOINT`.
+
+**Enabled setup remains incomplete.** The legacy credential/endpoint declarations
+are retained for omission and enabled proxy tasks for compatibility, but are
+insufficient: upstream expects an actual `ProxyPool`; the adapter does not wire
+those `OSWORLD_PROXY_*` inputs into one. Setting `true` or supplying those inputs
+is not proof of a working proxy. A real enabled setup needs a separately reviewed
+follow-up; this change builds no proxy bridge and fabricates no credentials.
+
+The requested switch is sealed as `osworld_enable_proxy_override` via the same
+manifest disclosure table as the compute overrides. An older adapter that does
+not declare the optional `OSWORLD_ENABLE_PROXY` requirement is refused before
+`prepare`, rather than silently applying its old behavior under a false disclosure.
+Omission adds no override metadata and remains compatible with older selectors;
+no adapter wire-schema change is required.
+
+Disabling proxy does **not** establish direct-network adequacy or benchmark
+comparability. Record the changed apparatus before outcomes, verify necessary
+guest network access separately, and classify blocked access as an infrastructure
+failure rather than inventing credentials or silently changing policy. Local
+validation here uses captured provider constructor arguments and fake-provider
+CLI episodes, not cloud/network validation.
 
 ### Guest disk reclamation at episode start
 

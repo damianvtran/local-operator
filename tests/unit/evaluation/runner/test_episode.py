@@ -1309,7 +1309,11 @@ def _spec_with_infra(episode_id: str, *names: str) -> Any:
         spec,
         "infra_values",
         tuple(
-            ScopedInfraValue(name=name, purpose="benchmark_compute", value="m5.xlarge")
+            ScopedInfraValue(
+                name=name,
+                purpose="benchmark_compute",
+                value="false" if name == "OSWORLD_ENABLE_PROXY" else "m5.xlarge",
+            )
             for name in names
         ),
     )
@@ -1330,8 +1334,9 @@ def _infra_runner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY"])
 async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, name: str
 ) -> None:
     """The reviewer's reproduction, as a test: old adapter + new host script.
 
@@ -1344,12 +1349,12 @@ async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
 
     adapter = FakeAdapter(tmp_path, episode_id)
     outcome = await _infra_runner(
-        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+        tmp_path, episode_id, _spec_with_infra(episode_id, name), adapter
     ).run()
 
     assert outcome.status == "failed_pre_bundle"
     assert outcome.bundle_root is None
-    assert "AWS_INSTANCE_TYPE" in (outcome.diagnostic or "")
+    assert name in (outcome.diagnostic or "")
     assert "UndeclaredDisclosedInfra" in (outcome.diagnostic or "")
     # The side-effect boundary was never crossed and the worker was reaped.
     assert "prepare" not in adapter.calls and "reset_start" not in adapter.calls
@@ -1357,8 +1362,9 @@ async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY"])
 async def test_a_declared_disclosed_infra_value_runs_normally(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, name: str
 ) -> None:
     """The inverse direction: a rebuilt adapter DOES declare it, so it runs.
 
@@ -1371,15 +1377,15 @@ async def test_a_declared_disclosed_infra_value_runs_normally(
         episode_id,
         declared_requirements=(
             Requirement(
-                requirement_id="AWS_INSTANCE_TYPE",
+                requirement_id=name,
                 kind="infra",
-                name="AWS_INSTANCE_TYPE",
+                name=name,
                 required=False,
             ),
         ),
     )
     outcome = await _infra_runner(
-        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+        tmp_path, episode_id, _spec_with_infra(episode_id, name), adapter
     ).run()
 
     assert outcome.status == "completed", outcome.diagnostic
@@ -1501,7 +1507,8 @@ def test_an_undisclosed_infra_value_is_never_stamped() -> None:
     import scripts.run_episode as run_episode
 
     assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {}
-    assert run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"]) == {}
+    with pytest.raises(ValueError, match="--infra expects"):
+        run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"])
     assert run_episode._infra_disclosure_metadata([]) == {}
     # Both at once, each under its own key.
     assert run_episode._infra_disclosure_metadata(
