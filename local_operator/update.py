@@ -101,15 +101,25 @@ def installed_version() -> str:
     Empty is the source-checkout case: there is nothing to compare to PyPI
     and :func:`install_kind` will refuse rather than guess.
 
-    An EDITABLE install's metadata is written once, at install time, and is
-    never refreshed when ``pyproject.toml``'s version changes -- so a tree at
-    0.49.0 kept reporting the 0.46.23 it was installed at, and the app showed
-    that stale number to users in Settings > Updates (QA Q3 / UX U13). The
-    running CODE is the checkout, so for an editable install the checkout's own
-    ``pyproject.toml`` is the truth and the metadata is the stale copy.
+    Install metadata is written ONCE and never refreshed when the version in
+    ``pyproject.toml`` moves, so a checkout at 0.49.0 kept reporting the
+    0.46.23 it had been installed at -- and the app showed that stale number to
+    users in Settings > Updates (QA Q3 / UX U13).
 
-    Non-editable installs are untouched: there is no source tree to read, and
-    their metadata is written by the same build that produced the code.
+    PRECEDENCE, and why this way round. When the package is imported from a
+    directory that sits next to a ``pyproject.toml`` naming this project, the
+    running CODE is that checkout: its version is a fact about what is
+    executing, while the metadata describes an earlier state of the same tree.
+    The checkout therefore wins, and metadata is the fallback.
+
+    When they legitimately differ, that is precisely the case this resolves --
+    and it resolves it toward the code. A packaged (non-editable) install has
+    no adjacent project file, so it never takes this path and reports its
+    metadata exactly as before; there is no configuration in which a released
+    build starts reading a stray file. Both an editable install and a bare
+    ``PYTHONPATH`` checkout are covered, which matters because a leftover
+    ``*.egg-info`` in the tree shadows the installed distribution entirely and
+    made "is this editable?" the wrong question to ask.
     """
     source = _editable_source_version()
     if source:
