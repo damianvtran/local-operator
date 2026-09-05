@@ -49,10 +49,18 @@ from __future__ import annotations
 import dataclasses
 import enum
 import functools
+import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
+
+from local_operator.providers.local import (
+    DEFAULT_MODEL_OVERRIDES,
+    LOCAL_PRESETS,
+    model_overrides,
+    validate_endpoint_setting,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
@@ -184,6 +192,9 @@ class Setting:
     #: anything — a preview must never reach a writer, which is exactly why the
     #: flag lives beside the write facade rather than inside it.
     preview: bool = False
+    #: Structured text settings validate before any persistence; the UI retains
+    #: the rejected input so a typo cannot silently disable a working endpoint.
+    validate_value: Callable[[Any], object] | None = None
     #: The key of a BOOL master switch this setting is INERT without. The
     #: settings page paints the value dim while the master is off (the same
     #: ink as a READONLY row) and the row's detail says so, so a leftover
@@ -355,6 +366,13 @@ SECTIONS: tuple[Section, ...] = (
         "Web fetch",
         Scope.LIVE,
         "Limits and rendering for the fetch tool.",
+    ),
+    Section(
+        "local_providers",
+        "Local servers",
+        Scope.NEW_SESSIONS,
+        "Server endpoints and exact-model metadata. Use /login to connect; "
+        "reselect with /model saved to apply model changes.",
     ),
     Section(
         "retired",
@@ -1185,6 +1203,33 @@ SETTINGS: tuple[Setting, ...] = (
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
     ),
+    *[
+        setting
+        for provider, (name, endpoint, _url) in LOCAL_PRESETS.items()
+        for setting in (
+            Setting(
+                f"providers.{provider}.base_url",
+                ("providers", provider, "base_url"),
+                "local_providers",
+                f"{name} endpoint",
+                Kind.TEXT,
+                endpoint,
+                "HTTP(S) API root. Changing servers requires a new token through /login; "
+                "existing tokens are never forwarded to another endpoint.",
+                validate_value=validate_endpoint_setting,
+            ),
+            Setting(
+                f"providers.{provider}.models",
+                ("providers", provider, "models"),
+                "local_providers",
+                f"{name} model overrides",
+                Kind.TEXT,
+                DEFAULT_MODEL_OVERRIDES,
+                'JSON: {"model-id":{"context_window":8192}}; server limits still apply.',
+                validate_value=model_overrides,
+            ),
+        )
+    ],
     # -- retired ------------------------------------------------------------
     # Kept VISIBLE and read-only rather than hidden. A user who set one of
     # these years ago needs to see that it is inert; removing the row would
@@ -1310,6 +1355,10 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
+    if setting.validate_value is model_overrides and isinstance(raw, Mapping):
+        # Hand-written YAML maps and the text editor share the same contract.
+        # Python's dict repr uses single quotes and cannot round-trip as JSON.
+        return json.dumps(raw, default=str)
     if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
         return strict_bool(raw, setting.default)
     return raw
@@ -1377,6 +1426,11 @@ def validate(setting: Setting, value: Any) -> str | None:
     show 500 forever while the tool used 120 — the config and the behaviour
     disagreeing, with nothing on screen admitting it.
     """
+    if setting.validate_value is not None:
+        try:
+            setting.validate_value(value)
+        except (ValueError, TypeError) as error:
+            return str(error)
     if setting.kind is Kind.READONLY:
         return "this setting is retired and cannot be changed"
     if setting.kind is Kind.ENUM:
