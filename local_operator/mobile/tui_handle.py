@@ -228,6 +228,16 @@ class TuiSessionHandle(SessionHandle):
         self._unsubscribe = unsubscribe
         return unsubscribe
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        state = await self._on_app(lambda: self._session().refresh_attention())
+        self._projection.attention = state
+        return state
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        state = await self._on_app(lambda: self._session().acknowledge_attention(token))
+        self._projection.attention = state
+        return state
+
     @property
     def frontend_state_seed(self):  # type: ignore[no-untyped-def]
         """Canonical state seed for full-TUI attach clients only."""

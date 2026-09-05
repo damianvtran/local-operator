@@ -231,6 +231,7 @@ class SessionTable:
         self._summaries_cache: list[dict[str, Any]] | None = None
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        self._attention_states: dict[str, dict[str, Any]] = {}
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -301,6 +302,15 @@ class SessionTable:
             rows = self._durable_rows_cache
             if rows is None or time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
                 rows = await self._refresh_durable_rows()
+            from local_operator.session.attention import AttentionStore
+
+            identities = {f"session/{session_id}" for session_id in rows}
+            identities.update(
+                f"session/{entry.record.session_id}" for entry in self.entries.values()
+            )
+            self._attention_states = await asyncio.to_thread(
+                AttentionStore().state_many, identities
+            )
             return self._merge_summaries(rows)
 
         task = asyncio.ensure_future(_build())
@@ -427,44 +437,28 @@ class SessionTable:
         return self._seen_store
 
     def _is_unseen(self, session_id: str, row: Any, entry: SessionEntry | None) -> bool:
-        """The seen-store verdict for one summary row.
+        """Only completed outcomes count; subscribers and mtimes prove no read."""
+        return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
-        Cheap: dict lookups only, no disk access — the store is fully in
-        memory and persists itself on ``mark_seen``.
 
-        Two rules the naive version got wrong:
+def _bootstrap_mobile_attention() -> None:
+    """Migrate the retained list once on daemon startup, not on passive reads."""
+    from local_operator.paths import config_dir
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
 
-        - **Holding the projection SSE stream IS viewing** (spec §3). A user
-          watching a turn finish must never come back to that session marked
-          new, so an open subscriber re-stamps ``last_seen`` here rather than
-          relying on the client to POST /seen again after every repaint.
-        - **The activity clock is never ``heartbeat_at``.** That is rewritten
-          unconditionally every HEARTBEAT_INTERVAL_S whether or not anything
-          happened, so using it re-lit a just-cleared session every 15 s
-          forever. Only the transcript mtime dates real activity; without a
-          durable row there is nothing to date against, and the session's own
-          ``started_at`` is a fixed instant that cannot creep.
-        """
-        store = self.seen_store
-        if self.session_subscribers.get(session_id):
-            # Viewing now: keep the stamp at the current instant so activity
-            # arriving during the watch is already covered when it lands. The
-            # disk write is debounced inside the store — this runs on every
-            # repaint of a watched session.
-            store.touch_watched(session_id)
-            return False
-        if row is not None:
-            activity = row.mtime
-        elif entry is not None:
-            # A live session with no durable row yet (younger than its first
-            # transcript write, or outside the 100-row window). started_at is
-            # a birth instant, not a liveness clock.
-            activity = entry.record.started_at
-        else:
-            activity = 0.0
-        if not activity:
-            return False
-        return store.is_unseen(session_id, activity)
+    root = config_dir() / "sessions"
+    if not root.is_dir():
+        return
+    # Match the relay's bounded recent-history surface. Older conversations are
+    # imported when a real Session loads them, avoiding an unbounded boot scan.
+    live = {record.session_id for record, state in registry.scan() if state == "live"}
+    directories = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+    for directory in directories[:100]:
+        if directory.name in live:
+            continue
+        if _durable_user_session_dir(directory.name) is not None:
+            bootstrap_transcript(Transcript(directory, defer_materialise=True))
 
 
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
@@ -513,6 +507,7 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         _compact_multiline,
     )
     from local_operator.resume import stored_session_title
+    from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
     directory = _durable_user_session_dir(session_id)
@@ -530,6 +525,7 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         pid=0,
         kind="daemon",
         conversation_name=stored_session_title(directory),
+        attention=AttentionStore().state(f"session/{session_id}"),
         cwd="",
         model_label="",
     )
@@ -850,8 +846,20 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     ``cap_projection_frame``); the retained projection object is untouched.
     """
     from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
 
     data, degraded = cap_projection_frame(projection)
+    attention = projection.attention
+    data["attention"] = attention
+    if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+        data["transcript"] = [
+            *data["transcript"],
+            TranscriptEntry(
+                id=attention["anchor_id"],
+                kind="notice",
+                text="Stopped with an error" if attention["kind"] == "error" else "Interrupted",
+            ).to_json(),
+        ]
     if degraded:
         logger.debug(
             "mobile daemon: capped oversized projection frame for session %s",
@@ -1252,6 +1260,39 @@ class MobileDaemon:
             await asyncio.sleep(SCAN_INTERVAL_S)
 
     async def _scan_once(self) -> None:
+        if not getattr(self, "_attention_bootstrapped", False):
+            await asyncio.to_thread(_bootstrap_mobile_attention)
+            self._attention_bootstrapped = True
+        from local_operator.session.attention import AttentionStore
+
+        revision = await asyncio.to_thread(AttentionStore().revision)
+        if revision != getattr(self, "_attention_revision", None):
+            self._attention_revision = revision
+            # Receipts change the merged badge, not durable transcript metadata.
+            self.table._summaries_cache = None
+            self.table._summaries_at = 0.0
+            self.table.notify_list_changed()
+            watched = list(self.table.session_subscribers.items())
+            attention_states = await asyncio.to_thread(
+                AttentionStore().state_many,
+                [f"session/{session_id}" for session_id, _ in watched],
+            )
+            for session_id, queues in watched:
+                entry = _entry_for_session(self, session_id)
+                projection = (
+                    entry.projection
+                    if entry is not None
+                    else await asyncio.to_thread(_durable_projection, session_id)
+                )
+                if projection is not None:
+                    projection.attention = attention_states.get(
+                        f"session/{session_id}", projection.attention
+                    )
+                    frame = _projection_frame(projection)
+                    for queue in queues:
+                        if queue.full():
+                            queue.get_nowait()
+                        queue.put_nowait(frame)
         seen: set[int] = set()
         changed = False
         for record, state in await asyncio.to_thread(registry.scan):
@@ -2050,11 +2091,27 @@ def build_app(daemon: MobileDaemon):
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
-        daemon.seen_store.mark_seen(session_id)
-        # The next list paint must already show the cleared verdict.
+        from local_operator.session.attention import AttentionStore
+
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse(
+                {"error": "completion_token is required; update the client"}, status_code=422
+            )
+        token = body.get("completion_token") if isinstance(body, dict) else None
+        if not isinstance(token, str):
+            return JSONResponse({"error": "completion_token is required"}, status_code=422)
+        try:
+            state = await asyncio.to_thread(
+                AttentionStore().acknowledge, f"session/{session_id}", token
+            )
+        except ValueError:
+            return JSONResponse({"error": "unknown completion token"}, status_code=409)
+        # The next list paint must already show the authoritative verdict.
         daemon.table.invalidate_summaries_cache()
         daemon.table.notify_list_changed()
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "attention": state})
 
     async def api_subagent_detail(request: Request) -> Response:
         """Full state for the one descendant named by the active phone route."""

@@ -164,7 +164,17 @@ export interface PendingRequest {
 	question_total: number;
 }
 
+export interface CompletionAttention {
+	conversation_id: string;
+	completion_token: string | null;
+	anchor_id: string | null;
+	kind: "complete" | "error" | "interrupted" | null;
+	unseen: boolean;
+	revision: [number, number];
+}
+
 export interface SessionProjection {
+	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;
 	kind: string;

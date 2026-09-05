@@ -572,6 +572,7 @@ class SessionProjection:
     pending_count: int = 0
     usage: dict[str, int] = field(default_factory=dict)  # input/output tokens
     version: int = 0  # projection epoch; the phone drops stale repaints
+    attention: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)

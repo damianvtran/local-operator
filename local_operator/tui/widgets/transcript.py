@@ -262,6 +262,7 @@ class TranscriptBlock(Static):
     #: Grouping key for adaptive spacing. Blocks that share a kind stack
     #: tight while each stays one row; a change of kind always opens a gap.
     SPACING_KIND: ClassVar[str] = "block"
+    completion_anchor_id: str = ""
     #: True for a block that always opens a gap above itself regardless of
     #: what preceded it — the turn boundary, not a content difference.
     SPACING_LEAD: ClassVar[bool] = False

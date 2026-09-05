@@ -649,6 +649,16 @@ class OwnedSessionHandle(SessionHandle):
     # and owns its session outright (see ``spawn_owned_session``), so the hop
     # would be a round trip to the thread already executing.
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        state = await self._session.refresh_attention()
+        self._projection.attention = state
+        return state
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        state = await self._session.acknowledge_attention(token)
+        self._projection.attention = state
+        return state
+
     @property
     def frontend_state_seed(self) -> Any:
         """Canonical state seed for full-TUI attach clients."""

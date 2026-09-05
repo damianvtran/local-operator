@@ -799,10 +799,9 @@ class Notifier:
         #: call site, matching ``TerminalTitle``.
         self._enabled = enabled
         self._label = ""
-        #: Start focused. The app is launched from the terminal the user is
-        #: typing in, and Textual only reports focus on a CHANGE — assuming
-        #: unfocused would notify on the first turn of every session.
-        self._focused = True
+        #: A terminal may start in the background. Until the host reports
+        #: focus, suppressing notifications would silently lose that completion.
+        self._focused = False
         #: Annotated rather than inferred: the attribute is mutable, so type
         #: inference widens the literal this returns to plain ``str``.
         #:
