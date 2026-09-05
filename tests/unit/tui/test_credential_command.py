@@ -183,3 +183,56 @@ async def test_cred_alias_runs_the_same_handler() -> None:
         notices = _notice_texts(app)
     assert any("No credentials stored" in n for n in notices), notices
     assert not any("unknown command" in n for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_the_credential_prompt_speaks_credential_not_login(tmp_path) -> None:
+    """UX round 1, U5: the masked card is reused from ``/login``, and it said so.
+
+    ``Paste your DB_PASSWORD API key`` names a key no provider issued, and on
+    Esc it painted ``DB_PASSWORD login cancelled`` AND a second ``not stored``
+    notice — two rows, one about a login the user never started. The card
+    now knows it is holding a credential: it asks for the VALUE, and its own
+    settled receipt is the single cancel row.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/credential DB_PASSWORD")
+        await pilot.pause()
+        painted = _painted(app)
+        assert "Paste the value for DB_PASSWORD" in painted, painted
+        assert "API key" not in painted, painted
+        assert "paste or type the value" in painted, painted
+        await pilot.press("escape")
+        for _ in range(3):
+            await pilot.pause()
+        painted = _painted(app)
+        notices = _notice_texts(app)
+    assert "login cancelled" not in painted, painted
+    assert "DB_PASSWORD not stored" in painted, painted
+    # Exactly one cancel row: the card's receipt, and no doubled notice.
+    assert painted.count("not stored") == 1, painted
+    assert not any("Cancelled;" in n for n in notices), notices
+    assert session.variables.credential_names() == []
+
+
+@pytest.mark.asyncio
+async def test_the_credential_receipt_counts_a_value_not_a_key() -> None:
+    """The success receipt keeps the length-only shape, in credential words."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    placeholder = "x" * 12
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/credential DEPLOY_TOKEN")
+        await pilot.pause()
+        for char in placeholder:
+            await pilot.press(char)
+        await pilot.press("enter")
+        for _ in range(3):
+            await pilot.pause()
+        painted = _painted(app)
+    assert "DEPLOY_TOKEN value received (12 chars)" in painted, painted
+    assert "key received" not in painted, painted

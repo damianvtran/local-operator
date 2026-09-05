@@ -117,7 +117,7 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory"}
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "credential"}
 
 
 def _accepts_locality(fn: Any) -> bool:
@@ -1575,6 +1575,54 @@ class RuntimeServer:
                 result = run(*args, locality=locality)
             else:
                 result = run(*args)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        if op == "credential":
+            # Validated HERE because the payload path does not run
+            # ``validate_control_frame`` the way ``_dispatch`` does (a
+            # pre-existing gap for every payload op). Only this op is wired,
+            # deliberately: it is the one that carries a secret, and widening
+            # the validator over ``slash_result`` is a behaviour change for
+            # every routed slash that belongs in its own review.
+            from local_operator.mobile.types import validate_control_frame
+
+            validate_control_frame(frame)
+            # A DEDICATED op rather than a `slash_result` with the secret in
+            # its `args` string. The value must never sit in a general-purpose
+            # field that other code paths echo, log, or put in a transcript —
+            # `args` is the same field that carries `/goal` text. Here the
+            # secret has exactly one named home and one consumer.
+            #
+            # The store lives on the owner because that is where the agent's
+            # bash commands run and read it from the environment; a follower
+            # storing it locally would tell the model about a key that no tool
+            # on the executing side can use.
+            #
+            # Optional capability, getattr-probed like `cancel` above: a
+            # reduced handle or an older runtime answers the unknown-op error
+            # rather than silently accepting a secret it will not store.
+            credential = getattr(h, "credential_op", None)
+            if not callable(credential):
+                raise ValueError("this owner cannot hold session credentials")
+            action = str(frame.get("action", ""))
+            if action == "store" and locality == "remote":
+                # Same locality rule the `/mcp` grant verbs apply
+                # (``mcp/grants.py::REMOTE_GRANT_NOTICE``): a secret pasted on
+                # a RELAYED client — a phone, in a future relay topology —
+                # would be typed on a device the desktop's environment was
+                # never meant to trust, and then injected into every bash
+                # command here. Loopback attach clients are ``local`` by
+                # construction, so no user today is refused; the gate exists
+                # so the relay, when it lands, does not inherit a write it
+                # never opted into (review round 1, R4). The read verbs stay
+                # open: they return key NAMES only, never a value.
+                return {"ok": False, "reason": "remote-client"}
+            result = credential(
+                action,
+                str(frame.get("key", "")),
+                str(frame.get("value", "")),
+            )
             if inspect.isawaitable(result):
                 result = await result
             return result

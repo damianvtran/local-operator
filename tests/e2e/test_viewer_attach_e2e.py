@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -197,3 +197,252 @@ async def test_the_event_relay_reaches_an_attached_viewer(
             await viewer.dispose()
         server.close()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_runs_a_team_and_holds_a_credential(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The two capabilities a viewer silently lacked, over the real socket.
+
+    Both were reported by the operator as "nothing happens". They share one
+    mechanism — state that lives on ``Session`` and has no seam on
+    ``RemoteSession`` — and both are asserted here on the OWNER's state, which
+    is the half a viewer cannot fake.
+
+    ``/team``: the mutating form used to return an unconsumed
+    ``noop {"type": "team_mutate"}``, so the command evaporated. The property
+    is that the attach lands on the session that builds the next turn.
+
+    ``/credential``: the store is an in-memory per-process dict whose reader is
+    ``credential_env()`` inside the `bash` tool — which runs HERE. A viewer
+    holding its own store would satisfy a naive round-trip test and still leave
+    every tool unable to read the secret, so this asserts the value arrives in
+    a real child process's environment. Never by printing it: the length is
+    proof enough and the value must not enter a log or a transcript.
+    """
+    from local_operator.session.remote import RemoteSession
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(headless_tui_env)
+    registry.create_team(
+        TeamEditFields(
+            name="viewerteam",
+            description="d",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    directory = headless_tui_env / "sessions" / "capgapsess1"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, ["ack"])
+    session.team_registry = registry
+    await server.start_in_process()
+    viewer = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+
+        outcome = await viewer.route_shared_slash("team", "viewerteam do the thing", [])
+        assert outcome.get("kind") != "noop", (
+            "the mutating /team returned an unconsumed noop again; the command "
+            "renders nothing at all on a viewer"
+        )
+        assert (outcome.get("data") or {}).get("type") == "team_attached"
+        assert (outcome.get("data") or {}).get("request") == "do the thing"
+        assert session.active_team_name == "viewerteam", (
+            "the attach must land on the OWNER, which is where the roster and "
+            "briefs are stamped onto the turn"
+        )
+
+        secret = "abcd-1234-efgh"
+        stored = await viewer.credential_op("store", "E2E_TOKEN", secret)
+        assert stored.get("ok"), stored
+        assert secret not in str(stored), "the value must never travel back"
+        assert session.variables.credential_names() == ["E2E_TOKEN"], (
+            "the credential must land in the OWNER's store — that is the one "
+            "the bash tool reads through credential_env()"
+        )
+
+        from local_operator.tools.builtin import execute_bash
+
+        class _Ctx:
+            variables = session.variables
+            cwd = str(directory)
+
+        result = await execute_bash(
+            "e2e-cred-probe",
+            {"command": 'test -n "$E2E_TOKEN" && echo LEN=${#E2E_TOKEN}'},
+            None,
+            None,
+            cast("Any", _Ctx()),
+        )
+        rendered = str(getattr(result, "content", result))
+        assert (
+            f"LEN={len(secret)}" in rendered
+        ), f"the credential never reached the tool's environment: {rendered}"
+        assert secret not in rendered, "the value must not appear in tool output"
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_text", ["", "ship it"], ids=["bare-attach", "with-request"])
+async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
+    headless_tui_env: Path, workspace: Path, request_text: str
+) -> None:
+    """#622 × #624: the runtime a cold `/team x` just engaged must survive the quit.
+
+    Since #622 a viewer that leaves offers its runtime back
+    (``retire_if_pristine``) and the runtime refuses when anything durable
+    exists. #624 makes a cold viewer engage a runtime and route ``/team
+    <name> [<request>]`` through it. The sequence to rule out: cold `/team x`
+    → `ctrl+d` → the runtime reads as pristine → it retires, discarding the
+    attachment the "team x is ready" receipt just vouched for and stranding a
+    sidecar-only directory.
+
+    The BARE form is the primary cell (review round 2, R7). The first version
+    of this test used the request form only and passed for the wrong reason:
+    the viewer sends the ``prompt`` frame before the quit, and that — not the
+    attach — was what made the session non-pristine. With no request there is
+    no prompt frame, so the attach's own durability (the ``attachment.json``
+    sidecar, which ``is_pristine`` now consults) is the only thing standing
+    between the runtime and retirement.
+
+    Driven end to end with nothing stubbed on the runtime side: a production
+    ``OwnedSessionHandle`` behind a production ``RuntimeServer`` (the same
+    ``is_pristine`` probe and the same refusal path a real child runs), a real
+    ``RemoteSession.cold(<minted id>)`` whose ``engage_runtime`` is pointed at
+    that server, the real ``OperatorApp`` submitting the command as one paste
+    + Enter and then quitting on the very next tick.
+    """
+    import os
+    import uuid
+
+    from textual import events
+
+    from local_operator.session.remote import RemoteSession
+    from local_operator.session.runtime import launch as launch_module
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+
+    (headless_tui_env / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+    )
+    TeamRegistry(headless_tui_env).create_team(
+        TeamEditFields(
+            name="quitteam", description="d", manager="manager", members=[TeamMember(role="coder")]
+        )
+    )
+    session_id = uuid.uuid4().hex[:12]
+    directory = headless_tui_env / "sessions" / session_id
+    directory.mkdir(parents=True)
+    # A slow reply keeps the turn IN FLIGHT across the quit — the window the
+    # retirement decision must respect.
+    session, handle, server = await _runtime(directory, ["ack", "ack"])
+    session.team_registry = TeamRegistry(headless_tui_env)
+    retire_details: list[str] = []
+    real_retire = server._retire_if_pristine
+
+    async def spy_retire(*, leaving: Any) -> str:
+        detail = await real_retire(leaving=leaving)
+        retire_details.append(detail)
+        return detail
+
+    server._retire_if_pristine = spy_retire  # type: ignore[method-assign]
+
+    async def engage_here(sid: str, cwd: str, work: Any, *, config_dir: Path, deadline_s=30.0):
+        # Stand in for the spawn only: the record, the dial and the sync are
+        # production code against this real server.
+        await server.start_in_process()
+        (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+        await _wait_for_record(config_dir, sid)
+        return None
+
+    original = launch_module.engage_runtime
+    launch_module.engage_runtime = engage_here  # type: ignore[assignment]
+    try:
+
+        async def factory() -> RemoteSession:
+            return await RemoteSession.cold(
+                session_id,
+                config_dir=headless_tui_env,
+                cwd=str(directory),
+                takeover_factory=_never_take_over,
+            )
+
+        OperatorApp._check_for_update = lambda self: None  # type: ignore[method-assign]
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            viewer = app._session
+            assert isinstance(viewer, RemoteSession)
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            line = f"/team quitteam {request_text}".rstrip()
+            app.post_message(events.Paste(line))
+            await pilot.pause()
+            await pilot.press("enter")
+            if not request_text:
+                # A bare name parks as `/team quitteam ` with the name-argument
+                # picker's completion; the second Enter is the blank-Enter
+                # SWITCH the picker advertises ("Enter to switch").
+                await pilot.pause()
+                await pilot.press("enter")
+            # Wait only for the ROUTE to land (the attach is synchronous on the
+            # owner inside the slash handler), then quit at once.
+            for _ in range(400):
+                await pilot.pause()
+                if session.active_team_name == "quitteam":
+                    break
+                await asyncio.sleep(0.01)
+            assert session.active_team_name == "quitteam", "the cold route never attached"
+            app.exit()
+        # Quit ran `_retire_unused_runtime` before dispose.
+        assert retire_details, "the viewer never offered the runtime back"
+        assert retire_details[-1].startswith("kept:"), retire_details
+        assert not handle.is_pristine(), "a stamped team is durable state, not a pristine session"
+        from local_operator.resume import (
+            ATTACHMENT_SIDECAR_NAME,
+            read_session_attachment,
+        )
+
+        assert (directory / ATTACHMENT_SIDECAR_NAME).exists(), "the attachment must survive"
+        restored = read_session_attachment(directory)
+        assert restored is not None and getattr(restored, "team", "") == "quitteam", restored
+        assert session.active_team_name == "quitteam", "the runtime kept the team it was given"
+        if not request_text:
+            # The sidecar ALONE held the runtime: no prompt frame, no row.
+            assert not (directory / "transcript.jsonl").exists(), "the bare form wrote a row"
+        if request_text:
+            # The runtime was NOT stopped: the turn it was given still lands.
+            deadline = asyncio.get_running_loop().time() + 15
+            body = ""
+            while asyncio.get_running_loop().time() < deadline:
+                body = (
+                    (directory / "transcript.jsonl").read_text()
+                    if (directory / "transcript.jsonl").exists()
+                    else ""
+                )
+                if request_text in body and "ack" in body:
+                    break
+                await asyncio.sleep(0.05)
+            assert request_text in body and "ack" in body, f"the turn was lost:\n{body}"
+    finally:
+        launch_module.engage_runtime = original  # type: ignore[assignment]
+        server.close()
+        await handle.dispose()

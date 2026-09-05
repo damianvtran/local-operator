@@ -2367,7 +2367,11 @@ class Editor(TextArea):
                 event.stop()
                 event.prevent_default()
                 return
-            if key == "d" and not self._model_picker.query_text():
+            if (
+                key == "d"
+                and not self._model_picker.query_text()
+                and self._model_picker.navigated()
+            ):
                 # `d` SAVES the highlighted row as the boot default (#369).
                 #
                 # Gated on an EMPTY query, which is the whole reason this is
@@ -2376,6 +2380,16 @@ class Editor(TextArea):
                 # must keep filtering. Only once the query is empty is `d` free
                 # to be an action, and that is exactly the state a user is in
                 # after arrowing to a row they already found.
+                #
+                # ...and gated on the user having NAVIGATED the list, because an
+                # empty query is ALSO the state one keystroke into typing
+                # `/model default <p>/<id>`: the picker opens on `/model ` with
+                # the current model highlighted, and the `d` of `default` was
+                # eaten as "save this row" — a silent config write of the
+                # current model, then a switch to a model named `efault …`
+                # (UX round 1, U8; QA Q4). Arrowing to a row is what says "this
+                # one"; typing straight after the space says "I am spelling a
+                # subcommand", and the letter goes to the composer.
                 row = self._model_picker.highlighted()
                 if row is not None:
                     handler = getattr(self.app, "_persist_default_from_picker", None)

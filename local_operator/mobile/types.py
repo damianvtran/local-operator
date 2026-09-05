@@ -185,6 +185,17 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("command must be a non-empty string")
         if not isinstance(frame.get("args"), str):
             raise ValueError("args must be a string")
+    elif op == "credential":
+        # The one op that carries a SECRET (``value``, store only). Typed here
+        # so a non-string value is refused rather than coerced by ``str()`` at
+        # the dispatch and stored as its repr (review round 1, N2). The value
+        # is never inspected beyond its type.
+        if not isinstance(frame.get("action"), str) or not frame["action"]:
+            raise ValueError("action must be a non-empty string")
+        if not isinstance(frame.get("key", ""), str):
+            raise ValueError("key must be a string")
+        if not isinstance(frame.get("value", ""), str):
+            raise ValueError("value must be a string")
     elif op == "adopt_aside":
         messages = frame.get("messages")
         if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):

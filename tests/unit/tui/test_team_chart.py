@@ -210,6 +210,59 @@ async def test_bare_chart_with_no_attached_team_is_an_error_not_a_crash() -> Non
 
 
 @pytest.mark.asyncio
+async def test_bare_chart_teaches_the_escape_when_a_team_named_chart_exists() -> None:
+    """UX round 1, U2: the one user who most needs ``=chart`` never saw it.
+
+    The hint used to print only once a chart of the team named ``chart``
+    OPENED. A user with nothing attached who typed ``/team chart`` meaning
+    "talk to my team called chart" got the plain empty-state line instead.
+    Taught here too — and only when such a team exists, so everyone else
+    keeps the short sentence.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="chart", manager="director", members=[TeamMember(role="coder")])
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/team chart")
+        await pilot.pause()
+        assert app._org_chart_view is None
+        notices = " ".join(
+            str(getattr(block, "_text", "") or "")
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        )
+    assert "no team to chart" in notices, notices
+    assert "/team =chart <request>" in notices, notices
+
+
+@pytest.mark.asyncio
+async def test_bare_chart_keeps_the_short_line_without_a_team_named_chart() -> None:
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="org", manager="director", members=[TeamMember(role="coder")])
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/team chart")
+        await pilot.pause()
+        notices = " ".join(
+            str(getattr(block, "_text", "") or "")
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        )
+    assert "no team to chart" in notices, notices
+    assert "=chart" not in notices, notices
+
+
+@pytest.mark.asyncio
 async def test_chart_unknown_team_is_an_error() -> None:
     session = FakeSession()
     session.team_registry = _registry(
