@@ -72,6 +72,50 @@ def _spec_for_spawn(episode_id: str) -> Any:
     return spec
 
 
+def test_helper_wheel_record_and_lazy_startup(tmp_path: Path, adapter_wheel: Path) -> None:
+    import subprocess
+
+    selector = spawn_helpers.build_spawnable_adapter(tmp_path, adapter_wheel, _TASKS)
+    result = subprocess.run(
+        [
+            selector.python_executable,
+            "-I",
+            "-B",
+            "-c",
+            """
+import sys
+from pathlib import Path
+from importlib.metadata import distribution
+import local_operator.cli
+import lop_osworld_v2_adapter
+assert not any(name.startswith(('desktop_env', 'evaluation_examples')) for name in sys.modules)
+assert 'lop_osworld_v2_adapter.dependencies' not in sys.modules
+from local_operator.evaluation.adapters.discovery import distribution_digest, AdapterDiscoveryError
+dist = distribution('lop-osworld-v2-adapter')
+digest = distribution_digest(dist)
+helper = Path(str(dist.locate_file('evaluation_examples/task_class/generated_task_utils.py')))
+original = helper.read_bytes()
+try:
+    helper.write_bytes(original + b'\\n# tamper\\n')
+    try:
+        distribution_digest(dist)
+    except AdapterDiscoveryError:
+        print('helper mutation refused; startup imported no task/runtime helpers')
+    else:
+        raise AssertionError('unattested helper bytes were accepted')
+finally:
+    helper.write_bytes(original)
+assert distribution_digest(dist) == digest
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "helper mutation refused" in result.stdout
+
+
 @pytest.mark.asyncio
 async def test_real_wheel_handshakes_and_reaps(tmp_path: Path, adapter_wheel: Path) -> None:
     selector = spawn_helpers.build_spawnable_adapter(tmp_path, adapter_wheel, _TASKS)

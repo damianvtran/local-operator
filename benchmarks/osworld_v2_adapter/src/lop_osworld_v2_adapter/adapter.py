@@ -461,6 +461,15 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+        if self._provider_factory is None and self._read_provider_config().get("provider") in (
+            None,
+            "aws",
+        ):
+            # Tasks are first named here. Check packaging before constructing a
+            # cloud provider; importing the task itself could run arbitrary code.
+            from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
+
+            validate_task_dependencies(self._load_task_source(params.task_id))
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
