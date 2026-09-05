@@ -1787,7 +1787,10 @@ class RemoteSession:
             # (round-6 NIT-3).
             pass
         finally:
-            if self._gate_key == self._gate_identity(pending):
+            if (
+                self._gate_key == self._gate_identity(pending)
+                and self._gate_task is asyncio.current_task()
+            ):
                 self._gate_task = None
 
     async def _run_ask(self, pending: PendingRequest) -> None:
@@ -1830,7 +1833,10 @@ class RemoteSession:
             # stop path's dead-owner post (round-6 NIT-3).
             pass
         finally:
-            if self._gate_key == self._gate_identity(pending):
+            if (
+                self._gate_key == self._gate_identity(pending)
+                and self._gate_task is asyncio.current_task()
+            ):
                 self._gate_task = None
 
     # -- owner loss ---------------------------------------------------------
@@ -2567,11 +2573,29 @@ class RemoteSession:
         """
         # A sibling frontend may settle Q1 while detach awaits cancellation.
         # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
+        task = self.suspend_viewer_gates()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    def suspend_viewer_gates(self) -> asyncio.Task[Any] | None:
+        """Stop the answer bridge before an atomic presentation swap.
+
+        Cancellation is requested synchronously, before clearing a widget can
+        resolve its waiter as a rejection. The runtime's pending gate is never
+        answered by navigation; only this viewer's bridge is suspended.
+        """
         self._gates_detached = True
         task, self._gate_task = self._gate_task, None
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    def resume_viewer_gates(self) -> None:
+        """Recreate bridges only after the source is the visible input target."""
+        if self._gates_detached:
+            self._gates_detached = False
+            self._gate_handled_key = None
+        self._maybe_start_gate()
 
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.

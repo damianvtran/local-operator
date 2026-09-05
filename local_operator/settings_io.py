@@ -821,6 +821,29 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("hidden", "hidden", "not shown"),
         ),
     ),
+    Setting(
+        key="tui.sidebar_visible",
+        path=("tui", "sidebar_visible"),
+        section="appearance",
+        label="Session sidebar",
+        kind=Kind.BOOL,
+        default=False,
+        help="Active and recent conversations. Ctrl+B toggles the sidebar.",
+        choices=_bool_choices("show the sidebar", "keep the full conversation width"),
+    ),
+    Setting(
+        key="tui.sidebar_position",
+        path=("tui", "sidebar_position"),
+        section="appearance",
+        label="Sidebar position",
+        kind=Kind.ENUM,
+        default="left",
+        help="Which side of the conversation holds the session sidebar.",
+        choices=(
+            Choice("left", "left", "sessions to the left of the conversation"),
+            Choice("right", "right", "sessions to the right of the conversation"),
+        ),
+    ),
     # -- approvals ----------------------------------------------------------
     Setting(
         key="tool_approval_mode",

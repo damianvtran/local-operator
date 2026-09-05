@@ -30,7 +30,6 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -75,8 +74,6 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
-from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -146,6 +143,7 @@ from local_operator.tui.events import (
     PeerMessageDelivered,
     RetryEnded,
     RetryStarted,
+    SessionEvent,
     StartFlushTimer,
     SteeringDelivered,
     SubagentEnded,
@@ -169,6 +167,11 @@ from local_operator.tui.markdown_theme import (
     install_markdown_theme,
 )
 from local_operator.tui.notify import Notifier, notifications_enabled
+from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
+from local_operator.tui.session_drafts import SessionDraftStore
+from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
+from local_operator.tui.session_navigation import SessionNavigation
+from local_operator.tui.session_presentation import HistoryPageNotice, PreparedReplay, SessionPresentation
 from local_operator.tui.settings import settings_get
 from local_operator.tui.terminal_title import (
     TerminalTitle,
@@ -215,6 +218,11 @@ from local_operator.tui.widgets.org_chart_view import (
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
+)
+from local_operator.tui.widgets.session_sidebar import (
+    SIDEBAR_MAIN_MIN_WIDTH,
+    SIDEBAR_WIDTH,
+    SessionSidebar,
 )
 from local_operator.tui.widgets.settings_view import (
     SettingsChanged,
@@ -1515,9 +1523,17 @@ class OperatorApp(App[None]):
         # when the side question occurs to them would have to delete their
         # draft to ask it. The draft is stashed and Esc puts it back.
         #
-        # `ctrl+b` because TextArea binds neither it nor anything near it, so
-        # the composer keeps every editing key it had.
-        Binding("ctrl+b", "aside", "Aside", show=False),
+        # Ctrl+B is navigation across platforms; F8 keeps Aside independent of
+        # terminal modifier encoding and leaves every TextArea editing key alone.
+        Binding("f8", "aside", "Aside", show=False),
+        Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
+        # Textual decodes Kitty's Super modifier. Terminals that intercept Cmd+B
+        # never deliver it, so Ctrl+B and /sidebar remain unconditional routes.
+        *(
+            [Binding("super+b", "toggle_sidebar", "Sessions", show=False)]
+            if sys.platform == "darwin"
+            else []
+        ),
         # Promote the aside exchange into the conversation. Only meaningful
         # while the card is open, and the action says so rather than the
         # binding: a key that silently does nothing elsewhere is worse than one
@@ -1668,6 +1684,9 @@ class OperatorApp(App[None]):
         warm_session_imports: bool = True,
     ) -> None:
         super().__init__()
+        self._interaction = SessionInteraction(None)
+        self._interactions: dict[int, SessionInteraction] = {}
+        self._event_sources: dict[EventController, SessionInteraction] = {}
         # Dark is the product's island night and the fallback: `theme_name`
         # arrives from config.yml, and a saved name a build no longer ships
         # (downgrade, hand-edited config) must not keep the app from booting.
@@ -1844,7 +1863,7 @@ class OperatorApp(App[None]):
         #: turn so the other is a no-op. Kept physically beside
         #: ``_completion_deferred``/``_settled_child_ids`` because all three are
         #: turn-scoped and every site that resets one must reset the others.
-        self._turn_open: bool = False
+        self._turn_open = False
         #: Whether this turn's notification ladder has already RUN. Distinct
         #: from ``_turn_open``, which says whether the turn is still live:
         #: retiring a turn and announcing it are two different claims, and a
@@ -1856,7 +1875,7 @@ class OperatorApp(App[None]):
         #: without which a FAILED turn was toasted "task complete" while the
         #: title on the same turn read ``✗`` (review R4). Turn-scoped, so every
         #: site that resets ``_turn_open`` resets this too.
-        self._turn_notified: bool = False
+        self._turn_notified = False
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -1926,13 +1945,13 @@ class OperatorApp(App[None]):
         #: because both triggers announce themselves through those events, so one
         #: flag covers the automatic pass and `/compact` alike. It is what stops
         #: a prompt being sent into a history that is being rewritten.
-        self._compacting: bool = False
+        self._compacting = False
         #: Whether the working line on screen was mounted by a compaction (a
         #: manual pass has no turn to mount one), so only the handler that
         #: started it takes it away.
         self._compaction_owns_working_block: bool = False
         #: A prompt typed DURING a pass, sent when the pass ends.
-        self._prompt_held_for_compaction: str = ""
+        self._prompt_held_for_compaction = ""
         #: What the USER typed for that held prompt, when it differs from the
         #: string above — a ``$skill`` invocation holds the expanded SKILL.md
         #: body to SEND while the composer must get the short line back.
@@ -1944,15 +1963,15 @@ class OperatorApp(App[None]):
         #: ended` SENDS the held prompt (the payload), while the `/reload`
         #: teardown HANDS IT BACK to the composer (the typed line). One field
         #: could not serve both without one of them being wrong.
-        self._typed_held_for_compaction: str = ""
+        self._typed_held_for_compaction = ""
         #: Its attachments, held in parallel. Separate so the line above keeps
         #: `""` as its sentinel — that field's emptiness is load-bearing and
         #: mutation-tested (round 13), and widening it to a tuple would move
         #: the check every one of those tests makes.
-        self._images_held_for_compaction: dict[int, Marked] = {}
+        self._images_held_for_compaction = {}
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
-        self._total_cost: float = 0.0
+        self._total_cost = 0.0
         #: Delegated spend, keyed by job id and holding the LAST cost observed
         #: for that child. A dict rather than a running sum because a child's
         #: figure grows while it works, so each tick has to replace its entry
@@ -1960,14 +1979,14 @@ class OperatorApp(App[None]):
         #: ``AsyncJobManager`` sweeps settled jobs out of the ledger after a
         #: retention window and a spend counter that goes DOWN when a finished
         #: child is evicted is worse than no counter at all.
-        self._subagent_costs: dict[str, float] = {}
+        self._subagent_costs = {}
         #: True when `_total_cost` includes money RESTORED from a resumed
         #: conversation, which makes the band's figure a lower bound rather than
         #: a total (see `_restore_reported_usage`). Sticky for the life of the
         #: session: adding a real turn to a floor leaves a floor, so nothing
         #: this session does can make the figure exactly known again. Cleared
         #: only on a swap, where the ledger it qualifies is cleared too.
-        self._spend_is_floor: bool = False
+        self._spend_is_floor = False
         #: Queued-steer rows still promising a delivery that has not happened.
         #: Appended when a mid-turn submit is steered, drained when the engine
         #: reports it took them (`on_steering_delivered`). A list because several
@@ -2058,7 +2077,7 @@ class OperatorApp(App[None]):
         #: as the key the two retire-on-failure sites already use. Those
         #: entries keep the historical by-text behaviour, limit included. Both
         #: in-tree sessions take the keyword, so no shipping path relies on it.
-        self._pending_user_echoes: list[_PendingUserEcho] = []
+        self._pending_user_echoes = []
         #: Discovered skills by name, for the ``$skill`` composer prefix.
         #: ``None`` until the first submit or picker sync asks; see
         #: :meth:`_discovered_skills` for why one discovery per session is the
@@ -2091,6 +2110,9 @@ class OperatorApp(App[None]):
         #: scrolling up reveal real history instead of a re-read from disk that
         #: could race `compact_file` replacing the transcript underneath it.
         self._resume_pending_head: list[Any] = []
+        self._resume_pending_tail: list[Any] = []
+        self._resume_tail_notice: NoticeBlock | None = None
+        self._resume_tail_paging = False
         #: Every tool result in the WHOLE resumed conversation, keyed by call
         #: id. A deferred page's calls are paired with their results from here,
         #: because a call in the head can be answered by a result that already
@@ -2118,6 +2140,8 @@ class OperatorApp(App[None]):
         #: `_collect_resume_page_blocks`, which is synchronous — no await
         #: crosses it, so no live event can be diverted into a history page.
         self._block_sink: list[Any] | None = None
+        self._projection_message_id = ""
+        self._projection_part = 0
         #: One page per USER GESTURE, not per scroll callback. Held from the
         #: first trigger until the mount's settle pass has restored the scroll
         #: anchor: Textual ANIMATES pageup/home, so the scroll watcher fires
@@ -2155,7 +2179,7 @@ class OperatorApp(App[None]):
         #: and this resets to 0.0 at every turn boundary. Without it the two
         #: writers would each bill the same tokens and the band would report
         #: roughly double what a turn actually cost.
-        self._turn_accrued_cost: float = 0.0
+        self._turn_accrued_cost = 0.0
         # Auto-naming fires while the conversation is STILL unnamed, at most
         # one attempt in flight. Latched here rather than on the session
         # holder because the app is what schedules the call, and a second
@@ -2230,7 +2254,7 @@ class OperatorApp(App[None]):
         # `ChatRequest.isolated`) and runs concurrently with the turn on
         # purpose, so serialising it here would restore the very latency this
         # feature exists to remove.
-        self._turn_provider_lock: asyncio.Lock = asyncio.Lock()
+        self._turn_provider_lock = asyncio.Lock()
         # Last subagent count painted, so the 1 Hz poll repaints only on a
         # real change instead of every tick.
         # (task jobs, bash jobs) last painted, so a repaint only happens on change.
@@ -2249,14 +2273,14 @@ class OperatorApp(App[None]):
         self._login_lock: Any | None = None
         # ``/loop`` state: one loop at a time, cooperatively cancellable at
         # the turn boundary (never mid-turn, so a turn is never half-applied).
-        self._loop_running: bool = False
-        self._loop_cancelled: bool = False
+        self._loop_running = False
+        self._loop_cancelled = False
         #: Goal-mode state for `/loop <goal text>`. `_loop_goal` is BOTH the
         #: mode flag and the payload: goal mode is active iff it is truthy while
         #: `_loop_running`. Carrying the goal here (not via `set_goal`) keeps the
         #: standing `/goal` and the system prompt's tail untouched — a `/loop do
         #: X` must not silently overwrite a goal the user set for the session.
-        self._loop_goal: str = ""
+        self._loop_goal = ""
         #: While a held goal loop is running, the per-turn completion toast that
         #: the `TurnEnded` handler fires on every clean turn is SUPPRESSED — the
         #: loop owns a single release toast fired only when the judge says the
@@ -2265,12 +2289,12 @@ class OperatorApp(App[None]):
         #: worker's `finally`; a stuck-True flag would mute completions for the
         #: rest of the process (and across sessions), so that reset is
         #: load-bearing, never best-effort.
-        self._loop_suppress_completion: bool = False
+        self._loop_suppress_completion = False
         #: AbortSignal for the in-flight bang-mode command, if any. Owned by
         #: the app rather than the session because bang-mode is a TUI gesture
         #: — the session's abort stops a TURN, and a user-typed `sleep 30`
         #: is not one. Esc/Ctrl+C abort this the same way they abort a turn.
-        self._shell_signal: Any = None
+        self._shell_signal = None
         #: The ToolCard currently painting a bang-mode run, so a second
         #: submit cannot start another command over a live one (omp refuses
         #: a second bash while one is running) and so Esc can mark it
@@ -2279,7 +2303,7 @@ class OperatorApp(App[None]):
         #: Textual worker owning the command above. Kept separately from the
         #: card/signal so a session swap can abort and AWAIT process reaping
         #: before disposing the session captured by the worker.
-        self._shell_worker: Any = None
+        self._shell_worker = None
         # The one pending tool-approval prompt, if any. The TUI owns approvals
         # (see widgets/approval.py) because the default stdin gate deadlocks
         # under a full-screen app; `_approve_all` is the session-scoped "allow
@@ -2356,7 +2380,7 @@ class OperatorApp(App[None]):
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
         # epoch it entered in and denies if the latch covers that epoch, so a
         # `TurnStarted` racing the wake cannot un-deny a stopped turn's tools.
-        self._turn_epoch: int = 0
+        self._turn_epoch = 0
         self._approvals_denied_epoch: int | None = None
         # Tool cards the last turn boundary marked interrupted. Read once, by
         # `on_turn_ended`, to decide whether an abort still owes the user a
@@ -2495,6 +2519,741 @@ class OperatorApp(App[None]):
         # probing an unfamiliar key four times got four warning rows, which is
         # the transcript noise the key's silence exists to avoid.
         self._effort_refusal_shown: str | None = None
+        self._session_sidebar = SessionSidebar()
+        self._sidebar_settings = SidebarSettings()
+        self._sidebar_timer: Timer | None = None
+        self._sidebar_refresh_generation = 0
+        self._sidebar_refresh_pending = False
+        self._sidebar_prefetch: Any = None
+        self._sidebar_focus_restore: Widget | None = None
+        self._sidebar_presentations: dict[str, SessionPresentation] = {}
+        self._sidebar_sources: dict[str, SessionInteraction] = {}
+        self._sidebar_drafts = SessionDraftStore()
+        self._sidebar_navigation = SessionNavigation(
+            prepare=self._prepare_sidebar_session,
+            commit=self._commit_sidebar_session,
+            release=self._release_sidebar_preparation,
+            pending=self._sidebar_navigation_pending,
+            failed=self._sidebar_navigation_failed,
+        )
+
+    # UI accessors address the current source; workers capture the context
+    # before scheduling and never use these aliases after yielding.
+    @property
+    def _turn_provider_lock(self) -> asyncio.Lock:
+        return self._interaction.turn.provider_lock
+
+    @_turn_provider_lock.setter
+    def _turn_provider_lock(self, value: asyncio.Lock) -> None:
+        self._interaction.turn.provider_lock = value
+
+    @property
+    def _turn_epoch(self) -> int:
+        return self._interaction.turn.epoch
+
+    @_turn_epoch.setter
+    def _turn_epoch(self, value: int) -> None:
+        self._interaction.turn.epoch = value
+
+    @property
+    def _turn_open(self) -> bool:
+        return self._interaction.turn.open
+
+    @_turn_open.setter
+    def _turn_open(self, value: bool) -> None:
+        self._interaction.turn.open = value
+
+    @property
+    def _turn_notified(self) -> bool:
+        return self._interaction.turn.notified
+
+    @_turn_notified.setter
+    def _turn_notified(self, value: bool) -> None:
+        self._interaction.turn.notified = value
+
+    @property
+    def _turn_accrued_cost(self) -> float:
+        return self._interaction.turn.accrued_cost
+
+    @_turn_accrued_cost.setter
+    def _turn_accrued_cost(self, value: float) -> None:
+        self._interaction.turn.accrued_cost = value
+
+    @property
+    def _pending_user_echoes(self) -> list[_PendingUserEcho]:
+        return self._interaction.turn.pending_echoes
+
+    @_pending_user_echoes.setter
+    def _pending_user_echoes(self, value: list[_PendingUserEcho]) -> None:
+        self._interaction.turn.pending_echoes = value
+
+    @property
+    def _loop_running(self) -> bool:
+        return self._interaction.loop.running
+
+    @_loop_running.setter
+    def _loop_running(self, value: bool) -> None:
+        self._interaction.loop.running = value
+
+    @property
+    def _loop_cancelled(self) -> bool:
+        return self._interaction.loop.cancelled
+
+    @_loop_cancelled.setter
+    def _loop_cancelled(self, value: bool) -> None:
+        self._interaction.loop.cancelled = value
+
+    @property
+    def _loop_goal(self) -> str:
+        return self._interaction.loop.goal
+
+    @_loop_goal.setter
+    def _loop_goal(self, value: str) -> None:
+        self._interaction.loop.goal = value
+
+    @property
+    def _loop_suppress_completion(self) -> bool:
+        return self._interaction.loop.suppress_completion
+
+    @_loop_suppress_completion.setter
+    def _loop_suppress_completion(self, value: bool) -> None:
+        self._interaction.loop.suppress_completion = value
+
+    @property
+    def _shell_signal(self) -> Any:
+        return self._interaction.shell.signal
+
+    @_shell_signal.setter
+    def _shell_signal(self, value: Any) -> None:
+        self._interaction.shell.signal = value
+
+    @property
+    def _shell_worker(self) -> Any:
+        return self._interaction.shell.worker
+
+    @_shell_worker.setter
+    def _shell_worker(self, value: Any) -> None:
+        self._interaction.shell.worker = value
+
+    @property
+    def _compacting(self) -> bool:
+        return self._interaction.compaction.active
+
+    @_compacting.setter
+    def _compacting(self, value: bool) -> None:
+        self._interaction.compaction.active = value
+
+    @property
+    def _prompt_held_for_compaction(self) -> str:
+        return self._interaction.compaction.held_prompt
+
+    @_prompt_held_for_compaction.setter
+    def _prompt_held_for_compaction(self, value: str) -> None:
+        self._interaction.compaction.held_prompt = value
+
+    @property
+    def _typed_held_for_compaction(self) -> str:
+        return self._interaction.compaction.held_typed
+
+    @_typed_held_for_compaction.setter
+    def _typed_held_for_compaction(self, value: str) -> None:
+        self._interaction.compaction.held_typed = value
+
+    @property
+    def _images_held_for_compaction(self) -> dict[int, Marked]:
+        return self._interaction.compaction.held_images
+
+    @_images_held_for_compaction.setter
+    def _images_held_for_compaction(self, value: dict[int, Marked]) -> None:
+        self._interaction.compaction.held_images = value
+
+    @property
+    def _total_cost(self) -> float:
+        return self._interaction.accounting.total
+
+    @_total_cost.setter
+    def _total_cost(self, value: float) -> None:
+        self._interaction.accounting.total = value
+
+    @property
+    def _subagent_costs(self) -> dict[str, float]:
+        return self._interaction.accounting.child_costs
+
+    @_subagent_costs.setter
+    def _subagent_costs(self, value: dict[str, float]) -> None:
+        self._interaction.accounting.child_costs = value
+
+    @property
+    def _spend_is_floor(self) -> bool:
+        return self._interaction.accounting.is_floor
+
+    @_spend_is_floor.setter
+    def _spend_is_floor(self, value: bool) -> None:
+        self._interaction.accounting.is_floor = value
+
+    async def _on_message(self, message: TextualMessage) -> None:
+        if isinstance(message, SessionEvent) and message.origin is not None:
+            source = self._event_sources.get(message.origin)
+            if source is not None:
+                source.presentation_revision += 1
+                if not self._is_current(source):
+                    self._reduce_hidden_session_event(source, message)
+                    return
+        if (
+            isinstance(message, SessionEvent)
+            and message.origin is not None
+            and message.origin is not self._controller
+            and not (
+                isinstance(message, SteeringDelivered)
+                and message.origin in self._superseded_steer_controllers
+            )
+        ):
+            # The queue outlives subscriptions. Late source events must never
+            # mutate the newly committed transcript, prompts or status band.
+            return
+        await super()._on_message(message)
+
+    def _reduce_hidden_session_event(
+        self, source: SessionInteraction, message: SessionEvent
+    ) -> None:
+        # Hiding a view is not cancelling its work. In particular, accepted
+        # input held during compaction still owes delivery to its source.
+        if isinstance(message, TurnStarted):
+            source.turn.epoch += 1
+            source.turn.open = True
+            source.turn.notified = False
+        elif isinstance(message, TurnEnded):
+            source.turn.open = False
+            source.turn.notified = True
+        elif isinstance(message, TurnAbandoned):
+            if message.epoch == source.turn.epoch and not bool(
+                getattr(source.session, "is_streaming", False)
+            ):
+                source.turn.open = False
+        elif isinstance(message, CompactionStarted):
+            source.compaction.active = True
+        elif isinstance(message, CompactionEnded):
+            source.compaction.active = False
+            self._consume_compaction_input(source)
+
+    def _consume_compaction_input(self, source: SessionInteraction) -> None:
+        held, source.compaction.held_prompt = source.compaction.held_prompt, ""
+        typed, source.compaction.held_typed = source.compaction.held_typed, ""
+        images, source.compaction.held_images = source.compaction.held_images, {}
+        accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
+        if held or images:
+            self._start_turn_for(
+                source, held, resolve_markers(typed or held, images), accepted=accepted
+            )
+
+    def _is_current(self, source: SessionInteraction) -> bool:
+        return self._interaction is source
+
+    def _notice_for(self, source: SessionInteraction, text: str, kind: Any = "info") -> None:
+        if self._is_current(source):
+            self._notice(text, kind)
+        else:
+            # Canonical history owns durable output. This bounded fallback is
+            # only for frontend failures that never reached an owner journal.
+            source.notices.append((text, kind))
+            del source.notices[:-64]
+
+    def _restore_unsent_for(
+        self,
+        source: SessionInteraction,
+        text: str,
+        images: list[ImageContent] | None,
+        *,
+        accepted: SessionDraft | None = None,
+    ) -> None:
+        restored = accepted or SessionDraft(text=text)
+        if self._is_current(source):
+            editor = self._editor()
+            if not editor.text.strip():
+                editor.forget_prompt(text)
+                editor.load_text(restored.text)
+                editor.adopt_attachments(restored.attachments)
+        else:
+            source.unsent.append((text, list(images or [])))
+            if not source.draft.text.strip():
+                source.draft = restored
+
+    def _register_user_echo_for(
+        self, source: SessionInteraction, text: str, *, message_id: str = ""
+    ) -> _PendingUserEcho:
+        entry = _PendingUserEcho(message_id, text)
+        source.turn.pending_echoes.append(entry)
+        return entry
+
+    def _discard_user_echo_for(self, source: SessionInteraction, entry: _PendingUserEcho) -> None:
+        source.turn.pending_echoes[:] = [
+            held for held in source.turn.pending_echoes if held is not entry
+        ]
+
+    def _post_turn_abandoned_for(
+        self, source: SessionInteraction, *, aborted: bool, error: str | None
+    ) -> None:
+        message = TurnAbandoned(
+            source.turn.epoch,
+            aborted=aborted,
+            error=error,
+            outcome_known=not bool(getattr(source.session, "is_remote", False)),
+        )
+        message.origin = source.controller
+        self.post_message(message)
+
+    def _capture_sidebar_presentation(self) -> SessionPresentation:
+        replay = PreparedReplay(
+            view=self._transcript_view(),
+            _resume_results=self._resume_results,
+            _resume_pending_head=self._resume_pending_head,
+            _resume_pending_tail=self._resume_pending_tail,
+            _resume_tail_notice=self._resume_tail_notice,
+            _resume_head_notice=self._resume_head_notice,
+            _resume_mounted_ids=self._resume_mounted_ids,
+            _replay_bang_pending=self._replay_bang_pending,
+            _live_peer_receipts=self._live_peer_receipts,
+            _live_wake_receipts=self._live_wake_receipts,
+        )
+        return SessionPresentation(
+            replay=replay,
+            revision=self._interaction.presentation_revision,
+            streaming_block=self._streaming_block,
+            tool_cards=self._tool_cards,
+            composing_cards=self._composing_cards,
+            working_block=self._working_block,
+            working_fallback=self._working_fallback,
+            compaction_owns_working_block=self._compaction_owns_working_block,
+            shell_card=self._shell_card,
+            queued_steer_notices=self._queued_steer_notices,
+            deferred_steer_notices=self._deferred_steer_notices,
+            held_steer_blocks=self._held_steer_blocks,
+            welcome=self._welcome,
+            welcome_visible=self._welcome_visible,
+        )
+
+    def _apply_sidebar_presentation(self, presentation: SessionPresentation) -> None:
+        replay = presentation.replay
+        self._transcript = replay.view
+        self._resume_results = replay._resume_results
+        self._resume_pending_head = replay._resume_pending_head
+        self._resume_pending_tail = replay._resume_pending_tail
+        self._resume_tail_notice = replay._resume_tail_notice
+        self._resume_tail_paging = False
+        self._resume_head_notice = replay._resume_head_notice
+        self._resume_mounted_ids = replay._resume_mounted_ids
+        self._replay_bang_pending = replay._replay_bang_pending
+        self._live_peer_receipts = replay._live_peer_receipts
+        self._live_wake_receipts = replay._live_wake_receipts
+        self._streaming_block = presentation.streaming_block
+        self._tool_cards = presentation.tool_cards
+        self._composing_cards = presentation.composing_cards
+        self._working_block = presentation.working_block
+        self._working_fallback = presentation.working_fallback
+        self._compaction_owns_working_block = presentation.compaction_owns_working_block
+        self._shell_card = presentation.shell_card
+        self._queued_steer_notices = presentation.queued_steer_notices
+        self._deferred_steer_notices = presentation.deferred_steer_notices
+        self._held_steer_blocks = presentation.held_steer_blocks
+        self._welcome = presentation.welcome
+        self._welcome_visible = presentation.welcome_visible
+        # Gesture tasks belong to the abandoned viewport, not its history.
+        self._resume_paging = False
+        self._resume_check_pending = False
+        self._resume_in_zone = False
+        self._stop_offered_at = None
+        self._stop_offer_count = 0
+        self._stop_notice = None
+        self._stop_all_armed_at = None
+        self._stop_all_listing = None
+        self._exit_hint = None
+        self._superseded_steer_controllers.clear()
+
+    async def _prepare_sidebar_session(
+        self, session_id: str
+    ) -> tuple[SessionInteraction, SessionPresentation]:
+        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.paths import config_dir
+        from local_operator.session.remote import RemoteSession
+
+        if self._session is not None and self._session.session_id == session_id:
+            return self._interaction, self._capture_sidebar_presentation()
+        source = self._sidebar_sources.get(session_id)
+        if source is None:
+            directory = config_dir()
+            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
+            if record is not None and record.protocol < 4:
+                raise RuntimeError("Update the older Local Operator session before opening it here")
+
+            async def takeover() -> Any:
+                if self._resume_factory is None:
+                    raise RuntimeError("This launcher cannot reopen an inactive conversation")
+                return await self._resume_factory(session_id)
+
+            if record is not None and owner is not None:
+                remote = await RemoteSession.connect(
+                    record, session_id, config_dir=directory, takeover_factory=takeover
+                )
+            else:
+                remote = await takeover()
+                if not isinstance(remote, RemoteSession):
+                    raise RuntimeError("Sidebar navigation requires an owner-backed session")
+                await remote._ensure_bound()
+            source = SessionInteraction(remote)
+            source.draft = await self._sidebar_drafts.get(session_id)
+            self._interactions[id(remote)] = source
+            self._sidebar_sources[session_id] = source
+            source.controller = EventController(remote, self)
+            self._event_sources[source.controller] = source
+            source.controller.subscribe()
+        session = source.session
+        if not isinstance(session, RemoteSession):
+            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+        if session.is_cold:
+            await session._ensure_bound()
+        if session.is_cold:
+            raise RuntimeError("The conversation has not finished connecting")
+        cached = self._sidebar_presentations.get(session_id)
+        if cached is not None and cached.revision == source.presentation_revision:
+            if not source.draft.following_tail and source.draft.scroll_anchor_id:
+                cached.replay.view.restore_navigation_anchor(source.draft.scroll_anchor_id, source.draft.scroll_anchor_part, source.draft.scroll_offset)
+            return source, cached
+        replay = PreparedReplay()
+        source.preparations += 1
+        revision = source.presentation_revision
+        try:
+            replay.prepare(
+                list(session.history()), bound=max(12, self.size.height // 2),
+                anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
+            )
+            replay.view.styles.layer = "session-cache"
+            replay.view.styles.visibility = "hidden"
+            replay.view.styles.height = self._transcript_view().outer_size.height
+            conversation = self.query_one("#session-conversation")
+            conversation.styles.layers = "default session-cache"
+            await conversation.mount(replay.view)
+            with replay.view.batch_append():
+                for block in replay.blocks:
+                    replay.view.append_block(block)
+            replay.view.follow_tail()
+            # Preparation waits for layout, not for a guessed sleep. The commit
+            # can then reveal already measured rows without replaying history.
+            laid_out = asyncio.Event()
+            self.call_after_refresh(laid_out.set)
+            await laid_out.wait()
+            if not source.draft.following_tail and source.draft.scroll_anchor_id:
+                replay.view.restore_navigation_anchor(source.draft.scroll_anchor_id, source.draft.scroll_anchor_part, source.draft.scroll_offset)
+            return source, SessionPresentation(
+                replay, revision=revision, working_fallback=DEFAULT_ACTIVITY
+            )
+        except BaseException:
+            if replay.view.is_mounted:
+                await replay.view.remove()
+            if (
+                source.preparations == 1
+                and not source.must_retain
+                and source is not self._interaction
+                and session_id not in self._sidebar_presentations
+            ):
+                source.controller.dispose()
+                self._event_sources.pop(source.controller, None)
+                self._sidebar_sources.pop(session_id, None)
+                self._interactions.pop(id(session), None)
+                await session.dispose()
+            raise
+        finally:
+            source.preparations -= 1
+
+    def _sidebar_navigation_pending(self, session_id: str) -> None:
+        from local_operator.session.remote import RemoteSession
+
+        current = self._session
+        if isinstance(current, RemoteSession):
+            if session_id:
+                current.suspend_viewer_gates()
+            else:
+                current.resume_viewer_gates()
+        self._session_transition_pending = bool(session_id)
+        self._session_sidebar.requested_id = session_id
+        self._session_sidebar.refresh()
+
+    def _sidebar_navigation_failed(self, session_id: str, error: Exception) -> None:
+        self._session_sidebar.show_error(str(error))
+        self._system_notice(f"Could not open conversation: {error}", "warning")
+
+    async def _release_sidebar_preparation(
+        self, prepared: tuple[SessionInteraction, SessionPresentation]
+    ) -> None:
+        source, presentation = prepared
+        if (
+            presentation.replay.view is self._transcript
+            or presentation in self._sidebar_presentations.values()
+        ):
+            return
+        if presentation.replay.view.is_mounted:
+            await presentation.replay.view.remove()
+        # Detaching this speculative viewer never stops its runtime. A source
+        # with accepted input or executing work retains its facade separately.
+        if (
+            source is not self._interaction
+            and not source.must_retain
+            and not source.preparations
+            and source.session is not None
+        ):
+            if source.controller is not None:
+                source.controller.dispose()
+                self._event_sources.pop(source.controller, None)
+            try:
+                await self._sidebar_drafts.put(
+                    source.session.session_id,
+                    replace(source.draft, attachments=dict(source.draft.attachments)),
+                )
+            except OSError:
+                self._system_notice(
+                    "Could not save the draft to disk; it is still kept in memory", "warning"
+                )
+                return
+            # Saving overflow yields to disk. A rapid return may have acquired
+            # this same facade meanwhile, so recheck ownership before closing.
+            if (
+                source is self._interaction
+                or source.preparations
+                or source.session.session_id in self._sidebar_presentations
+            ):
+                return
+            self._sidebar_sources.pop(source.session.session_id, None)
+            self._interactions.pop(id(source.session), None)
+            await source.session.dispose()
+
+    def _commit_sidebar_session(
+        self,
+        session_id: str,
+        prepared: tuple[SessionInteraction, SessionPresentation],
+        generation: int,
+    ) -> None:
+        from local_operator.session.remote import RemoteSession
+
+        source, incoming = prepared
+        session = source.session
+        if session is None or session.session_id != session_id:
+            raise RuntimeError("The prepared conversation identity changed")
+        if source is self._interaction:
+            return
+        if not isinstance(session, RemoteSession) or session.is_cold:
+            raise RuntimeError("The conversation is not ready for input")
+        outgoing = self._interaction
+        previous = outgoing.session
+        if previous is not None and not isinstance(previous, RemoteSession):
+            raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+        editor = self._editor()
+        outgoing.draft.text = editor.text
+        outgoing.draft.attachments = editor.attachments()
+        outgoing.draft.selection = editor.selection
+        outgoing.draft.shell_mode = editor.shell_mode
+        old_view = self._transcript_view()
+        outgoing.draft.following_tail = old_view.is_following_tail
+        if not outgoing.draft.following_tail:
+            top = old_view.content_region.y
+            anchor = next((block for block in old_view.blocks() if block.navigation_anchor_id and block.display and block.region.bottom > top), None)
+            if anchor is not None:
+                outgoing.draft.scroll_anchor_id = anchor.navigation_anchor_id
+                outgoing.draft.scroll_anchor_part = anchor.navigation_anchor_part
+                outgoing.draft.scroll_offset = top - anchor.region.y
+        if previous is not None:
+            self._sidebar_sources[previous.session_id] = outgoing
+            self._sidebar_presentations[previous.session_id] = self._capture_sidebar_presentation()
+        if isinstance(previous, RemoteSession):
+            previous.suspend_viewer_gates()
+        self._deny_queued_approvals()
+        self._settle_ask_picker()
+        self._settle_key_prompt()
+        self._approval = None
+        old_view = self._transcript_view()
+        old_view.set_on_user_scroll(None)
+        old_view.set_on_tail_requested(None)
+        old_view.set_on_clear(None)
+        old_view.styles.layer = "session-cache"
+        old_view.styles.visibility = "hidden"
+        old_view.styles.height = old_view.outer_size.height
+        displaced = self._sidebar_presentations.pop(session_id, None)
+        self._apply_sidebar_presentation(incoming)
+        incoming.replay.view.styles.layer = "default"
+        incoming.replay.view.styles.visibility = "visible"
+        incoming.replay.view.styles.height = "1fr"
+        incoming.replay.view.set_on_clear(self._on_transcript_cleared)
+        incoming.replay.view.set_on_user_scroll(self._transcript_scrolled)
+        incoming.replay.view.set_on_tail_requested(self._jump_newer_resume_tail)
+        self._swapping_session = True
+        try:
+            self._adopt_session(session, replay_history=False, reuse_controller=True)
+            editor.load_text(source.draft.text)
+            editor.adopt_attachments(source.draft.attachments)
+            editor.set_shell_mode(source.draft.shell_mode)
+            if source.draft.selection is not None:
+                editor.selection = source.draft.selection
+            session.resume_viewer_gates()
+            self._session_sidebar.current_id = session_id
+            self._session_sidebar.refresh()
+            self._set_welcome_visible(False)
+            if source.draft.focus_id == "@transcript":
+                incoming.replay.view.focus()
+            else:
+                editor.focus()
+        finally:
+            self._swapping_session = False
+        if displaced is not None and displaced is not incoming:
+            self.run_worker(self._release_sidebar_preparation((source, displaced)))
+        # Active + one retained presentation. Executing contexts stay alive
+        # without retaining their widgets, and drafts remain source-owned.
+        while len(self._sidebar_presentations) > 1:
+            evicted_id = next(iter(self._sidebar_presentations))
+            evicted = self._sidebar_presentations.pop(evicted_id)
+            self.run_worker(
+                self._release_sidebar_preparation((self._sidebar_sources[evicted_id], evicted))
+            )
+
+    def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
+        message.stop()
+        if self._session is not None and self._session.session_id == message.session_id:
+            if self._sidebar_navigation.requested_id:
+                self._sidebar_navigation.cancel()
+            self._editor().focus()
+            return
+        if self._session_transition_pending and not self._sidebar_navigation.requested_id:
+            self.workers.cancel_group(self, "session")
+        self._sidebar_navigation.select(message.session_id)
+
+    def _apply_sidebar_settings(self) -> None:
+        self._sidebar_settings = SidebarSettings.from_values(self._config_values())
+        self._set_sidebar_open(self._sidebar_settings.visible)
+
+    def action_toggle_sidebar(self) -> None:
+        self._set_sidebar_open(not self._session_sidebar.display)
+
+    def _set_sidebar_open(self, opened: bool) -> None:
+        sidebar = self._session_sidebar
+        if opened and not sidebar.display:
+            self._sidebar_focus_restore = self.focused
+        sidebar.set_open(opened)
+        self._sync_sidebar_layout(self.size)
+        if self._sidebar_timer is not None:
+            if opened:
+                self._sidebar_timer.resume()
+                self._refresh_sidebar()
+            else:
+                self._sidebar_timer.pause()
+                # Late off-loop reads are harmless, but must not repaint or
+                # restart work after the user reclaimed the full-width view.
+                self._sidebar_refresh_generation += 1
+                if self._sidebar_prefetch is not None:
+                    self._sidebar_prefetch.cancel()
+                retained, self._sidebar_presentations = self._sidebar_presentations, {}
+                for session_id, presentation in retained.items():
+                    source = self._sidebar_sources.get(session_id)
+                    if source is not None:
+                        self.run_worker(self._release_sidebar_preparation((source, presentation)))
+        if not opened and sidebar.has_focus:
+            target = self._sidebar_focus_restore
+            if target is not None and target.is_mounted:
+                target.focus()
+            else:
+                self._editor().focus()
+
+    def _sync_sidebar_layout(self, size: Size) -> None:
+        sidebar = self._session_sidebar
+        if not sidebar.is_mounted:
+            return
+        narrow = size.width < SIDEBAR_WIDTH + SIDEBAR_MAIN_MIN_WIDTH + 2
+        workspace = self.query_one("#session-workspace")
+        workspace.set_class(narrow, "sidebar-overlay")
+        sidebar.styles.dock = self._sidebar_settings.position
+        sidebar.styles.width = min(SIDEBAR_WIDTH, max(16, size.width - 2))
+        if narrow:
+            # The small-screen list floats over the transcript, never over the
+            # composer or a pending prompt. The conversation retains its width.
+            dock = self.query_one("#input-dock")
+            sidebar.styles.height = max(3, size.height - dock.outer_size.height - 2)
+        else:
+            sidebar.styles.height = "1fr"
+
+    def _refresh_sidebar(self) -> None:
+        if not self._session_sidebar.display or self._sidebar_refresh_pending:
+            return
+        self._sidebar_refresh_generation += 1
+        generation = self._sidebar_refresh_generation
+        self._sidebar_refresh_pending = True
+
+        def collect() -> list[CatalogEntry]:
+            from local_operator.paths import config_dir
+            from local_operator.resume import recent_session_rows
+
+            rows = self._overlay_live_state(recent_session_rows(config_dir(), limit=None))
+            return [CatalogEntry(row) for row in rows]
+
+        async def refresh() -> None:
+            try:
+                entries = await asyncio.to_thread(collect)
+                if (
+                    generation != self._sidebar_refresh_generation
+                    or not self._session_sidebar.display
+                ):
+                    return
+                session = self._session
+                self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
+                self._session_sidebar.set_entries(entries)
+                self._prewarm_sidebar(entries)
+            except Exception:
+                if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
+                    self._session_sidebar.show_error("Could not refresh conversations")
+                logger.debug("sidebar catalog refresh failed", exc_info=True)
+            finally:
+                self._sidebar_refresh_pending = False
+
+        self.run_worker(refresh(), group="sidebar-catalog")
+
+    def _prewarm_sidebar(self, entries: list[CatalogEntry]) -> None:
+        if (
+            not self._session_sidebar.display
+            or self._sidebar_prefetch is not None
+            or self._sidebar_presentations
+            or self._sidebar_navigation.requested_id
+        ):
+            return
+        current = str(getattr(self._session, "session_id", ""))
+        candidate = next(
+            (entry for entry in entries if entry.id != current and entry.row.live_state), None
+        )
+        if candidate is None:
+            return
+
+        async def prepare() -> None:
+            prepared = None
+            try:
+                prepared = await self._prepare_sidebar_session(candidate.id)
+                if (
+                    self._session_sidebar.display
+                    and not self._sidebar_navigation.requested_id
+                    and not self._sidebar_presentations
+                    and candidate.id != str(getattr(self._session, "session_id", ""))
+                ):
+                    self._sidebar_presentations[candidate.id] = prepared[1]
+                    prepared = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Speculation never overwrites a usable catalog with an error.
+                # An explicit selection reports the same failure normally.
+                logger.debug("sidebar prewarm failed", exc_info=True)
+            finally:
+                if prepared is not None:
+                    await self._release_sidebar_preparation(prepared)
+                self._sidebar_prefetch = None
+
+        self._sidebar_prefetch = self.run_worker(prepare(), group="sidebar-prefetch")
+
+    def on_session_sidebar_dismissed(self, message: SessionSidebar.Dismissed) -> None:
+        message.stop()
+        self._set_sidebar_open(False)
 
     # -- composition --------------------------------------------------------
     def get_default_screen(self) -> Screen[None]:
@@ -2511,87 +3270,90 @@ class OperatorApp(App[None]):
         return TranscriptScreen(id="_default")
 
     def compose(self) -> ComposeResult:
-        # The welcome splash is the transcript's EMPTY STATE, so it is mounted
-        # INSIDE the transcript rather than beside it: that hands it exactly the
-        # region above the input panel with no arithmetic here. It supersedes the
-        # old D9 boot-hint line, which was a real transcript block and would have
-        # hidden the splash on mount.
-        self._transcript = TranscriptView(id="transcript")
-        with self._transcript:
-            yield WelcomeView(
-                lambda: session_welcome_info(
-                    self._session,
-                    self._providers,
-                    notice=self._splash_notice,
-                    setup=self._setup_state,
-                    update_available=self._update_available,
-                )
-            )
-        # The dock band: subagent task list + todo list, sitting between the
-        # transcript and the composer. It is a transparent POSITIONER (zero own
-        # height when empty) holding one filled body per panel; the two panels
-        # each manage their own `display` so the band collapses to nothing when
-        # neither has content. Holding a ref lets the 1 Hz poll and the
-        # Subagent*/tool-end handlers repaint it without a relookup per tick.
-        self._subagent_panel = SubagentPanel(on_open=self._open_subagent_view)
-        self._wake_panel = WakePanel()
-        self._todo_panel = TodoPanel()
-        # Two containers for one panel: the dock is the docked POSITIONER, and
-        # the shell is the panel the user sees — the fill, the padding, and the
-        # boot layout's clamp. A docked widget cannot be centred by its parent,
-        # so the clamp has to sit on a child of the dock rather than on the dock
-        # itself; see the tcss.
-        #
-        # The status line IS the input box's last row: the band docks at the
-        # bottom of the shell and carries the structural rule styling, so it can
-        # never be overdrawn or pushed off-screen by the editor, and it travels
-        # with the input when the panel becomes a card. One row does double duty
-        # — zero extra height (D3/D17).
-        with Container(id="input-dock"):
-            # The prompt host: where a question the turn is PARKED ON lives.
-            #
-            # Above the band and inside the dock, and both halves of that are
-            # deliberate. Inside the dock, because a question anchored to the
-            # composer stays put while the user scrolls the transcript back to
-            # find what they need to answer it — the whole point of moving these
-            # surfaces out of `ModalScreen`, which covered the conversation it
-            # was asking about. Above the band, because the band is STATUS
-            # (subagent jobs, todos) and this is a BLOCKER: the thing being
-            # waited on belongs closest to the composer, and a status list that
-            # grew and shrank underneath the question would shift it under the
-            # user's cursor mid-answer.
-            #
-            # Zero rows when empty, like the band: a transparent positioner
-            # holding at most one prompt. Mounted once and kept, so a question
-            # never has to await a mount before it can be shown.
-            yield Container(id="prompt-host")
-            # The dock band (subagent + todo) lives INSIDE the same bottom-docked
-            # container as the input shell, ABOVE it (D-15-01). A sibling
-            # `dock: bottom` overlapped the input (Textual anchors same-edge
-            # docks to the bottom edge independently), and a margin to fix that
-            # violates the sheet's one-margin rule. As a child here, the band is
-            # a normal-flow row the dock's vertical layout reserves before the
-            # shell; it collapses to zero when both panels are hidden.
-            with Container(id="band"):
-                yield self._subagent_panel
-                yield self._wake_panel
-                yield self._todo_panel
-            with Container(id="input-shell"):
-                yield Band(id="status-band")
-                editor = Editor(commands=SLASH_COMMANDS)
-                with Horizontal(id="input-row"):
-                    yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
-                    yield editor
-                # The picker is the editor's, but it cannot be the editor's
-                # CHILD: it has to draw across the full panel width, outside the
-                # chevron row. Mounted here it lands between the input row and
-                # the bottom-docked status band — under the text it completes,
-                # above the footer — and it claims zero rows while closed.
-                yield editor.picker
-                # Same placement rule, same reason. The two are mutually
-                # exclusive — the buffer parse that opens one closes the other —
-                # so they can share the row band without ever competing for it.
-                yield editor.model_picker
+        with Horizontal(id="session-workspace"):
+            yield self._session_sidebar
+            with Container(id="session-conversation"):
+                # The welcome splash is the transcript's EMPTY STATE, so it is mounted
+                # INSIDE the transcript rather than beside it: that hands it exactly the
+                # region above the input panel with no arithmetic here. It supersedes the
+                # old D9 boot-hint line, which was a real transcript block and would have
+                # hidden the splash on mount.
+                self._transcript = TranscriptView(id="transcript")
+                with self._transcript:
+                    yield WelcomeView(
+                        lambda: session_welcome_info(
+                            self._session,
+                            self._providers,
+                            notice=self._splash_notice,
+                            setup=self._setup_state,
+                            update_available=self._update_available,
+                        )
+                    )
+                # The dock band: subagent task list + todo list, sitting between the
+                # transcript and the composer. It is a transparent POSITIONER (zero own
+                # height when empty) holding one filled body per panel; the two panels
+                # each manage their own `display` so the band collapses to nothing when
+                # neither has content. Holding a ref lets the 1 Hz poll and the
+                # Subagent*/tool-end handlers repaint it without a relookup per tick.
+                self._subagent_panel = SubagentPanel(on_open=self._open_subagent_view)
+                self._wake_panel = WakePanel()
+                self._todo_panel = TodoPanel()
+                # Two containers for one panel: the dock is the docked POSITIONER, and
+                # the shell is the panel the user sees — the fill, the padding, and the
+                # boot layout's clamp. A docked widget cannot be centred by its parent,
+                # so the clamp has to sit on a child of the dock rather than on the dock
+                # itself; see the tcss.
+                #
+                # The status line IS the input box's last row: the band docks at the
+                # bottom of the shell and carries the structural rule styling, so it can
+                # never be overdrawn or pushed off-screen by the editor, and it travels
+                # with the input when the panel becomes a card. One row does double duty
+                # — zero extra height (D3/D17).
+                with Container(id="input-dock"):
+                    # The prompt host: where a question the turn is PARKED ON lives.
+                    #
+                    # Above the band and inside the dock, and both halves of that are
+                    # deliberate. Inside the dock, because a question anchored to the
+                    # composer stays put while the user scrolls the transcript back to
+                    # find what they need to answer it — the whole point of moving these
+                    # surfaces out of `ModalScreen`, which covered the conversation it
+                    # was asking about. Above the band, because the band is STATUS
+                    # (subagent jobs, todos) and this is a BLOCKER: the thing being
+                    # waited on belongs closest to the composer, and a status list that
+                    # grew and shrank underneath the question would shift it under the
+                    # user's cursor mid-answer.
+                    #
+                    # Zero rows when empty, like the band: a transparent positioner
+                    # holding at most one prompt. Mounted once and kept, so a question
+                    # never has to await a mount before it can be shown.
+                    yield Container(id="prompt-host")
+                    # The dock band (subagent + todo) lives INSIDE the same bottom-docked
+                    # container as the input shell, ABOVE it (D-15-01). A sibling
+                    # `dock: bottom` overlapped the input (Textual anchors same-edge
+                    # docks to the bottom edge independently), and a margin to fix that
+                    # violates the sheet's one-margin rule. As a child here, the band is
+                    # a normal-flow row the dock's vertical layout reserves before the
+                    # shell; it collapses to zero when both panels are hidden.
+                    with Container(id="band"):
+                        yield self._subagent_panel
+                        yield self._wake_panel
+                        yield self._todo_panel
+                    with Container(id="input-shell"):
+                        yield Band(id="status-band")
+                        editor = Editor(commands=SLASH_COMMANDS)
+                        with Horizontal(id="input-row"):
+                            yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
+                            yield editor
+                        # The picker is the editor's, but it cannot be the editor's
+                        # CHILD: it has to draw across the full panel width, outside the
+                        # chevron row. Mounted here it lands between the input row and
+                        # the bottom-docked status band — under the text it completes,
+                        # above the footer — and it claims zero rows while closed.
+                        yield editor.picker
+                        # Same placement rule, same reason. The two are mutually
+                        # exclusive — the buffer parse that opens one closes the other —
+                        # so they can share the row band without ever competing for it.
+                        yield editor.model_picker
         # The toast slot lives on its own CSS layer (see the tcss), so it
         # overlays the transcript's top-right corner without taking a row from
         # it. Mounted once and kept: showing a message never has to await a
@@ -2624,6 +3386,8 @@ class OperatorApp(App[None]):
     # -- lifecycle ----------------------------------------------------------
     async def on_mount(self) -> None:
         install_markdown_theme()
+        self._sidebar_timer = self.set_interval(2.0, self._refresh_sidebar, pause=True)
+        self._apply_sidebar_settings()
         try:
             self.console.push_theme(brand_markdown_theme())  # D1 markdown ramp
             self._markdown_theme_pushed = True
@@ -2747,7 +3511,9 @@ class OperatorApp(App[None]):
             await self._warm_session_imports()
         return await self._session_factory()
 
-    def _adopt_session(self, session: Any) -> None:
+    def _adopt_session(
+        self, session: Any, *, replay_history: bool = True, reuse_controller: bool = False
+    ) -> None:
         """Take ``session`` as the app's, and put its history on screen.
 
         SYNCHRONOUS end to end, and that is load-bearing rather than incidental:
@@ -2760,6 +3526,11 @@ class OperatorApp(App[None]):
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
         self._invalidate_pending_frontend_state()
+        source = self._interactions.get(id(session))
+        if source is None:
+            source = SessionInteraction(session)
+            self._interactions[id(session)] = source
+        self._interaction = source
         self._session = session
         # The latch belongs to the BINDING, not to the app: a swapped-in
         # session is cold again and owes its own engage. Its declaration has
@@ -2875,8 +3646,13 @@ class OperatorApp(App[None]):
         session.set_approval_handler(self._request_tool_approval_on_app_loop)
         # Installing this hook is what makes the ask tool exist for a UI host.
         session.set_ask_handler(self._request_user_choice_on_app_loop)
-        self._controller = EventController(session, self)
-        self._controller.subscribe()
+        if reuse_controller and source.controller is not None:
+            self._controller = source.controller
+        else:
+            self._controller = EventController(session, self)
+            self._interaction.controller = self._controller
+            self._event_sources[self._controller] = self._interaction
+            self._controller.subscribe()
         # Beside the event controller because it answers the same question for
         # a different source: the controller renders what the SESSION says, this
         # renders what the CONFIG FILE says (a change from another pane).
@@ -2912,7 +3688,8 @@ class OperatorApp(App[None]):
         )
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
-        self._render_resumed_history(session)
+        if replay_history:
+            self._render_resumed_history(session)
         # AFTER the replay, and the order is load-bearing (D1). A stale
         # attachment is by definition only reachable on a session that ALREADY
         # RAN, so this notice always lands on a transcript with history. Raised
@@ -3782,6 +4559,8 @@ class OperatorApp(App[None]):
         # into a short session would otherwise page the OLD conversation onto
         # the new transcript the first time the reader scrolled up.
         self._resume_pending_head = []
+        self._resume_pending_tail = []
+        self._resume_tail_notice = None
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
@@ -3795,312 +4574,65 @@ class OperatorApp(App[None]):
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
-        """Mount settled transcript rows through the ONE role-aware renderer.
+        from local_operator.tui.session_presentation import project_settled_rows
 
-        The shared history/render seam: cold resume feeds it the whole
-        conversation and a reconnect's durable gap replay
-        (:class:`HistoryRowsSettled`) feeds it exactly the rows no frontend
-        painted. One implementation is the point — the gap replay previously
-        synthesized role-blind assistant events and a recovered user prompt
-        painted as agent speech (review round 3, MAJOR-1/U7/D1). Whatever
-        this method does for ``--resume`` is by construction what a
-        reconnect gap does: user rows as :class:`UserBlock` with images,
-        assistant prose + tool cards paired with results, wake/peer custom
-        rows as their own blocks, refusal/error notices.
+        try:
+            return project_settled_rows(self, history, bound=bound)
+        finally:
+            self._projection_message_id = ""
 
-        Returns whether anything mounted, so callers can skip tail-follow
-        work for an empty projection.
+    def on_history_page_notice_requested(self, message: HistoryPageNotice.Requested) -> None:
+        message.stop()
+        if message.notice is self._resume_tail_notice:
+            self._mount_newer_resume_page()
 
-        ``bound`` renders only the LAST ``bound`` messages and holds the rest
-        for :meth:`_mount_older_resume_page`. It is a display bound and nothing
-        else: the deferred messages stay in ``_resume_pending_head`` in full,
-        and the model's conversation — built from the transcript, not from this
-        projection — never sees the split at all. The gap-replay caller passes
-        no bound, because a reconnect gap is by definition the small set of
-        rows no frontend painted and bounding it could hide one.
-        """
-        # Results are keyed by the call they answer, and a tool message can sit
-        # several messages after its call (one assistant turn issues a batch).
-        # Indexing first is what lets each call render WITH its outcome instead
-        # of as a second, orphaned row.
-        #
-        # Indexed over the WHOLE history, before any bound is applied: a call in
-        # the deferred head is often answered by a result inside the rendered
-        # tail, and a per-page index would show that call as `interrupted`.
-        #
-        # Seeded from the whole-conversation index a bounded resume kept, so a
-        # deferred page's call still finds a result that lives in the already
-        # rendered tail. Empty for every unbounded caller.
-        results: dict[str, Any] = dict(self._resume_results)
-        settled_results: set[str] = set()
-        # Harness chrome the LIVE path never paints as a user row, so replay
-        # must not either (see the `role == "user"` branch). Deferred once to
-        # the top of this method rather than inside the loop, matching the
-        # file's other lazy session.* imports.
-        from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
-        from local_operator.session.session import _CONTINUATION_PROMPT
+    def _jump_newer_resume_tail(self) -> None:
+        if not self._resume_pending_tail:
+            return
+        view = self._transcript_view()
+        notice = self._resume_tail_notice
+        mounted = view.blocks()
+        if notice is not None and mounted and mounted[-1] is not notice:
+            # Live output (or an earlier End) already supplies the true tail.
+            # The middle gap stays reachable without moving it after that tail.
+            return
+        start = _resume_tail_start(self._resume_pending_tail, max(12, self.size.height // 2))
+        page, self._resume_pending_tail = self._resume_pending_tail[start:], self._resume_pending_tail[:start]
+        blocks = self._collect_resume_page_blocks(page)
+        if not self._resume_pending_tail and notice is not None:
+            view.remove_block(notice)
+            self._resume_tail_notice = None
+        with view.batch_append():
+            for block in blocks:
+                view.append_block(block)
 
-        for message in history:
-            if getattr(message, "role", None) != "tool":
-                continue
-            call_id = getattr(message, "tool_call_id", None)
-            if not call_id:
-                continue
-            results[call_id] = message
-            # A result whose call painted LIVE before a disconnect must
-            # settle the card already on screen — the disconnect marked it
-            # ``interrupted``, and replaying it as a new row would double the
-            # card (review round 4, MINOR-1). The disconnect retired the card
-            # out of ``_tool_cards`` but left it mounted, so scan the
-            # transcript for the painted card carrying this call id.
-            painted = self._painted_tool_card(call_id)
-            if painted is not None:
-                self._settle_painted_tool_card(painted, message)
-                settled_results.add(call_id)
-        # Fresh batch, fresh pairing: a flag left by an earlier replay (or a
-        # truncated one) must not open a card in this conversation.
-        self._replay_bang_pending = False
+    def _mount_newer_resume_page(self) -> None:
+        if self._resume_tail_paging or self._resume_paging or not self._resume_pending_tail:
+            return
+        view = self._transcript_view()
+        generation = self._sidebar_navigation.generation
+        self._resume_tail_paging = True
+        top = view.content_region.y
+        anchor = next((block for block in view.blocks() if block.navigation_anchor_id and block.region.bottom > top), None)
+        if anchor is not None:
+            view.restore_navigation_anchor(anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y)
+        count = min(len(self._resume_pending_tail), max(12, self.size.height // 2))
+        page, self._resume_pending_tail = self._resume_pending_tail[:count], self._resume_pending_tail[count:]
+        page = [message for message in page if str(getattr(message, "id", "")) not in self._resume_mounted_ids]
+        blocks = self._collect_resume_page_blocks(page)
+        def settled() -> None:
+            if self._transcript is view and self._sidebar_navigation.generation == generation:
+                self._resume_tail_paging = False
 
-        # Split the conversation into the head this frame defers and the tail it
-        # paints. Sliced on MESSAGES rather than on rendered blocks because the
-        # split has to be decided before anything is built — deciding it by
-        # block count would mean building the blocks first, which is the cost
-        # being avoided. A message mounts 0-2 blocks, so the block count lands
-        # near the bound rather than on it, which is fine: the bound is a budget,
-        # not a contract about how many rows appear.
-        if bound is not None and len(history) > bound:
-            start = _resume_tail_start(history, bound)
-            if start > 0:
-                deferred, history = history[:start], history[start:]
-                # Whole-conversation results, so a deferred call still pairs with a
-                # result that renders (or already rendered) in the tail.
-                self._resume_results = results
-                self._resume_pending_head = deferred
-        transcript = self._transcript_view()
-
-        appended = bool(settled_results)
-        # The "older messages" notice has to be the FIRST row, so it is
-        # appended before the batch rather than prepended after it.
-        # `prepend_blocks` restores a scroll anchor on a later refresh, which
-        # would fight `follow_tail` for the same frame — the reflow-after-paint
-        # #451/#452 exist to prevent. One extra mount of a one-line notice is
-        # not the cost this bound is avoiding.
-        if (
-            self._block_sink is None
-            and self._resume_pending_head
-            and self._resume_head_notice is None
-        ):
-            notice = NoticeBlock(RESUME_OLDER_NOTICE, "note")
-            self._resume_head_notice = notice
-            self._append_block(notice)
-            appended = True
-        # ONE mount for the whole conversation. Per-block mounting made Textual
-        # re-walk its stylesheet, invalidate the container and schedule a settle
-        # callback 297 times over on a 396-message session, for a layout that is
-        # only looked at once — see `TranscriptView.batch_append`. A collected
-        # backward page must not open a batch on the live transcript: the
-        # blocks are inserted later, and an empty batch still schedules a
-        # settle pass that would race the insert's own settle.
-        batch = nullcontext() if self._block_sink is not None else transcript.batch_append()
-        with batch:
-            for message in history:
-                # A wake delivery is a CustomMessage, so it has no ``role``
-                # and would fall through every branch below — which is exactly
-                # why a resumed session showed the agent answering a wake with
-                # no sign the wake ever fired. Replaying it as its own block
-                # keeps the receipt on screen. The catch-up prompt is
-                # user-attributed, so replaying it too would put a raw
-                # '(alarm) The session resumed…' line in the transcript as if
-                # the user had typed it.
-                if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
-                    details = getattr(message, "details", None) or {}
-                    if not details.get("wake_catchup"):
-                        key = (str(details.get("wake_id", "")), details.get("occurrence"))
-                        # Skip a receipt this session already painted live —
-                        # replaying it would double the line (round 2, m2).
-                        if key not in self._live_wake_receipts:
-                            self._append_block(
-                                WakeBlock(str(details.get("text", "")), catchup=False)
-                            )
-                            appended = True
-                    continue
-                # A peer message (`lop send` from another session) is also a
-                # CustomMessage with no ``role`` and would otherwise fall
-                # through, leaving a resumed session with the agent's reply but
-                # no sign the peer note arrived. Replay it as its own block,
-                # skipping one already painted live this session (double-paint
-                # guard, mirroring the wake branch above).
-                if getattr(message, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE:
-                    details = getattr(message, "details", None) or {}
-                    if str(getattr(message, "id", "")) not in self._live_peer_receipts:
-                        self._append_block(
-                            PeerMessageBlock(
-                                str(details.get("body", "")),
-                                details.get("sender") or {},
-                            )
-                        )
-                        appended = True
-                    continue
-                # A gate that timed out unattended is the most expensive event
-                # in the detached feature — up to a day of held residency ends
-                # here — and it rendered NOWHERE (round 1, D2/U2): the user
-                # returned to a conversation that promised an action and
-                # appeared to simply stop. The payload already carried the
-                # tool, the description and the wait; only a renderer was
-                # missing.
-                #
-                # `warning` ink because it is a state the user must know about,
-                # not a receipt they can skip: a tool was denied, and denied by
-                # expiry rather than by their decision — which is the same
-                # distinction the transcript row itself exists to preserve.
-                if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
-                    details = getattr(message, "details", None) or {}
-                    self._append_block(NoticeBlock(_gate_timeout_notice(details), kind="warning"))
-                    appended = True
-                    continue
-                # A compaction that did NOT run. Rendered here for the same
-                # reason as the row above: a custom row with no renderer is a
-                # row nobody sees, and this one exists to CORRECT the
-                # optimistic "compacting context…" receipt the routed command
-                # already showed (round 5, U17). `warning` ink because the
-                # context the user asked to reclaim is still there.
-                if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
-                    details = getattr(message, "details", None) or {}
-                    text = str(details.get("detail") or "compaction did not run").strip()
-                    kind = "error" if text.startswith("compaction failed") else "warning"
-                    self._append_block(NoticeBlock(text, kind=kind))
-                    appended = True
-                    continue
-                role = getattr(message, "role", None)
-                if role == "tool":
-                    continue  # already rendered beside the call that asked for it
-                text = getattr(message, "text", "") or ""
-                text = text.strip() if isinstance(text, str) else ""
-                if role == "user":
-                    # The live path never paints harness chrome as a user row
-                    # (LOOP_PROMPT is registered as a pending echo and consumed;
-                    # the auto-continuation prompt is never announced at all).
-                    # Replay must make the same choice, or a resumed session
-                    # shows rows the live one deliberately suppressed — the
-                    # live/replay divergence review round 2 pinned.
-                    #
-                    # The network-continuation prompt joins them for the same
-                    # reason: it is persisted so the TRANSCRIPT explains why one
-                    # answer arrived in two pieces, but the user never typed it
-                    # and the live run showed a NoticeEvent instead.
-                    if text in (
-                        LOOP_PROMPT,
-                        _CONTINUATION_PROMPT,
-                        CONNECTIVITY_CONTINUATION_PROMPT,
-                    ):
-                        continue
-                    # A `$skill` invocation persists as its EXPANDED payload,
-                    # because that is what the model was sent. Replaying it
-                    # verbatim showed a resumed conversation the whole SKILL.md
-                    # body as the user's row — and, since the picker titles a
-                    # session from its first user turn, named every such thread
-                    # "The user invoked the `research` skill…". The typed line
-                    # rides the payload's own opening tag, so replay repaints
-                    # exactly what the live session painted. Same live/replay
-                    # parity rule as the two prompts skipped above.
-                    text = _typed_line_of(text) or text
-                    # The images ride the persisted message as base64 content
-                    # blocks — the same bytes the model saw — so a resumed
-                    # prompt replays WITH its pictures, not just the receipt
-                    # count. This is the resume half of the promise the live
-                    # path makes in `_submit_prompt`.
-                    replay_images = [
-                        block
-                        for block in (getattr(message, "content", None) or [])
-                        if isinstance(block, ImageContent)
-                    ]
-                    if text or replay_images:
-                        self._append_block(UserBlock(text, len(replay_images)))
-                        self._append_image_blocks(replay_images, marker_text=text)
-                        appended = True
-                    # A bang-mode receipt replays as open as it lived: the
-                    # user row is `! <command>` and the assistant message that
-                    # follows carries exactly one bash call. Remembered so the
-                    # call's card can open on settle, the same contract the
-                    # live path makes.
-                    if text.startswith("! "):
-                        self._replay_bang_pending = True
-                    continue
-                if role != "assistant":
-                    continue
-                # Consume the pending bang marker on EVERY assistant message:
-                # record_shell writes the call-bearing assistant immediately
-                # after the `!` row, and a later unrelated turn must never
-                # inherit the open-on-settle flag.
-                bang_pending = self._replay_bang_pending
-                self._replay_bang_pending = False
-                if text:
-                    block = AssistantBlock()
-                    block.completion_anchor_id = str(getattr(message, "id", ""))
-                    block.update_text(text)
-                    block.finalize_text()
-                    self._append_block(block)
-                    appended = True
-                tool_calls = getattr(message, "tool_calls", None) or []
-                for call in tool_calls:
-                    # Only the FIRST call of a bang assistant message is the
-                    # command's own card; the shape record_shell writes has
-                    # exactly one, so consuming here is exact in practice and
-                    # conservative in theory.
-                    user_run = bool(
-                        bang_pending
-                        and tool_calls[0] is call
-                        and getattr(call, "name", "") == "bash"
-                    )
-                    self._replay_tool_call(call, results, user_run=user_run)
-                    appended = True
-                stop = getattr(message, "stop_reason", None)
-                if stop == "refusal":
-                    # A refused turn replays its refusal even when the model DID
-                    # stream some prose first (Gemini safety stops often cut a
-                    # partial answer): the prose alone reads as a complete,
-                    # oddly short reply, and the user re-reading the session
-                    # needs to know the provider cut it off and why. The message
-                    # itself was stashed on the assistant message by the loop
-                    # precisely so this replay could show it.
-                    payload = getattr(message, "provider_payload", None) or {}
-                    # The fallback keeps the marker grammar (D3): every other
-                    # refusal line ends in a parenthetical, and a user who has
-                    # learned that shape would read its absence as meaningful.
-                    refusal = str(payload.get("refusal") or "") or (
-                        "model refused the request (no details recorded)"
-                    )
-                    self._append_block(NoticeBlock(refusal, "error"))
-                    appended = True
-                elif not text and not tool_calls:
-                    # An assistant message with neither prose nor a call is a
-                    # turn that FAILED. Skipping it is what left a resumed
-                    # session showing a prompt and nothing after it, with no
-                    # hint that the answer had errored rather than never been
-                    # asked for.
-                    if stop in ("error", "aborted"):
-                        reason = "turn failed" if stop == "error" else "interrupted"
-                        self._append_block(NoticeBlock(reason, "error"))
-                        appended = True
-        # Every message this pass rendered, by stable id — the dedupe key a
-        # later backward page is filtered through.
-        self._resume_mounted_ids.update(
-            str(getattr(message, "id", "")) for message in history if getattr(message, "id", None)
-        )
-        if self._block_sink is not None:
-            # A collected page mounts nothing and owns no viewport: the head
-            # notice belongs to the first render, and `follow_tail` would drag
-            # the reader from the history they scrolled up to read down to the
-            # newest turn — the exact opposite of the gesture that asked for it.
-            return appended
-        if appended:
-            # Replay is mounted as one synchronous batch, before Textual can
-            # remeasure the growing container between blocks. Land the reader on
-            # the latest turn and ARM the anchor there, so the first thing the
-            # resumed session streams carries them with it rather than growing
-            # off the bottom of a viewport pinned to the replay's last frame.
-            transcript.follow_tail()
-        return appended
+        mounted = view.blocks()
+        notice = self._resume_tail_notice
+        index = mounted.index(notice) if notice is not None and notice in mounted else len(mounted)
+        # New live output may already follow the gap. Insert older missing
+        # rows BEFORE its marker, never after that newer output.
+        view.insert_blocks(index, blocks, on_settled=settled)
+        if not self._resume_pending_tail and notice is not None:
+            view.remove_block(notice)
+            self._resume_tail_notice = None
 
     def _transcript_scrolled(self, *_args: Any, continuous: bool = False) -> None:
         """Mount the next older page when the reader reaches the top.
@@ -4138,6 +4670,10 @@ class OperatorApp(App[None]):
         reported loop the operator actually saw — chunks loading "without
         requiring me to scroll up to the top again on the new height".
         """
+        view = self._transcript_view()
+        if self._resume_pending_tail and view.scroll_y > 0 and view.is_near_bottom():
+            self._mount_newer_resume_page()
+            return
         if not self._resume_pending_head:
             return
         if self._resume_paging:
@@ -4161,7 +4697,11 @@ class OperatorApp(App[None]):
             return
         self._resume_check_pending = True
 
+        generation = self._sidebar_navigation.generation
+
         def run_check() -> None:
+            if self._transcript is not view or self._sidebar_navigation.generation != generation:
+                return
             self._resume_check_pending = False
             self._check_resume_page()
 
@@ -4380,56 +4920,9 @@ class OperatorApp(App[None]):
     def _replay_tool_call(
         self, call: Any, results: dict[str, Any], *, user_run: bool = False
     ) -> None:
-        """Mount one settled tool row for a call from a previous session.
+        from local_operator.tui.session_presentation import replay_tool_call
 
-        The card is built exactly as a live one is — same constructor, same
-        summary derivation from the arguments — so a resumed row is
-        indistinguishable from the row the user watched run, apart from the
-        duration the transcript never recorded.
-        """
-        card = ToolCard(
-            getattr(call, "id", "") or "",
-            getattr(call, "name", "") or "",
-            getattr(call, "arguments", None) or {},
-            user_run=user_run,
-        )
-        self._append_block(card)
-        result = results.get(getattr(call, "id", "") or "")
-        if result is None:
-            # No result recorded: the session ended between the call and its
-            # answer. Showing it as complete would invent an outcome.
-            card.restore(state="interrupted")
-            return
-        result_text = getattr(result, "text", "") or ""
-        payload = getattr(result, "provider_payload", None) or {}
-        details = payload.get("details") if isinstance(payload, dict) else None
-        if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
-            # A user-stopped bang command persists as an error result (the
-            # model-facing shape), but the LIVE frame it came from was the dim
-            # shut `interrupted ⊘` row. Replaying it through the error branch
-            # would reopen the user's own Esc as a red failure (design round
-            # 1, D1). The aborted prefix is execute_bash's stable contract.
-            card.restore(state="interrupted")
-            return
-        if getattr(result, "is_error", False):
-            card.restore(
-                state="error",
-                result_text=result_text,
-                details=details,
-                error=_first_line(result_text),
-            )
-        else:
-            card.restore(state="success", result_text=result_text, details=details)
-        # Same rule as `on_tool_ended`: a result carrying image blocks shows
-        # them under the settled card, so a resumed session's screenshots are
-        # back on screen exactly where the live session showed them.
-        self._append_image_blocks(
-            [
-                block
-                for block in (getattr(result, "content", None) or [])
-                if isinstance(block, ImageContent)
-            ]
-        )
+        return replay_tool_call(self, call, results, user_run=user_run)
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -4651,6 +5144,9 @@ class OperatorApp(App[None]):
         discover it from an answer that has forgotten everything.
         ``/reload`` itself no longer calls this path; it re-execs.
         """
+        # Explicit reload replaces this workflow source. Sidebar navigation
+        # never calls this path and therefore never retires its loops.
+        self._interaction.retired = True
         previous_id = self._conversation_id()
         previous_len = self._history_length()
         preserve_outgoing = preserve_outgoing or (
@@ -4914,6 +5410,11 @@ class OperatorApp(App[None]):
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
+                # Reload retired the outgoing turn before adopting a fresh
+                # interaction context. Its late unowned fallback must not give
+                # that new context a failed outcome before its first start.
+                self._turn_open = False
+                self._turn_notified = True
                 self._flush_fork_receipt(getattr(session, "session_id", "") or "")
                 # The IN-PROCESS adoption path needs the boot prompt too, not
                 # just the cold-boot one. `/fork <message>` with
@@ -5663,65 +6164,11 @@ class OperatorApp(App[None]):
                 return resolved
         return False
 
-    def _overlay_live_state(self, rows: "list[Any]") -> "list[Any]":
-        """Fill in each row's runtime state, and float the ones needing a person.
-
-        Two reads for the whole list: the discovery records say which sessions
-        are running, working, attached or wedged, and the wake index says which
-        have reminders armed. Best-effort — a picker that cannot read either
-        one still lists every session exactly as it did before, because the
-        fields are defaulted and the markers simply do not appear.
-        """
+    def _overlay_live_state(self, rows: list[Any]) -> list[Any]:
         from local_operator.paths import config_dir
-        from local_operator.session.runtime import registry
-        from local_operator.tui.widgets.session_picker import sort_needs_you_first
+        from local_operator.tui.session_catalog import decorate_rows
 
-        try:
-            scanned = registry.scan(config_dir())
-        except Exception:  # noqa: BLE001 — markers are an enhancement, never a gate
-            logger.debug("picker could not scan session records", exc_info=True)
-            scanned = []
-        try:
-            from local_operator.wakes.store import read_index
-
-            wake_index = read_index(config_dir())
-        except Exception:  # noqa: BLE001
-            logger.debug("picker could not read the wake index", exc_info=True)
-            wake_index = {}
-
-        live: dict[str, tuple[Any, str]] = {}
-        for record, state in scanned:
-            session_id = getattr(record, "session_id", "")
-            if session_id:
-                live[session_id] = (record, state)
-
-        updated: list[Any] = []
-        for row in rows:
-            record_state = live.get(row.id)
-            live_state = ""
-            pending: str | None = None
-            if record_state is not None:
-                record, state = record_state
-                if state == "wedged":
-                    live_state = "wedged"
-                elif getattr(record, "busy", False):
-                    live_state = "busy"
-                elif not getattr(record, "detached", False):
-                    live_state = "attached"
-                else:
-                    live_state = "idle"
-                pending = getattr(record, "pending", None) or None
-            entry = wake_index.get(row.id) or {}
-            schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
-            updated.append(
-                row._replace(
-                    live_state=live_state,
-                    pending=pending,
-                    wakes=len(schedules),
-                    wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
-                )
-            )
-        return sort_needs_you_first(updated)
+        return decorate_rows(config_dir(), rows)
 
     def _run_session_transition(self, operation: Awaitable[None]) -> None:
         """Run one session replacement behind the standard composer boundary.
@@ -5754,20 +6201,21 @@ class OperatorApp(App[None]):
         try:
             await operation
         finally:
-            # Both success and refusal/failure reopen the same ordinary composer:
-            # either the new session is now authoritative or the old one remains.
-            self._session_transition_pending = False
-            outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
-            if outcome is not None:
-                self._notice(*outcome)
-            # If the settled session has an authoritative EMPTY roster, retire
-            # the one-row transition reserve now. Waiting for another keystroke
-            # would leave a blank/loading hole indefinitely after a refused
-            # attach or an empty replacement session. A filled roster is cheap
-            # to re-derive and stays in the same reserved geometry.
-            editor = self._editor()
-            if editor.argument_command in ("team", "teams", "agent", "agents"):
-                self._fill_name_argument_list(editor, editor.argument_command)
+            if not self._sidebar_navigation.requested_id:
+                # Both success and refusal/failure reopen the same ordinary composer:
+                # either the new session is now authoritative or the old one remains.
+                self._session_transition_pending = False
+                outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
+                if outcome is not None:
+                    self._notice(*outcome)
+                # If the settled session has an authoritative EMPTY roster, retire
+                # the one-row transition reserve now. Waiting for another keystroke
+                # would leave a blank/loading hole indefinitely after a refused
+                # attach or an empty replacement session. A filled roster is cheap
+                # to re-derive and stays in the same reserved geometry.
+                editor = self._editor()
+                if editor.argument_command in ("team", "teams", "agent", "agents"):
+                    self._fill_name_argument_list(editor, editor.argument_command)
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
@@ -8045,6 +8493,7 @@ class OperatorApp(App[None]):
         # about to be exactly wide enough for the card. It is also the last handler
         # to run BEFORE the screen arranges, which is what lets the composition below
         # land in the first frame the terminal ever sees.
+        self._sync_sidebar_layout(event.size)
         self._sync_boot_layout(size=event.size)
         self._sync_subagent_compact_layout(event.size.height)
         # The overlay cards are hosted in `width: auto` containers, so a
@@ -9042,13 +9491,20 @@ class OperatorApp(App[None]):
         # Showing the typed line instead makes paste and non-paste `$skill`
         # behave identically and makes the two rows agree by construction.
         row = text if sent is not None else expand_pastes(text, message.attachments)
-        self._submit_prompt(
-            row,
-            images,
-            message.attachments,
-            sent=sent,
-            typed=text,
+        source = self._interaction
+        source.turn.submitted_draft = SessionDraft(
+            text=message.text, attachments=dict(message.attachments)
         )
+        try:
+            self._submit_prompt(
+                row,
+                images,
+                message.attachments,
+                sent=sent,
+                typed=text,
+            )
+        finally:
+            source.turn.submitted_draft = None
 
     def on_inline_command_requested(self, message: InlineCommandRequested) -> None:
         """Run a slash command spliced out of the MIDDLE of a draft.
@@ -9109,6 +9565,12 @@ class OperatorApp(App[None]):
         and something lost it, and only the pair covers "the composer went dark
         because the usage panel lit up".
         """
+        if not self._swapping_session and event.widget is not self._session_sidebar:
+            view = self._transcript
+            if view is not None and (event.widget is view or view in event.widget.ancestors):
+                self._interaction.draft.focus_id = "@transcript"
+            elif isinstance(event.widget, Editor):
+                self._interaction.draft.focus_id = "@editor"
         self._sync_composer_focus()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
@@ -9393,6 +9855,9 @@ class OperatorApp(App[None]):
         already exists for "the user is done with this card": it discards the
         aside and hands back the main-chat draft it borrowed.
         """
+        if self._sidebar_navigation.requested_id:
+            self._sidebar_navigation.cancel()
+            return
         editor = self._editor()
         # A COPY GESTURE IN FLIGHT is not a draft the user is scrapping, so
         # Ctrl+C keeps its older meaning there — the interrupt and the first
@@ -11077,6 +11542,8 @@ class OperatorApp(App[None]):
         # longer holds. The model's context is untouched by any of this, which
         # is what /clear already promises.
         self._resume_pending_head = []
+        self._resume_pending_tail = []
+        self._resume_tail_notice = None
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
@@ -11965,6 +12432,17 @@ class OperatorApp(App[None]):
             self.exit()
 
     async def on_unmount(self) -> None:
+        await self._sidebar_navigation.close()
+        await self._sidebar_drafts.close()
+        if self._sidebar_timer is not None:
+            self._sidebar_timer.stop()
+        from local_operator.session.remote import RemoteSession
+
+        for source in tuple(self._interactions.values()):
+            if source.session is not self._session and isinstance(source.session, RemoteSession):
+                if source.controller is not None:
+                    source.controller.dispose()
+                await source.session.dispose()
         # Unpublish the discovery record BEFORE anything can block: the mobile
         # daemon reaps by pid liveness anyway, and this removes the record in
         # the common case so the phone list drops the session immediately
@@ -12042,6 +12520,8 @@ class OperatorApp(App[None]):
             command = command[1:].lstrip()
         if not command:
             return
+        import weakref
+
         from local_operator.harness.types import (
             AbortSignal,
             AgentToolUpdate,
@@ -12049,6 +12529,7 @@ class OperatorApp(App[None]):
         )
         from local_operator.tools.builtin import execute_bash
 
+        source = self._interaction
         call_id = f"shell-{time.monotonic_ns()}"
         # user_run: the row says WHO ran it (`you:` chip) and opens at settle,
         # because the user ran the command to read its output.
@@ -12058,7 +12539,9 @@ class OperatorApp(App[None]):
         signal = AbortSignal()
         self._shell_signal = signal
         self._shell_card = card
-        session = self._session
+        card_ref = weakref.ref(card)
+        source.shell.call_id = call_id
+        session = source.session
         cwd = os.getcwd()
         session_cwd = getattr(session, "_cwd", None) if session is not None else None
         if isinstance(session_cwd, str) and session_cwd:
@@ -12084,7 +12567,10 @@ class OperatorApp(App[None]):
         def on_update(update: AgentToolUpdate) -> None:
             detail = _partial_text(update)
             if detail:
-                card.set_partial_detail(detail)
+                source.shell.progress = detail[-4096:]
+                current_card = card_ref()
+                if self._is_current(source) and current_card is not None:
+                    current_card.set_partial_detail(detail)
 
         async def persist(result: ToolResult) -> None:
             """One persistence hop; a spawn failure is still a completed
@@ -12125,8 +12611,14 @@ class OperatorApp(App[None]):
                     context,
                 )
             except Exception as error:  # surface, never crash the app
-                if self._shell_card is card and not signal.aborted:
-                    card.mark_failed(str(error), str(error))
+                current_card = card_ref()
+                if (
+                    self._is_current(source)
+                    and self._shell_card is current_card
+                    and current_card is not None
+                    and not signal.aborted
+                ):
+                    current_card.mark_failed(str(error), str(error))
                 await persist(
                     ToolResult(
                         tool_call_id=call_id,
@@ -12145,31 +12637,39 @@ class OperatorApp(App[None]):
             # authoritative until the subprocess is reaped. Do not overwrite
             # that interrupted frame with execute_bash's abort result; DO still
             # persist the result so the command cannot disappear on resume.
-            if self._shell_card is card and not signal.aborted:
+            current_card = card_ref()
+            if (
+                self._is_current(source)
+                and self._shell_card is current_card
+                and current_card is not None
+                and not signal.aborted
+            ):
                 if result.is_error:
-                    card.mark_failed(_first_line(result.text), result.text, result.details)
+                    current_card.mark_failed(_first_line(result.text), result.text, result.details)
                 else:
-                    card.mark_done(result.text, result.details)
+                    current_card.mark_done(result.text, result.details)
             await persist(result)
 
         def _clear_shell_state() -> None:
-            if self._shell_card is card:
+            if self._is_current(source) and self._shell_card is card_ref():
                 self._shell_card = None
-            if self._shell_signal is signal:
-                self._shell_signal = None
+            if source.shell.signal is signal:
+                source.shell.signal = None
 
         worker: Any = None
+        source.active_workers += 1
 
         async def run_and_clear() -> None:
             try:
                 await run_shell()
             finally:
+                source.active_workers -= 1
                 _clear_shell_state()
-                if self._shell_worker is worker:
-                    self._shell_worker = None
+                if source.shell.worker is worker:
+                    source.shell.worker = None
 
-        worker = self.run_worker(run_and_clear(), thread=False, group="shell")
-        self._shell_worker = worker
+        worker = self.run_worker(run_and_clear(), thread=False, group=source.worker_group("shell"))
+        source.shell.worker = worker
 
     def _abort_shell_command(self) -> bool:
         """Abort the in-flight bang-mode command. True if there was one.
@@ -12373,6 +12873,7 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
+            self._interaction.compaction.accepted_draft = self._interaction.turn.submitted_draft
             # Only when they differ, so the common path leaves this empty and
             # the hand-back below falls through to the held prompt itself.
             #
@@ -12402,6 +12903,18 @@ class OperatorApp(App[None]):
         self._maybe_name_conversation(named)
 
     def _start_turn(self, text: str, images: list[ImageContent] | None = None) -> None:
+        self._start_turn_for(
+            self._interaction, text, images, accepted=self._interaction.turn.submitted_draft
+        )
+
+    def _start_turn_for(
+        self,
+        source: SessionInteraction,
+        text: str,
+        images: list[ImageContent] | None = None,
+        *,
+        accepted: SessionDraft | None = None,
+    ) -> None:
         """Run one user prompt as a turn, reporting a failure as a notice.
 
         Extracted from :meth:`_submit_prompt` so a prompt HELD through a
@@ -12409,7 +12922,7 @@ class OperatorApp(App[None]):
         the alternative was re-entering `_submit_prompt`, which would write the
         user's row into the ledger a second time.
         """
-        session = self._session
+        session = source.session
         if session is None or self._status is None:
             return
         # The turn's first append announces this prompt back as a user
@@ -12427,14 +12940,17 @@ class OperatorApp(App[None]):
         # back to text. Both in-tree sessions accept it -- `RemoteSession`
         # included, which is what an attached follower TUI drives and which
         # swallowed cross-surface prompts until it did (round 1, F1).
-        echo = self._register_user_echo(text, message_id=self._echo_message_id(session.prompt))
+        echo = self._register_user_echo_for(
+            source, text, message_id=self._echo_message_id(session.prompt)
+        )
         # A turn STARTING ends any barren click gesture: from here Ctrl+C means
         # "stop this turn", and a claim raised before the turn existed cannot
         # speak for a press aimed at it (agent review round 3, R3-3). Belt and
         # braces with the editor's own submit seam, because a prompt held
         # through a compaction reaches this dispatch point long after the
         # submit that queued it.
-        self._editor().retire_barren_click()
+        if self._is_current(source):
+            self._editor().retire_barren_click()
         # Naming is deliberately NOT cancelled here. It used to be, because the
         # title call took the same provider lane the turn takes and a follow-up
         # had to be able to evict it. The call is now `isolated` and concurrent,
@@ -12442,13 +12958,16 @@ class OperatorApp(App[None]):
         # would throw away a title generated from the OPENER and re-derive one
         # from the follow-up, which names the conversation after its second
         # subject. Reload still cancels: see `_cancel_naming_attempt`.
-        self._status.update(streaming=True)
+        if self._is_current(source):
+            self._status.update(streaming=True)
+
+        source.active_workers += 1
 
         async def run_prompt() -> None:
             aborted = False
             error_text: str | None = None
             try:
-                async with self._turn_provider_lock:
+                async with source.turn.provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
@@ -12468,9 +12987,13 @@ class OperatorApp(App[None]):
                 # the dropped text and the way back are exactly what the user
                 # needs, and this refusal is what remains on screen after the
                 # stop notice scrolls off (round-4 D4-2).
-                if self._stopped_session_id and "stopped" in str(error):
+                if (
+                    self._is_current(source)
+                    and self._stopped_session_id
+                    and "stopped" in str(error)
+                ):
                     text_line, kind = self._no_session_notice(unsent=True)
-                    self._append_block(NoticeBlock(text_line, kind))
+                    self._notice_for(source, text_line, kind)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -12484,16 +13007,15 @@ class OperatorApp(App[None]):
                     # again with one keystroke, and the viewer drops its
                     # binding so the NEXT send engages a fresh runtime rather
                     # than dialling a socket that is never coming back.
-                    self._restore_unsent(text, images)
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
                     go_cold = getattr(session, "_go_cold", None)
                     if callable(go_cold):
                         go_cold()
-                    self._append_block(
-                        NoticeBlock(
-                            "this session's runtime stopped — your message is back in the "
-                            "composer; send it again to start a new one",
-                            "warning",
-                        )
+                    self._notice_for(
+                        source,
+                        "this session's runtime stopped — your message is back in the "
+                        "composer; send it again to start a new one",
+                        "warning",
                     )
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
@@ -12502,14 +13024,15 @@ class OperatorApp(App[None]):
                     # and the other did not purely by route — and this is the
                     # route the reported incident took, because an MCP auth
                     # failure is what makes `prompt()` raise.
-                    self._append_block(NoticeBlock(self._with_recovery_hint(str(error)), "error"))
+                    self._notice_for(source, self._with_recovery_hint(str(error)), "error")
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
                 # the next identical prompt's event; `_discard_user_echo` is
                 # safe because a delivered announcement has already consumed
                 # the entry.
-                self._discard_user_echo(echo)
+                self._discard_user_echo_for(source, echo)
             finally:
+                source.active_workers -= 1
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong
                 # together. The status band and the working line used to be
                 # retired by DIFFERENT mechanisms: the band by this `finally`
@@ -12601,9 +13124,9 @@ class OperatorApp(App[None]):
                 # and the fallback is a no-op on every normal turn. Calling
                 # `_finalize_turn` directly instead would run AHEAD of the
                 # queued real end and double-notify every single turn.
-                self._post_turn_abandoned(aborted=aborted, error=error_text)
+                self._post_turn_abandoned_for(source, aborted=aborted, error=error_text)
 
-        self.run_worker(run_prompt(), thread=False, group="turns")
+        self.run_worker(run_prompt(), thread=False, group=source.worker_group("turns"))
 
     def _retire_turn_band(self, session: Any, *, failed: bool | None = None) -> None:
         """Clear the status band for a turn whose worker is done with it.
@@ -12675,14 +13198,7 @@ class OperatorApp(App[None]):
         why it is retiring, and deriving it here keeps all three from having to
         remember it.
         """
-        self.post_message(
-            TurnAbandoned(
-                self._turn_epoch,
-                aborted=aborted,
-                error=error,
-                outcome_known=not bool(getattr(self._session, "is_remote", False)),
-            )
-        )
+        self._post_turn_abandoned_for(self._interaction, aborted=aborted, error=error)
 
     # -- conversation naming --------------------------------------------------
     def _cancel_naming_attempt(self) -> None:
@@ -14087,6 +14603,8 @@ class OperatorApp(App[None]):
         try:
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
+            elif message.key in ("tui.sidebar_visible", "tui.sidebar_position"):
+                self._apply_sidebar_settings()
             elif message.key == "display.comfortable_rows":
                 # Layout, not ink: the padding lives in the stylesheet behind
                 # one Screen class, so flipping the class is the whole apply
@@ -14511,6 +15029,10 @@ class OperatorApp(App[None]):
         resume already retired it when it painted the tail, and a page mounted
         into the scrollback is not the edge that starts a conversation.
         """
+        if self._projection_message_id:
+            block.navigation_anchor_id = self._projection_message_id
+            block.navigation_anchor_part = self._projection_part
+            self._projection_part += 1
         if self._block_sink is not None:
             self._block_sink.append(block)
             return
@@ -14527,49 +15049,9 @@ class OperatorApp(App[None]):
     def _append_image_blocks(
         self, images: list[ImageContent], *, marker_text: str | None = None
     ) -> list[ImageBlock]:
-        """Mount one :class:`ImageBlock` per image, in order.
+        from local_operator.tui.session_presentation import append_image_blocks
 
-        The single entry point for putting pictures on the transcript — the
-        prompt path, the tool-result path, and the resume replay all route
-        here so a rendering decision (caps, protocol, the unavailable
-        receipt) is made in exactly one place. Guarded per block: a block
-        whose bytes will not decode still mounts (as its unavailable
-        receipt), but a failure CONSTRUCTING one must not take down the
-        message dispatch that carried a perfectly good tool result.
-
-        Labels name WHICH of several images a receipt is about, and only
-        when the batch has more than one — a receipt for a batch of one
-        names nothing the row above it has not already said (review round
-        1, F4). Where ``marker_text`` is given (the prompt paths), the
-        numbers are read from the text's own ``[Image #N]`` citations, in
-        citation order — the same walk ``resolve_markers`` built ``images``
-        from — because marker numbers are not positional: delete #1 and
-        paste again and the draft reads ``[Image #2] [Image #3]``, so a
-        positional ``#1`` would name a marker the prompt does not contain
-        (review round 2, F9). Tool results have no markers and fall back to
-        positions.
-        """
-        indices: list[int] = []
-        if marker_text:
-            from local_operator.tui.widgets.editor import IMAGE_MARKER
-
-            indices = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
-        mounted: list[ImageBlock] = []
-        for index, image in enumerate(images):
-            if len(images) <= 1:
-                label = ""
-            elif index < len(indices):
-                label = f"#{indices[index]}"
-            else:
-                label = f"#{index + 1}"
-            try:
-                block = ImageBlock(image.data or None, image.mime_type, label=label)
-            except Exception:
-                logger.debug("image block construction failed", exc_info=True)
-                continue
-            self._append_block(block)
-            mounted.append(block)
-        return mounted
+        return append_image_blocks(self, images, marker_text=marker_text)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
@@ -14820,6 +15302,8 @@ class OperatorApp(App[None]):
                 logger.debug("display settings cache could not be dropped", exc_info=True)
         if "display.dock" in changed:
             self._apply_dock_density()
+        if any(key in changed for key in ("tui.sidebar_visible", "tui.sidebar_position")):
+            self._apply_sidebar_settings()
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -15510,6 +15994,15 @@ class OperatorApp(App[None]):
         parts = text.split(maxsplit=1)
         entry = slash_command_for(text)
         command = f"/{entry.name}" if entry is not None else parts[0].lower()
+        if self._sidebar_navigation.requested_id and command not in (
+            "/sidebar",
+            "/help",
+            "/settings",
+        ):
+            self._system_notice(
+                "Wait for the conversation to open before sending a command", "warning"
+            )
+            return
         arg = parts[1].strip() if len(parts) > 1 else ""
         # The argument of a ``consumes_prompt`` command with its collapsed
         # pastes spliced back in. That flag's own definition is "this argument
@@ -15672,6 +16165,9 @@ class OperatorApp(App[None]):
             route_session = self._session
             route_generation = getattr(self, "_frontend_session_generation", 0)
 
+            route_session = self._session
+            route_generation = getattr(self, "_frontend_session_generation", 0)
+
             async def run_remote_slash() -> None:
                 # A queued operation belongs to its committed session, and an
                 # already-sent operation's receipt must not paint a replacement
@@ -15769,6 +16265,8 @@ class OperatorApp(App[None]):
             self._cmd_theme(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
+        elif command == "/sidebar":
+            self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
         elif command == "/search":
@@ -15871,9 +16369,15 @@ class OperatorApp(App[None]):
         # announced `compacting context…` with no end event to retire it. The
         # session refuses a second concurrent pass itself (``already_running``),
         # which is one authority for the whole question instead of two.
-        self.run_worker(self._compact_worker(session), thread=False, group="compact")
+        self.run_worker(
+            self._compact_worker(session, self._interaction),
+            thread=False,
+            group=self._interaction.worker_group("compact"),
+        )
 
-    async def _compact_worker(self, session: SessionProtocol) -> None:
+    async def _compact_worker(
+        self, session: SessionProtocol, source: SessionInteraction | None = None
+    ) -> None:
         """Await one manual compaction and report what it did.
 
         A pass that RUNS narrates itself through the ``compaction_start`` /
@@ -15891,15 +16395,16 @@ class OperatorApp(App[None]):
         louder than the one carrying the reason. :meth:`on_compaction_ended`
         now leaves the manual case to this line.
         """
+        source = source or self._interactions.get(id(session), self._interaction)
         try:
             outcome = await session.compact_now()
         except Exception as exc:  # noqa: BLE001 — a failed pass must not kill the app
             logger.debug("manual compaction failed", exc_info=True)
-            self._system_notice(f"compaction failed: {exc}", "error")
+            self._notice_for(source, f"compaction failed: {exc}", "error")
             return
         if not outcome.ran:
             kind: NoticeKind = "error" if outcome.reason == "failed" else "warning"
-            self._system_notice(outcome.detail or "compaction did not run", kind)
+            self._notice_for(source, outcome.detail or "compaction did not run", kind)
         # A pass that RAN needs nothing further here: the band is settled from
         # the END EVENT, in `on_compaction_ended`, so the automatic trigger gets
         # the same treatment instead of leaving its own reading stale.
@@ -18679,7 +19184,11 @@ class OperatorApp(App[None]):
             return
         self._loop_cancelled = False
         notice(f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel")
-        self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+        self.run_worker(
+            self._loop_worker(iterations, self._interaction),
+            thread=False,
+            group=self._interaction.worker_group("loop"),
+        )
 
     def _start_goal_loop(self, goal: str, notice: NoticeFn) -> None:
         """Launch goal mode (`/loop <goal text>`) — loop turns until a judge
@@ -18702,18 +19211,26 @@ class OperatorApp(App[None]):
         # sequence must not rewrite the terminal) and length-capped for the
         # notice only — the full string still drives the loop.
         notice(f"looping toward: {_loop_goal_label(goal)} — /loop stop to cancel")
-        self.run_worker(self._loop_goal_worker(goal), thread=False, group="loop")
+        self.run_worker(
+            self._loop_goal_worker(goal, self._interaction),
+            thread=False,
+            group=self._interaction.worker_group("loop"),
+        )
 
-    async def _loop_worker(self, iterations: int) -> None:
+    async def _loop_worker(self, iterations: int, source: SessionInteraction | None = None) -> None:
         """Run up to ``iterations`` goal-advancing turns, sequentially."""
 
-        def notice(body: str, kind: NoticeKind = "info") -> None:
-            self._append_block(NoticeBlock(body, kind))
+        source = source or self._interaction
 
-        session = self._session
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        session = source.session
         if session is None:
             return
-        self._loop_running = True
+        source.loop.running = True
+        source.active_workers += 1
+        source.loop.operation += 1
         completed = 0
         #: Whether the loop ended by CRASHING rather than by running out of
         #: iterations. Without it a loop whose first prompt died signed off
@@ -18723,7 +19240,7 @@ class OperatorApp(App[None]):
         crashed = False
         try:
             for index in range(iterations):
-                if self._loop_cancelled:
+                if source.loop.cancelled:
                     break
                 # Re-checked every iteration, not captured once: `/reload`
                 # replaces `self._session` underneath a running loop, and the
@@ -18731,7 +19248,7 @@ class OperatorApp(App[None]):
                 # old one took the remaining prompts, the new one took none, and
                 # `_loop_running` stayed True so `/loop` answered "already
                 # running". Same guard `_name_conversation_worker` already makes.
-                if session is not self._session:
+                if source.retired:
                     break
                 # A NOTICE, not a `UserBlock`: this line is app-authored chrome
                 # (the comment on `SLASH_COMMANDS["loop"]` says as much of the
@@ -18740,7 +19257,7 @@ class OperatorApp(App[None]):
                 # ten of them, so the loudest new mark in the transcript would
                 # belong to the one turn the user did not type.
                 notice(f"loop {index + 1}/{iterations}", "note")
-                if self._status is not None:
+                if self._is_current(source) and self._status is not None:
                     self._status.update(streaming=True)
                 # LOOP_PROMPT is app-authored chrome and deliberately gets no
                 # user row (the notice above is its receipt) — but the session
@@ -18748,8 +19265,8 @@ class OperatorApp(App[None]):
                 # prompt. Register it so the event is consumed silently instead
                 # of painting the loudest mark in the transcript for words the
                 # user never typed.
-                echo = self._register_user_echo(
-                    LOOP_PROMPT, message_id=self._echo_message_id(session.prompt)
+                echo = self._register_user_echo_for(
+                    source, LOOP_PROMPT, message_id=self._echo_message_id(session.prompt)
                 )
                 loop_error: str | None = None
                 try:
@@ -18766,7 +19283,7 @@ class OperatorApp(App[None]):
                     notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
-                    self._discard_user_echo(echo)
+                    self._discard_user_echo_for(source, echo)
                     crashed = True
                     break
                 finally:
@@ -18783,13 +19300,14 @@ class OperatorApp(App[None]):
                     # verbatim under `/loop`: spinner climbing, band idle,
                     # nothing announced. A healthy iteration's real `TurnEnded`
                     # is already queued ahead of this, so it is a no-op there.
-                    self._post_turn_abandoned(aborted=False, error=loop_error)
+                    self._post_turn_abandoned_for(source, aborted=False, error=loop_error)
                 completed = index + 1
         finally:
-            self._loop_running = False
-        if self._loop_cancelled:
+            source.active_workers -= 1
+            source.loop.running = False
+        if source.loop.cancelled:
             notice(f"loop cancelled after {completed} iteration(s)")
-        elif session is not self._session:
+        elif source.retired:
             # Reported as stopped, not finished: the remaining iterations never
             # ran, and "finished" on a reload reads as the loop having completed.
             notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
@@ -18824,20 +19342,23 @@ class OperatorApp(App[None]):
         # where `complete_aside` is the real implementation (a follower's raises),
         # but guard in case a future path reaches the worker on a session lacking
         # it — treat a missing primitive as a judge failure, not a crash.
+        source = self._interactions.get(id(session), self._interaction)
         if not hasattr(session, "complete_aside"):
             return None, ""
         turns = [Message.user(LOOP_JUDGE_PROMPT.format(goal=goal))]
         try:
-            answer = await session.complete_aside(turns, on_usage=self._charge_aside)
+            answer = await session.complete_aside(
+                turns, on_usage=lambda usage: self._charge_aside_for(source, usage)
+            )
         except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
             self._append_block(NoticeBlock(f"judge unavailable, continuing: {error}", "warning"))
             return None, ""
         achieved, reason = _parse_loop_verdict(answer)
         if achieved is None:
-            self._append_block(NoticeBlock("judge returned no verdict, continuing", "warning"))
+            self._notice_for(source, "judge returned no verdict, continuing", "warning")
         return achieved, reason
 
-    async def _loop_goal_worker(self, goal: str) -> None:
+    async def _loop_goal_worker(self, goal: str, source: SessionInteraction | None = None) -> None:
         """Run goal mode: loop turns toward ``goal`` until the judge releases.
 
         Separate from `_loop_worker` on purpose — the two share only their
@@ -18848,36 +19369,41 @@ class OperatorApp(App[None]):
         the judge saying ACHIEVED, or the consecutive-judge-failure breaker.
         """
 
-        def notice(body: str, kind: NoticeKind = "info") -> None:
-            self._append_block(NoticeBlock(body, kind))
+        source = source or self._interaction
 
-        session = self._session
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        session = source.session
         if session is None:
             return
-        self._loop_running = True
-        self._loop_goal = goal
+        source.loop.running = True
+        source.active_workers += 1
+        source.loop.operation += 1
+        operation = source.loop.operation
+        source.loop.goal = goal
         # Suppress the per-turn completion toast for the whole held loop; the
         # release path below fires the single toast. Set here, cleared in the
         # `finally` — the reset is load-bearing (see the field's init comment).
-        self._loop_suppress_completion = True
+        source.loop.suppress_completion = True
         completed = 0
         judge_failures = 0
         released = False
         reason = ""
         try:
             while True:
-                if self._loop_cancelled:
+                if source.loop.cancelled:
                     break
                 # Re-checked every iteration, not captured once: `/reload`
                 # replaces `self._session` underneath a running loop, and the
                 # captured reference would go on driving the DISPOSED session.
                 # Same guard the numeric worker documents.
-                if session is not self._session:
+                if source.retired:
                     break
                 # A NOTICE, not a UserBlock: the per-turn prompt is app-authored
                 # chrome, exactly as in numeric mode.
                 notice(f"loop {completed + 1} (goal mode)", "note")
-                if self._status is not None:
+                if self._is_current(source) and self._status is not None:
                     self._status.update(streaming=True)
                 # Format ONCE and reuse the exact string for both the echo
                 # registration and the prompt: an id-less entry (a session
@@ -18885,8 +19411,8 @@ class OperatorApp(App[None]):
                 # string byte-for-byte, so a second `.format` here could drift
                 # and leave the user MessageStartEvent unconsumed.
                 prompt = LOOP_GOAL_PROMPT.format(goal=goal)
-                echo = self._register_user_echo(
-                    prompt, message_id=self._echo_message_id(session.prompt)
+                echo = self._register_user_echo_for(
+                    source, prompt, message_id=self._echo_message_id(session.prompt)
                 )
                 try:
                     await session.prompt(prompt, **echo.prompt_kwargs())
@@ -18898,7 +19424,7 @@ class OperatorApp(App[None]):
                     notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
-                    self._discard_user_echo(echo)
+                    self._discard_user_echo_for(source, echo)
                     # Retire the dead turn, exactly as the other two call sites
                     # do. The goal loop's single-toast contract is preserved by
                     # `_loop_suppress_completion`, which is still set here and is
@@ -18908,14 +19434,14 @@ class OperatorApp(App[None]):
                     # takes its ERROR branch — a held loop that dies outright
                     # must not go silent, which is the one notification the
                     # suppression deliberately does not cover.
-                    self._post_turn_abandoned(aborted=False, error=str(error))
+                    self._post_turn_abandoned_for(source, aborted=False, error=str(error))
                     break
                 # NOTE: the status is deliberately NOT reset to idle here — it
                 # stays in a working state across the judge call below so the
                 # loop never looks frozen while the verdict is being computed.
                 completed += 1
                 # --- yield boundary reached: judge the settled turn ---
-                if self._loop_cancelled or session is not self._session:
+                if source.loop.cancelled or source.retired:
                     self._retire_turn_band(session)
                     break
                 # Keep the status in a working state ACROSS the judge call. The
@@ -18967,15 +19493,15 @@ class OperatorApp(App[None]):
             # AFTER any already-queued `TurnEnded` has been suppressed. The
             # release path is unaffected: it calls `_notify` directly, and its
             # own `await _judge_goal` already drained the final `TurnEnded`.
-            self._loop_running = False
-            self._loop_goal = ""
-            self.call_later(self._release_loop_completion_suppression)
+            source.loop.running = False
+            source.loop.goal = ""
+            self.call_later(self._release_loop_completion_suppression, source, operation)
         # Terminal outcome (mirrors the numeric worker's tail). Only the release
         # path fires the toast — one notification, exactly when the judge said
         # the goal was met, which is the whole notify-once contract.
-        if self._loop_cancelled:
+        if source.loop.cancelled:
             notice(f"loop cancelled after {completed} turn(s)")
-        elif session is not self._session:
+        elif source.retired:
             notice(f"loop stopped by reload after {completed} turn(s)", "warning")
         elif released:
             # The NoticeBlock is the unconditional in-transcript receipt (visible
@@ -18985,10 +19511,13 @@ class OperatorApp(App[None]):
             # while they are still working (the existing deferral machinery then
             # delivers it when the last child lands).
             notice(f"goal achieved after {completed} turn(s): {reason}", "info")
-            self._notify("complete", running_children=self._outstanding_delegated_jobs())
+            if self._is_current(source):
+                self._notify("complete", running_children=self._outstanding_delegated_jobs())
         # (judge-failure and turn-error paths already emitted their own notice.)
 
-    def _release_loop_completion_suppression(self) -> None:
+    def _release_loop_completion_suppression(
+        self, source: SessionInteraction | None = None, operation: int | None = None
+    ) -> None:
         """Clear the goal-loop completion-toast suppression, deferred one pump
         cycle past the worker's exit so a still-queued final ``TurnEnded``
         cannot fire a spurious "task complete" on a cancelled/reloaded loop.
@@ -19000,8 +19529,9 @@ class OperatorApp(App[None]):
         ends. Without the guard, a `/loop` typed within one pump cycle of the
         last one ending could unmute the fresh loop's per-turn toasts.
         """
-        if not self._loop_running:
-            self._loop_suppress_completion = False
+        source = source or self._interaction
+        if not source.loop.running and (operation is None or operation == source.loop.operation):
+            source.loop.suppress_completion = False
 
     # -- providers / accounts / usage --------------------------------------
     def _cmd_search(self, arg: str, notice: NoticeFn) -> None:
@@ -20021,7 +20551,7 @@ class OperatorApp(App[None]):
             self._ask_aside(arg)
 
     def action_aside(self) -> None:
-        """Ctrl+B — open the aside WITHOUT spending the composer's draft."""
+        """F8 — open the aside WITHOUT spending the composer's draft."""
         self._open_aside()
 
     def _open_aside(self) -> AsidePanel | None:
@@ -20216,7 +20746,7 @@ class OperatorApp(App[None]):
         cleared the block it streamed into.
 
         Spend IS counted. An aside carries the whole conversation, so it is not
-        free, and a status line that a ctrl+b popup could move without moving
+        free, and a status line that an F8 popup could move without moving
         would be a number the user cannot act on.
         """
         panel = self._aside_panel()
@@ -20259,7 +20789,12 @@ class OperatorApp(App[None]):
         panel.settle_answer(generation, answer)
         self._sync_aside_fork_hint()
 
-    def _charge_aside(self, usage) -> None:  # noqa: ANN001 - harness Usage
+    def _charge_aside(self, usage: Any) -> None:
+        self._charge_aside_for(self._interaction, usage)
+
+    def _charge_aside_for(
+        self, source: SessionInteraction, usage: Any
+    ) -> None:  # noqa: ANN001 - harness Usage
         """Fold an aside's provider usage into the session's running cost.
 
         Through the SAME ``_cost_for`` the turn path uses, so the status line
@@ -20267,14 +20802,14 @@ class OperatorApp(App[None]):
         its own tick; nothing is forced here, because a delta-rate repaint of
         the whole band is exactly the input lag the working line was fixed for.
         """
-        session = self._session
+        session = source.session
         store = getattr(session, "_frontend_state_store", None) if session is not None else None
         if store is not None:
             store.accrue_usage(session, usage)
             return
-        cost = self._cost_for(usage)
+        cost = turn_cost(_effective_label(session), usage) if session is not None else None
         if cost is not None:
-            self._total_cost += cost
+            source.accounting.total += cost
         # Cache instrumentation (debug-only, off by default): an aside is meant
         # to ride the working turn's cached prefix, so cache_read should be a
         # large fraction of the prompt while input (the uncached remainder)
@@ -20338,7 +20873,7 @@ class OperatorApp(App[None]):
             # in the same verb they just learned, for the operation this is not
             # — left them with no route to the thing they actually wanted.
             self._system_notice(
-                "ctrl+f folds an open aside into the chat (ctrl+b opens one) — "
+                "ctrl+f folds an open aside into the chat (F8 opens one) — "
                 "to branch this conversation, use /fork",
                 "warning",
             )
@@ -21831,8 +22366,9 @@ class OperatorApp(App[None]):
         # stops so a user who only ever saw "expand/collapse" learns the panel
         # can now shrink to a row or go away (#525).
         lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
-        lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
-        # Directly under `ctrl+b`, because it is only meaningful once an aside
+        lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        lines.append(_key_row("F8", "open an aside; ctrl+f forks it in"))
+        # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
         # inside the description, which keeps the gutter reading as one gesture
         # per row. MEASURED at 62 composed cells against the 74-cell ceiling
@@ -22835,7 +23371,11 @@ class OperatorApp(App[None]):
                 style="warning",
             )
         self._loop_cancelled = False
-        self.run_worker(self._loop_worker(iterations), thread=False, group="loop")
+        self.run_worker(
+            self._loop_worker(iterations, self._interaction),
+            thread=False,
+            group=self._interaction.worker_group("loop"),
+        )
         return SlashResult(
             kind="notice",
             text=f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel",
@@ -22860,7 +23400,11 @@ class OperatorApp(App[None]):
                 text="no session yet — there is no context to compact",
                 style="warning",
             )
-        self.run_worker(self._compact_worker(session), thread=False, group="compact")
+        self.run_worker(
+            self._compact_worker(session, self._interaction),
+            thread=False,
+            group=self._interaction.worker_group("compact"),
+        )
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
     def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
@@ -25193,23 +25737,7 @@ class OperatorApp(App[None]):
         self._refresh_working_activity()
         # A prompt typed DURING the pass was held rather than sent into a
         # history being rewritten; now the history is settled, it goes.
-        held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
-        # Kept, not dropped: the markers are resolved against the TYPED text
-        # below. Cleared after that so a later `/reload` cannot hand back a
-        # line whose prompt already went.
-        typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
-        held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
-        if held or held_images:
-            # `resolve_markers` orders images by WHERE the citation sits, so it
-            # must read the text the user actually wrote. Run against the
-            # expanded payload, a `[Image #N]` appearing anywhere in the
-            # SKILL.md body (a skill about screenshots is the obvious case)
-            # shifts the citation positions and the model silently receives the
-            # attachments in the wrong order — verified: a draft citing #2 then
-            # #1 sent `[BBB, AAA]` on the normal path and `[AAA, BBB]` here.
-            # The PAYLOAD is still what gets sent; only the marker walk uses
-            # the typed line.
-            self._start_turn(held, resolve_markers(typed or held, held_images))
+        self._consume_compaction_input(self._interaction)
 
     def on_effective_model_changed(self, message: EffectiveModelChanged) -> None:
         """Repaint the model segment with the model actually serving requests.

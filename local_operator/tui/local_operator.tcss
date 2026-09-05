@@ -88,6 +88,34 @@
  * composer — see `TranscriptView` for why that row is the transcript's.
  */
 
+#session-workspace {
+    width: 1fr;
+    height: 1fr;
+    layers: default sidebar;
+}
+
+#session-conversation {
+    width: 1fr;
+    height: 1fr;
+}
+
+SessionSidebar {
+    width: 30;
+    height: 1fr;
+    padding: 0 1;
+    background: $lo-bg;
+    color: $lo-fg;
+    overflow: hidden;
+}
+
+/* Small terminals keep the conversation's full line length. Each layer lays
+ * out independently, so the list overlays only the transcript; its height is
+ * bounded above the live input dock by the app. No frame or dividing rule. */
+.sidebar-overlay SessionSidebar {
+    layer: sidebar;
+    background: $lo-surface;
+}
+
 Screen {
     background: $lo-bg;
     color: $lo-fg;

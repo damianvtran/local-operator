@@ -63,6 +63,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_MODE,
     )
     from local_operator.tools.builtin import BASH_SHELL_DEFAULT
+    from local_operator.tui.session_catalog import (
+        DEFAULT_SIDEBAR_POSITION,
+        DEFAULT_SIDEBAR_VISIBLE,
+    )
     from local_operator.tui.theme import DEFAULT_THEME
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -76,6 +80,8 @@ def _consumer_defaults() -> dict[str, object]:
         # registry said `""` while the app used `dark`, so the page reported a
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
+        "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
+        "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,

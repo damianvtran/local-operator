@@ -1,0 +1,137 @@
+"""Immutable sidebar summaries; never prepare a transcript from a paint or click.
+
+Names and runtime marks use the same sources as /resume. Attention is supplied
+by the shared completion authority, not inferred from transcript timestamps.
+The catalog has no acknowledgement path: listing a conversation is not reading it.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+from local_operator.resume import SessionRow
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_SIDEBAR_VISIBLE = False
+DEFAULT_SIDEBAR_POSITION = "left"
+SidebarPosition = Literal["left", "right"]
+
+
+@dataclass(frozen=True)
+class SidebarSettings:
+    visible: bool = DEFAULT_SIDEBAR_VISIBLE
+    position: SidebarPosition = "left"
+
+    @classmethod
+    def from_values(cls, values: Mapping[str, Any]) -> SidebarSettings:
+        section = values.get("tui")
+        section = section if isinstance(section, Mapping) else {}
+        visible = section.get("sidebar_visible", DEFAULT_SIDEBAR_VISIBLE)
+        position = section.get("sidebar_position", DEFAULT_SIDEBAR_POSITION)
+        return cls(
+            visible=visible if isinstance(visible, bool) else DEFAULT_SIDEBAR_VISIBLE,
+            position="right" if position == "right" else "left",
+        )
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    row: SessionRow
+    unseen: bool = False
+    completion_kind: str = ""
+
+    @property
+    def id(self) -> str:
+        return self.row.id
+
+    @property
+    def rank(self) -> tuple[int, float, str]:
+        # Gates are independent of completed turns; acknowledging a completion
+        # must never demote a question still waiting for a person.
+        tier = 0 if self.row.pending else 1 if self.unseen else 2 if self.row.live_state else 3
+        return tier, -self.row.mtime, self.id
+
+    @property
+    def status(self) -> str:
+        if self.row.pending:
+            return "Approval needed" if self.row.pending == "approval" else "Answer needed"
+        if self.unseen:
+            return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
+                self.completion_kind, "Unseen completion"
+            )
+        return {
+            "busy": "Working",
+            "idle": "Ready",
+            "attached": "Open",
+            "wedged": "Not responding",
+        }.get(self.row.live_state, "Recent")
+
+
+def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
+    """Stable identities survive refreshes, including deterministic recency ties."""
+    return tuple(sorted(entries, key=lambda entry: entry.rank))
+
+
+def decorate_rows(directory: Path, rows: list[SessionRow]) -> list[SessionRow]:
+    """Fill in each row's runtime state, and float the ones needing a person.
+
+    Two reads for the whole list: the discovery records say which sessions
+    are running, working, attached or wedged, and the wake index says which
+    have reminders armed. Best-effort — a picker that cannot read either
+    one still lists every session exactly as it did before, because the
+    fields are defaulted and the markers simply do not appear.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.tui.widgets.session_picker import sort_needs_you_first
+
+    try:
+        scanned = registry.scan(directory)
+    except Exception:  # noqa: BLE001 — markers are an enhancement, never a gate
+        logger.debug("picker could not scan session records", exc_info=True)
+        scanned = []
+    try:
+        from local_operator.wakes.store import read_index
+
+        wake_index = read_index(directory)
+    except Exception:  # noqa: BLE001
+        logger.debug("picker could not read the wake index", exc_info=True)
+        wake_index = {}
+
+    live: dict[str, tuple[Any, str]] = {}
+    for record, state in scanned:
+        session_id = getattr(record, "session_id", "")
+        if session_id:
+            live[session_id] = (record, state)
+
+    updated: list[SessionRow] = []
+    for row in rows:
+        record_state = live.get(row.id)
+        live_state = ""
+        pending: str | None = None
+        if record_state is not None:
+            record, state = record_state
+            if state == "wedged":
+                live_state = "wedged"
+            elif getattr(record, "busy", False):
+                live_state = "busy"
+            elif not getattr(record, "detached", False):
+                live_state = "attached"
+            else:
+                live_state = "idle"
+            pending = getattr(record, "pending", None) or None
+        entry = wake_index.get(row.id) or {}
+        schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+        updated.append(
+            row._replace(
+                live_state=live_state,
+                pending=pending,
+                wakes=len(schedules),
+                wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
+            )
+        )
+    return sort_needs_you_first(updated)
