@@ -1088,7 +1088,7 @@ class TestTheSwitchReceiptCannotNarrateTheWrongSession:
 
         source = inspect.getsource(OperatorApp._reload_session)
         assert (
-            "self._pending_fork_receipt = None" in source
+            "self._pending_fork_receipt = self._pending_fork_receipt, None" in source
         ), "the failed-transition branch does not drop the fork receipt"
 
 
@@ -1508,7 +1508,7 @@ class TestAPendingForkIsVisibleAndRevocable:
 
         source = inspect.getsource(OperatorApp._cmd_fork)
 
-        assert "esc to cancel" in source
+        assert "esc to stay here" in source
 
     def test_the_band_shows_a_pending_fork(self) -> None:
         from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT, StatusLine

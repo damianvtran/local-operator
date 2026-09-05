@@ -178,7 +178,6 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         # Guarded fallbacks in app.py that degrade to a documented default
         # (fork clones from disk, routing reads config.yml, usage/context
         # measurement is skipped, bang-mode results are not journalled).
-        "request_fork",
         "has_pending_fork",
         "routing_settings",
         "record_shell",
