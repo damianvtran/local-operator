@@ -27,6 +27,8 @@ it reports.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from local_operator.tui.app import OperatorApp
@@ -52,10 +54,23 @@ class _BoundViewer(FakeSession):
     is_remote = True
     is_cold = False
 
-    def __init__(self, owner_version: str = "", owner_source_ref: str = "") -> None:
+    def __init__(
+        self,
+        owner_version: str = "",
+        owner_source_ref: str = "",
+        session_id: str = "",
+    ) -> None:
         super().__init__()
         self.owner_version = owner_version
         self.owner_source_ref = owner_source_ref
+        # ``session_id`` is a read-only property on the base double, and the
+        # owner-notice debounce is keyed by it — so a test that needs two
+        # DISTINCT sessions has to override it here rather than assign it.
+        self._skew_session_id = session_id
+
+    @property
+    def session_id(self) -> str:  # type: ignore[override]
+        return self._skew_session_id or super().session_id
 
 
 @pytest.mark.asyncio
@@ -244,8 +259,81 @@ async def test_a_runtime_without_a_stamp_is_reported_as_predating_it(monkeypatch
         notices = _notices(app)
 
     predates = [n for n in notices if "predates build reporting" in n]
-    assert len(predates) == 1, "once per session per process, not once per seam"
+    assert len(predates) == 1, "one session, repeatedly checked, speaks once"
     assert "/stop" in predates[0]
+
+
+@pytest.mark.asyncio
+async def test_a_second_stale_session_gets_its_own_notice(monkeypatch, tmp_path) -> None:
+    """ "Once per SESSION per process" — the claim the debounce key must honour.
+
+    A terminal that adopts one stale runtime, then `/resume`s onto another, is
+    looking at two different stale runtimes. Keying the debounce on the notice
+    kind alone silently swallows the second, so the user is told about one of
+    the two and has no way to know the other is also stale. Design §6.7 and
+    this method's contract both say per-session; this cell is what makes that
+    true rather than merely written down (review round 1, R1-5, NIT-1).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.49.0")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+
+        first = _BoundViewer(owner_version="", session_id="sessionaaaa1")
+        app._session = first
+        app._check_build_skew(reason="bind")
+        app._check_build_skew(reason="bind-again")  # same session: still once
+
+        second = _BoundViewer(owner_version="", session_id="sessionbbbb2")
+        app._session = second
+        app._check_build_skew(reason="resume")
+        await pilot.pause()
+        notices = _notices(app)
+
+    predates = [n for n in notices if "predates build reporting" in n]
+    assert len(predates) == 2, (
+        "each stale session must be reported once; a per-process key hides "
+        "every runtime after the first"
+    )
+
+
+@pytest.mark.asyncio
+async def test_disk_drift_is_not_rescoped_by_a_session_swap(monkeypatch, tmp_path) -> None:
+    """Drift is a fact about THIS PROCESS, so it must not repeat per session.
+
+    The counterpart to the cell above: scoping every notice by session would
+    make an unchanged disk drift re-announce on each `/new`, which is the
+    notice-fatigue failure. Only the owner notices carry a scope.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.46.23")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(
+            update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
+        )
+        first = _BoundViewer(owner_version="0.49.0", session_id="sessionaaaa1")
+        app._session = first
+        app._check_build_skew(reason="adopt")
+
+        second = _BoundViewer(owner_version="0.49.0", session_id="sessionbbbb2")
+        app._session = second
+        app._check_build_skew(reason="adopt-2")
+        await pilot.pause()
+        notices = _notices(app)
+
+    drift = [n for n in notices if "install on disk changed" in n]
+    assert len(drift) == 1, "disk drift is per-process, not per-session"
 
 
 @pytest.mark.asyncio
@@ -408,3 +496,132 @@ async def test_an_attach_receipt_still_submits_its_request(monkeypatch, tmp_path
         "a declaring viewer promises the runtime it will submit this itself; "
         "breaking that promise restores the silent drop on the new client"
     )
+
+
+# ---------------------------------------------------------------------------
+# The TUI-hosted owner mirror
+#
+# A session is owned either by a detached runtime or by THIS app, and a
+# follower routing `/team <name> <request>` must get the same answer from
+# both. Every completion cell in
+# ``tests/unit/session/runtime/test_action_receipt_completion.py`` drives
+# ``OwnedSessionHandle``, so before these cells the app-side copy of the
+# predicate was executed by nothing in CI: an edit drifting it toward
+# ``declared is None`` would double-submit on the TUI-owner path with no test
+# noticing (review round 1, R1-3).
+# ---------------------------------------------------------------------------
+
+
+async def _app_with_team(app: OperatorApp, tmp_path, name: str = "lopdev") -> None:
+    """Give the app's session a real registry holding one attachable team."""
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(tmp_path / "teams")
+    registry.create_team(
+        TeamEditFields(
+            name=name,
+            description="d",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    # ``SessionProtocol`` does not declare ``team_registry`` (it is session
+    # state the real Session carries and the pilot double mirrors), so the
+    # assignment is narrowed for the type checker rather than the protocol
+    # being widened for a test.
+    setattr(app._session, "team_registry", registry)
+
+
+@pytest.mark.asyncio
+async def test_the_tui_owner_completes_for_an_undeclaring_client(monkeypatch, tmp_path) -> None:
+    """The incident shape when the OWNER is a TUI rather than a runtime.
+
+    Same contract, second host: a client that did not declare the receipt type
+    cannot submit the request, so this app must.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        await _app_with_team(app, tmp_path)
+        submitted: list[str] = []
+        monkeypatch.setattr(
+            app,
+            "_submit_prompt",
+            lambda text, images=None, attachments=None, **kw: submitted.append(text),
+        )
+
+        outcome = await app.run_slash_authoritative(
+            "team", "lopdev do the thing", [], consumers=None
+        )
+
+    assert outcome["data"]["type"] == "team_attached"
+    assert submitted == ["do the thing"], (
+        "the TUI-hosted owner must complete an undeclared client's request, "
+        "exactly as the runtime host does"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_tui_owner_defers_to_a_declaring_client(monkeypatch, tmp_path) -> None:
+    """The double-submission guard on the second host.
+
+    This is the branch with no CI coverage before this cell: a drift here runs
+    the user's command twice whenever the session happens to be TUI-owned.
+    """
+    from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        await _app_with_team(app, tmp_path)
+        submitted: list[str] = []
+        monkeypatch.setattr(
+            app,
+            "_submit_prompt",
+            lambda text, images=None, attachments=None, **kw: submitted.append(text),
+        )
+
+        outcome = await app.run_slash_authoritative(
+            "team", "lopdev do the thing", [], consumers=list(SLASH_ACTION_RECEIPTS)
+        )
+
+    assert outcome["data"]["request"] == "do the thing"
+    assert submitted == [], "a declaring client submits it itself; the owner must not"
+
+
+@pytest.mark.asyncio
+async def test_the_tui_owner_treats_declaring_nothing_as_undeclared(monkeypatch, tmp_path) -> None:
+    """``[]`` admits here too — the rule is ``type not in declared``.
+
+    The tempting shortcut ("complete when the field was absent") passes the
+    undeclared cell and fails this one, on this host only.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await asyncio.sleep(0.01)
+        await _app_with_team(app, tmp_path)
+        submitted: list[str] = []
+        monkeypatch.setattr(
+            app,
+            "_submit_prompt",
+            lambda text, images=None, attachments=None, **kw: submitted.append(text),
+        )
+
+        await app.run_slash_authoritative("team", "lopdev do the thing", [], consumers=[])
+
+    assert submitted == ["do the thing"]

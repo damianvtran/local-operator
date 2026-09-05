@@ -49,10 +49,33 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import image_blocks as _image_blocks
-from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+from local_operator.session.runtime.types import runtime_must_complete
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
+
+
+#: How many loop turns a dispatched admission is given to surface a SYNCHRONOUS
+#: refusal before it is left to run detached. ``prompt`` raises its reportable
+#: refusals (closing session, full queue, rejected reservation) before its first
+#: await, so one turn suffices; the margin only guards a future edit that adds
+#: another await to that prelude. Turns, not seconds — see
+#: ``_admit_without_waiting_for_the_turn``.
+_ADMISSION_PRELUDE_TURNS = 3
+
+
+def _log_detached_admission(task: "asyncio.Task[str]") -> None:
+    """Never let a dispatched admission become an unretrieved exception.
+
+    The receipt has already been returned by the time this runs, so there is no
+    caller left to tell: a failure here is a log line, and swallowing it
+    silently is what would make the next occurrence undiagnosable.
+    """
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("a completed slash action's turn failed after admission: %s", error)
 
 
 def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
@@ -1668,18 +1691,15 @@ class OwnedSessionHandle(SessionHandle):
             return result
         data = getattr(result, "data", None) or {}
         receipt_type = data.get("type")
-        if receipt_type not in SLASH_ACTION_RECEIPTS:
+        # The shared predicate, so this host and the TUI-hosted one cannot
+        # drift: not an action receipt, or one the client declared it renders
+        # (admitting that too would double-submit the user's command).
+        if not runtime_must_complete(receipt_type, consumers):
             return result
         request = str(data.get("request") or "")
         if not request:
             # ``/agent clear`` returns ``agent_attached`` with an empty
             # request: a detach is a receipt with no action behind it.
-            return result
-        if receipt_type in (consumers or ()):
-            # The client renders this type and will submit the request itself.
-            # Admitting here too is the double-submission failure, which is
-            # worse than the bug being fixed: the user sees one command run
-            # twice with no way to tell which turn is which.
             return result
         try:
             # Mirrors the viewer's own submit split (``app.py::_submit_prompt``):
@@ -1687,10 +1707,15 @@ class OwnedSessionHandle(SessionHandle):
             # concurrent call outright and the text would be thrown away. The
             # steer is delivered at the engine's next tool/message boundary,
             # which is the existing mid-turn channel rather than a new queue.
+            #
+            # ``steer`` is awaited directly because it cannot park: everything
+            # it does is synchronous (reserve, hand the text to the session,
+            # note the echo) and it returns on its first step. ``prompt``
+            # emphatically CAN park — see below.
             if self._session.is_streaming:
                 await self.steer(request, images=images, command_id=str(uuid.uuid4()))
             else:
-                await self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+                await self._admit_without_waiting_for_the_turn(request, images)
         except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
             # The attach ALREADY landed and stays; only the turn failed to
             # start (session closing, queue full, a rejected prompt). Reporting
@@ -1705,6 +1730,63 @@ class OwnedSessionHandle(SessionHandle):
                 }
             )
         return result
+
+    async def _admit_without_waiting_for_the_turn(
+        self, request: str, images: list[dict[str, str]] | None
+    ) -> None:
+        """Admit ``request`` as a turn, reporting only the IMMEDIATE refusals.
+
+        ``prompt`` resolves its receipt on the durable transcript append, which
+        the drain performs only when it reaches that command — so awaiting it
+        holds this coroutine for the whole of any turn queued ahead. That would
+        be paid on the ``slash_result`` REQUEST/RESPONSE, which is a different
+        thing from the ``prompt`` op's own fire-and-forget wait: the reply frame
+        would be withheld for the duration of the earlier turn, the viewer's
+        ``ACK_TIMEOUT_S`` (15 s) would elapse on anything longer, and the old
+        viewer would print a transport error for a request that WAS admitted —
+        a worse failure than the silent drop this method exists to repair. The
+        per-connection reader is strictly serial, so every later op from that
+        viewer would queue behind the park as well (review round 1, R1-1).
+
+        The ``is_streaming`` branch above does not cover it: the flag is still
+        False during the drain's pre-streaming prelude (lock acquire, record
+        and journal flushes), so a prompt sent moments before this lands in
+        exactly that window.
+
+        So the admission is DISPATCHED and this returns as soon as its outcome
+        can no longer be reported synchronously. The refusals worth reporting —
+        a closing session, a full queue, a rejected reservation — all raise in
+        ``prompt``'s synchronous prelude, before it ever awaits, so they surface
+        here and still become the warning receipt. Anything after that point is
+        a turn that is genuinely running and whose result belongs in the
+        transcript, not in this receipt.
+
+        Bounded in LOOP TURNS rather than seconds deliberately: a wall-clock
+        budget here would be a bet on machine load, whereas "the task has had
+        its synchronous prelude" is a fact about scheduling that holds under any
+        contention (AGENTS.md, "Wait on the event, never on the clock").
+        """
+        task = asyncio.ensure_future(
+            self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+        )
+        # One turn is enough today — nothing before ``prompt``'s first suspension
+        # point yields — but a couple of extra turns costs nothing and keeps this
+        # correct if a future edit puts another await in that prelude.
+        for _ in range(_ADMISSION_PRELUDE_TURNS):
+            if task.done():
+                break
+            await asyncio.sleep(0)
+        if task.done():
+            # Re-raises the synchronous refusal into the caller's warning path.
+            # A cancelled task is not a refusal to report: the session is going
+            # away and the receipt is the least of it.
+            if not task.cancelled():
+                task.result()
+            return
+        # Still parked on the durable append, i.e. genuinely queued behind a
+        # running turn. Let it finish on its own; the user row appears through
+        # the event relay exactly as it would for any other admitted prompt.
+        task.add_done_callback(_log_detached_admission)
 
     async def _slash_result(
         self, command: str, args: str, SlashResult: Any, locality: str = "local"

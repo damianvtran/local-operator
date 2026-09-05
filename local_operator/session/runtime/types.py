@@ -105,6 +105,27 @@ ATTACH_MAX_CLIENTS = 4
 SLASH_ACTION_RECEIPTS: tuple[str, ...] = ("team_attached", "agent_attached")
 
 
+def runtime_must_complete(receipt_type: Any, consumers: Any) -> bool:
+    """Whether the OWNER must submit this receipt's request itself.
+
+    The one rule, in one place: a client completes a receipt only if it
+    DECLARED that type, so ``type not in declared`` — never ``declared is
+    None``. Both ``None`` (a client built before the field) and ``[]``
+    (declared, consumes nothing) mean undeclared and therefore admit here.
+
+    Extracted because the predicate has two hosts by contract — a session is
+    owned either by a detached runtime or by a TUI, and both must answer
+    identically. Hand-duplicating it left the two copies free to drift, where
+    a drift toward ``declared is None`` silently double-submits on one host
+    only (review round 1, NIT-2). Living beside ``SLASH_ACTION_RECEIPTS``
+    keeps the rule next to the list it is applied to; this module is
+    import-light by contract and this adds no imports.
+    """
+    if receipt_type not in SLASH_ACTION_RECEIPTS:
+        return False
+    return receipt_type not in (consumers or ())
+
+
 # ---------------------------------------------------------------------------
 # Discovery record
 # ---------------------------------------------------------------------------

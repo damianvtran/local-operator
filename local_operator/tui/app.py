@@ -2505,11 +2505,13 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — see above; degrade to "unknown"
             self._loaded_build = None
         #: Debounce for :meth:`_check_build_skew`. Keyed on the whole
-        #: ``(kind, from, to)`` triple rather than on the kind alone, so a
+        #: ``(kind, from, to, scope)`` key rather than on the kind alone, so a
         #: SECOND drift (two ``lop-update`` runs while this terminal lives) is
         #: still announced while the mount engage, the draft warm-up and the
-        #: slash engage together cost exactly one notice.
-        self._skew_notice_shown: set[tuple[str, str, str]] = set()
+        #: slash engage together cost exactly one notice. ``scope`` is the
+        #: session id for the owner notices and empty for disk drift — see
+        #: :meth:`_check_build_skew` for why the two differ.
+        self._skew_notice_shown: set[tuple[str, str, str, str]] = set()
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -8594,8 +8596,18 @@ class OperatorApp(App[None]):
                 # to retry.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                return
             finally:
                 self._set_starting(False)
+            # AFTER a successful bind, which is the only moment the OWNER's
+            # build is knowable: the pre-spawn check above runs while the
+            # facade is still cold, so its C branch always returns at the
+            # ``is_cold`` guard and only disk drift can be reported there.
+            # Without this second call the mechanism misses the case it exists
+            # for — ``engage_runtime`` finding an EXISTING resident record and
+            # binding to it without spawning, i.e. an ordinary first prompt
+            # against a stale runtime (review round 1, R1-4).
+            self._check_build_skew(reason=f"{reason}-bound")
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -14480,8 +14492,13 @@ class OperatorApp(App[None]):
         Called at the seams that spawn or bind a runtime (adopt, engage, the
         tail of a successful bind) \u2014 the moments the answer can change and the
         moments the user is about to depend on it. Debounced on the whole
-        (kind, from, to) triple so those seams together cost at most one
+        (kind, from, to, scope) key so those seams together cost at most one
         notice per distinct skew, while a genuinely new drift still speaks up.
+        Disk drift carries no scope: it is a fact about THIS process against
+        the disk, once per from/to pair whichever session is open. The owner
+        notices are scoped BY SESSION, so a terminal that adopts two different
+        stale runtimes hears about both \u2014 \"once per session per process\", which
+        is what design \u00a76.7 states.
 
         ``reason`` names the calling seam for logs only; the copy is chosen by
         WHICH skew was found, not by where it was noticed.
@@ -14493,8 +14510,15 @@ class OperatorApp(App[None]):
             # only produce false alarms.
             return
 
-        def announce(kind: str, before: str, after: str, body: str) -> None:
-            key = (kind, before, after)
+        def announce(kind: str, before: str, after: str, body: str, scope: str = "") -> None:
+            # ``scope`` narrows the debounce from per-process to per-SUBJECT
+            # where the subject is what varies: an owner notice describes ONE
+            # session's runtime, so a second stale session adopted in the same
+            # terminal is a different fact and must speak. Disk drift takes no
+            # scope because it describes THIS process against the disk and is
+            # genuinely once per (from, to) pair whichever session is open
+            # (review round 1, R1-5).
+            key = (kind, before, after, scope)
             if key in self._skew_notice_shown:
                 return
             self._skew_notice_shown.add(key)
@@ -14530,6 +14554,12 @@ class OperatorApp(App[None]):
             return
         owner_version = str(getattr(session, "owner_version", "") or "")
         owner_ref = str(getattr(session, "owner_source_ref", "") or "")
+        # The subject of an owner notice is the SESSION, so the debounce is
+        # keyed by it: "once per session per process", which is what design
+        # §6.7 and this method's own contract say. Keyed on the session id
+        # rather than the facade object so a takeover that swaps the object
+        # under one conversation does not re-announce the same runtime.
+        scope = str(getattr(session, "session_id", "") or id(session))
         if not owner_version:
             # A runtime older than the field itself. It cannot tell us what it
             # is running, but the absence is informative: the field ships in
@@ -14542,6 +14572,7 @@ class OperatorApp(App[None]):
                 loaded.label(),
                 "this session's runtime predates build reporting \u2014 it is older than "
                 "this terminal. /stop, then resend, restarts it on the current install.",
+                scope,
             )
             return
         from local_operator.update import BuildStamp
@@ -14555,6 +14586,7 @@ class OperatorApp(App[None]):
                 f"this session's runtime is running {owner.label()} but this terminal "
                 f"is {loaded.label()} \u2014 routed commands may behave differently. /stop, "
                 f"then resend: the runtime restarts on the current install.",
+                scope,
             )
 
     def _echo_user_command(self, text: str) -> None:
@@ -21187,20 +21219,19 @@ class OperatorApp(App[None]):
         # handle at ``_mobile_handle`` does the same), and this method runs
         # only when a follower routes a slash command to a TUI-hosted owner.
         from local_operator.session.runtime.server import image_blocks
-        from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+        from local_operator.session.runtime.types import runtime_must_complete
 
         if getattr(result, "kind", None) != "notice":
             return result
         data = getattr(result, "data", None) or {}
         receipt_type = data.get("type")
-        if receipt_type not in SLASH_ACTION_RECEIPTS:
+        # THE SAME predicate the runtime host applies, imported rather than
+        # restated: the two hosts must answer identically, and a second copy
+        # is free to drift toward double-submitting on this path alone.
+        if not runtime_must_complete(receipt_type, consumers):
             return result
         request = str(data.get("request") or "")
         if not request:
-            return result
-        if receipt_type in (consumers or ()):
-            # Declared: the client submits it. Doing it here as well is the
-            # double-submission failure the declaration exists to prevent.
             return result
         try:
             images = image_blocks(wire_images)

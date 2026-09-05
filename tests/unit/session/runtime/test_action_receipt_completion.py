@@ -380,3 +380,94 @@ async def test_each_completion_uses_a_fresh_command_id() -> None:
     assert len(ids) == 2
     assert all(ids), "every admission needs an explicit command id"
     assert ids[0] != ids[1], "a reused id makes the second request read as a duplicate"
+
+
+class _SlowDrainSession(FakeSession):
+    """A session whose admission resolves only after a prior turn finishes.
+
+    Models the real shape: ``Session`` resolves a prompt's ``admitted`` future
+    on the durable transcript append, which the drain performs when it reaches
+    that command — so a turn queued ahead holds the next admission open. The
+    flag matters too: ``is_streaming`` is still False during the drain's
+    pre-streaming prelude, which is the window the steer guard cannot see.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.started: list[str] = []
+
+    # ``message_id``/``admitted`` are load-bearing on this double, not
+    # decoration. The handle probes for ``message_id`` (``owned.py``'s
+    # ``legacy_prompt`` check) and, when it is ABSENT, resolves the admission
+    # immediately as a compatibility shim for pre-durable sessions — so a
+    # double without it never exercises the durable path and cannot reproduce
+    # the park at all. The first version of this test passed on the UNFIXED
+    # tree for exactly that reason, which is why it is spelled to match
+    # production ``Session``: the drain hands over the ``admitted`` future and
+    # the session resolves it on the durable append.
+    async def prompt(  # noqa: ANN001
+        self, text: str, images=None, message_id=None, admitted=None, **_kwargs
+    ) -> None:
+        self.started.append(text)
+        self.prompt_calls.append(text)
+        # Deliberately NOT setting is_streaming: this is the prelude window,
+        # where a turn is admitted and running but the flag is still False —
+        # the window the steer guard cannot see.
+        await self.release.wait()
+        if admitted is not None and not admitted.done():
+            admitted.set_result(None)
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_returns_without_waiting_for_a_queued_turn() -> None:
+    """R1-1: the reply must not be held open for the duration of a prior turn.
+
+    ``prompt`` resolves its receipt on the durable append, so AWAITING it here
+    parked the ``slash_result`` response behind whatever was already running.
+    Measured at 4.35 s in review; anything over the client's ``ACK_TIMEOUT_S``
+    (15 s) makes the viewer raise a transport error for a request that was in
+    fact admitted — worse than the silent drop this method exists to fix — and
+    the per-connection reader is serial, so every later op from that viewer
+    queues behind the park too.
+
+    Asserted structurally rather than on a stopwatch: the receipt is produced
+    while the session is still blocked, which is a fact about ordering that no
+    amount of machine load can change (AGENTS.md: wait on the event, never on
+    the clock).
+    """
+    session = _SlowDrainSession()
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+
+    result = await handle._complete_unconsumed_action(_attach_receipt(), None, None)
+
+    assert not session.release.is_set(), "the turn must still be in flight"
+    assert result.style == "info", "a dispatched admission is not a failure to report"
+    assert result.text == "sending to lopdev. manager is coordinating."
+
+    # And the turn really was admitted, not dropped: release the drain and it
+    # completes on its own.
+    session.release.set()
+    await _settle()
+    assert session.prompt_calls == ["do the thing"]
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_refusal_is_still_reported_after_dispatching() -> None:
+    """Dispatching must not cost the warning receipt for FAST failures.
+
+    A closing session, a full queue and a rejected reservation all raise in
+    ``prompt``'s synchronous prelude, before it ever awaits — so they are still
+    knowable when the receipt is built, and step 4's contract survives the
+    change. Only the slow outcome (a turn genuinely queued behind another) is
+    left to run detached.
+    """
+    handle, session = make_handle()
+    handle._disposing = True
+
+    result = await handle._complete_unconsumed_action(_attach_receipt(), None, None)
+
+    assert result.style == "warning"
+    assert "the request was not sent" in result.text
+    assert "session is closing" in result.text
+    assert session.prompt_calls == []

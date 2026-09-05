@@ -458,9 +458,15 @@ def source_ref(prefix: str | Path | None = None) -> str:
     root = Path(prefix) if prefix is not None else Path(sys.prefix)
     try:
         raw = (root / ".lop-source").read_text(encoding="utf-8")
-    except OSError:
-        # Missing, unreadable, or a directory. A build token is decoration on
-        # a diagnostic path; it must never raise into an adopt or a bind.
+    except (OSError, ValueError):
+        # Missing, unreadable, a directory (OSError) — or not valid UTF-8,
+        # which raises UnicodeDecodeError, a ValueError rather than an
+        # OSError. Both are caught because this must never raise into an
+        # adopt or a bind: ``RuntimeServer.__init__`` stamps the record from
+        # here, so an unhandled decode error on a corrupt marker would stop
+        # every runtime on the host from being constructed at all — total
+        # blast radius for a token that is only ever decoration on a
+        # diagnostic path (review round 1, R1-2).
         return ""
     parts = raw.split()
     return parts[0] if parts else ""
