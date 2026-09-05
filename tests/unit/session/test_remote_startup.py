@@ -179,3 +179,97 @@ async def test_interrupted_initial_sync_closes_socket_and_retries(
         await asyncio.gather(binding, return_exceptions=True)
         await viewer.dispose()
         server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["prompt", "steer"])
+async def test_recovery_sync_is_the_only_binding_for_waiting_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from local_operator.harness.types import Message
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_transcript(tmp_path, "s1")
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    engagements = 0
+
+    async def engage(*args, **kwargs):
+        nonlocal engagements
+        engagements += 1
+        server.start()
+        (tmp_path / "sessions/s1/.session.pid").write_text(str(os.getpid()))
+        async with asyncio.timeout(30):
+            while not any(status == "live" for _, status in registry.scan(tmp_path)):
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    reached = asyncio.Event()
+    release = asyncio.Event()
+    clients = []
+    sending = None
+    try:
+        async with asyncio.timeout(30):
+            await viewer._ensure_bound()
+            first_client = viewer._client
+            assert first_client is not None
+            original_sync = viewer._await_frontend
+
+            async def held_recovery_sync():
+                sync = await original_sync()
+                clients.append(viewer._client)
+                reached.set()
+                await release.wait()
+                return sync
+
+            monkeypatch.setattr(viewer, "_await_frontend", held_recovery_sync)
+            first_client.close()
+            await reached.wait()
+            assert viewer._recovering
+            assert viewer.is_cold
+            assert not viewer._owner_ready.is_set()
+            with pytest.raises(ConnectionError, match="reconnect"):
+                await viewer.route_shared_slash("goal", "do not queue during recovery")
+
+            entered = asyncio.Event()
+
+            async def send():
+                entered.set()
+                if operation == "prompt":
+                    await viewer.prompt("during reconnect")
+                else:
+                    await viewer._send_steer_when_ready(Message.user("during reconnect"))
+
+            sending = asyncio.create_task(send())
+            await entered.wait()
+            assert not sending.done()
+            assert engagements == 1, "recovery owns its dial; a turn must not engage again"
+            assert handle.calls == []
+            recovery = viewer._recovery_task
+            release.set()
+            await sending
+            if recovery is not None:
+                await recovery
+            assert engagements == 1
+            assert len(clients) == 1, "a second binding would orphan the recovery socket"
+            assert [call[0] for call in handle.calls] == [operation]
+            await viewer.dispose()
+            assert not first_client.connected
+            assert all(client is not None and not client.connected for client in clients)
+    finally:
+        release.set()
+        if sending is not None:
+            if not sending.done():
+                sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
+        await viewer.dispose()
+        # Also clean a regression's orphaned socket, so a failed test cannot
+        # leave an extra observer resident in the runtime used by the fixture.
+        for client in clients:
+            if client is not None:
+                client.close()
+        server.close()

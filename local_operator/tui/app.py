@@ -8550,45 +8550,51 @@ class OperatorApp(App[None]):
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
     def _needs_runtime_first(self, command: str, arg: str) -> bool:
-        """Whether ``command`` must engage a runtime before it can be dispatched.
+        """Keep owner mutations behind initial sync, including non-picker routes.
 
-        True only on a COLD viewer (``is_cold`` on a facade that can bind), and
-        only for the commands whose effect lives on the runtime rather than in
-        this terminal:
-
-        - ``/team <name> …`` and ``/agent <name>`` — the attach stamps the
-          roster and briefs onto the session that builds the next turn, which
-          does not exist yet on a cold viewer. The bare LISTINGS and ``/team
-          chart`` read local config and stay local; engaging a runtime to list
-          teams would make opening `lop` and pressing `/team` cost a process.
-        - ``/credential`` — every verb. The store is the runtime's in-memory
-          dict (the `bash` tool reads it there), so even ``list`` has nothing
-          to answer from until one exists, and the STORE verb must have a
-          destination BEFORE the masked paste opens: accepting a secret and
-          then reporting nowhere to put it was the worst shape in the round
-          (UX U3).
-
-        Every other slash either runs locally or is already refused honestly
-        when cold; this list is deliberately the three the round measured.
+        The canonical locality registry is the census: a cold facade advertises
+        no capabilities yet, so falling through before consulting it would call
+        compatibility setters that drop writes before dial or send before sync.
+        Only local interactions/read-only bare forms stay local. Recovery is a
+        different lifecycle: slashes retain their explicit reconnect refusal.
         """
         session = self._session
-        if session is None or not getattr(session, "is_cold", False):
+        if (
+            session is None
+            or not getattr(session, "is_cold", False)
+            or getattr(session, "_recovering", False)
+            or getattr(session, "_deliberate_stop", False)
+            or not callable(getattr(session, "_ensure_bound", None))
+        ):
             return False
-        if not callable(getattr(session, "_ensure_bound", None)):
+        from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
+
+        entry = slash_command_for(command)
+        if entry is None:
             return False
-        head = arg.partition(" ")[0].strip()
-        if command == "/credential":
+        name = entry.name
+        if name == "credential":
+            # Its masked interaction is local but its in-memory store is not.
             return True
-        if command == "/model":
-            # Bare opens a local picker; default writes local config. A session
-            # selection (including saved) must await the owner, never fall into
-            # the local setter while the cold facade has nowhere to send it.
-            return bool(head) and head.casefold() != "default"
-        if command == "/team":
-            return bool(head) and head.casefold() != "chart"
-        if command == "/agent":
-            return bool(head)
-        return False
+        if name in _FRONTEND_LOCAL_SLASHES:
+            return False
+        head = arg.partition(" ")[0].strip().casefold()
+        if (name == "model" and head == "default") or (name == "team" and head == "chart"):
+            return False
+        # These bare forms only read the cold projection or open local UI.
+        # New owner commands conservatively wait unless explicitly classified
+        # as a local reading, rather than silently acquiring a raw-setter path.
+        return bool(arg.strip()) or name not in {
+            "rename",
+            "model",
+            "effort",
+            "context",
+            "goal",
+            "approvals",
+            "mcp",
+            "team",
+            "agent",
+        }
 
     def _bind_then_dispatch(
         self, text: str, attachments: Mapping[int, Marked] | None = None
@@ -14521,6 +14527,13 @@ class OperatorApp(App[None]):
             _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
         )
 
+        if command == "/model" and arg.strip().casefold() == "saved":
+            # Saved belongs to the invoking terminal, not the owner's config.
+            # Resolve now, at commitment, and route the concrete selection so
+            # an older startup snapshot cannot choose its meaning later.
+            self._cmd_model_saved(notice)
+            return
+
         remote_route = getattr(self._session, "route_shared_slash", None)
         remote_capabilities = {
             f"/{cap.command}": cap
@@ -14554,23 +14567,12 @@ class OperatorApp(App[None]):
         if command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart":
             remote_capability = None
         if self._needs_runtime_first(command, arg):
-            # BIND, THEN ROUTE. A COLD viewer — every fresh `lop`, and every
-            # viewer after `/stop` — advertises no capabilities at all, so the
-            # branches below would fall through to the LOCAL handler, whose
-            # attach seam does not exist on a `RemoteSession`, and refuse with
-            # copy that reads as permanent. Measured: engaging takes 1.1–2.8 s,
-            # and a paste-and-Enter at t=0, or Enter typed faster than the warm
-            # engage the first keystroke started, lost the command every time
-            # (review round 1 R2, QA Q2, UX U1/U3).
-            #
-            # The rule is the one a PROMPT already follows: `RemoteSession.
-            # prompt()` calls `_ensure_bound()` first and the runtime it needs
-            # comes into existence. A slash that needs the same runtime gets
-            # the same treatment — engage, then dispatch again against the
-            # capabilities the bound viewer just adopted. Re-entering
-            # `_run_slash_command` rather than calling the routed branch
-            # directly keeps ONE dispatch, so the pullbacks above (`chart`,
-            # `default`, bare `/mcp`) apply identically on the second pass.
+            # A cold facade has no authoritative capability snapshot yet.
+            # Resolve locality from the canonical registry, then re-enter this
+            # SAME dispatch after binding: both typed commands and picker
+            # choices must avoid raw setters that drop or prematurely send.
+            # Local pullbacks (default/chart/bare pickers) remain local, and
+            # recovery/stop retain their existing refusal paths.
             self._bind_then_dispatch(text, attachments)
             return
         if (
@@ -15802,12 +15804,10 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
-        # Routed through `_cmd_model`'s selector path rather than reimplemented:
-        # that path validates the provider, resolves the spec, carries the
-        # chosen effort across, re-measures the context and repaints the band.
-        # A second switch implementation here is how the two would drift on the
-        # next change to any of those steps.
-        self._cmd_model(f"{provider}/{model_id}", notice)
+        # Re-enter the normal selector dispatch: local Sessions still use the
+        # local activation path, while viewers await their owner and use its
+        # canonical mutation/receipt rather than a fire-and-forget raw setter.
+        self._run_slash_command(f"/model {provider}/{model_id}")
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
@@ -17119,7 +17119,9 @@ class OperatorApp(App[None]):
             notice(f"{row.provider} needs a login first — starting it now", "warning")
             self._cmd_login(row.provider, notice)
             return
-        self._cmd_model(row.selector, notice)
+        # A picker choice is the same commitment as a typed selector. Bypassing
+        # dispatch here called the facade's raw setter before it had an owner.
+        self._run_slash_command(f"/model {row.selector}")
 
     # -- goal / loop --------------------------------------------------------
     def _cmd_goal(self, arg: str, notice: NoticeFn) -> None:

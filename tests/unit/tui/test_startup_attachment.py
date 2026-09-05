@@ -32,6 +32,10 @@ class _SelectionHandle(_RoutingHandle):
             self._frontend.mutate(active_team=args)
         elif command == "agent":
             self._frontend.mutate(active_agent=args)
+        elif command == "goal":
+            self._frontend.mutate(goal=args)
+        elif command == "rename":
+            self._frontend.mutate(conversation_title=args)
         return result
 
 
@@ -43,7 +47,7 @@ async def _until(pilot, predicate):
 
 
 @asynccontextmanager
-async def _held_startup(tmp_path, monkeypatch):
+async def _held_startup(tmp_path, monkeypatch, phase="sync"):
     for key in tuple(os.environ):
         if key.startswith("CMUX_"):
             monkeypatch.delenv(key)
@@ -68,6 +72,9 @@ async def _held_startup(tmp_path, monkeypatch):
     release = asyncio.Event()
 
     async def engage(*args, **kwargs):
+        if phase == "spawn":
+            reached.set()
+            await release.wait()
         server.start()
         marker = config / "sessions/startup-test/.session.pid"
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -83,8 +90,9 @@ async def _held_startup(tmp_path, monkeypatch):
 
     async def held_sync():
         sync = await original()
-        reached.set()
-        await release.wait()
+        if phase == "sync":
+            reached.set()
+            await release.wait()
         return sync
 
     async def factory():
@@ -155,9 +163,10 @@ async def test_sync_preserves_active_interaction(surface, tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command", ["model", "team", "agent"])
-async def test_latest_committed_selection_survives_sync(command, tmp_path, monkeypatch):
-    async with _held_startup(tmp_path, monkeypatch) as (app, pilot, viewer, handle, release):
+@pytest.mark.parametrize("command", ["model", "team", "agent", "goal", "rename"])
+@pytest.mark.parametrize("phase", ["spawn", "sync"])
+async def test_latest_committed_selection_survives_sync(command, phase, tmp_path, monkeypatch):
+    async with _held_startup(tmp_path, monkeypatch, phase) as (app, pilot, viewer, handle, release):
         for choice in ("first", "latest"):
             target = f"test/{choice}" if command == "model" else choice
             app.post_message(events.Paste(f"/{command} {target}"))
@@ -179,7 +188,16 @@ async def test_latest_committed_selection_survives_sync(command, tmp_path, monke
             lambda: (
                 viewer.model.model_id == "latest"
                 if command == "model"
-                else getattr(viewer.frontend_state, f"active_{command}") == "latest"
+                else getattr(
+                    viewer.frontend_state,
+                    {
+                        "team": "active_team",
+                        "agent": "active_agent",
+                        "goal": "goal",
+                        "rename": "conversation_title",
+                    }[command],
+                )
+                == "latest"
             ),
         )
         calls = [call[1][:2] for call in handle.calls if call[0] == "run_slash_authoritative"]
@@ -201,10 +219,15 @@ async def test_committed_setting_and_new_edit_survive_sync(tmp_path: Path, monke
         assert settings is not None
         _select(settings, "display.comfortable_rows")
         previous = settings_get("display.comfortable_rows")
-        await pilot.press("enter")
+        await pilot.press("space")
         await pilot.pause()
         saved = settings_get("display.comfortable_rows")
-        assert saved is not previous, "Enter must commit the changed setting"
+        assert saved is not previous, "Space must commit the changed setting"
+        from local_operator.config import ConfigManager
+
+        assert (
+            ConfigManager(tmp_path / "config").get_config_value("display.comfortable_rows") == saved
+        )
         _select(settings, "hosting")
         await pilot.press("enter", *"new")
         before = (settings._selected, settings._editing, settings._buffer, app.focused)
@@ -212,3 +235,77 @@ async def test_committed_setting_and_new_edit_survive_sync(tmp_path: Path, monke
         await _until(pilot, lambda: not viewer.is_cold and not app._starting_runtime)
         assert settings_get("display.comfortable_rows") == saved
         assert (settings._selected, settings._editing, settings._buffer, app.focused) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["spawn", "sync"])
+async def test_picker_choice_and_saved_use_canonical_dispatch(phase, tmp_path, monkeypatch):
+    from local_operator.config import ConfigManager
+    from local_operator.tui.widgets.model_picker import ModelRow
+
+    async with _held_startup(tmp_path, monkeypatch, phase) as (app, pilot, viewer, handle, release):
+        editor = app._editor()
+        # Local cached rows can be available before the owner's first catalogue.
+        app._run_slash_command("/model")
+        await pilot.pause()
+        editor.model_picker.set_rows(
+            [
+                ModelRow(provider="test", model_id=name, label=name, connected=True)
+                for name in ("initial", "picked")
+            ],
+            current="test/initial",
+        )
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert handle.calls == [], "a real picker choice must not call a raw remote setter"
+        # Saved is resolved on THIS terminal at commitment, not on the owner or
+        # at some later bind callback after the config has changed again.
+        config = ConfigManager(tmp_path / "config")
+        config.set_config_value("model_name", "saved-choice")
+        app._run_slash_command("/model saved")
+        config.set_config_value("model_name", "later-default")
+        await pilot.press(*"next draft", "left")
+        before = (editor.text, editor.selection, app.focused)
+        release.set()
+        await _until(pilot, lambda: viewer.model.model_id == "saved-choice")
+        calls = [call[1][:2] for call in handle.calls if call[0] == "run_slash_authoritative"]
+        assert calls == [("model", "test/picked"), ("model", "test/saved-choice")]
+        assert (editor.text, editor.selection, app.focused) == before
+
+
+@pytest.mark.asyncio
+async def test_cold_mutation_census_uses_canonical_locality(tmp_path, monkeypatch):
+    async with _held_startup(tmp_path, monkeypatch) as (app, pilot, viewer, handle, release):
+        # This table pins argument-dependent LOCAL exceptions, not a second
+        # authority registry. All other commands inherit canonical locality.
+        for command, arg in [
+            ("goal", "a goal"),
+            ("rename", "a title"),
+            ("effort", "high"),
+            ("fast", ""),
+            ("approvals", "ask"),
+            ("loop", ""),
+            ("compact", ""),
+            ("mcp", "reauth demo"),
+            ("model", "test/next"),
+            ("team", "chosen"),
+            ("agent", "chosen"),
+            ("credential", "list"),
+        ]:
+            assert app._needs_runtime_first(f"/{command}", arg), (command, arg)
+        for command, arg in [
+            ("model", ""),
+            ("model", "default test/next"),
+            ("team", ""),
+            ("team", "chart example"),
+            ("agent", ""),
+            ("goal", ""),
+            ("context", ""),
+            ("effort", ""),
+            ("approvals", ""),
+            ("mcp", ""),
+            ("settings", ""),
+            ("stop", ""),
+            ("theme", "dark"),
+        ]:
+            assert not app._needs_runtime_first(f"/{command}", arg), (command, arg)

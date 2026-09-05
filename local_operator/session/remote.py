@@ -969,10 +969,13 @@ class RemoteSession:
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
         """
-        if not self._can_go_cold or not self.is_cold or self._disposed:
+        # Recovery already owns its dial/sync and signals _owner_ready. A
+        # prompt or steer must wait on that promise, not start a competing
+        # initial attachment merely because its connected socket is not ready.
+        if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
             return
         async with self._bind_lock:
-            if not self.is_cold or self._disposed:
+            if not self.is_cold or self._disposed or self._recovering:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import WarmErrand, engage_runtime
