@@ -112,7 +112,7 @@ jobs:
 
       - name: Attach the extension zip to the GitHub Release
         if: ${{ steps.ext-changed.outputs.changed == 'true' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.ext-build.outputs.asset }}
 
