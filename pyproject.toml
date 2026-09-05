@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.46.25"
+version = "0.49.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -60,6 +60,9 @@ dependencies = [
     "starlette",
     "uvicorn",
     "python-multipart",
+    # The personal tunnel gateway verifies the edge's RSA proof locally;
+    # declare this directly rather than relying on the MCP transitive copy.
+    "pyjwt[crypto]>=2.10,<3",
     "websockets>=15.0.1",
     "apscheduler",
     "dill",
@@ -129,7 +132,7 @@ dev = [
     # Unpinned it would drift from CI: a newer pycodestyle can flag code CI
     # accepts, or accept code CI flags, and either way the local gate stops
     # predicting the remote one. Bump this and the ci.yml pin together.
-    "flake8==7.1.0",
+    "flake8==7.3.0",
     # Same discipline as flake8: one version across the type-check job,
     # the local gate, and this extra. Unpinned, the wrapper
     # (PYRIGHT_PYTHON_FORCE_VERSION=latest used to live on the type-check
@@ -246,7 +249,8 @@ lop = "local_operator.cli:main"
 [tool.black]
 line-length = 100
 target-version = ['py312']
-extend-exclude = "F401"
+# Vendored release helpers stay byte-identical to their recorded upstream SHA.
+extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/"
 
 [tool.pylint."messages control"]
 ignore = ["__init__.py"]
@@ -260,6 +264,7 @@ enable = [
 
 [tool.isort]
 profile = "black"
+extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples"]
 
 [tool.pyright]
 reportMissingTypeArgument = true
@@ -296,7 +301,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # runtime surface the gate exists to protect. Excluding `docs/` keeps the
 # type-check gate focused on `local_operator/` and `tests/` without weakening it
 # for real code or littering a throwaway generator with per-line ignores.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

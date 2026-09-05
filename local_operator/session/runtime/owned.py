@@ -105,6 +105,32 @@ class _PromptCommand:
         yield self.images
 
 
+def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
+    """Read one historical plan without materializing or rewriting its files."""
+    from local_operator.session.frontend_state import TodoItemState, TodoPhaseState
+    from local_operator.session.transcript import Transcript
+
+    try:
+        transcript = Transcript(directory, defer_materialise=True)
+        if not transcript.path.is_file():
+            return None
+        payload = transcript.latest_custom("todo_snapshot") or {}
+        raw = payload.get("items", [])
+        if not isinstance(raw, list):
+            return None
+        phases = [
+            (
+                TodoPhaseState.model_validate(row)
+                if "items" in row
+                else TodoPhaseState(name="Todos", items=[TodoItemState.model_validate(row)])
+            )
+            for row in raw
+        ]
+        return [phase.model_dump(mode="json") for phase in phases]
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 class OwnedSessionHandle(SessionHandle):
     """SessionHandle over an in-process Session living on ``loop``.
 
@@ -1478,6 +1504,14 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
 
+    async def fork_snapshot(self, message: str) -> dict[str, Any]:
+        """Snapshot THIS authenticated owner, never a client-supplied path/id."""
+        busy = self.is_busy()
+        result = await self._session.fork_snapshot(message)
+        # Jobs and parked gates also count as original work, even between turns.
+        result["busy"] = busy
+        return result
+
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         """Run an off-record provider request against this session.
 
@@ -2581,8 +2615,56 @@ class OwnedSessionHandle(SessionHandle):
         which is the same eviction problem ``job_trajectory_replacements``
         solves for the delta stream.
         """
-        job = self._session.jobs.get(job_id)
+        comms = getattr(self._session, "_subagent_comms", None)
+        node = comms.node(job_id) if comms is not None else None
+        lookup = getattr(comms, "job", None)
+        job = lookup(job_id) if callable(lookup) else None
+        if job is None:
+            job = self._session.jobs.get(job_id)
         rows = list(getattr(job, "trajectory", None) or []) if job is not None else []
+        details: dict[str, Any] = {}
+        store = getattr(self._session, "_frontend_state_store", None)
+        if (
+            offset == 0
+            and comms is not None
+            and node is not None
+            and node.session_id
+            and node.session_dir is not None
+            and not getattr(node, "live", False)
+        ):
+            from local_operator.tools.builtin import TODO_STORE, restore_todos
+
+            if node.session_id not in TODO_STORE:
+                # A cold owner's roster must not read every child transcript.
+                # Hydrate only this selected plan, off-loop, then join the newest
+                # canonical snapshot. A live update or resumed identity wins.
+                phases = await asyncio.to_thread(_read_child_todo_snapshot, node.session_dir)
+                current_node = comms.node(job_id)
+                if (
+                    phases is not None
+                    and current_node is not None
+                    and current_node.job_id == node.job_id
+                    and current_node.session_id == node.session_id
+                ):
+                    restore_todos(node.session_id, phases)
+        if offset == 0 and store is not None:
+            from local_operator.session.frontend_state import job_todos_wire_value
+
+            # Publish the flush before capturing its sequence, with no await in
+            # between. A delayed reply can then be joined safely with newer live
+            # todo replacements on the follower. Only the first page pays for it.
+            store.refresh_jobs(self._session)
+            state = store.state
+            canonical_id = node.job_id if node is not None else str(getattr(job, "id", job_id))
+            row = next((row for row in state.jobs if row.id == canonical_id), None)
+            if row is not None:
+                details = {
+                    "detail_job_id": canonical_id,
+                    "detail_session_id": row.session_id,
+                    "detail_epoch": state.epoch,
+                    "detail_sequence": state.sequence,
+                    "todos": job_todos_wire_value(row.todos),
+                }
         total = len(rows)
         page = rows[offset : offset + limit]
         first = rows[0] if rows else None
@@ -2596,7 +2678,8 @@ class OwnedSessionHandle(SessionHandle):
             # A job swept from the ledger is distinguishable from one with no
             # events yet: the page renders "no longer on the ledger" for the
             # first and "no activity" for the second.
-            "known": job is not None,
+            "known": job is not None or node is not None,
+            **details,
         }
 
     async def refresh(self) -> None:

@@ -653,6 +653,53 @@ def test_rejected_snapshot_mutation_cannot_diverge_owner_and_follower() -> None:
     assert follower.state.jobs[0].trajectory == owner.state.jobs[0].trajectory
 
 
+@pytest.mark.parametrize("replacement", [False, True])
+def test_trajectory_delta_preserves_nested_json_objects(replacement: bool) -> None:
+    """Exercise JSON, not an in-process delta that still recognizes frozen maps."""
+    earlier = {"type": "notice", "text": "Earlier activity"}
+    initial = _state(jobs=[JobState(id="child", type="task", trajectory=[earlier])])
+    owner = FrontendStateStore(initial)
+    follower = FrontendStateStore(initial)
+    events = [
+        {
+            "type": "tool_execution_start",
+            "tool_call_id": "call",
+            "tool_name": "read",
+            "intent": "Reading documentation",
+            "args": {"path": "README.md", "options": {"ranges": [{"start": 1}]}},
+        },
+        {
+            "type": "tool_execution_end",
+            "tool_call_id": "call",
+            "tool_name": "read",
+            "result": {
+                "content": [{"type": "text", "text": "Synthetic documentation"}],
+                "details": {"count": 1, "rows": [{"ok": True, "extra": None}]},
+            },
+        },
+        {
+            "type": "message_end",
+            "message": {
+                "id": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Finished reading."}],
+            },
+        },
+    ]
+    trajectory = events if replacement else [earlier, *events]
+    update = owner.mutate(jobs=[JobState(id="child", type="task", trajectory=trajectory)])
+    assert update is not None
+    wire = FrontendUpdate.model_validate_json(update.model_dump_json())
+    assert wire.job_trajectory_appends == {"child": events}
+    assert wire.job_trajectory_replacements == (["child"] if replacement else [])
+    assert follower.apply_update(wire)
+    assert follower.state.jobs[0].trajectory == owner.state.jobs[0].trajectory
+    assert follower.state.jobs[0].model_dump(mode="json")["trajectory"] == trajectory
+    # Thawing the emitted payload must not expose canonical state to a consumer.
+    update.job_trajectory_appends["child"][0]["args"]["options"]["ranges"][0]["start"] = 99
+    assert owner.state.jobs[0].model_dump(mode="json")["trajectory"] == trajectory
+
+
 def test_one_large_roster_progress_update_sends_only_the_new_event() -> None:
     """A one-child append must not serialize 50,000 unchanged events."""
     jobs = [

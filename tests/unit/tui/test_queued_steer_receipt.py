@@ -36,7 +36,7 @@ from local_operator.tui.app import (
     SENT_STEER_NOTICE,
     OperatorApp,
 )
-from local_operator.tui.events import SteeringDelivered, TurnEnded
+from local_operator.tui.events import SteeringDelivered, TurnEnded, TurnStarted
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -701,6 +701,11 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
         await pilot.pause()
         await _submit(pilot, app, "steered into a turn about to be stopped")
 
+        # The turn is OPENED before it is ended: the standalone `interrupted`
+        # notice is part of the tail that retires at-most-once per turn, so a
+        # `TurnEnded` for a turn nothing started prints nothing at all — a state
+        # the product cannot reach, since `agent_start` opens every turn.
+        app.post_message(TurnStarted())
         app.post_message(TurnEnded(True, None))
         await pilot.pause()
 

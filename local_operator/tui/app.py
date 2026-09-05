@@ -154,6 +154,7 @@ from local_operator.tui.events import (
     ToolEnded,
     ToolStarted,
     ToolUpdated,
+    TurnAbandoned,
     TurnBoundaryEnd,
     TurnBoundaryStart,
     TurnEnded,
@@ -290,15 +291,17 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: and this clause sits after the access note, so it has to be complete and short.
 #: "Saves provider and model" named the payload but not why it mattered; "saves
 #: this for new sessions" names the consequence, fits the same slot, and includes
-#: the article the clipped phrase lacked. At 38 cells it clears the footer's
-#: 47-cell budget at 50 columns, which is the width that decides whether it
-#: survives at all — the picker's status clauses concatenate with no shedding.
+#: the article the clipped phrase lacked. The budget arithmetic is in the last
+#: paragraph below — one set of figures, so nobody "fixes" the string toward a
+#: stale number.
 #:
-#: REPOINTED at the `d` affordance (#369). It used to read "/model default saves
-#: this for new sessions", which is no longer true: a bare `/model default` now
-#: CONFIRMS rather than writing, precisely because that spelling was the
-#: ambiguity the issue reported. The breadcrumb names the key instead, because
-#: the key is the one route to a saved default with no ambiguity in it at all.
+#: REPOINTED BACK at `/model default`, after #369 briefly pointed it at a `d`
+#: key on a picker row. That key is gone: inside a filter every printable
+#: character belongs to the query, so a `d` that saved config on an empty query
+#: and narrowed the list otherwise was a mode with nothing on screen to mark it.
+#: The ambiguity #369 reported is closed by the COMMAND being unambiguous — a
+#: bare `/model default` writes the model the session is already on and switches
+#: nothing — not by moving the write onto a keystroke.
 #:
 #: It names `/model` as well as `d` because two of its four sites are receipts
 #: printed when NO picker is open (the switch receipt, and the bare-`/model`
@@ -920,9 +923,9 @@ COMFORTABLE_ROWS_CLASS = "comfortable-rows"
 #: recede rather than disappear, or the page stops reading as the same app.
 #: Flipped in exactly two places, ``_open_subagent_view``/``_close_subagent_view``.
 SUBAGENT_LAYOUT_CLASS = "subagent"
-#: At phone-height terminals the live roster and todos can consume nearly the
-#: entire detail page. The compact mode keeps the selected transcript primary;
-#: secondary context remains one ``Esc`` away in the parent conversation.
+#: At phone-height terminals the scoped roster and todos still need to be
+#: reachable. Compact mode reclaims the disabled composer and decorative rows,
+#: keeping the selected transcript primary without hiding the owner's controls.
 SUBAGENT_COMPACT_LAYOUT_CLASS = "subagent-compact"
 SUBAGENT_COMPACT_MAX_ROWS = 24
 
@@ -1100,6 +1103,18 @@ class _HeldAnswerKey:
 
 RESIZE_REFIT_DELAY_S = 0.05
 
+#: How often, and for how long, to re-check ``sessions/last-cleanup.json``
+#: after adoption. The startup cleanup pass is dispatched at session
+#: construction and waits ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS``
+#: (0.75 s) before touching the disk, then walks the store — sub-second on
+#: a small store, longer on a large one — so no single fixed delay is right:
+#: a 5 s timer lagged ~4 s on small stores and silently deferred a pass that
+#: took longer than 5 s to the NEXT boot (UX round 3, U16/U17). Polled at
+#: the interval until the window closes; a late notice is still a notice, a
+#: missed one is the incident's silent splash.
+STARTUP_CLEANUP_RECHECK_S = 1.0
+STARTUP_CLEANUP_RECHECK_WINDOW_S = 30.0
+
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
 #: is wide enough for the boot input to read as a CARD rather than as a bar. It
 #: is a measurement, not a mode — see ``OperatorApp._sync_boot_card``.
@@ -1229,6 +1244,9 @@ COMPOSER_COPY = object()
 #: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
+# A fast local setup can finish before the old setup toast times out. Retire
+# only that session's notice on reload, never an unrelated actionable card.
+SPLASH_NOTICE = object()
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
 #: :data:`COMPOSER_PASTE_NOTICE`.
@@ -1679,6 +1697,8 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state = False
+        self._model_activation_generation = 0
+        self._model_activation_pending: int | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -1692,9 +1712,11 @@ class OperatorApp(App[None]):
         self._invalid_hosting: str | None = None
         #: The provider that resolved fine but has no model, when THAT is why we
         #: are in the setup state (``None`` otherwise). Unlike `_invalid_hosting`
-        #: this one IS read: `/model` and the picker's `d` key consult it to
-        #: decide that a saved default should also boot the session that does
-        #: not exist yet, which is what makes this setup state escapable.
+        #: this one IS read: `/model <p>/<id>` (via `_recover_from_missing_model`)
+        #: consults it to decide that a saved default should also boot the
+        #: session that does not exist yet, which is what makes this setup state
+        #: escapable. It was briefly a second caller's flag too — a `d` key on a
+        #: picker row — and that key is gone; nothing else routes on it.
         self._model_missing_for: str | None = None
         #: Invoked before a post-login session rebuild so the launch-time config
         #: manager (captured by the session factory closure) re-reads the
@@ -1782,6 +1804,27 @@ class OperatorApp(App[None]):
         #: last, so nobody delivered the completion — and the deferred flag then
         #: latched, swallowing every later completion in the session.
         self._settled_child_ids: set[str] = set()
+        #: Whether a turn is OPEN — set by ``TurnStarted``, cleared by
+        #: ``_finalize_turn`` and by the two teardown paths that throw a turn
+        #: away. It is the latch that makes turn retirement at-most-once: a
+        #: real ``agent_end`` and the ``TurnAbandoned`` fallback both route
+        #: through ``_finalize_turn``, and whichever arrives first closes the
+        #: turn so the other is a no-op. Kept physically beside
+        #: ``_completion_deferred``/``_settled_child_ids`` because all three are
+        #: turn-scoped and every site that resets one must reset the others.
+        self._turn_open: bool = False
+        #: Whether this turn's notification ladder has already RUN. Distinct
+        #: from ``_turn_open``, which says whether the turn is still live:
+        #: retiring a turn and announcing it are two different claims, and a
+        #: fallback that cannot know the outcome (a follower's, whose
+        #: ``prompt()`` returned mid-turn on the owner's ACK) performs the first
+        #: without the second. Keeping them apart is what lets the owner's real
+        #: outcome, arriving behind that fallback, still say what happened
+        #: instead of being dropped behind a turn already marked closed —
+        #: without which a FAILED turn was toasted "task complete" while the
+        #: title on the same turn read ``✗`` (review R4). Turn-scoped, so every
+        #: site that resets ``_turn_open`` resets this too.
+        self._turn_notified: bool = False
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -2091,10 +2134,6 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
-        #: Last cmux label dispatched for THIS fork process. Name updates can
-        #: arrive provisionally, generated, and manually within seconds; exact
-        #: coalescing avoids three socket calls for an unchanged stored title.
-        self._fork_cmux_name: str = ""
         #: A receipt that must survive a session transition, as
         #: ``(fork_id, text)``. `fork.mode=switch` reboots onto the fork, which
         #: wipes the ledger about half a second after the notice is written, so
@@ -2108,6 +2147,12 @@ class OperatorApp(App[None]):
         #: the adopted session IS the fork makes that unconstructable rather
         #: than relying on every adoption path remembering to clear it.
         self._pending_fork_receipt: tuple[str, str] | None = None
+        # Unlike a destination-scoped switch receipt, a completed create must
+        # remain discoverable wherever the user navigated while it was copying.
+        self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
+        self._fork_in_progress = False
+        self._fork_source_session: Any = None
+        self._fork_cancelled = False
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
         # purpose: a conversation is identified by what it was opened for, and
@@ -2797,6 +2842,12 @@ class OperatorApp(App[None]):
         # `_render_resumed_history` no-ops there, so the boot splash is
         # untouched and the notice still lands under it.
         self._report_attachment_restore(session)
+        # A launch that removed sessions must SAY SO on this screen. Checked
+        # now (a viewer attaching to a runtime that already ran its pass) and
+        # again after the pass's idle window (this process's own pass runs in
+        # the background AFTER the first frame). Both read one file; the
+        # first to find it unacknowledged announces it.
+        self._report_startup_cleanup(rechecks_left=STARTUP_CLEANUP_RECHECK_WINDOW_S)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -4363,9 +4414,10 @@ class OperatorApp(App[None]):
         nothing, because hosting is already valid -- and the splash says so. This
         state is reached by the app's own repair (`/login` into a provider with
         no default clears the model deliberately), which is why it must be
-        escapable rather than merely non-red: see :meth:`_cmd_model` and
-        :meth:`_persist_default_from_picker`, which rebuild the session from
-        setup instead of refusing with "session is still starting...".
+        escapable rather than merely non-red: see :meth:`_cmd_model`, whose
+        `/model <p>/<id>` path routes through
+        :meth:`_recover_from_missing_model` to rebuild the session from setup
+        instead of refusing with "session is still starting...".
 
         ``hosting_source`` keeps that honesty one step further. `/login` writes
         the CONFIG FILE, but precedence is agent > flag > config, so when the
@@ -4462,7 +4514,9 @@ class OperatorApp(App[None]):
             # session still booting rather than one waiting on the user.
             self._status.update(model_label="setup", model_name="", streaming=False)
 
-    async def _reload_session(self, *, keep_context: bool = False) -> None:
+    async def _reload_session(
+        self, *, keep_context: bool = False, preserve_outgoing: bool = False
+    ) -> None:
         """Dispose the current session, boot its replacement, and rebuild the
         ledger from what that replacement ACTUALLY holds.
 
@@ -4487,6 +4541,15 @@ class OperatorApp(App[None]):
         """
         previous_id = self._conversation_id()
         previous_len = self._history_length()
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
+        if preserve_outgoing:
+            detach_gates = getattr(self._session, "detach_viewer_gates", None)
+            if callable(detach_gates):
+                # Cancel the bridge before clearing UI futures; clearing first
+                # would send a denial to the owner whose work we must preserve.
+                await cast(Callable[[], Awaitable[None]], detach_gates)()
         # Invalidate latch ownership synchronously and request cancellation
         # before disposing the old session. The provider lock is drained after
         # disposal below, so no stale title call can delay the replacement.
@@ -4577,6 +4640,26 @@ class OperatorApp(App[None]):
         # runs just above, after `_approval` is cleared, and clears it.)
         self._completion_deferred = False
         self._settled_child_ids.clear()
+        # And the turn itself is thrown away, so a `TurnAbandoned` already
+        # queued by its worker must find the latch closed and drop. Left open,
+        # that fallback would dispatch after the reload and announce a
+        # completion for a conversation the user can no longer see.
+        #
+        # `_turn_notified` is SET, not cleared, and that asymmetry is the point:
+        # the two flags together mean "closed, and owed nothing", which is what
+        # makes a queued fallback drop. Clearing it would leave the ladder owed
+        # and let that fallback announce the dead conversation's turn — the
+        # exact leak this line exists to prevent.
+        self._turn_open = False
+        self._turn_notified = True
+        # The failure mark is turn-scoped and the StatusLine outlives the swap
+        # (it is constructed once), so a cross set by the dying conversation's
+        # last turn otherwise sits in the title over the REPLACEMENT session
+        # until its first turn starts — a cross for a conversation the user can
+        # no longer see, which is the same cross-session leak as the resets
+        # above (review R7).
+        if self._status is not None:
+            self._status.set_failed(False)
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -4708,8 +4791,14 @@ class OperatorApp(App[None]):
                 # the WRONG session, but a stash left set would sit there until
                 # some later boot happened to match the id — so the switch that
                 # did not happen drops its copy here.
-                self._pending_fork_receipt = None
+                failed_fork, self._pending_fork_receipt = self._pending_fork_receipt, None
                 self._on_boot_failed(error)
+                if failed_fork is not None:
+                    self._notice(
+                        f"fork saved but could not open: /resume {failed_fork[0]}. "
+                        f"Return to original: /resume {previous_id}",
+                        "warning",
+                    )
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
@@ -4833,6 +4922,8 @@ class OperatorApp(App[None]):
         # The splash notice describes the session being replaced. Left
         # standing, a `/new` would open on the dead session's quota warning.
         self._splash_notice = None
+        for toast in self.query(Toast):
+            toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -5252,7 +5343,9 @@ class OperatorApp(App[None]):
         # without remembering the symbol.
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
-    def _resume_session(self, resume_id: str, notice: NoticeFn) -> None:
+    def _resume_session(
+        self, resume_id: str, notice: NoticeFn, *, preserve_outgoing: bool = False
+    ) -> None:
         """Rebind the factory to ``resume_id`` and reboot onto that session.
 
         Shared by the picker and by ``/resume <id>`` so both paths reload
@@ -5290,7 +5383,13 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
-        left_running = self._detach_or_stop_outgoing()
+        # A navigation entered during /fork must not queue a stop behind its
+        # snapshot RPC. The original's ownership guarantee lasts through that
+        # create, even when the ordinary resume preference would stop it.
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
+        left_running = preserve_outgoing or self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         # Name what happened to the session being LEFT (round 1, D5). This is
         # the release's headline behaviour change and it INVERTS a prior
@@ -5304,7 +5403,7 @@ class OperatorApp(App[None]):
             notice(f"resuming session {resume_id}… (previous session left running)")
         else:
             notice(f"resuming session {resume_id}…")
-        self._run_session_transition(self._reload_session())
+        self._run_session_transition(self._reload_session(preserve_outgoing=preserve_outgoing))
 
     def _detach_or_stop_outgoing(self) -> bool:
         """Decide what happens to the session being LEFT by a /resume.
@@ -5540,6 +5639,9 @@ class OperatorApp(App[None]):
             # Both success and refusal/failure reopen the same ordinary composer:
             # either the new session is now authoritative or the old one remains.
             self._session_transition_pending = False
+            outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
+            if outcome is not None:
+                self._notice(*outcome)
             # If the settled session has an authoritative EMPTY roster, retire
             # the one-row transition reserve now. Waiting for another keystroke
             # would leave a blank/loading hole indefinitely after a refused
@@ -5551,7 +5653,7 @@ class OperatorApp(App[None]):
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
-        return self._session_transition_pending
+        return self._session_transition_pending or self._model_activation_pending is not None
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -5588,6 +5690,12 @@ class OperatorApp(App[None]):
             self._system_notice(str(error), "warning")
             return
 
+        detach_gates = getattr(self._session, "detach_viewer_gates", None)
+        if callable(detach_gates):
+            await cast(Callable[[], Awaitable[None]], detach_gates)()
+        self._deny_queued_approvals()
+        self._settle_ask_picker()
+        self._approval = None
         # Reuse the ordinary replacement path's cleanup discipline, but the
         # remote is already built and history-loaded. Dispose the old local
         # session and substitute in one frame; no attach banner/emission.
@@ -5727,121 +5835,117 @@ class OperatorApp(App[None]):
         self._load_approvals_default()
 
     def _cmd_fork(self, arg: str, notice: NoticeFn) -> None:
-        """``/fork [message]`` — branch this conversation into a new session.
+        """Fork committed history without interrupting or stopping original work.
 
-        The gap in the session-command family: ``/clear`` wipes the screen and
-        keeps the conversation, ``/new`` discards the conversation and keeps the
-        app, ``/resume`` moves to an existing one. Nothing carried history INTO
-        a fresh session, so "try this two ways" meant polluting one conversation
-        with a dead end or rebuilding context from scratch.
-
-        **The original session keeps running and is not disturbed.** The fork
-        opens in a new window or cmux workspace (``fork.mode = window``, the
-        default), because the entire value of forking is trying a direction
-        without leaving the conversation that got you there — a switch-in-place
-        would cost two context switches per branch. ``fork.mode = switch`` opts
-        into moving this terminal onto the fork instead.
-
-        Three arrival states, and they get three different behaviours:
-
-        * **idle** — clone immediately, right here. The transcript on disk is
-          already complete (every message is appended as it happens), so a copy
-          at idle is a consistent snapshot needing no coordination at all.
-        * **turn running** — defer to the session's next safe boundary, which
-          also interrupts an in-flight interruptible tool so the boundary
-          arrives in ~250 ms rather than after a ten-minute ``wait``. The
-          parent's turn is otherwise untouched: no steering message, no skipped
-          tool calls.
-        * **compacting** — REFUSE. ``_compacting`` means the transcript's head is
-          being rewritten, and a clone taken then can copy a half-rewritten
-          file. A refusal rather than a defer because compaction is minutes and
-          the user should decide whether to wait.
+        The runtime owns snapshot consistency. A viewer cannot copy its cached
+        transcript or interrupt a tool merely to hurry a boundary. Legacy local
+        hosts cannot preserve a busy owner across disposal and refuse at busy.
         """
-        session = self._session
-        if session is None:
-            self._system_notice("fork unavailable: the session is still starting", "warning")
+        from local_operator.spawn.policy import fork_mode, parse_fork_args
+
+        try:
+            override, message = parse_fork_args(arg)
+        except ValueError as error:
+            notice(str(error), "warning")
             return
-        session_id = self._resumable_session_id()
-        if not session_id:
-            # Nothing on disk to copy yet. Said plainly rather than creating an
-            # empty fork, which would look like it worked and open a window onto
-            # a conversation with no history in it.
-            self._system_notice("nothing to fork yet — this conversation has no history", "warning")
+        session = self._session
+        parent_id = self._resumable_session_id()
+        mode = override or fork_mode(self._config_values())
+        if session is None:
+            notice("fork unavailable: the session is still starting", "warning")
+            return
+        if not parent_id:
+            notice("nothing to fork yet: this conversation has no history", "warning")
             return
         if self._compacting:
-            self._system_notice("esc first — history is being rewritten", "warning")
+            notice("history is being rewritten; retry /fork when compaction finishes", "warning")
             return
-
-        from local_operator.paths import config_dir
-
-        message = arg.strip()
-        # The echo lands here, once the command is known to be actionable: it is
-        # the only place the fork's opening instruction is visible in THIS
-        # window, and echoing before the refusals above would attribute a
-        # message to the user that no model was ever given.
-        if message:
-            self._echo_user_command(f"/fork {message}")
-
-        if not self._turn_is_live():
-            notice("forking…")
-            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+        if self._fork_in_progress or self._session_transition_pending:
+            notice("a session transition is already in progress; wait or press esc", "warning")
             return
-
-        # Deferred: the session drains it at its next boundary. `request_fork`
-        # documents why there are two such boundaries and why both are needed.
-        # An OPTIONAL session capability, probed rather than required, matching
-        # how this app treats every other one (`subscribe_frontend`,
-        # `set_takeover_callback`, `set_model`). Deferring needs a tool loop to
-        # have a boundary in, which the lightweight hosts and `RemoteSession` do
-        # not have — and a fork on a follower must run against THIS machine
-        # anyway, since it opens a window here and reads this config.yml.
-        request_fork = getattr(session, "request_fork", None)
-        if not callable(request_fork):
-            # No boundary to wait for: clone now. The transcript on disk is
-            # missing the turn in flight, which is the honest snapshot such a
-            # host can offer, and it is strictly better than refusing.
-            notice("forking…")
-            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+        if mode == "switch" and self._resume_factory is None:
+            notice("this launcher cannot switch sessions; use /fork --window", "warning")
             return
-
-        # The callback fires from the session's drain, which runs on this same
-        # event loop. It only SCHEDULES the report: opening a window can block
-        # for seconds (see `_on_fork_complete`), and the drain happens at the
-        # parent's turn boundary — blocking there would stall the very turn this
-        # feature promises to leave running.
-        replaced = request_fork(
-            config_dir(),
-            message=message,
-            on_complete=self._schedule_fork_report,
-        )
-        if replaced:
-            # Say that the earlier request was dropped. Two identical
-            # acknowledgements for two `/fork`s that produce ONE fork is the
-            # defect this closes: the replacement is fine, doing it invisibly
-            # is not, and the single receipt lands minutes later far up the
-            # scrollback where the discrepancy would never be spotted.
+        snapshot = getattr(session, "fork_snapshot", None)
+        detachable = callable(getattr(session, "detach_viewer_gates", None))
+        if mode == "switch" and not detachable:
+            jobs = getattr(session, "jobs", None)
+            scheduler = getattr(session, "wake_scheduler", None)
+            has_jobs = jobs is not None and any(job.status == "running" for job in jobs.list())
+            has_wakes = bool(getattr(scheduler, "schedules", ()))
+            if has_jobs or has_wakes:
+                notice(
+                    "this launcher cannot leave jobs or wakes running; use /fork --window",
+                    "warning",
+                )
+                return
+        if self._turn_is_live() and (
+            not callable(snapshot) or (mode == "switch" and not detachable)
+        ):
             notice(
-                (
-                    f"fork request replaced — the branch will carry “{message}”"
-                    if message
-                    else "fork request replaced — the branch will carry no message"
-                ),
-                "note",
+                "this launcher cannot switch away from active work safely; wait until it finishes",
+                "warning",
             )
             return
-        # The escape hatch is named IN the acknowledgement, because this is the
-        # only moment the user is looking for it. `action_interrupt` has always
-        # withdrawn a pending fork, but nothing ever said so — and a mistyped
-        # `/fork rewrite everythign` costs a billed model call in a window the
-        # user is not watching, so "this is revocable" has to be discoverable
-        # before it fires rather than in the docs afterwards.
-        notice("forking at the next safe boundary… (esc to cancel)")
-        # A STANDING indication that the fork is still coming. The line above
-        # scrolls away behind a long tool run, and without this the user is left
-        # with nothing on screen saying anything is armed — then a window opens
-        # minutes later with no visible cause. Cleared by `_sync_fork_pending`
-        # at the receipt and by `action_interrupt`'s cancel.
-        self._sync_fork_pending()
+        self._echo_user_command(f"/fork {arg}".rstrip())
+        self._fork_in_progress = True
+        self._fork_cancelled = False
+        notice(
+            "copying committed history; work still in progress is not included (esc to stay here)"
+            if self._turn_is_live()
+            else "forking… (esc to stay here)"
+        )
+        self._fork_source_session = session
+        self.run_worker(
+            self._fork_snapshot_worker(session, parent_id, message, mode), exclusive=False
+        )
+
+    async def _fork_snapshot_worker(
+        self, session: Any, parent_id: str, message: str, mode: str
+    ) -> None:
+        from local_operator.fork import fork_session
+        from local_operator.paths import config_dir
+
+        try:
+            result: dict[str, Any] = {}
+            snapshot = getattr(session, "fork_snapshot", None)
+            if callable(snapshot):
+                result = await cast(Callable[[str], Awaitable[dict[str, Any]]], snapshot)(message)
+                fork_id = result["fork_id"]
+            else:
+                fork_id = await asyncio.to_thread(
+                    fork_session, config_dir(), parent_id, message=message
+                )
+            if (
+                self._fork_cancelled
+                or self._session is not session
+                or self._session_transition_pending
+            ):
+                self._report_fork_outcome(
+                    f"fork saved: {fork_id}. Open it with /resume {fork_id}", "note"
+                )
+                return
+            await self._on_fork_complete(
+                fork_id,
+                "",
+                mode=mode,
+                original_busy=bool(result.get("busy")) if callable(snapshot) else False,
+                incomplete=bool(result.get("incomplete")) if callable(snapshot) else False,
+            )
+        except Exception as error:  # noqa: BLE001 — a failed fork never stops the original
+            self._report_fork_outcome(f"fork failed: {error}", "warning")
+        finally:
+            self._fork_source_session = None
+            self._fork_in_progress = False
+
+    def _report_fork_outcome(self, body: str, kind: NoticeKind) -> None:
+        # An incoming ledger reset would erase a notice emitted on the outgoing
+        # transcript. Publish after the common transition boundary on success,
+        # failure or cancellation; never switch away from the user's new target.
+        if self._session_transition_pending:
+            self._pending_fork_outcome = (body, kind)
+        else:
+            self._notice(body, kind)
 
     def _sync_fork_pending(self) -> None:
         """Push ``session.has_pending_fork()`` at the band's fork indicator.
@@ -5894,7 +5998,15 @@ class OperatorApp(App[None]):
             return
         await self._on_fork_complete(fork_id, "")
 
-    async def _on_fork_complete(self, fork_id: str, error: str) -> None:
+    async def _on_fork_complete(
+        self,
+        fork_id: str,
+        error: str,
+        *,
+        mode: str | None = None,
+        original_busy: bool = False,
+        incomplete: bool = False,
+    ) -> None:
         """Report the clone, then open the fork. Runs on the app's own loop.
 
         The two failure kinds are deliberately NOT reported the same way. A
@@ -5914,10 +6026,10 @@ class OperatorApp(App[None]):
         )
 
         values = self._config_values()
-        if fork_mode(values) == FORK_MODE_SWITCH:
-            # No spawn at all: the proven session transition moves this terminal
-            # onto the fork. The original stays on disk, untouched and
-            # resumable — which is what makes this mode safe rather than lossy.
+        if (mode or fork_mode(values)) == FORK_MODE_SWITCH:
+            # Navigation detaches only this viewer. The explicit preservation
+            # flag overrides background_on_resume and withdraws UI gate bridges
+            # before cleanup, so neither work nor approvals are cancelled.
             #
             # The receipt has to survive the transition, which is why it is
             # STASHED rather than printed here. `_resume_session` reboots the
@@ -5931,13 +6043,20 @@ class OperatorApp(App[None]):
             self._pending_fork_receipt = (
                 fork_id,
                 (
-                    f"switched to fork {fork_id} — the original is still there: "
-                    f"lop --resume {parent_id}"
+                    f"now in fork {fork_id}. "
+                    + (
+                        "Original work stays in the background. "
+                        "Pending approvals still need your response. "
+                        if original_busy
+                        else ""
+                    )
+                    + ("Work still in progress was not copied. " if incomplete else "")
+                    + f"Return to original: /resume {parent_id}. Preferences: /settings, then Fork."
                     if parent_id
                     else f"switched to fork {fork_id}"
                 ),
             )
-            self._resume_session(fork_id, self._notice)
+            self._resume_session(fork_id, self._notice, preserve_outgoing=True)
             return
 
         from local_operator.multiplexer.broadcast import resume_argv, resume_executable
@@ -7187,6 +7306,56 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    def _report_startup_cleanup(self, *, rechecks_left: float = 0.0) -> None:
+        """Announce a startup cleanup pass that removed sessions, once.
+
+        The pass runs in the runtime process, in the background, after the
+        first frame — so neither "the session object" nor "this process" is a
+        place the fact reliably lives when the TUI paints. It lives on disk:
+        ``sessions/last-cleanup.json``, written by the removing pass and
+        flipped to acknowledged by the viewer that reports it (see
+        ``session.cleanup.take_unannounced_cleanup`` for WHICH viewer: the
+        one attached to the removing runtime, while that runtime lives).
+        Routed through :meth:`_system_notice` so it lands under the splash
+        without ending the empty state, the same channel an MCP startup
+        failure uses; WARNING kind because sessions are gone, whatever the
+        policy said.
+
+        Polls rather than fires once: the pass finishes whenever the store
+        walk finishes, so the check repeats every ``STARTUP_CLEANUP_RECHECK_S``
+        until it has announced or ``rechecks_left`` seconds have elapsed.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import (
+            SESSIONS_DIRNAME,
+            format_cleanup_notice,
+            take_unannounced_cleanup,
+        )
+
+        # The FORMAT is inside the try too: a hand-edited or newer-schema
+        # record (`"removed": "many"`) crashed the first frame when only the
+        # read was guarded (review round 3, R3-2). The formatter is total on
+        # its own; this is the belt to its braces.
+        try:
+            runtime_pid = getattr(self._session, "runtime_pid", None)
+            payload = take_unannounced_cleanup(
+                config_dir() / SESSIONS_DIRNAME,
+                runtime_pid=runtime_pid if isinstance(runtime_pid, int) else None,
+            )
+            body = None if payload is None else format_cleanup_notice(payload)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            logger.debug("startup cleanup notice could not be built", exc_info=True)
+            return
+        if body is not None:
+            self._system_notice(body, "warning")
+            return
+        if rechecks_left > 0:
+            remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
+            self.set_timer(
+                STARTUP_CLEANUP_RECHECK_S,
+                lambda: self._report_startup_cleanup(rechecks_left=remaining),
+            )
 
     def _report_attachment_restore(self, session: SessionProtocol) -> None:
         """Say so when a resumed session's team/agent could not be re-attached.
@@ -8460,7 +8629,7 @@ class OperatorApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
-        if self._session_transition_pending:
+        if self.composer_submission_blocked():
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
             # already have been posted, so return the draft rather than routing
@@ -9228,6 +9397,14 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        if self._fork_in_progress:
+            # The snapshot may already be copying. Let it settle safely, but
+            # withdraw navigation without forwarding Esc to the original tool.
+            self._fork_cancelled = True
+            self._notice(
+                "staying here; the saved fork will be listed when copying finishes", "note"
+            )
+            return
         # Expanded roster navigation temporarily owns focus so arrows can reach
         # every child. Its first Esc returns to the draft-bearing composer;
         # only a subsequent Esc enters the stop ladder below.
@@ -11752,10 +11929,24 @@ class OperatorApp(App[None]):
         self._status.update(streaming=True)
 
         async def run_prompt() -> None:
+            aborted = False
+            error_text: str | None = None
             try:
                 async with self._turn_provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
+            except asyncio.CancelledError:
+                # NOT OPTIONAL, and not covered by the clause below:
+                # `CancelledError` is a `BaseException`, so it slides straight
+                # past `except Exception` into the `finally`. Without this
+                # branch a Ctrl+C, a `/reload` or a worker dispose would post
+                # `error=None` and the fallback would fire "task complete" for
+                # a turn the user had just killed — the one outcome here that
+                # actively breaks trust. Re-raised so Textual still sees the
+                # worker as cancelled rather than as having returned.
+                aborted = True
+                raise
             except Exception as error:  # surface, never crash the app
+                error_text = str(error)
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
                 # the dropped text and the way back are exactly what the user
@@ -11789,7 +11980,13 @@ class OperatorApp(App[None]):
                         )
                     )
                 else:
-                    self._append_block(NoticeBlock(str(error), "error"))
+                    # THROUGH the same helper the `agent_end` path uses. This
+                    # branch printed a bare `str(error)` while the event path
+                    # appended a recovery hint, so one failure got instructions
+                    # and the other did not purely by route — and this is the
+                    # route the reported incident took, because an MCP auth
+                    # failure is what makes `prompt()` raise.
+                    self._append_block(NoticeBlock(self._with_recovery_hint(str(error)), "error"))
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
                 # the next identical prompt's event; `_discard_user_echo` is
@@ -11797,12 +11994,106 @@ class OperatorApp(App[None]):
                 # the entry.
                 self._discard_user_echo(echo)
             finally:
-                # agent_end usually flips this first; a redundant update is a
-                # no-op, and this covers sessions that end without agent_end.
+                # THE TWO-MECHANISM HAZARD, and why these two lines belong
+                # together. The status band and the working line used to be
+                # retired by DIFFERENT mechanisms: the band by this `finally`
+                # (failure-proof, it runs however the turn ends) and the line
+                # only by `on_turn_ended`, which requires an `agent_end` to
+                # reach the controller. Every route that ends a turn without
+                # one — `prompt()` raising, a subscriber raising inside
+                # `Session._emit` so `TurnEnded` is never posted, or
+                # `on_turn_ended` itself raising partway — therefore left the
+                # band idle and the working line spinning forever, AND
+                # swallowed the turn's completion notification, since every
+                # terminal side effect lives in that handler's tail. Do not
+                # re-split them: the line, the notification and the band all
+                # retire through `_finalize_turn` now, and this `finally` is
+                # the one place that always runs.
                 assert self._status is not None
-                self._status.update(streaming=False)
+                # KEPT, and still load-bearing for the one case the seam
+                # deliberately drops: `prompt()` refusing before any
+                # `agent_start` (session disposed, "already streaming", an MCP
+                # failure while building the request). `_start_turn` set
+                # `streaming=True` above and no `TurnStarted` ever arrived, so
+                # `_turn_open` is False and nothing else would clear the band.
+                #
+                # CARRIES THE OUTCOME, and that is what closes the title flash
+                # structurally. This is the EARLIER of the two writes that retire
+                # a turn's band — `_finalize_turn`'s is the other — so writing
+                # only `streaming=False` here published `lo ›` ("finished
+                # cleanly") for a turn this very `except` had just caught, and
+                # `lo ✗` landed one write later (review D6/U8). The fact is
+                # already in hand; sending it with the write that needs it means
+                # there is no interval in which the title is wrong, rather than a
+                # short one. `_finalize_turn` then writes the same pair and the
+                # title dedupes on the rendered string.
+                #
+                # `None` (leave alone) when this worker cannot know the outcome —
+                # a FOLLOWER's `prompt()` returns on the owner's ACK, mid-turn,
+                # so its `error_text` is None because nothing was reported here,
+                # not because the turn succeeded. Same reasoning as
+                # `_post_turn_abandoned`'s `outcome_known`.
+                knows_outcome = not bool(getattr(session, "is_remote", False))
+                self._status.update(
+                    streaming=False,
+                    failed=(bool(error_text) and not aborted) if knows_outcome else None,
+                )
+                # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
+                # `prompt()` returns only after the pipeline's `finally` has
+                # flushed the held end, which `_emit`s `agent_end`
+                # SYNCHRONOUSLY into the controller, which posts the real
+                # `TurnEnded`. That message is therefore ALREADY in Textual's
+                # FIFO by the time this line runs, and a message posted here
+                # dispatches strictly after it — so the real end wins the latch
+                # and the fallback is a no-op on every normal turn. Calling
+                # `_finalize_turn` directly instead would run AHEAD of the
+                # queued real end and double-notify every single turn.
+                self._post_turn_abandoned(aborted=aborted, error=error_text)
 
         self.run_worker(run_prompt(), thread=False, group="turns")
+
+    def _post_turn_abandoned(self, *, aborted: bool, error: str | None) -> None:
+        """Offer the fallback retirement for the turn this worker just left.
+
+        ONE helper because there are THREE places that drive `session.prompt()`
+        — `_start_turn` and both `/loop` workers — and "however the turn dies,
+        it is retired" is a promise about all of them. Only the composer's path
+        was on this seam at first, so a `/loop` turn whose prompt raised
+        reproduced the entire reported incident one surface over: the thinking
+        clock climbed forever, the band read idle, and nothing was announced.
+        A helper rather than a third copy of the post keeps the epoch stamping
+        and the "posted, never called inline" rule in one place.
+
+        POSTED, NEVER CALLED INLINE, and the reason is subtle enough to be worth
+        restating at the seam: for an in-process `Session` the real `TurnEnded`
+        is ALREADY in Textual's FIFO by the time a worker's `finally` runs, so a
+        message posted here dispatches strictly behind it and loses the latch,
+        which is what makes this a no-op on every healthy turn. Calling
+        `_finalize_turn` directly would run AHEAD of the queued real end.
+
+        WHETHER THE WORKER KNOWS THE OUTCOME is carried separately from what the
+        outcome was, because on a FOLLOWER it does not know. `RemoteSession`'s
+        `prompt()` returns on the owner's ACK ("prompt admitted"), so this
+        worker's `finally` runs MID-TURN with `error=None` — which means "I have
+        no error to report", not "the turn succeeded". Reported as a clean
+        completion it produced a "task complete" toast for a turn that had
+        failed on the owner, while the title on the SAME turn read `✗` (review
+        R4). An in-process worker awaited the whole turn, so its `error` IS the
+        outcome and stays authoritative.
+
+        Read off the session at POST time rather than passed in by the three
+        call sites: it is a property of which session the worker drove, not of
+        why it is retiring, and deriving it here keeps all three from having to
+        remember it.
+        """
+        self.post_message(
+            TurnAbandoned(
+                self._turn_epoch,
+                aborted=aborted,
+                error=error,
+                outcome_known=not bool(getattr(self._session, "is_remote", False)),
+            )
+        )
 
     # -- conversation naming --------------------------------------------------
     def _cancel_naming_attempt(self) -> None:
@@ -11896,68 +12187,11 @@ class OperatorApp(App[None]):
             return
         self._provisional_name = label
         self._status.update(conversation_name=label)
-        self._sync_fork_cmux_name(label)
         # The band is DISPLAY-only; the phone reads the session store, which
         # is still empty. Push the stand-in so the list and header name the
         # conversation the same frame the tab does, instead of "untitled"
         # until a generated title lands (or forever, if naming 429s).
         self._notify_mobile_title(label)
-
-    def _sync_fork_cmux_name(self, title: str) -> None:
-        """Rename only the cmux target this fork process owns, best-effort.
-
-        Terminal OSC titles identify the live surface but cmux workspace labels
-        do not follow them. Provenance is the safety gate: a parent/ordinary
-        session never calls the mutating cmux command, even when it happens to
-        run in the workspace from which a fork was created.
-        """
-        session = self._session
-        session_id = str(getattr(session, "session_id", "") or "") if session else ""
-        clean = " ".join(str(title).split()).strip()
-        if not session_id or not clean or clean == getattr(self, "_fork_cmux_name", ""):
-            return
-        try:
-            from local_operator.fork import fork_parent
-            from local_operator.paths import config_dir
-
-            if not fork_parent(config_dir() / "sessions" / session_id):
-                return
-        except Exception:
-            return
-        self._fork_cmux_name = clean
-
-        if getattr(self, "_fork_cmux_name_worker_running", False):
-            return
-        self._fork_cmux_name_worker_running = True
-
-        async def rename() -> None:
-            from local_operator.multiplexer.cmux import rename_fork_target
-            from local_operator.spawn.policy import fork_cmux_placement
-
-            applied = ""
-            try:
-                # One serial drain owns the subprocess boundary. A newer title
-                # arriving during a slow rename replaces the pending value; the
-                # old call may finish, but the drain always applies the newest
-                # value afterwards, making the externally visible result latest-wins.
-                while applied != getattr(self, "_fork_cmux_name", ""):
-                    pending = self._fork_cmux_name
-                    try:
-                        await asyncio.to_thread(
-                            rename_fork_target,
-                            dict(os.environ),
-                            pending,
-                            placement=fork_cmux_placement(self._config_values()),
-                        )
-                    except Exception:
-                        # A label is decoration; cmux restart/closure must never
-                        # disturb the conversation or roll back the stored title.
-                        logger.debug("fork cmux rename failed", exc_info=True)
-                    applied = pending
-            finally:
-                self._fork_cmux_name_worker_running = False
-
-        self.run_worker(rename(), group="fork-cmux-name", exclusive=False, exit_on_error=False)
 
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
@@ -12254,7 +12488,6 @@ class OperatorApp(App[None]):
                 conversation_name=stored,
                 forked=bool(getattr(session, "wears_inherited_title", False)),
             )
-        self._sync_fork_cmux_name(stored)
         # The title lands on a detached worker AFTER the last turn event, so
         # the mobile fold never re-reads it on its own. Push now so the
         # phone's header and list update the same moment the band does.
@@ -12319,7 +12552,6 @@ class OperatorApp(App[None]):
                 conversation_name=stored,
                 forked=bool(getattr(session, "wears_inherited_title", False)),
             )
-        self._sync_fork_cmux_name(stored)
         self._notify_mobile_title(stored)
         # `stored`, not `arg`: the store collapses whitespace and caps the length
         # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title
@@ -12484,6 +12716,47 @@ class OperatorApp(App[None]):
                 wake_rows = 0
         return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
+    def _subagent_job(self, job_id: str) -> Any:
+        session = self._session
+        comms = getattr(session, "_subagent_comms", None)
+        lookup = getattr(comms, "job", None)
+        job = lookup(job_id) if callable(lookup) else None
+        manager = getattr(session, "jobs", None)
+        if job is None and manager is not None:
+            job = manager.get(job_id)
+        if job is None:
+            # Restored descendants have reader DTOs, not local execution rows.
+            frontend = getattr(session, "frontend_state", None)
+            job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
+        return job
+
+    def _subagent_roster(self) -> tuple[list[Any], Any]:
+        """Resolve one direct-child scope for open, retarget, tick and close.
+
+        The execution ledger is local on an owner and flattened on a follower.
+        The comms graph is the common ownership contract, never the current row
+        selection or a best-effort label match.
+        """
+        session = self._session
+        comms = getattr(session, "_subagent_comms", None)
+        manager = getattr(session, "jobs", None)
+        view = self._subagent_view
+        try:
+            job_for = self._subagent_job
+
+            if comms is not None and callable(getattr(comms, "children", None)):
+                nodes = comms.children(view.job_id if view is not None else None)
+                jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                return jobs, job_for(view.job_id) if view is not None else None
+            # Old/local hosts without lineage can still show their root ledger,
+            # but a child must never inherit its parent's roster by default.
+            return (
+                manager.list() if manager is not None and view is None else [],
+                self._subagent_job(view.job_id) if view is not None else None,
+            )
+        except Exception:
+            return [], None
+
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
 
@@ -12496,11 +12769,7 @@ class OperatorApp(App[None]):
         # The settle loop deliberately runs several panel passes, but the job
         # ledger cannot change synchronously inside one refresh. Snapshot once
         # so 100-child sessions do not copy and sort the same roster per pass.
-        try:
-            manager = getattr(session, "jobs", None)
-            jobs = manager.list() if manager is not None else []
-        except Exception:
-            jobs = []
+        jobs, selected_job = self._subagent_roster()
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -12535,7 +12804,7 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session, jobs=jobs)
+                self._subagent_panel.sync(session, jobs=jobs, selected_job=selected_job)
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
@@ -12560,6 +12829,10 @@ class OperatorApp(App[None]):
                     session,
                     session_id=selected_session_id,
                     transcript_directory=selected_directory,
+                    loading=(
+                        self._subagent_view is not None
+                        and self._trajectory_state.get(self._subagent_view.job_id) == "loading"
+                    ),
                 )
             self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
@@ -12728,7 +13001,23 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        comms = getattr(self._session, "_subagent_comms", None)
+        node_lookup = getattr(comms, "node", None)
+        node = node_lookup(job_id) if callable(node_lookup) else None
+        canonical_id = getattr(node, "job_id", None)
+        if isinstance(canonical_id, str) and canonical_id:
+            job_id = canonical_id
         if self._subagent_view is not None:
+            previous_id = self._subagent_view.job_id
+            if previous_id != job_id:
+                unload = getattr(self._session, "unload_job_trajectory", None)
+                if callable(unload):
+                    self._trajectory_loads.discard(previous_id)
+                    self.run_worker(
+                        cast(Callable[[str], Awaitable[None]], unload)(previous_id),
+                        group="subagent-trajectory",
+                        exclusive=False,
+                    )
             # Retargeting is opening another child's page; it owes the same
             # fetch a first open does.
             self._load_subagent_trajectory(job_id)
@@ -12760,6 +13049,17 @@ class OperatorApp(App[None]):
         # limit. Started before the first paint so the fetch overlaps the
         # mount, and the page shows its loading row meanwhile.
         self._load_subagent_trajectory(job_id)
+        # The dock is re-scoped to THIS child's direct children the moment the
+        # page exists, in the same handler, and through `_refresh_band` rather
+        # than a bare panel `sync`. A leaf child has no roster, so the panel
+        # hides; only `_refresh_band` also re-decides the band's `has-slot`
+        # inset from that visibility. Leaving either half to the deferred
+        # refresh below (or to the 1 Hz poll, which is where the inset used to
+        # catch up) posts a four-widget `messages.Layout` cascade on whichever
+        # later frame happens to run it — a reflow the reader sees as the dock
+        # jumping after the page has already painted, and one the spinner-tick
+        # budget test caught only under xdist contention.
+        self._refresh_band()
         # Enter paints the new mode first; folding and mounting a retained
         # 500-event trajectory on the same key handler made the key appear lost
         # for about a second. The next refresh fills the already-visible page.
@@ -12826,6 +13126,9 @@ class OperatorApp(App[None]):
             )
         self._subagent_view = None
         view.remove()
+        if self._subagent_panel is not None:
+            scoped_jobs, _ = self._subagent_roster()
+            self._subagent_panel.sync(self._session, jobs=scoped_jobs)
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
@@ -13225,16 +13528,17 @@ class OperatorApp(App[None]):
         session = self._session
         manager = getattr(session, "jobs", None) if session is not None else None
         comms = getattr(session, "_subagent_comms", None) if session is not None else None
+        node_lookup = getattr(comms, "node", None)
+        node = node_lookup(job_id) if callable(node_lookup) else None
+        canonical_id = getattr(node, "job_id", None)
+        if isinstance(canonical_id, str) and canonical_id and canonical_id != job_id:
+            # Resume may replace the attempt while its page is open. Resolve
+            # before reading the ledger, and use the normal navigation path to
+            # move the watch/fetch rather than painting a phantom missing job.
+            self._open_subagent_view(canonical_id)
+            return
         try:
-            lookup = getattr(comms, "job", None) if comms is not None else None
-            job = lookup(job_id) if callable(lookup) else None
-            # Owner comms resolves durable attempt aliases to a live job. The
-            # follower graph facade deliberately has no job objects of its own;
-            # its canonical SnapshotJobs ledger is authoritative instead. A
-            # callable lookup returning None must therefore fall through, not
-            # turn every follower child page into a false "no longer on ledger".
-            if job is None and manager is not None:
-                job = manager.get(job_id)
+            job = self._subagent_job(job_id)
         except Exception:
             job = manager.get(job_id) if manager is not None else None
         # Comms accepts durable predecessor IDs, but the panel contains only the
@@ -13318,6 +13622,9 @@ class OperatorApp(App[None]):
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)
         self._point_band_at(job)
+        if self._subagent_panel is not None:
+            scoped_jobs, selected_job = self._subagent_roster()
+            self._subagent_panel.sync(session, jobs=scoped_jobs, selected_job=selected_job)
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
                 session,
@@ -13327,6 +13634,7 @@ class OperatorApp(App[None]):
                     if node is not None and getattr(node, "session_dir", None) is not None
                     else None
                 ),
+                loading=self._trajectory_state.get(job_id) == "loading",
             )
 
     def _point_band_at(self, job: Any) -> None:
@@ -14148,7 +14456,6 @@ class OperatorApp(App[None]):
             # the owner's process, invisible to the user who asked). Choosing a
             # row still routes the switch back to the owner.
             if command == "/model" and not arg:
-                self._system_notice(self._persist_hint_notice())
                 self._open_model_picker()
                 return
 
@@ -14277,6 +14584,8 @@ class OperatorApp(App[None]):
             self._cmd_mcp(arg, notice)
         elif command == "/login":
             self._cmd_login(arg, notice)
+        elif command == "/mobile":
+            self._cmd_mobile(arg, notice)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
         elif command == "/credential":
@@ -14468,6 +14777,15 @@ class OperatorApp(App[None]):
         self._stop_notice = None
         self._completion_deferred = False
         self._settled_child_ids.clear()
+        # Same reason as the reload path: a stopped turn is a turn thrown away,
+        # and its worker's queued fallback must not announce it as finished.
+        # `_turn_notified` set (not cleared) for the reason given there — the
+        # pair means "closed and owed nothing", which is what makes the queued
+        # fallback drop instead of announcing a session that is going away.
+        self._turn_open = False
+        self._turn_notified = True
+        if self._status is not None:
+            self._status.set_failed(False)
         if self._controller is not None:
             self._controller.dispose()
             self._controller = None
@@ -14920,14 +15238,9 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if not arg:
-            # ``_system_notice``, NOT ``notice``: opening the picker is the user
-            # configuring the app, not starting a conversation, and a plain
-            # notice ends the empty state — which collapses the boot
-            # composition and makes the centred prompt unreachable. That is the
-            # same failure a broken MCP server caused before ``_system_notice``
-            # existed; routing a hint about the app's own settings through the
-            # conversation path reintroduced it.
-            self._system_notice(self._persist_hint_notice())
+            # The persist-hint notice is NOT printed here: reopening the list
+            # posts ``ModelQueryOpened`` and ``on_model_query_opened`` prints it,
+            # on this route and on the keystroke route alike.
             self._open_model_picker()
             return
         # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
@@ -14952,6 +15265,34 @@ class OperatorApp(App[None]):
         # direction.
         if lowered == "saved":
             self._cmd_model_saved(notice)
+            return
+        if (
+            persist_default
+            and not target
+            and session is None
+            and self._setup_state
+            and self._model_missing_for
+        ):
+            # The setup-state TRAP (UX review U1). The picker footer advertises
+            # a bare `/model default` there too, and with no session there is
+            # no current model to elide to — so, left to the generic guard
+            # below, the advertised command answered "session is still
+            # starting…" forever. Nothing is starting: the app already knows
+            # why there is no session. Ordered ABOVE that guard so the answer
+            # is the state's own next step, and worded to name both ways out
+            # (a row in the picker, or the explicit spelling), because those
+            # are the two routes `_recover_from_missing_model` actually takes.
+            #
+            # Gated on ``_model_missing_for`` — the predicate the escape below
+            # checks — so the advice is only given where following it works.
+            # In the no-hosting and unknown-hosting variants `/model default
+            # <p>/<id>` falls to the generic guard too, and the splash's
+            # `/login` is the real next step (code review round 2, R7).
+            self._system_notice(
+                "no model yet — usage: /model default <provider>/<model-id>, "
+                "or pick a row in /model",
+                "warning",
+            )
             return
         if persist_default and self._session_runs_elsewhere():
             # Persisting writes THIS machine's config, so it only makes sense
@@ -14993,32 +15334,36 @@ class OperatorApp(App[None]):
             self._system_notice("session is still starting…", "warning")
             return
         if persist_default and not target:
-            # Bare ``/model default`` CONFIRMS rather than writing (#369).
+            # Bare ``/model default`` SAVES THE CURRENT MODEL. The elided
+            # selector resolves to the session's own model, so this spelling
+            # switches nothing and persists what the user is already looking at
+            # on the status band.
             #
-            # It used to resolve the elided selector to `session.model_label`
-            # and write immediately. That is the defect the issue reports: the
-            # user who typed it was asking to be SWITCHED to their configured
-            # default, and instead their current model silently replaced that
-            # default in config.yml, with no undo and a receipt that arrived
-            # after the write. Two intentions shared one spelling and the
-            # destructive one won.
+            # #369 made it CONFIRM instead, on the reading that a user typing it
+            # might mean "switch me to my configured default". That reading now
+            # has its own word — `/model saved` — so the confirmation was asking
+            # a question the grammar already answers, and it cost the one thing
+            # the command is for: "make this the default" is the phrase users
+            # actually arrive with, and it had no spelling that worked.
             #
-            # Nothing is written here. The confirmation names the model that
-            # WOULD be saved, and both other readings are offered by name, so
-            # the ambiguity is resolved by the user rather than guessed at:
-            # `/model saved` switches to the configured default, `/model
-            # default <p>/<id>` persists explicitly, and the `d` key on a
-            # picker row does it without the command at all.
-            label = session.model_label
-            if not label:
+            # The elided form is resolved to `provider` + BARE `model_id` here
+            # rather than passed on as a selector, because the persist path
+            # below writes the two config keys INDEPENDENTLY and `bootstrap`
+            # reads them independently: a `model_name` holding
+            # `anthropic/claude-opus-5` under an `anthropic` hosting boots a
+            # model id no provider owns. `model_label` is `provider/model_id`
+            # joined by the session, so the split is on the FIRST `/` — the same
+            # `partition` the explicit path uses, and the reason
+            # `openrouter/deepseek/deepseek-chat` keeps `deepseek/deepseek-chat`
+            # whole as an id rather than losing its own slash.
+            target = session.model_label
+            if not target or "/" not in target:
+                # No current model to elide to — the setup state, or a reduced
+                # host whose session cannot say. Naming the explicit form is the
+                # only useful answer; guessing would write an empty pair and
+                # leave the next launch with no model at all.
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
-            self._system_notice(
-                f"save {label} as the boot default? — "
-                f"/model default {label} confirms · d on a /model row does it too · "
-                "/model saved switches to the configured default instead"
-            )
-            return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             self._system_notice(
@@ -15039,56 +15384,153 @@ class OperatorApp(App[None]):
         if self._providers.provider(provider) is None:
             self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
+        if getattr(self._providers.provider(provider), "local_setup", False):
+            self._model_activation_pending = generation
+            # This is a user-command receipt, not background infrastructure.
+            # Retire the splash before the wait so completion cannot move the
+            # composer underneath a draft typed while capacity is being checked.
+            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            self.run_worker(
+                self._resolve_local_model_activation(
+                    session, provider, model_id, persist_default, notice, generation
+                ),
+                group="local-model-resolution",
+                exclusive=True,
+            )
+            return
         try:
             spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
+        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+
+    async def _resolve_local_model_activation(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        persist_default: bool,
+        notice: NoticeFn,
+        generation: int,
+    ) -> None:
+        providers = self._providers
+        if providers is None:
+            return
+        try:
+            spec = await asyncio.to_thread(providers.resolve_model, provider, model_id)
+            # A slow probe cannot overtake a newer choice or apply to a different
+            # session. Enter stays behind the existing composer boundary until
+            # selection settles, so a fast next prompt cannot reach the old model.
+            if self._session is session and generation == self._model_activation_generation:
+                self._activate_resolved_model(
+                    session, provider, model_id, spec, persist_default, notice
+                )
+        except Exception as error:
+            self._system_notice(f"cannot resolve {provider}: {error}", "error")
+        finally:
+            if self._model_activation_pending == generation:
+                self._model_activation_pending = None
+
+    def _activate_resolved_model(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        spec: Any,
+        persist_default: bool,
+        notice: NoticeFn,
+    ) -> None:
         old_label = session.model_label
-        # The chosen effort rides along when the new model accepts it: a user
-        # who dropped to `low` for cost did not mean "until I switch models".
-        # ``explicit``: this is a deliberate model choice, so a pinned fallback
-        # route is withdrawn even when the choice re-selects the model the
-        # fallback displaced — see ``Session.set_model``.
-        session.set_model(
-            self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
-            explicit=True,
-        )
-        self._probe_quota_after_switch(session)
-        # A text-only model renders the history WITHOUT its images (see
-        # ``Session._render_history``), so the estimate painted for the vision
-        # model overstates what the new one actually carries. Re-measure so
-        # the band agrees with what the next request sends; the measure's own
-        # exact-count guard makes this a no-op once a turn has reported.
-        self._measure_preloaded_context(session)
-        # A different model may well have a dial, so the per-model refusal latch
-        # goes with the old one.
-        self._effort_refusal_shown = None
-        # The active provider just changed; warm its quota row so a `/usage`
-        # right after the switch answers from disk too. The age gate makes this
-        # a no-op when the row is already warm.
-        self._warm_usage_background()
+        # WRITE-ONLY when the default being saved is the model already in force
+        # (review round 1, R3/Q1). This is the whole of the bare form, and it is
+        # what makes "switches nothing" a true statement rather than a summary
+        # of the label: the switch tail below is not a no-op on a same-model
+        # re-selection. `Session.set_model(..., explicit=True)` reads it as the
+        # user reclaiming the primary from a pinned provider fallback and
+        # WITHDRAWS the fallback, and the per-model effort-refusal latch is
+        # cleared — so "make this my default" was silently also "drop the route
+        # that is currently serving me". A user who wants the fallback withdrawn
+        # has the plain `/model <p>/<id>` spelling for exactly that gesture.
+        # Compared on the joined label because that is what the elided form was
+        # derived from, so the two halves cannot disagree by case or spacing.
+        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        if not write_only:
+            # The chosen effort rides along when the new model accepts it: a
+            # user who dropped to `low` for cost did not mean "until I switch
+            # models". ``explicit``: this is a deliberate model choice, so a
+            # pinned fallback route is withdrawn even when the choice
+            # re-selects the model the fallback displaced — see
+            # ``Session.set_model``.
+            session.set_model(
+                self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
+                explicit=True,
+            )
+            self._probe_quota_after_switch(session)
+            # A text-only model renders the history WITHOUT its images (see
+            # ``Session._render_history``), so the estimate painted for the
+            # vision model overstates what the new one actually carries.
+            # Re-measure so the band agrees with what the next request sends;
+            # the measure's own exact-count guard makes this a no-op once a
+            # turn has reported.
+            self._measure_preloaded_context(session)
+            # A different model may well have a dial, so the per-model refusal
+            # latch goes with the old one.
+            self._effort_refusal_shown = None
+            # The active provider just changed; warm its quota row so a
+            # `/usage` right after the switch answers from disk too. The age
+            # gate makes this a no-op when the row is already warm.
+            self._warm_usage_background()
         persist_result: str | None = None
         saved_to = ""
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
-            # both switches AND persists; a future flag could persist-only).
-            # Failure to write is reported but not fatal — the session already
-            # switched, and a read-only config dir should not take down a
-            # working prompt. The status line is repainted regardless (the
-            # ``return`` below used to skip it, leaving the band's model label
-            # stale on the very config the user just asked to make permanent).
+            # both switches AND persists; the bare form is the persist-only
+            # case). Failure to write is reported but not fatal — a read-only
+            # config dir should not take down a working prompt. The status line
+            # is repainted regardless (the ``return`` below used to skip it,
+            # leaving the band's model label stale on the very config the user
+            # just asked to make permanent).
+            #
+            # Through the ``settings_io`` FACADE, not ``manager.set_config_value``
+            # (design review D1 / UX review U4), for the reason
+            # `_save_approvals_default` gives: the facade is what marks a write
+            # as this process's own. It notifies the config watcher, which fans
+            # the change out with ``source="local"``, which is how
+            # :meth:`_on_config_change` knows the receipt below already told the
+            # user and stays quiet. Written underneath it, this process's own
+            # write arrived through the poll one tick later as ``source="disk"``
+            # and the user read a second row — `config.yml changed: model_name
+            # needs a relaunch` — that is worded for an edit someone ELSE made,
+            # names only the key that happened to differ, and says "when" a
+            # second time in a third phrasing. Two facade calls because the
+            # registry holds the pair as two settings; each notifies once and
+            # both arrive as local, so neither prints.
             try:
+                from local_operator import settings_io
                 from local_operator.config import ConfigManager
                 from local_operator.paths import config_dir
 
                 manager = ConfigManager(config_dir())
-                manager.set_config_value("hosting", provider)
-                manager.set_config_value("model_name", model_id)
+                for key, value in (("hosting", provider), ("model_name", model_id)):
+                    setting = settings_io.resolve_key(key)
+                    if setting is None:  # pragma: no cover - both keys are registered
+                        raise KeyError(f"{key} is not a registered setting")
+                    settings_io.write_setting(manager, setting, value)
                 saved_to = _home_relative(str(manager.config_file))
             except Exception as error:  # config write failure
-                persist_result = f"model switched, but could not save default: {error}"
+                # The write-only form switched nothing, so its failure receipt
+                # must not claim it did (QA round 1, Q1b).
+                persist_result = (
+                    f"could not save default: {error}"
+                    if write_only
+                    else f"model switched, but could not save default: {error}"
+                )
         if self._status is not None:
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
@@ -15103,7 +15545,12 @@ class OperatorApp(App[None]):
                 fast=_fast_label(session),
                 context_window=_context_window(session),
             )
-        suffix, warning = self._model_access_note(provider)
+        # The access note answers "can I use the model I just switched to". On
+        # the write-only form nothing was switched to, so the note is filler on
+        # a row that is already three lines at 50 columns (UX review U7) and
+        # the login warning would be about a provider already serving the
+        # session.
+        suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
@@ -15111,9 +15558,17 @@ class OperatorApp(App[None]):
             # the user cannot check without quitting and relaunching, and the
             # PROVIDER is the half that rides along silently — it is written from
             # the selector's left side, never typed as its own setting.
+            #
+            # "used by new sessions", the noun PERSIST_HINT already uses, not
+            # "from the next launch" (design review D3): a user who ran this
+            # after reading the footer met three phrasings of "when" within two
+            # rows. "New sessions" is also the fuller claim — `/new` reloads
+            # `hosting`/`model_name` before it builds, so the default applies
+            # there as well as at relaunch. The settings page keeps its own
+            # "new launch" vocabulary; it is a different surface.
             notice(
                 f"boot default saved to {saved_to}: hosting {provider}, "
-                f"model_name {model_id} (used from the next launch){suffix}"
+                f"model_name {model_id} (used by new sessions){suffix}"
             )
         else:
             # "(next turn)" alone read as permanent — the complaint behind this
@@ -15175,6 +15630,27 @@ class OperatorApp(App[None]):
         the user back to the model they were already trying to leave.
         """
         session = self._session
+        if session is None and self._setup_state and self._model_missing_for:
+            # The setup state is BY DEFINITION the state with no usable boot
+            # default — that is why there is no session — so "session is still
+            # starting…" would be the same dead end U1 closes for the bare
+            # `/model default`: nothing is starting, and the honest answer is
+            # that there is nothing to switch back to yet, plus the route that
+            # creates one. Ordered above the generic guard for that reason.
+            #
+            # Gated on ``_model_missing_for`` because the route this names
+            # (`/model default <p>/<id>`) only WORKS in that variant — it is
+            # the same predicate `_cmd_model`'s escape checks. The other two
+            # setup variants (no hosting, unknown hosting) have no model escape
+            # and their next step is `/login`, which the splash already says;
+            # naming the model route there would re-create the trap one step
+            # later (code review round 2, R7).
+            self._system_notice(
+                "no boot default to switch to yet — /model default "
+                "<provider>/<model-id> sets one, or pick a row in /model",
+                "warning",
+            )
+            return
         if session is None or not hasattr(session, "set_model"):
             self._system_notice("session is still starting…", "warning")
             return
@@ -15203,72 +15679,6 @@ class OperatorApp(App[None]):
         # A second switch implementation here is how the two would drift on the
         # next change to any of those steps.
         self._cmd_model(f"{provider}/{model_id}", notice)
-
-    def _persist_default_from_picker(self) -> None:
-        """``d`` on the highlighted model-picker row — save it as the default.
-
-        The PRIMARY fix for #369: it removes the ambiguity by removing the need
-        to type the command at all. The comment on `_cmd_model` already
-        anticipated this affordance — "the user phrase 'make this the default'
-        has no other home, and the picker's current-row marker already covers
-        'which am I on'" — and the row under the cursor supplies the `this` that
-        a bare `/model default` had to guess at.
-
-        Does NOT switch the session. The picker's Enter already means "switch to
-        this", so `d` is the other half; a key that did both would make the two
-        indistinguishable and leave a user who only wanted to set a default
-        talking to a model they did not pick.
-        """
-        picker = self._editor().model_picker
-        row = picker.highlighted()
-        if row is None:
-            return
-        if self._session_runs_elsewhere():
-            # Same refusal `/model default` gives, through the same predicate —
-            # which is the point. This guard asked `is_remote` directly while
-            # `_cmd_model` had already migrated to `_session_runs_elsewhere()`,
-            # so the two halves of one feature disagreed: since 0.46.0 EVERY
-            # session is remote, and `d` refused every local user in their own
-            # terminal while `/model default` allowed them.
-            #
-            # The question a config write actually asks is "would writing this
-            # machine's config govern the runtime?", not "is there a socket in
-            # the way" — see `_session_runs_elsewhere`.
-            self._system_notice(
-                "the boot default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern",
-                "warning",
-            )
-            return
-        try:
-            from local_operator.config import ConfigManager
-            from local_operator.paths import config_dir
-
-            manager = ConfigManager(config_dir())
-            manager.set_config_value("hosting", row.provider)
-            manager.set_config_value("model_name", row.model_id)
-            saved_to = _home_relative(str(manager.config_file))
-        except Exception as error:  # noqa: BLE001 — a read-only config dir
-            self._system_notice(f"could not save default: {error}", "warning")
-            return
-        if self._setup_state and self._model_missing_for:
-            # In the no-model setup state this key is a RECOVERY, not just a
-            # preference: the value it just wrote is the one thing the session
-            # was missing, so "used from the next launch" would be false advice
-            # — there is no current launch to prefer, and telling the user to
-            # restart is the dead end this state exists to avoid.
-            self._system_notice(
-                f"boot default saved to {saved_to}: hosting {row.provider}, "
-                f"model_name {row.model_id}"
-            )
-            self._leave_setup_state_and_boot(self._notice)
-            return
-        # Names both halves, the file and the keys, exactly as the command's
-        # own receipt does — one vocabulary for one outcome reached two ways.
-        self._system_notice(
-            f"boot default saved to {saved_to}: hosting {row.provider}, "
-            f"model_name {row.model_id} (used from the next launch)"
-        )
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
@@ -15324,13 +15734,17 @@ class OperatorApp(App[None]):
     def _leave_setup_state_and_boot(self, notice: NoticeFn) -> None:
         """Clear the setup state and build the session its config now allows.
 
-        Shared by the two commands that can supply the missing model — `/model
-        <p>/<id>` and the picker's `d` key — so the escape is one sequence
-        rather than two copies that drift; that class of divergence is what
-        `providers/login_defaults` was extracted to end. `/login` keeps its own
-        tail because it is already inside a worker and awaits the rebuild
-        directly, while these two are synchronous command handlers and must hand
-        the rebuild to one.
+        Reached today only through :meth:`_recover_from_missing_model` (the
+        `/model <p>/<id>` spelling, typed or chosen from a picker row). It is
+        kept as its own step rather than inlined there because the escape is a
+        SEQUENCE whose order matters (below), and the next command that can
+        supply a missing model must run the same one rather than a copy that
+        drifts — the class of divergence `providers/login_defaults` was
+        extracted to end. It did briefly have a second caller, the picker's `d`
+        key; that key is gone and nothing should be re-added on its account.
+        `/login` keeps its own tail because it is already inside a worker and
+        awaits the rebuild directly, while a synchronous command handler must
+        hand the rebuild to one.
 
         The ordering is load-bearing rather than incidental: ``_on_config_changed``
         must run before the rebuild, or the launch-time config manager captured
@@ -15354,12 +15768,38 @@ class OperatorApp(App[None]):
         repeated here even though the status band carries it, because it is the
         subject of the sentence — "make THIS the default" needs a this, and with
         no session yet there is no this, so the label is all that varies.
+
+        This is where the OTHER TWO routes get named. ``PERSIST_HINT`` carries
+        only the command because the picker footer truncates it at 43 cells (see
+        the constant), while a notice WRAPS — so the surface with room is the
+        one that can afford the pair this string cannot: that `/model saved`
+        is the way BACK to the default (UX review U2 — the confirmation line
+        that used to be its only mention is gone, and a command the app never
+        names is one the user has to already know), and that the default is
+        also editable on the settings page, which is the discoverable route for
+        a user who did not arrive with a command in mind.
+
+        The nouns are placed so each pronoun sits beside its antecedent (design
+        review D4): "this" is the model on the band, "the boot default" is
+        restated before "set it" so "it" does not have to reach back past
+        "this". "Boot default" is the ONE noun for the thing `/model default`
+        writes — the receipt says `boot default saved to …` and `/model saved`
+        refuses with `no boot default …` — so the user is never left wondering
+        whether a "saved default" and a "boot default" are two settings
+        (design review round 2, D6).
+
+        The `/model saved` clause is DROPPED in the setup state (UX review
+        round 2, U11): that state is by definition the one with no usable boot
+        default, and `_cmd_model_saved` refuses there, so naming the route
+        would advertise a dead end the app already knows about.
         """
         session = self._session
         label = session.model_label if session is not None else ""
+        back = "" if self._setup_state else " · /model saved switches back to the boot default"
+        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
         if not label:
-            return PERSIST_HINT
-        return f"model: {label} — {PERSIST_HINT}"
+            return routes
+        return f"model: {label} — {routes}"
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -16173,8 +16613,35 @@ class OperatorApp(App[None]):
         makes every route into the list identical: typing `/model ` by hand, being
         completed into it by the command picker, or dispatching `/model` all end up
         here. Before this, only the dispatched route had rows.
+
+        The persist-hint notice is printed HERE for the same reason (UX review
+        U5). It used to be printed by ``_cmd_model`` before it reopened the
+        list, so only a dispatched `/model` (Esc past the command picker, then
+        Enter, or the `/models` alias) ever named `/model saved` and `/settings`
+        — the primary keystroke path, where the command picker completes
+        `/model ` and the list opens without a dispatch, printed nothing. The
+        message fires once per closed→open transition, so this is one row per
+        opening on every route, exactly what the dispatched route already did.
+        ``_system_notice`` rather than ``_notice``: opening the picker is the
+        user configuring the app, not starting a conversation, and a plain
+        notice ends the empty state — which collapses the boot composition and
+        makes the centred prompt unreachable.
+
+        The notice is skipped when the ledger's LAST row already says it. The
+        message is meant to fire once per visible opening, and the editor now
+        keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
+        round 2, U8, where each Esc-then-edit cycle stacked another copy). This
+        is the second line of defence for the same property: no sequence of
+        opens that produces nothing between them can print the hint twice,
+        whatever the editor's resync does in future. Compared on the text, so
+        a hint that changed (a switch landed between two opens) still prints.
         """
         message.stop()
+        hint = self._persist_hint_notice()
+        blocks = self._transcript_view().blocks()
+        last = blocks[-1] if blocks else None
+        if not (isinstance(last, NoticeBlock) and last.text() == hint):
+            self._system_notice(hint)
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -16705,6 +17172,12 @@ class OperatorApp(App[None]):
             return
         self._loop_running = True
         completed = 0
+        #: Whether the loop ended by CRASHING rather than by running out of
+        #: iterations. Without it a loop whose first prompt died signed off
+        #: "loop finished after 0 iteration(s)" directly beneath its own red
+        #: error line — two adjacent statements about the same event, one of
+        #: them wrong, and the reassuring one last (review U9).
+        crashed = False
         try:
             for index in range(iterations):
                 if self._loop_cancelled:
@@ -16735,17 +17208,36 @@ class OperatorApp(App[None]):
                 echo = self._register_user_echo(
                     LOOP_PROMPT, message_id=self._echo_message_id(session.prompt)
                 )
+                loop_error: str | None = None
                 try:
                     await session.prompt(LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
-                    notice(f"loop stopped: {error}", "error")
+                    loop_error = str(error)
+                    # THROUGH the same helper the composer's turn uses. A loop
+                    # runs UNATTENDED by definition — `/loop 20` overnight — so
+                    # this is the surface where a remedy is worth most and the
+                    # one where the user is least able to ask for it: they come
+                    # back to a naked 401 with no way to tell what to run
+                    # (review U6). Same asymmetry U2 was raised about, one
+                    # surface over.
+                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
                     self._discard_user_echo(echo)
+                    crashed = True
                     break
                 finally:
                     if self._status is not None:
                         self._status.update(streaming=False)
+                    # The SAME retirement the composer's turn gets. A loop
+                    # iteration is an ordinary turn as far as the transcript is
+                    # concerned — it mounts a working line and opens the latch —
+                    # so a prompt that dies here owes exactly what one dying in
+                    # `_start_turn` owes. Without this the incident reproduced
+                    # verbatim under `/loop`: spinner climbing, band idle,
+                    # nothing announced. A healthy iteration's real `TurnEnded`
+                    # is already queued ahead of this, so it is a no-op there.
+                    self._post_turn_abandoned(aborted=False, error=loop_error)
                 completed = index + 1
         finally:
             self._loop_running = False
@@ -16755,6 +17247,13 @@ class OperatorApp(App[None]):
             # Reported as stopped, not finished: the remaining iterations never
             # ran, and "finished" on a reload reads as the loop having completed.
             notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
+        elif crashed:
+            # NO second sign-off. The error line above already said the loop
+            # stopped and why, and it carries the remedy; adding "finished" under
+            # it contradicts that in the calmer of the two voices. Same reasoning
+            # as the reload branch — "finished" is a claim about completion, and
+            # a loop that died did not complete.
+            pass
         else:
             notice(f"loop finished after {completed} iteration(s)")
 
@@ -16848,10 +17347,23 @@ class OperatorApp(App[None]):
                 except Exception as error:  # surface and stop; never spin
                     if self._status is not None:
                         self._status.update(streaming=False)
-                    notice(f"loop stopped: {error}", "error")
+                    # Same helper, same reason as the numeric worker: a held
+                    # goal loop is the MOST unattended surface in the app, and
+                    # it was printing a bare `str(error)` (review U6).
+                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
                     self._discard_user_echo(echo)
+                    # Retire the dead turn, exactly as the other two call sites
+                    # do. The goal loop's single-toast contract is preserved by
+                    # `_loop_suppress_completion`, which is still set here and is
+                    # what `_finalize_turn` reads: the turn's LINE, band, latch
+                    # and stranded cards are reclaimed, and no per-turn
+                    # completion fires. The `error` is carried so the ladder
+                    # takes its ERROR branch — a held loop that dies outright
+                    # must not go silent, which is the one notification the
+                    # suppression deliberately does not cover.
+                    self._post_turn_abandoned(aborted=False, error=str(error))
                     break
                 # NOTE: the status is deliberately NOT reset to idle here — it
                 # stays in a working state across the judge call below so the
@@ -18793,9 +19305,51 @@ class OperatorApp(App[None]):
         """
         providers = self._providers
         assert providers is not None
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, provider_settings
+
+        if provider_id in LOCAL_PROVIDER_IDS:
+            return (
+                "configured server"
+                if provider_settings(provider_id).get("base_url")
+                else "configure server"
+            )
         if stored:
             return "logged in"
         return "env key" if providers.is_usable(provider_id) else "needs login"
+
+    def _cmd_mobile(self, arg: str, notice: NoticeFn) -> None:
+        """A convenience over the same CLI lifecycle, never an implicit login side effect.
+
+        /mobile enable <quoted-monthly-price> makes the billing acceptance
+        explicit. All network and service work runs outside the TUI loop;
+        only the sanitized final receipt returns to the conversation surface.
+        """
+        pieces = arg.split()
+        action = pieces[0] if pieces else "status"
+        if action not in {"status", "enable", "start", "stop", "billing"} or len(pieces) > 2:
+            notice("Use /mobile status, billing, enable <monthly price>, start, or stop.")
+            return
+        if getattr(self, "_tunnel_action_busy", False):
+            notice("Mobile setup is already running.")
+            return
+        self._tunnel_action_busy = True
+
+        async def run() -> None:
+            from local_operator.tunnels.cli import mobile_action
+
+            try:
+                result = await asyncio.to_thread(
+                    mobile_action, action, pieces[1] if len(pieces) > 1 else None
+                )
+            except Exception:  # noqa: BLE001 — no provider bodies or secrets in a notice
+                result = "Mobile setup failed. Check lop tunnel status and /login radient."
+            finally:
+                self._tunnel_action_busy = False
+            self._system_notice(result)
+
+        # Do not cancel an in-flight enrollment to start a second one: a thread
+        # already talking to the cloud cannot be cancelled with its awaiter.
+        self.run_worker(run(), group="mobile-setup")
 
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
@@ -18824,10 +19378,16 @@ class OperatorApp(App[None]):
             self._system_notice(f"unknown provider: {provider}", "warning")
             return
         definition = self._providers.provider(provider)
-        if getattr(definition, "login", None) is None:
+        if getattr(definition, "login", None) is None and not getattr(
+            definition, "local_setup", False
+        ):
             self._system_notice(f"provider '{provider}' has no interactive login.", "warning")
             return
-        notice(f"logging in to {provider}…")
+        notice(
+            f"configuring {provider}…"
+            if getattr(definition, "local_setup", False)
+            else f"logging in to {provider}…"
+        )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
@@ -19149,6 +19709,19 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "local_setup", False):
+
+            async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+                return await self._request_login_key(
+                    str(getattr(definition, "name", "Server")),
+                    secret=secret,
+                    field_label=field,
+                    default=default,
+                )
+
+            return LoginCallbacks(
+                on_progress=on_progress, on_warning=on_warning, on_setup_input=on_setup_input
+            )
         if not getattr(definition, "accepts_paste_prompt", False):
             return LoginCallbacks(
                 on_auth_url=on_auth_url, on_progress=on_progress, on_warning=on_warning
@@ -19185,6 +19758,8 @@ class OperatorApp(App[None]):
         *,
         secret: bool = True,
         sole_path: bool = True,
+        field_label: str | None = None,
+        default: str | None = None,
         credential: bool = False,
     ) -> str | None:
         """Put a paste prompt in the transcript and await the key.
@@ -19209,8 +19784,23 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_aside()
+        instructions = None
+        if field_label:
+            instructions = (
+                f"Enter keeps {default}"
+                if default and not secret
+                else "Enter continues without a new value; Esc cancels setup."
+            )
+        if field_label and secret:
+            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
         block = KeyPromptBlock(
-            provider_label, secret=secret, sole_path=sole_path, credential=credential
+            provider_label,
+            secret=secret,
+            sole_path=sole_path,
+            field_label=field_label,
+            default=default,
+            instructions=instructions,
+            credential=credential,
         )
         self._key_prompt = block
         # Kept BEYOND the `finally` that clears `_key_prompt`, because the flow
@@ -19360,6 +19950,10 @@ class OperatorApp(App[None]):
                     self._on_config_changed()
                 await notice("starting session…", "info")
                 await self._reload_session()
+            elif getattr(self._providers.provider(provider), "local_setup", False):
+                if self._on_config_changed is not None:
+                    self._on_config_changed()
+                self._cmd_model_saved(self._notice)
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -19368,9 +19962,14 @@ class OperatorApp(App[None]):
             # painted its own "cancelled" receipt, so this stays quiet about the
             # detail and only closes the sentence the "logging in to …" notice
             # opened.
-            await notice("login cancelled.", "info")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(
+                "setup cancelled; previous configuration kept." if local else "login cancelled.",
+                "info",
+            )
         except Exception as error:
-            await notice(f"login failed: {error}", "error")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
         finally:
             self._login_lock.release()
 
@@ -19638,6 +20237,20 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        # The record of every session the cleanup policy has removed. Named
+        # HERE, next to the log path, because the removal itself happens in
+        # the runtime process whose log is not the one above (UX round 2,
+        # U6 residual): a user asking "what happened to my session" from
+        # /help must land on the file that answers, not on a log that never
+        # mentions it. Shown even when the file does not exist yet — its
+        # absence IS the answer "nothing was ever removed".
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.session.cleanup import CLEANUP_LOG_NAME, SESSIONS_DIRNAME
+
+        record_row = Text()
+        record_row.append("cleanup record".ljust(name_width), style=muted)
+        record_row.append(str(_config_dir() / SESSIONS_DIRNAME / CLEANUP_LOG_NAME), style=dim)
+        lines.append(record_row)
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
@@ -19907,7 +20520,7 @@ class OperatorApp(App[None]):
         the standard vocabulary. ``kind`` is ``notice`` for a printed line,
         ``block`` for a renderable payload, ``noop`` when the follower opens
         its own picker. Async because the MCP grant path starts a browser
-        round trip; every other producer is synchronous work.
+        round trip, and local model activation refreshes capacity off the UI loop.
 
         ``locality`` is the invoking client's declared position (see
         ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
@@ -19948,7 +20561,7 @@ class OperatorApp(App[None]):
                 # follower hosts the widget. A selector is a mutation: it is
                 # applied here, on the authoritative session.
                 return SlashResult(kind="noop")
-            return self._model_slash_result(args, SlashResult)
+            return await self._model_slash_result(args, SlashResult)
         if command == "loop":
             return self._loop_slash_result(args, SlashResult)
         if command == "compact":
@@ -20392,7 +21005,7 @@ class OperatorApp(App[None]):
             data={"type": "agent_attached", "agent": resolved, "request": request},
         )
 
-    def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """The routed, non-bare ``/model``: a REAL switch on the owner session.
 
         ``_cmd_model`` cannot be reused here — it prints through the local
@@ -20438,8 +21051,31 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice", text=f"unknown provider: {provider} — see /provider", style="warning"
             )
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
         try:
-            spec = self._providers.resolve_model(provider, model_id)
+            if getattr(self._providers.provider(provider), "local_setup", False):
+                self._model_activation_pending = generation
+                try:
+                    spec = await asyncio.to_thread(
+                        self._providers.resolve_model, provider, model_id
+                    )
+                finally:
+                    if self._model_activation_pending == generation:
+                        self._model_activation_pending = None
+                if self._session is not session or generation != self._model_activation_generation:
+                    return SlashResult(
+                        kind="notice",
+                        text=(
+                            "The session or model choice changed during lookup. "
+                            "Select the model again."
+                        ),
+                        style="warning",
+                    )
+            else:
+                spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:
             return SlashResult(
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
@@ -21216,12 +21852,25 @@ class OperatorApp(App[None]):
     def on_turn_started(self, message: TurnStarted) -> None:
         assert self._status is not None
         self._status.update(streaming=True)
+        # A new turn clears the previous one's failure mark: the title states
+        # the session's CURRENT state, and a cross left standing over work that
+        # is running again describes a turn nobody is waiting on any more.
+        self._status.set_failed(False)
         # A new turn may ask questions again — expressed by MOVING PAST the latch
         # rather than by clearing it. Clearing raced the drain: a `TurnStarted`
         # already in the message queue when the stop landed ran before the parked
         # asker woke, so the stopped turn's write/exec tool got a fresh question.
         # An epoch bump cannot arrive early for an asker that captured the old one.
         self._turn_epoch += 1
+        # The turn is OPEN from here, and exactly one of `_finalize_turn` or a
+        # teardown path closes it again. Set after the epoch bump so the flag
+        # and the epoch a queued fallback is matched against always agree.
+        self._turn_open = True
+        # A NEW turn owes a NEW announcement. Cleared alongside the flag above
+        # because the pair is turn-scoped: `_turn_open` says the turn is live,
+        # `_turn_notified` says its ladder has run, and a fresh turn is both
+        # live and unannounced.
+        self._turn_notified = False
         # A deferred completion belongs to the turn that finished, and a NEW
         # turn supersedes it: the session is working again, so "task complete"
         # would announce a finish while the agent is mid-stream — and the new
@@ -21244,6 +21893,27 @@ class OperatorApp(App[None]):
 
     def on_turn_ended(self, message: TurnEnded) -> None:
         assert self._status is not None
+        # The failure mark is NOT set here. It rides this handler's own
+        # `update(...)` below, which is the write that moves the title out of
+        # `working` — passing both facts to one call is what makes the pair
+        # atomic instead of two ordered writes racing (review D6/U8), and
+        # `_finalize_turn` applies the identical pair for the fallback route.
+        #
+        # It is also gated on the turn still being OWED an outcome, for the same
+        # reason `context_tokens` and `cost_text` are below: a plain `/reload`
+        # keeps the controller subscribed so the dying session's `agent_end` can
+        # settle its stranded cards, and that event carries the DEAD
+        # conversation's outcome. Stamping it unconditionally marked the
+        # replacement session's title with a failure belonging to a conversation
+        # the user can no longer see (review R8).
+        #
+        # CAPTURED BEFORE any of the cleanup below, because `_finalize_turn` at
+        # the foot of this handler clears `_turn_open` — reading the predicate
+        # afterwards would see every turn as already answered and no turn would
+        # ever mark its title. Same expression `_finalize_turn` computes for the
+        # fallback route, so the two routes cannot disagree about whether this
+        # turn may still state its outcome.
+        owes_outcome = self._turn_open or not self._turn_notified
         self._dismiss_working_block()
         # Build the segments as typed locals and make ONE call: a
         # dict[str, object] splatted into update() erases every parameter type,
@@ -21319,6 +21989,11 @@ class OperatorApp(App[None]):
             cost_text = "$—"
         self._status.update(
             streaming=False,
+            # ONE write carrying both the run state and the outcome — see the
+            # note at the top of this handler, where `owes_outcome` is captured
+            # and the R8 reasoning behind it is stated. `None` means "leave the
+            # mark exactly as it is".
+            failed=((bool(message.error) and not message.aborted) if owes_outcome else None),
             context_tokens=context_tokens,
             # Ordinarily this is the provider's exact prompt_tokens. A post-turn
             # compaction replaces that now-invalid occupancy with its local
@@ -21329,29 +22004,292 @@ class OperatorApp(App[None]):
             cost=cost_text,
         )
         if message.error:
-            # Append the local recovery to an auth-classified failure: the
-            # provider's own "invalid api-key" says what happened but not what
-            # the user can do from here, and `/login`/`credential update` are
-            # exactly that. No-op for every other error kind (a quota 403 reads
-            # differently and a login cannot fix it). The provider is the first
-            # segment of the model label, the same convention /model uses.
+            self._append_block(NoticeBlock(self._with_recovery_hint(message.error), "error"))
+        # NOT `elif`: `_finalize_turn` owns the "interrupted" notice now, so
+        # this handler's chain ends at the error notice.
+        self._finalize_turn(aborted=message.aborted, error=message.error, source="agent_end")
+
+    def on_turn_abandoned(self, message: TurnAbandoned) -> None:
+        """Retire a turn whose worker returned without a terminal ``agent_end``.
+
+        The fallback half of the seam. It exists because `agent_end` is not
+        guaranteed to reach this app: `prompt()` can raise, a subscriber can
+        raise inside `Session._emit` (which catches and logs every handler
+        exception, so the `TurnEnded` is simply never posted while `prompt()`
+        returns normally), or `on_turn_ended` can itself raise partway and skip
+        its own tail. Before this handler existed each of those left the working
+        line spinning forever AND silently swallowed the turn's notification.
+
+        Three guards, and each one is load-bearing.
+        """
+        # 1. EPOCH. A newer turn already owns the UI, so this fallback belongs
+        #    to a superseded turn and retiring anything now would tear down the
+        #    LIVE turn's working line. Dropping the superseded turn's
+        #    notification is the same deliberate decision the controller's
+        #    supersede guard and `on_turn_started` already make: the user is
+        #    told when the work they can see is actually over.
+        if message.epoch != self._turn_epoch:
+            return
+        # 2. STILL RUNNING. A FOLLOWER's `prompt()` returns on the owner's ACK
+        #    ("prompt admitted"), not at the end of the turn, so the worker's
+        #    `finally` fires MID-TURN on every attached TUI. Without this guard
+        #    every `lop attach` prompt would report a false finish the moment it
+        #    was accepted. Read at DISPATCH time rather than in the worker: by
+        #    now any real `TurnEnded` has already drained from the FIFO. For an
+        #    in-process `Session` this is already False when `prompt()` returns
+        #    (`_run_turn`'s finally clears it before the pipeline flushes the
+        #    held end), so it never suppresses a genuine fallback — and a
+        #    follower needs none, since an owner death or a `/stop` synthesises
+        #    a real aborted `AgentEndEvent` locally.
+        if self._session is not None and getattr(self._session, "is_streaming", False):
+            return
+        # 3. NOTHING TO FALL BACK FOR. A fallback is only meaningful for a turn
+        #    that is actually open: with no open turn this app's working line
+        #    and band belong to something else, and a `/compact` run outside a
+        #    turn owns exactly those surfaces (`_compaction_owns_working_block`)
+        #    — a stray fallback that ran the retirement anyway would lift a line
+        #    it does not own.
+        #
+        #    This check is NOT what makes retirement at-most-once, and it must
+        #    not be mistaken for it. It guards only the order where the real end
+        #    lands FIRST; the reverse order (fallback, then the real `TurnEnded`
+        #    dispatching behind it) never reaches this method at all, because
+        #    `on_turn_ended` calls `_finalize_turn` unconditionally. The
+        #    authoritative latch therefore lives on the shared path, inside
+        #    `_finalize_turn` — see the placement note in its docstring.
+        if not self._turn_open:
+            logger.debug("turn abandonment ignored: turn already closed or thrown away")
+            return
+        self._finalize_turn(
+            aborted=message.aborted,
+            error=message.error,
+            source="abandoned",
+            outcome_known=message.outcome_known,
+        )
+
+    def _with_recovery_hint(self, error: str) -> str:
+        """``error`` plus the local remedy for it, when there is one to name.
+
+        ONE helper because there are TWO surfaces that print a turn's error —
+        `on_turn_ended` for a turn that reported one, and the turn worker's
+        `except` for a `prompt()` that raised — and the user cannot tell them
+        apart. They had drifted: only the event path appended a hint, so the
+        IDENTICAL failure came with instructions or without depending on which
+        internal route it took. The motivating incident took the bare route,
+        because an MCP auth failure is what makes `prompt()` raise in the first
+        place.
+
+        MCP IS ASKED FIRST, and the order is the point rather than an
+        optimisation. Both hints answer "which credential do I fix?", and for an
+        expired MCP grant the provider answer is actively wrong: `/login
+        anthropic` re-authorizes a provider that was never broken, so the user
+        does the work and the failure survives it. The two are mutually
+        exclusive in practice (the provider hint keys off the rendered
+        `ProviderError` form, which no MCP failure produces), so this is a
+        tie-break that should never fire — stated explicitly because a silent
+        dependence on that would be one refactor from breaking.
+
+        Best-effort throughout: a hint is an ADDITION to an error the user is
+        already being shown, so anything that raises while deriving one leaves
+        the original message intact rather than replacing an error with a
+        traceback.
+        """
+        try:
+            from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+            manager = getattr(self._session, "mcp_manager", None)
+            # Reached through `getattr` because a session need not carry a
+            # manager at all (a follower has none), so the result is statically
+            # `object` and is narrowed here rather than cast.
+            #
+            # The REMEDY comes from the manager, never from this call site.
+            # Which command actually fixes a server depends on whether a grant
+            # is stored for it and whether it can take one at all, and only the
+            # manager knows — `McpManager.auth_recovery_hint` answers through
+            # `_auth_failure_text`, the same dispatcher the startup toast, the
+            # transcript incident and `/mcp` read, so all four surfaces agree.
+            # Hard-coding `reauth` here instead sent a never-logged-in user into
+            # a command that returns without logging in (review R5).
+            #
+            # No manager (a follower, a reduced facade) degrades to the unnamed
+            # `/mcp` hint rather than to silence: it is true whatever the shape,
+            # and a follower's user still has an `/mcp` in their own TUI.
+            derive = getattr(manager, "auth_recovery_hint", None)
+            remedy = derive(error) if callable(derive) else None
+            hint = mcp_auth_recovery_hint(error, remedy if isinstance(remedy, str) else None)
+            if hint:
+                return f"{error}\n{hint}"
+        except Exception:  # noqa: BLE001 — a hint must never replace the error
+            logger.debug("MCP recovery hint could not be derived", exc_info=True)
+        try:
             from local_operator.providers.failover import append_auth_recovery
 
+            # The provider is the first segment of the model label, the same
+            # convention /model uses.
             provider = ""
             if self._session is not None:
-                try:
-                    provider = (self._session.model_label or "").partition("/")[0]
-                except Exception:
-                    provider = ""
-            self._append_block(
-                NoticeBlock(append_auth_recovery(message.error, provider or None), "error")
+                provider = (self._session.model_label or "").partition("/")[0]
+            return append_auth_recovery(error, provider or None)
+        except Exception:  # noqa: BLE001 — same contract as above
+            logger.debug("provider recovery hint could not be derived", exc_info=True)
+        return error
+
+    def _finalize_turn(
+        self,
+        *,
+        aborted: bool,
+        error: str | None,
+        source: str,
+        outcome_known: bool = True,
+    ) -> None:
+        """Retire the turn. The ONE exit, however the turn ended.
+
+        Every terminal side effect a turn owes the user lives here — the
+        working line, the band, the waiting latch, the per-turn cost accrual,
+        stranded tool cards, held steering rows, and the notification — because
+        splitting them across handlers is precisely what produced the reported
+        defect: the band was cleared by a `finally` that always runs while the
+        line and the whole notification ladder hung off a `TurnEnded` that a
+        failed turn never produces.
+
+        WHERE THE LATCH LIVES, and why it is HERE rather than at the
+        `TurnAbandoned` call site. An earlier revision of this seam put the
+        `_turn_open` check in `on_turn_abandoned`; that is wrong and this note
+        supersedes it, so it is not re-litigated. A call-site check guards only
+        ONE of the two orders — fallback-after-real-end. It cannot guard
+        real-end-after-fallback, because `on_turn_ended` calls this method
+        unconditionally, so once the fallback has run the ladder the real
+        `TurnEnded` dispatching behind it runs the ladder AGAIN. Reproduced:
+        posting `TurnAbandoned` then `TurnEnded` notified twice, and an aborted
+        turn got two "interrupted" notices.
+
+        That order is not hypothetical, it is the FOLLOWER order.
+        `RemoteSession._on_wire_event` clears `_streaming` and only then emits
+        `agent_end`, on the socket read pump — a different task from Textual's
+        message pump. So the owner's end can land inside the post-to-dispatch
+        window: guard 2 reads a just-cleared `False`, the fallback proceeds, and
+        the relayed real end arrives after it. Only a latch on the path BOTH
+        routes share makes retirement at-most-once per TURN rather than
+        per-mechanism.
+
+        It gates THE NOTIFICATION TAIL ONLY, not the whole method. Everything
+        above the gate — the working line, the band, the waiting latch, the
+        accrual, and the stranded tool cards — stays reachable for a turn that
+        was already closed, because a plain `/reload` disposes the session while
+        keeping the controller subscribed precisely so the dying turn's late
+        `agent_end` can still settle its live tool cards, and that event arrives
+        after the reload has closed the turn. Gating the whole method would
+        strand those cards animating forever — the opposite of this fix. Gating
+        only the tail is also what resolves the late-`agent_end` ladder that
+        `/reload` used to run in full.
+
+        The tail's side effects are idempotent-by-omission rather than
+        idempotent-by-retry: a crash partway through loses the rest of the tail
+        instead of risking a second toast for one turn. `source` is recorded in
+        the debug log so a future "I got no notification" report is diagnosable
+        from a log rather than by re-deriving which mechanism should have fired.
+
+        `error` chooses the notification KIND only; it does not print. The
+        error `NoticeBlock` stays on the two paths that own their own wording —
+        `on_turn_ended` appends the provider's message with the auth-recovery
+        hint, and the worker's `except` has a branch for a message typed into a
+        stopped viewer that the event path does not. Printing here would either
+        double up or lose that branch. It is the one asymmetry in this seam.
+        """
+        logger.debug("retiring turn from %s (aborted=%s, error=%s)", source, aborted, bool(error))
+        # READ then cleared, in that order, and the reading is what the tail is
+        # gated on below. Captured up here rather than tested down there because
+        # the cleanup between the two must run on EVERY call (see the docstring:
+        # a `/reload`'s late `agent_end` still has cards to settle), so the flag
+        # has to be closed before any of it and its prior value carried forward.
+        was_open = self._turn_open
+        self._turn_open = False
+        # WHETHER THIS CALL MAY STATE THE TURN'S OUTCOME, on either surface.
+        # The title's cross and the desktop toast are ONE claim ("this turn
+        # ended, and here is how") made on two surfaces, so they share a gate:
+        # letting them diverge is what produced a toast reading "task complete"
+        # beside a title reading `✗` for the same turn (review R4).
+        #
+        # `was_open` alone is not the condition, and the difference is R8. A
+        # `/reload` throws its turn away and marks it ANSWERED, so the dying
+        # turn's late `agent_end` — which still arrives, by design, to settle
+        # stranded cards — must not stamp the REPLACEMENT session's title with
+        # a failure belonging to a conversation the user can no longer see. But
+        # a turn retired by a fallback that could not know its outcome is still
+        # OWED a statement, so the real end behind it must be able to make one.
+        # "Still owes an outcome" covers both, where either flag alone does not.
+        owes_outcome = was_open or not self._turn_notified
+        self._dismiss_working_block()
+        if self._status is not None:
+            # ONE `update` carrying BOTH facts, which is what makes the ordering
+            # STRUCTURAL rather than race-won. An earlier revision called
+            # `set_failed` and then `update(streaming=False)` and argued the
+            # order made the first a no-op write; that was true only of THIS
+            # route. The turn worker's own `finally` also calls
+            # `update(streaming=False)` — a separate, EARLIER write — so on the
+            # abandoned route a failed turn emitted `lo › name` ("finished
+            # cleanly") and only then `lo ✗ name`.
+            #
+            # The correction matters more than the gap: the earlier comment
+            # claimed this was "verified on the emitted OSC bytes", but that
+            # verification covered the `agent_end` route ONLY. On the abandoned
+            # route the flash was real and was won by a race — ~0.5-1ms on an
+            # idle app, but 43.5ms with 300 queued messages and 781ms at 1500
+            # queued blocks, well inside a rendered frame (review D6/U8). A
+            # single write cannot be raced by construction, so the claim is now
+            # carried by the shape of the call rather than by a measurement.
+            #
+            # The title's one durable statement about the OUTCOME, taken from
+            # the same fact the notification ladder reads so the sidebar label
+            # and the toast cannot disagree — and set on EVERY retirement,
+            # including a turn that died without an `agent_end`, which is the
+            # case that used to read `idle`.
+            #
+            # `None` when the outcome is UNKNOWN (a follower's fallback, whose
+            # `prompt()` returned mid-turn): the mark is left exactly as it was
+            # for the real end behind it to set, on the same reasoning that
+            # keeps that route from announcing a completion it cannot vouch for.
+            self._status.update(
+                streaming=False,
+                failed=(
+                    (bool(error) and not aborted) if (outcome_known and owes_outcome) else None
+                ),
             )
-        elif message.aborted and not self._interrupted_cards:
+            # Set DIRECTLY rather than re-derived through
+            # `_refresh_working_activity`. The title's attention state is
+            # turn-scoped and its only other writer is that method, which a
+            # dead turn never reaches again — and re-deriving on a turn that
+            # died while parked on an unanswered approval would fire a WAITING
+            # toast for a question that can no longer be answered.
+            self._status.set_attention(False)
+        self._waiting_kind = None
+        # The turn is over either way, so the per-call ledger closes here rather
+        # than only on the path that priced something: a turn whose cost came
+        # back unpriceable must not leave its accrual standing to be subtracted
+        # from the NEXT turn's total. A turn that died without `agent_end` is
+        # the strongest instance of that — it priced nothing at all.
+        self._turn_accrued_cost = 0.0
+        # An ADDITION rather than a move: `on_turn_ended` never did this, and
+        # `on_turn_boundary_end` did. A turn that dies without an `agent_end`
+        # emits no `turn_end` either, so its running tool cards are stranded
+        # live and would animate forever beside the retired working line.
+        #
+        # `+=`, NEVER `=`. On a normal turn `on_turn_boundary_end` has already
+        # banked the count and this adds 0, preserving the figure the notice
+        # decision below reads; a bare assignment would reset it to 0 and an
+        # aborted turn would regain the duplicate standalone "interrupted"
+        # notice that the per-card marks exist to replace.
+        self._interrupted_cards += self._retire_live_tool_cards()
+        if was_open and aborted and not self._interrupted_cards:
             # Only when NOTHING was in flight. A stopped turn already says so on
             # each card it stopped (`⊘ interrupted`), and that per-card mark is
             # the more useful of the two because it names WHICH tool stopped;
             # adding a standalone notice spent a row and a gap restating it, and
             # N+1 rows when several tools were running.
+            #
+            # `was_open` because this notice is part of the gated tail: it is an
+            # announcement of the turn's OUTCOME, so a turn already retired by
+            # the other route has said it once and must not say it twice.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
         # EVERY turn end reconciles its queued rows, because the invariant is
@@ -21366,6 +22304,39 @@ class OperatorApp(App[None]):
         # path regardless, because "held when the turn ended" is a fact this
         # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
+        # THE LATCH lands here — the notification ladder is the tail this turn
+        # owes AT MOST ONCE, whichever route retired it. Everything above ran
+        # unconditionally because a turn already closed can still have live
+        # cards to settle (the `/reload` case); nothing below may run twice.
+        # See the docstring for why the check is on this shared path instead of
+        # at the `TurnAbandoned` call site.
+        #
+        # `_turn_notified` rather than `was_open` alone, because retiring a turn
+        # and ANNOUNCING it are now two different claims. A fallback that does
+        # not know the outcome (a follower's) retires everything above and
+        # deliberately announces nothing, leaving the ladder owed — so the real
+        # end arriving behind it still gets to say what actually happened. Only
+        # a route that ACTUALLY notified closes it.
+        if not was_open and self._turn_notified:
+            logger.debug("turn already retired; %s adds no notification", source)
+            return
+        # AN UNKNOWN OUTCOME ASSERTS NOTHING. A follower's worker returns on the
+        # owner's ACK, mid-turn, so its `error=None` means "I was not told", not
+        # "it succeeded" — and announcing a completion on it toasted "task
+        # complete" for a turn that had failed, contradicting the title on the
+        # same turn (review R4). The turn is fully retired by the work above;
+        # only the announcement waits for the route that knows.
+        #
+        # NOT a silence hole: a follower whose owner dies or is stopped gets a
+        # real aborted `AgentEndEvent` synthesised locally
+        # (`RemoteSession._end_turn_locally`), which reaches this method through
+        # `on_turn_ended` and settles the ladder. The abandoned route is the
+        # fallback for a turn NOBODY ends, and on a follower that is precisely
+        # the case where this app has no outcome to report.
+        if not outcome_known:
+            logger.debug("turn retired by %s with an unknown outcome; not announcing", source)
+            return
+        self._turn_notified = True
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
         #
@@ -21376,15 +22347,28 @@ class OperatorApp(App[None]):
         #   who walked away needs pulled to their attention.
         # - otherwise → "task complete", suppressed while children are still
         #   running (see `Notifier.notify_turn_complete`).
-        if message.aborted:
+        #
+        # A turn that returned cleanly but delivered no `agent_end` takes the
+        # THIRD branch, not the second: the session considers the turn finished
+        # and the missing event is a transport or handler gap, so claiming an
+        # error would invent one the user cannot act on.
+        if aborted:
             pass
-        elif message.error:
+        elif error:
             self._notify("error")
         else:
             # Counts QUEUED and backgrounded work too (see
             # `_outstanding_delegated_jobs`): a child parked at the capacity
             # gate has not started at all, and a backgrounded bash job also
             # re-enters the conversation when it settles.
+            #
+            # EVALUATED here, never merely armed. A turn that died AFTER its
+            # children had already settled has no further `SubagentEnded`
+            # coming, so arming the deferral would strand its completion
+            # permanently — which is exactly the reported incident (two
+            # subagents already settled, one of them cancelled, and no
+            # notification ever arrived). Asking the question now returns 0 and
+            # the completion is delivered immediately.
             outstanding = self._outstanding_delegated_jobs()
             if self._loop_suppress_completion:
                 # A held goal loop (`/loop <goal text>`) owns the SINGLE release
@@ -22146,7 +23130,9 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(_splash_toast_headline(text, headline), duration_ms=duration)
+        toast.show(
+            _splash_toast_headline(text, headline), duration_ms=duration, owner=SPLASH_NOTICE
+        )
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.

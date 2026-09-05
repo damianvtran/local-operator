@@ -538,6 +538,68 @@ class Transcript:
                 raise asyncio.CancelledError
             return rows
 
+    async def fork_snapshot(
+        self, *, message: str = "", is_compacting: Callable[[], bool] = lambda: False
+    ) -> tuple[str, bool]:
+        """Copy a committed transcript without racing append or file compaction.
+
+        The owner, not a viewer's cache, defines this boundary. Cancellation of
+        a waiter cannot stop a filesystem copy, so retain the same ordering lock
+        as `_commit` until the worker settles, even after repeated cancellation.
+        The returned fork excludes live messages not yet durably committed.
+        """
+        from local_operator.fork import fork_session
+        from local_operator.session.session import _paired_prefix
+
+        async with self._lock:
+            if is_compacting():
+                raise ValueError("history is being rewritten; retry /fork when compaction finishes")
+
+            def copy_snapshot() -> tuple[str, bool]:
+                # Replay resolves attachments and can traverse a long history.
+                # It belongs off-loop with the copy, under the same writer lock,
+                # or /fork would freeze the UI and the original tool it preserves.
+                history = self.build_llm_history()
+                paired = _paired_prefix(history, strict=True)
+                retained = {item.id for item in paired}
+                excluded = frozenset(item.id for item in history if item.id not in retained)
+                compaction = next(
+                    (row for row in reversed(self._entries) if row.type == ENTRY_COMPACTION), None
+                )
+                if (
+                    compaction is not None
+                    and compaction.payload.get("first_kept_entry_id") in excluded
+                ):
+                    # Canonical replay falls back to full history if its latest
+                    # anchor disappears. Refuse BEFORE allocating a fork rather
+                    # than resurrect summarized context or rewrite marker bytes.
+                    raise ValueError(
+                        "compaction boundary is in an unfinished tool batch; "
+                        "retry /fork after the original finishes that batch"
+                    )
+                fork_id = fork_session(
+                    self.directory.parent.parent,
+                    self.directory.name,
+                    message=message,
+                    exclude_entry_ids=excluded,
+                )
+                return fork_id, bool(excluded)
+
+            worker = asyncio.create_task(asyncio.to_thread(copy_snapshot))
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(worker)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if worker.done():
+                        result = worker.result()
+                        break
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
     def _write_entries(self, entries: list[TranscriptEntry]) -> None:
         """Worker-only durable write; no in-memory index changes before fsync.
 

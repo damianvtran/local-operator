@@ -1729,6 +1729,62 @@ def make_parent(tmp_path, provider) -> Session:
 
 
 @pytest.mark.asyncio
+async def test_completed_nested_job_survives_manager_disposal_without_retaining_session(
+    tmp_path, monkeypatch
+):
+    import gc
+    import weakref
+
+    from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.frontend_state import FrontendStateStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    root = make_parent(tmp_path, ScriptedProvider())
+    manager = Session(
+        model=MODEL,
+        stream_fn=ScriptedProvider(),
+        tools=[],
+        system_blocks_provider=lambda: [],
+        transcript=Transcript(tmp_path / "manager"),
+        cwd=str(tmp_path),
+    )
+    comms = root.subagent_comms
+    manager_job = AsyncJob(id="manager", type="task", label="synthetic manager", start_time=1.0)
+    leaf_job = AsyncJob(id="leaf", type="task", label="synthetic leaf", start_time=1.0)
+    root.jobs._jobs[manager_job.id] = manager_job
+    manager.jobs._jobs[leaf_job.id] = leaf_job
+    comms.record_launch("manager", "Manager")
+    comms.attach("manager", manager, tmp_path / "manager")
+    root.jobs.attach_child_manager("manager", manager.jobs)
+    comms.record_launch("leaf", "Leaf", parent_job_id="manager")
+    notices = []
+    unsubscribe = comms.subscribe_changes(lambda: notices.append(True))
+    manager.jobs._notify_transient_job_change()
+    assert notices  # independent of the manager having a frontend subscriber
+    unsubscribe()
+    ref = weakref.ref(manager)
+    comms.detach("manager")
+    # Detach precedes the runner's terminal assignment. Retaining a value copy
+    # here would preserve a permanently running child on the root's viewer.
+    manager_job.status = "completed"
+    leaf_job.status = "completed"
+    leaf_job.result_text = "Nested work completed"
+    root.jobs.detach_child_manager("manager", [])
+    await manager.dispose()
+    del manager
+    gc.collect()
+    assert ref() is None
+    assert manager_job.child_jobs is None
+    assert comms.job("leaf") is leaf_job
+    rows = FrontendStateStore._jobs(root)
+    leaf = next(row for row in rows if row.id == "leaf")
+    assert leaf.parent_job_id == "manager"
+    assert leaf.status == "completed"
+    assert leaf.result_text == "Nested work completed"
+    await root.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_question_reaches_a_busy_child_and_its_answer_comes_back(tmp_path, monkeypatch):
     """The end-to-end claim: an aside injected into a child that is mid tool
     loop reaches its context, and the child's own hub call answers the

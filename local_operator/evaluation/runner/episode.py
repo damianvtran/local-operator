@@ -87,6 +87,7 @@ from local_operator.evaluation.evidence.models import (
     ScoringResultPayload,
     UsageCostPayload,
     UserSimulatorExchangePayload,
+    canonical_bytes,
     canonical_digest,
 )
 from local_operator.evaluation.evidence.store import EvidenceError, EvidenceWriter
@@ -100,6 +101,7 @@ from local_operator.evaluation.lifecycle import (
 )
 from local_operator.evaluation.protocol import (
     ActionBatch,
+    ArtifactRef,
     AskUserAction,
     FinishAction,
     Observation,
@@ -456,6 +458,7 @@ class EpisodeRunner:
         supervisor = self._launch(self._selector)
         self._supervisor = supervisor
         handshake = await supervisor.handshake(timeout=self._config.handshake_timeout)
+        self._action_surface = handshake.metadata.capabilities.action_surface()
         verifier = HostVerifier(
             self._spec.task_id,
             self._spec.episode_id,
@@ -727,6 +730,13 @@ class EpisodeRunner:
                 return
             decision = await self._decide(current)
             batch = decision.action_batch
+            if decision.public_reply is not None:
+                # _decide_once has already redacted and published this reply.
+                # Keep it on the current observation through _close_turn so
+                # accepted replay cannot silently collapse back to actions.
+                self._turns[-1] = self._turns[-1].model_copy(
+                    update={"public_reply": decision.public_reply}
+                )
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 self._append_batch(batch, terminal="finish")
@@ -778,7 +788,10 @@ class EpisodeRunner:
         nothing -- a missing usage record leaves an unclosed operation and the
         bundle cannot reach a terminal.
         """
-        from local_operator.evaluation.runner.model import DecisionRejected
+        from local_operator.evaluation.runner.model import (
+            DecisionRejected,
+            ModelDecision,
+        )
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
         message_count = len(self._turns)
@@ -790,7 +803,9 @@ class EpisodeRunner:
         # so recording it eagerly would make the failure path unsealable.
         rejected: DecisionRejected | None = None
         try:
-            decision = await self._model.decide(observation, tuple(self._turns))
+            decision = await self._model.decide(
+                observation, tuple(self._turns), action_surface=self._action_surface
+            )
         except _EvidenceFailure:
             raise
         except DecisionRejected as error:
@@ -853,13 +868,24 @@ class EpisodeRunner:
         # not know one); the requested route is the honest stand-in because
         # nothing served was accepted.
         served_route = decision.route or self._spec.requested_route
+        response_artifact = None
+        if isinstance(decision, ModelDecision) and decision.public_reply is not None:
+            from local_operator.evaluation.runner.public_reply import (
+                redact_public_reply,
+            )
+
+            public_reply = redact_public_reply(decision.public_reply, self._redactions)
+            decision = decision.model_copy(update={"public_reply": public_reply})
+            response_artifact = self._publish(
+                public_reply.encode("utf-8"), media_type="application/json"
+            )
         self._append(
             "model_request",
             ModelRequestPayload(
                 request_id=request_id,
                 requested_route=self._spec.requested_route,
                 tool_schema_digest=canonical_digest(
-                    "runner-tool-schema-v1", {"episode_id": self._spec.episode_id}
+                    "runner-tool-schema-v1", self._action_surface.schema()
                 ),
                 input_tokens=decision.usage.input_tokens,
                 message_count=message_count,
@@ -881,6 +907,7 @@ class EpisodeRunner:
                 cache_read_tokens=decision.usage.cache_read_tokens,
                 cache_write_tokens=decision.usage.cache_write_tokens,
                 tool_call_count=decision.tool_call_count,
+                redacted_response=response_artifact,
             ),
         )
         self._append(
@@ -1229,26 +1256,33 @@ class EpisodeRunner:
                 ),
                 timeout=self._config.score_timeout,
             )
-        except _EvidenceFailure:
-            raise
+            score = result.score
+            details_source = None
+            if score.details is not None:
+                reference = ArtifactRef.model_validate(score.details.model_dump(mode="json"))
+                # Staged worker bytes are not durable evidence. Reopen with the
+                # bounded verifier; the receipt writer scans and publishes before
+                # committing the score. None of these bytes enter model context.
+                details_source = verify_artifact(self._config.artifact_root, reference)
+            self._append_receipt(
+                "scoring_result",
+                ScoringResultPayload(
+                    finalization_id=self._finalization_id,
+                    scoring_operation_id=self._scoring_operation_id,
+                    score=score,
+                ),
+                details_source=details_source,
+            )
         except BaseException as error:
             # ADAPTER CONTRACT: ``score()`` returns a SCORED artifact or raises.
             # "Unscored" is a harness decision expressed through the
             # finalization intent, never an adapter return value.
             #
             # ``scoring_start`` is already durable and a scored-intent
-            # finalization cannot seal unscored, so no legal terminal remains.
-            # Rescue first (the worker may be poisoned), then abandon.
+            # finalization cannot seal unscored, including when its detail bytes
+            # fail verification/publication. Rescue first, then abandon with the
+            # existing finalization authority; ordinary failure intent is too late.
             return await self._abandon_after_scoring_failure(error)
-        score = result.score
-        self._append_receipt(
-            "scoring_result",
-            ScoringResultPayload(
-                finalization_id=self._finalization_id,
-                scoring_operation_id=self._scoring_operation_id,
-                score=score,
-            ),
-        )
         return await self._close_out(score, failure_kind=None, cancelled=False)
 
     async def _finalize_failure(self, error: BaseException) -> EpisodeOutcome:
@@ -1599,7 +1633,16 @@ class EpisodeRunner:
             cleanup_plan_id=plan.cleanup_plan_id,
             config_digest=spec.config_digest,
             created_wall_time_ms=self._started_ms,
-            metadata=dict(spec.metadata),
+            # The same negotiated schema builds the prompt and gates admission.
+            # Publish it, not merely a digest with no reproducible preimage; old
+            # sealed bundles retain their original metadata and canonical bytes.
+            metadata={
+                **dict(spec.metadata),
+                "action_surface": canonical_bytes(self._action_surface.schema()).decode("utf-8"),
+                # Reply fields are NOT tools. Keep their advertised schema and
+                # identity separate, and absent for clients that never used it.
+                **getattr(self._model, "model_reply_metadata", {}),
+            },
         )
 
     def _append(self, kind: Any, payload: Any) -> None:
@@ -1609,7 +1652,9 @@ class EpisodeRunner:
         except EvidenceError as error:
             raise _EvidenceFailure(_diagnostic(error, None)) from error
 
-    def _append_receipt(self, kind: str, payload: Any) -> None:
+    def _append_receipt(
+        self, kind: str, payload: Any, *, details_source: bytes | None = None
+    ) -> None:
         writer = self._require_writer()
         try:
             if kind == "reconciliation":
@@ -1617,7 +1662,7 @@ class EpisodeRunner:
             elif kind == "cleanup":
                 writer.record_cleanup(payload)
             else:
-                writer.record_scoring_result(payload)
+                writer.record_scoring_result(payload, details_source=details_source)
         except EvidenceError as error:
             raise _EvidenceFailure(_diagnostic(error, None)) from error
 
@@ -1724,14 +1769,26 @@ class EpisodeRunner:
         writer = self._require_writer()
         rescue_complete = await self._attempt_rescue()
         await self._emergency_teardown()
-        record = writer.abandon("ambiguous_finalization", _diagnostic_code(error))
+        status: EpisodeStatus = "abandoned"
+        detail = _diagnostic_code(error)
+        try:
+            record = writer.abandon("ambiguous_finalization", detail)
+            detail = record.diagnostic_code
+        except (EvidenceError, OSError) as abandonment_error:
+            # A detail or receipt fsync can poison the writer after evaluation.
+            # Like _abandon_for_evidence, report the actual unsealed disk state;
+            # recovery requires a fresh writer, never a second evaluator call.
+            status = "abandonment_failed"
+            detail = (
+                f"{detail}; abandonment refused: {_diagnostic(abandonment_error, self._redactions)}"
+            )
         return EpisodeOutcome(
-            status="abandoned",
+            status=status,
             episode_id=self._spec.episode_id,
             bundle_root=Path(writer.root),
             rescue_required=True,
             rescue_complete=rescue_complete,
-            diagnostic=record.diagnostic_code,
+            diagnostic=detail,
         )
 
     async def _abandon_for_evidence(self, detail: str) -> EpisodeOutcome:

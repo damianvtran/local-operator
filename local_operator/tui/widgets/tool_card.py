@@ -88,6 +88,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from rich.cells import cell_len
@@ -571,7 +572,7 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
     ``bool`` is excluded explicitly — it is an ``int`` subclass in Python and
     ``details={"added": True}`` must not print ``+1``.
     """
-    if not isinstance(details, dict):
+    if not isinstance(details, Mapping):
         return (0, 0)
 
     def _count(value: object) -> int:
@@ -584,17 +585,17 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
 
 def _search_result_output(details: dict[str, Any] | None) -> list[str]:
     """Structured web-search rows: provider, page name, URL, and short snippet."""
-    if not isinstance(details, dict):
+    if not isinstance(details, Mapping):
         return []
     sources = details.get("sources")
-    if not isinstance(sources, list) or not sources:
+    if not isinstance(sources, Sequence) or isinstance(sources, (str, bytes)) or not sources:
         return []
 
     provider = _strip_control_sequences(str(details.get("provider") or "search"))
     auth_mode = _strip_control_sequences(str(details.get("auth_mode") or ""))
     lines = [f"Provider: {provider}" + (f" ({auth_mode})" if auth_mode else ""), "Sources:"]
     for index, source in enumerate(sources, start=1):
-        if not isinstance(source, dict):
+        if not isinstance(source, Mapping):
             continue
         title = _strip_control_sequences(
             " ".join(str(source.get("title") or "Untitled result").split())
@@ -622,7 +623,7 @@ def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
     """
     if tool_name == "web_fetch":
         return True
-    if tool_name != "read" or not isinstance(details, dict):
+    if tool_name != "read" or not isinstance(details, Mapping):
         return False
     return "render_method" in details and "final_url" in details
 
@@ -637,7 +638,7 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     itself is appended by the body painter from the result text; this helper owns
     only the header rows, mirroring ``_search_result_output``'s split of duties.
     """
-    if not isinstance(details, dict):
+    if not isinstance(details, Mapping):
         return []
     url = _strip_control_sequences(str(details.get("url") or ""))
     final = _strip_control_sequences(str(details.get("final_url") or url))
@@ -1469,8 +1470,10 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
-        diff = details.get("diff") if isinstance(details, dict) else None
-        if isinstance(diff, list) and diff:
+        diff = details.get("diff") if isinstance(details, Mapping) else None
+        # Canonical follower details are immutable sequences, not concrete
+        # lists. They still carry the same unified diff as the live executor.
+        if isinstance(diff, Sequence) and not isinstance(diff, (str, bytes)) and diff:
             self._diff = [str(line) for line in diff]
         else:
             self._diff = None

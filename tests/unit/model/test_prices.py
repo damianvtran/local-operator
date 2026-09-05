@@ -18,6 +18,7 @@ answers with whatever rows a test hands it, and every document lands in
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 from unittest.mock import patch
@@ -372,13 +373,33 @@ def test_a_background_revalidation_gets_the_full_default_timeout(tmp_path) -> No
         catalogue._threads.clear()
     _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG), age_s=2 * 3600)
     recorder = _Canned([_ok()])
-    with patch("httpx.get", recorder):
-        row = price_catalogue_row("anthropic", "claude-fable-5-1", timeout=0.5, cache_dir=tmp_path)
-        assert row is not None
-        threads = catalogue._revalidation_threads()
-        assert len(threads) == 1
-        for thread in threads:
-            thread.join(timeout=5.0)
+    fetched = threading.Event()
+    workers: list[threading.Thread] = []
+
+    def record_fetch(url, **kwargs):
+        # A successful worker can disappear from the live-thread snapshot before
+        # this test observes it. Publish the actual worker identity instead; a
+        # completed fetch is success, not evidence that no refresh was started.
+        workers.append(threading.current_thread())
+        try:
+            return recorder(url, **kwargs)
+        finally:
+            fetched.set()
+
+    with patch("httpx.get", record_fetch):
+        try:
+            row = price_catalogue_row(
+                "anthropic", "claude-fable-5-1", timeout=0.5, cache_dir=tmp_path
+            )
+            assert fetched.wait(timeout=5.0), "background fetch did not start"
+            assert row is not None
+            assert len(workers) == 1
+            assert workers[0] is not threading.current_thread()
+        finally:
+            for worker in workers:
+                if worker is not threading.current_thread():
+                    worker.join(timeout=5.0)
+        assert not workers[0].is_alive(), "background fetch did not finish"
     assert recorder.calls[0]["timeout"] == prices.DEFAULT_TIMEOUT_S
 
 

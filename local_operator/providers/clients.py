@@ -25,6 +25,7 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -1379,13 +1380,26 @@ def _effective_max_tokens(request: ChatRequest) -> int:
         # HTTP 400 from the provider — and the two failures differ only in which
         # side reports them. Closing it would mean trusting a local count at
         # exactly the occupancy where being wrong is most expensive.
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+        advice = "Compact the conversation or start a new session."
+        if request.model.provider in LOCAL_PROVIDER_IDS:
+            history = any(message.role == "assistant" for message in request.messages)
+            advice = (
+                ("Compact the conversation, or increase " if history else "Increase ")
+                + "the model's loaded server context where supported, or choose a "
+                "larger-context model. Then reselect it with /model or restart. "
+                "Check the model's context override in /settings; if the server "
+                "cannot report capacity, set it to the server's actual capacity. "
+                "Client context overrides do not resize the server."
+            )
         raise ProviderError(
             None,
             (
                 f"prompt is too large for {request.model.model_id}: about "
                 f"{measured_prompt:,} tokens of input against a {window:,}-token "
                 f"context window leaves under {reserve:,} tokens for the "
-                f"reply. Compact the conversation or start a new session."
+                f"reply. {advice}"
             ),
             kind="request",
         )
@@ -1994,13 +2008,49 @@ class OpenAICompatClient:
             headers["Authorization"] = f"Bearer {bearer}"
         return headers
 
-    def _build_body(self, request: ChatRequest) -> dict[str, Any]:
+    def _codex_affinity_headers(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None", url: str
+    ) -> dict[str, str]:
+        """Keep a transcript's cache routing stable on the built-in OAuth route.
+
+        Codex emits both headers (codex-api/src/requests/headers.rs at
+        459a79eb). Matched live Sol/Astra tool loops favored this pair over the
+        body key alone. Independent QA confirmed improvement but also misses:
+        affinity is not a cache-hit guarantee. This is a GROUP, not stored history:
+        forks intentionally inherit the cache lineage and still replay full
+        input with store:false. Stateful transport would need a separate id.
+        """
+        key = request.prompt_cache_key
+        if (
+            url != CODEX_RESPONSES_URL
+            or self._base_url != "https://api.openai.com/v1"
+            or request.model.provider not in {"openai", "openai-device"}
+            or not self._codex_responses_mode(oauth_access)
+            or not key
+            or not key.strip()
+        ):
+            return {}
+        # Never send a filesystem/session label verbatim in a header. A fixed
+        # namespace makes the bounded ASCII UUID stable across retries, resumes,
+        # model changes and fresh client instances, without retaining credentials.
+        affinity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:codex-cache:{key}"))
+        return {"session-id": affinity, "thread-id": affinity}
+
+    def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
+        endpoint = f"{self._base_url}/chat/completions"
+        request = bind_native_context(
+            request, endpoint, "openai-chat", scope, _estimate_slope(request.model)
+        )
         messages = [
             *self._system_messages(request),
             # Empty assistant turns (errored/aborted model turns the harness
             # persists) are dropped, not sent: Moonshot/Kimi 400s on them.
             # See `_is_empty_assistant`.
-            *[_message_to_openai(m) for m in request.messages if not _is_empty_assistant(m)],
+            *[
+                self._replay_chat_message(m, request.model, endpoint, scope)
+                for m in request.messages
+                if not _is_empty_assistant(m)
+            ],
         ]
         if request.model.supports_prompt_cache:
             self._message_cache_markers(messages)
@@ -2010,12 +2060,25 @@ class OpenAICompatClient:
             "stream_options": {"include_usage": True},
             "messages": messages,
         }
-        if request.tools:
-            body["tools"] = _tools_to_openai(request.tools)
-            # Safe default: unmapped values fall back to "auto" instead of KeyError.
-            body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
-                request.tool_choice, "auto"
-            )
+        if request.tools and request.tool_choice == "required" and not request.model.supports_tools:
+            raise ProviderError(400, "The selected model does not support required tool use.")
+        if request.tools and request.model.supports_tools:
+            if request.model.provider == "ollama":
+                # Ollama rejects tool_choice. Dropping only the control for
+                # 'none' would authorize tools on an explicitly read-only aside.
+                if request.tool_choice == "required":
+                    raise ProviderError(
+                        400,
+                        "Ollama does not support required tool choice; use auto or another server.",
+                        retryable=False,
+                    )
+                if request.tool_choice != "none":
+                    body["tools"] = _tools_to_openai(request.tools)
+            else:
+                body["tools"] = _tools_to_openai(request.tools)
+                body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
+                    request.tool_choice, "auto"
+                )
         max_tokens = _effective_max_tokens(request)
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
@@ -2041,6 +2104,19 @@ class OpenAICompatClient:
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
+
+    @staticmethod
+    def _replay_chat_message(
+        message: Message, model: ModelSpec, endpoint: str, scope: str | None
+    ) -> dict[str, Any]:
+        entry = _message_to_openai(message)
+        native = replay_items(message, model, endpoint, "openai-chat", scope)
+        if native:
+            for item in native:
+                for key in ("reasoning_content", "reasoning"):
+                    if isinstance(item.get(key), str):
+                        entry[key] = item[key]
+        return entry
 
     def _system_messages(self, request: ChatRequest) -> list[dict[str, Any]]:
         """System blocks → messages; stable blocks carry ``cache_control``.
@@ -2133,13 +2209,11 @@ class OpenAICompatClient:
             ),
         }
         if request.system_blocks:
-            # The stable system prefix rides top-level ``instructions``, exactly
-            # as real Codex does (client.rs: ``instructions = base_instructions``).
-            # We deliberately do NOT move it into ``developer`` messages or attach
-            # ``prompt_cache_breakpoint`` markers: the ChatGPT-subscription Codex
-            # backend rejects both ``prompt_cache_breakpoint`` and
-            # ``prompt_cache_options`` with HTTP 400 (matches OpenAI Codex bug
-            # #35300), and that OAuth backend is the only path in use here.
+            # Preserve the established legacy layout. Current Codex also has
+            # Lite developer input items, but that changes reasoning context
+            # and showed no benefit in our probes (docs/OPENAI_CACHING.md).
+            # Public breakpoint/TTL support is a different contract: current
+            # OAuth probes reject explicit markers even with the Lite header.
             body["instructions"] = "\n\n".join(request.system_blocks)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
@@ -2165,8 +2239,9 @@ class OpenAICompatClient:
             # body above: the Responses API spells `service_tier` identically.
             body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
-            # The 24h policy is meaningful only with a stable key. SessionStreamFn
-            # supplies one per transcript, and retries preserve it on ChatRequest.
+            # Preserve the existing public request policy here; modern public
+            # TTL compatibility needs separate API-key validation. The Codex
+            # builder below removes retention, but keeps the routing key.
             body["prompt_cache_key"] = request.prompt_cache_key
             body["prompt_cache_retention"] = "24h"
         return body
@@ -2176,18 +2251,12 @@ class OpenAICompatClient:
     ) -> dict[str, Any]:
         """ChatGPT Codex body: Responses-shaped, on the ``store:false`` backend.
 
-        Reuses the public Responses body, then strips the fields the codex
-        backend does not take. Note that ``prompt_cache_key`` is deliberately
-        NOT stripped any more: an earlier version popped it under a comment
-        calling it "public-API-only", which was a wrong assumption. Real Codex
-        (client.rs, ``build_responses_request``) sets ``prompt_cache_key``
-        UNCONDITIONALLY on this same ``store:false`` backend for routing
-        stickiness, and the model's ~89-90% cache-read rate versus ~97-98% for
-        OpenAI-shaped peers was traced to us stripping it. ``prompt_cache_key``
-        and ``include`` (defect #2's encrypted reasoning) flow through from
-        ``_build_responses_body``. Only ``prompt_cache_retention`` is popped:
-        the codex backend is ``store:false``, so public retention does not
-        apply.
+        Reuses the public builder while removing unsupported retention, output
+        cap and sampling fields. The body cache key and encrypted reasoning
+        include remain intact. The key is a routing hint, not a cache-hit
+        guarantee; current matched experiments also needed the canonical
+        session/thread affinity headers. See ``_codex_affinity_headers`` and
+        docs/OPENAI_CACHING.md for the measured endpoint-specific evidence.
         """
         body = self._build_responses_body(request, endpoint=CODEX_RESPONSES_URL, scope=scope)
         body["store"] = False
@@ -2210,7 +2279,31 @@ class OpenAICompatClient:
             ):
                 yield event
             return
+        from local_operator.providers.local import (
+            LOCAL_PROVIDER_IDS,
+            normalize_base_url,
+            resolve_base_url,
+        )
+
+        if request.model.provider in LOCAL_PROVIDER_IDS:
+            actual_endpoint = normalize_base_url(self._base_url)
+            bound_endpoint = getattr(oauth_access, "api_endpoint", None)
+            if resolve_base_url(request.model.provider) != actual_endpoint or (
+                bound_endpoint is not None and normalize_base_url(bound_endpoint) != actual_endpoint
+            ):
+                # Sessions retain their selected endpoint. The credential store
+                # follows current configuration, so fail before sending either
+                # conversation or bearer when those two identities diverge.
+                raise ProviderError(
+                    400,
+                    "Server endpoint changed. Select the model again with "
+                    "/model saved before continuing.",
+                )
         url = f"{self._request_base_url(oauth_access)}/chat/completions"
+        scope = credential_scope(api_key, oauth_access)
+        reasoning_parts: dict[str, list[str]] = {}
+        replay_text: list[str] = []
+        replay_calls: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
@@ -2232,7 +2325,7 @@ class OpenAICompatClient:
         async with self._http.stream(
             "POST",
             url,
-            json=self._build_body(request),
+            json=self._build_body(request, scope=scope),
             headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
@@ -2297,8 +2390,13 @@ class OpenAICompatClient:
                     continue
                 choice = choices[0]
                 delta = choice.get("delta") or {}
+                for reasoning_key in ("reasoning_content", "reasoning"):
+                    fragment = delta.get(reasoning_key)
+                    if isinstance(fragment, str) and fragment:
+                        reasoning_parts.setdefault(reasoning_key, []).append(fragment)
                 text = delta.get("content")
                 if text:
+                    replay_text.append(text)
                     streamed_text = True
                     yield StreamTextDelta(delta=text)
                 refusal = delta.get("refusal")
@@ -2309,6 +2407,12 @@ class OpenAICompatClient:
                     function = tool_delta.get("function") or {}
                     call_id = tool_delta.get("id")
                     name = function.get("name")
+                    saved = replay_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    if call_id:
+                        saved["id"] = call_id
+                    if name:
+                        saved["name"] += name
+                    saved["arguments"] += function.get("arguments") or ""
                     if call_id:
                         yield StreamToolCallDelta(index=index, id=call_id)
                     if name:
@@ -2356,6 +2460,29 @@ class OpenAICompatClient:
             # the loop journals `error` as the incident, so name the failure,
             # not just the wire field that signalled it.
             error = f"provider reported a mid-stream failure (finish_reason '{finish_reason}')"
+        if reasoning_parts:
+            calls = []
+            valid = True
+            for saved in replay_calls.values():
+                try:
+                    arguments = json.loads(saved["arguments"] or "{}")
+                except ValueError:
+                    valid = False
+                    break
+                calls.append({"id": saved["id"], "name": saved["name"], "args": arguments})
+            if valid:
+                provider_payload = {
+                    **(provider_payload or {}),
+                    **native_payload(
+                        request.model,
+                        url,
+                        "openai-chat",
+                        [{key: "".join(parts) for key, parts in reasoning_parts.items()}],
+                        "".join(replay_text),
+                        calls,
+                        scope,
+                    ),
+                }
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,
@@ -2379,6 +2506,8 @@ class OpenAICompatClient:
             if codex
             else self._build_responses_body(request, scope=scope)
         )
+        headers = self._headers(api_key, oauth_access)
+        headers.update(self._codex_affinity_headers(request, oauth_access, url))
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
@@ -2397,7 +2526,7 @@ class OpenAICompatClient:
             "POST",
             url,
             json=body,
-            headers=self._headers(api_key, oauth_access),
+            headers=headers,
         ) as response:
             if response.status_code >= 400:
                 await response.aread()

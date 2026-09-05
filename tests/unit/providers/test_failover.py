@@ -957,6 +957,226 @@ async def test_primary_request_400_aborts_without_walking_chain() -> None:
     assert anthropic.calls == 0  # the fallback chain was never walked
 
 
+async def test_model_routing_flap_is_reasked_in_place(monkeypatch) -> None:
+    """A 400 that SAYS the gateway does not know the model is a routing flap,
+    not a request defect: it is re-asked on the same credential after a flat
+    delay, and the turn is served when the catalogue comes back.
+
+    Observed live: OpenRouter answered ``qwen/qwen3.8-max is not a valid
+    model ID`` on the 97th request of a session it had served 96 times on
+    that id, and served it again seconds later; by status alone the driver
+    aborted a 75-minute sentinel pass. The fallback must NOT be walked (the
+    catalogue is per gateway, not per bearer) and the flap must not occupy
+    the reported-error slot."""
+    import local_operator.providers.failover as fo
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    # The id has served before in this process: that is what makes the
+    # refusal a flap rather than a bad id.
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-4o"})
+    calls = {"n": 0}
+    anthropic = ScriptedClient([StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")])
+
+    def flap_then_serve(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise ProviderError(400, "qwen/qwen3.8-max is not a valid model ID", retryable=False)
+
+        async def gen():
+            yield StreamTextDelta(delta="served")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return anthropic
+        return _FnClient(flap_then_serve)
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    got = [
+        e
+        async for e in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+        )
+    ]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "served" for e in got)
+    assert calls["n"] == 3  # two flaps re-asked in place, third served
+    assert anthropic.calls == 0  # never walked the chain
+
+
+async def test_model_routing_flap_budget_then_request_defect(monkeypatch) -> None:
+    """A flap that never clears spends its small budget and then takes the
+    ordinary request-defect path: the primary's own 400 surfaces, with the
+    provider's words, and the chain is still not walked."""
+    import local_operator.providers.failover as fo
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-4o"})
+    calls = {"n": 0}
+    anthropic = ScriptedClient([StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")])
+
+    def always_flap(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        calls["n"] += 1
+        raise ProviderError(404, "model not found", retryable=False)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "anthropic":
+            return anthropic
+        return _FnClient(always_flap)
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"], "anthropic": ["k2"]}), settings, client_for
+        ):
+            pass
+    assert "model not found" in str(excinfo.value)
+    assert calls["n"] == 1 + fo.MAX_MODEL_FLAP_RETRIES
+    assert anthropic.calls == 0
+
+
+def test_model_routing_flap_predicate_is_narrow(monkeypatch) -> None:
+    """A flap needs BOTH the unknown-model wording on a 400/404 AND a selector
+    this process has seen serve. A never-served id with the same body is the
+    actionable refusal it reads as (``test_flat_unknown_model_404_still_aborts
+    _immediately`` pins that end to end); a 400 about a parameter, and a 5xx
+    or 429 with the same words, are never flaps."""
+    import local_operator.providers.failover as fo
+    from local_operator.providers.failover import is_model_routing_flap
+
+    served = ModelSpec(provider="openrouter", model_id="qwen/qwen3.8-max", context_window=1)
+    fresh = ModelSpec(provider="openrouter", model_id="openai/nope-9.9", context_window=1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", set())
+    fo.note_selector_served(served)
+
+    assert is_model_routing_flap(
+        ProviderError(400, "qwen/qwen3.8-max is not a valid model ID"), served
+    )
+    assert is_model_routing_flap(ProviderError(404, "Model not found"), served)
+    # Same words, never served: not a flap.
+    assert not is_model_routing_flap(
+        ProviderError(400, "openai/nope-9.9 is not a valid model ID"), fresh
+    )
+    assert not is_model_routing_flap(ProviderError(400, "invalid value for 'temperature'"), served)
+    assert not is_model_routing_flap(ProviderError(400, "bad request"), served)
+    assert not is_model_routing_flap(ProviderError(502, "model not found"), served)
+    assert not is_model_routing_flap(ProviderError(429, "model not found"), served)
+    # OpenRouter's per-request routing 404s describe OUR request (review R3).
+    assert not is_model_routing_flap(
+        ProviderError(404, "No endpoints found that support tool use"), served
+    )
+    assert is_model_routing_flap(ProviderError(404, "No endpoints found for qwen/x"), served)
+
+
+async def test_relayed_transient_404_does_not_also_spend_the_flap_budget(monkeypatch) -> None:
+    """A 404 already classified ``transient`` (clients.py's relayed-upstream
+    reclassification) owns the transport retry ladder; the flap arm must not
+    add its own three re-asks in front of it (review R2). The body is chosen
+    to MATCH a flap marker on a served id, so the only thing keeping the arm
+    off is the ``kind == "request"`` gate. The ladder gets ``maxRetries: 1``
+    (two attempts); the arm firing would add up to three more."""
+    import local_operator.providers.failover as fo
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-4o"})
+    calls = {"n": 0}
+
+    def relayed(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        calls["n"] += 1
+        raise ProviderError(404, "model not found", retryable=True, kind="transient")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(relayed)
+
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {}}}
+    with pytest.raises(ProviderError):
+        async for _ in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+        ):
+            pass
+    assert calls["n"] == 2, "transient ladder only: one attempt plus one retry, no flap re-asks"
+
+
+async def test_model_routing_flap_reask_keeps_codex_affinity_headers(monkeypatch) -> None:
+    """Every flap re-ask carries the SAME ``session-id``/``thread-id`` pair on
+    the wire as the attempt it repeats (PR #647 round-2 F1).
+
+    The header pair is a UUIDv5 of ``prompt_cache_key`` alone, so the property
+    holds today because nothing on the flap path rewrites that key — but the
+    loop does hand the client a fresh ``model_copy`` on every OAuth attempt
+    (``context_spec_for_access`` rebinding, QA round-2 Q2), so a future rewrite
+    that dropped the key on the copy would silently break cache affinity with
+    no test noticing at the header-derivation layer. Pinned end to end: the
+    real ``OpenAICompatClient`` over a mock transport, a ChatGPT OAuth grant,
+    the real ``stream_with_failover`` flap arm. The account catalogue lookup
+    that the rebinding performs is stubbed so no listing fetch is attempted.
+    Asserted on the wire, never on request-object identity."""
+    import local_operator.providers.failover as fo
+    from local_operator.model import discovery
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.providers.clients import CODEX_RESPONSES_URL
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-6-astra"})
+    monkeypatch.setattr(discovery, "available_models", lambda *a, **kw: ([], "ok"))
+
+    class OAuthAuth(FakeAuth):
+        """One ChatGPT subscription grant: the only route that ships the pair."""
+
+        access = OAuthAccess("synthetic", 1, org_id="account")
+
+        async def get_oauth_access(self, provider: str, session_id: Any = None, **kw: Any):
+            return self.access
+
+    wire: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        wire.append(request)
+        if len(wire) <= 2:
+            return httpx.Response(
+                400, json={"error": {"message": "gpt-6-astra is not a valid model ID"}}
+            )
+        return httpx.Response(
+            200,
+            content='data: {"type":"response.completed","response":{"output":[],'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        )
+
+    request = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-6-astra", supports_responses_api=True),
+        messages=[],
+        prompt_cache_key="lineage",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        got = [
+            e
+            async for e in stream_with_failover(
+                request,
+                OAuthAuth({"openai": ["synthetic"]}),
+                {"retry": {"baseDelayMs": 1}},
+                client_for,
+            )
+        ]
+    assert any(isinstance(e, StreamEndEvent) for e in got)
+    assert len(wire) == 3  # two flaps re-asked in place, third served
+    pairs = [(w.headers["session-id"], w.headers["thread-id"]) for w in wire]
+    assert all(str(w.url) == CODEX_RESPONSES_URL for w in wire)
+    assert pairs[0][0] == pairs[0][1]
+    assert len(set(pairs)) == 1, pairs
+
+
 async def test_fallback_request_400_still_walks() -> None:
     """A request-shape 400 on a FALLBACK target still walks to the next target.
 

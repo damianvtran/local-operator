@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -39,9 +40,15 @@ from local_operator.harness.jobs import (
 from local_operator.harness.types import (
     CustomMessage,
     Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     NoticeEvent,
     TextContent,
     ToolCall,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolResult,
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
@@ -804,6 +811,136 @@ def test_relay_stamps_a_sequence_that_eviction_cannot_renumber() -> None:
     assert stamps[-1] == TRAJECTORY_CAP + 4
 
 
+def _progress_relay() -> tuple[Any, list[str], AsyncJob]:
+    """A real relay over a running job, plus the progress words it emits.
+
+    ``report_progress`` and ``emit`` are both captured so the assertion covers
+    what the 1 Hz ``jobs.list()`` poll sees (``latest_details``) as well as the
+    parent stream — the two are meant to agree, and the band reads the first.
+    """
+    from local_operator.harness.subagent import _make_relay
+
+    job = AsyncJob(id="j1", type="task", status="running", label="child", start_time=1.0)
+    job.trajectory = []
+    emitted: list[str] = []
+
+    async def _emit(event: Any) -> None:
+        emitted.append(event.progress)
+
+    def _report(text: str) -> None:
+        job.latest_details = {"progress": text}
+
+    # ``message_end`` pokes the roster so the band repaints usage; a stub is
+    # enough here, the assertions are about the progress words.
+    manager = SimpleNamespace(_notify_roster_change=lambda: None)
+    relay = _make_relay(
+        "j1", "child", job, cast(Any, manager), _emit, _report, {"text": "", "error": None}
+    )
+    return relay, emitted, job
+
+
+def test_relay_says_thinking_not_responding_until_the_child_streams_text() -> None:
+    """A child in a model call reads ``thinking``; ``responding`` is prose.
+
+    The loop yields ``message_start`` from a placeholder at the top of EVERY
+    provider call, before the first token, so the row said ``responding`` the
+    moment any call began and held it until a tool started — for a tool-only
+    turn, that is the whole call. The band showed every working child as
+    writing while none of them was. The main working line keys on the first
+    text delta; the relay has to say the same word at the same moment.
+    """
+    relay, emitted, job = _progress_relay()
+    message = Message.assistant()
+
+    async def _drive() -> None:
+        # Turn 1: a tool-only call. The deltas are tool-call deltas, which
+        # never become a MessageUpdateEvent, so nothing arrives between the
+        # placeholder and the tool start.
+        await relay(MessageStartEvent(message=message))
+        assert emitted == ["thinking"]
+        assert job.latest_details == {"progress": "thinking"}
+        await relay(MessageEndEvent(message=message))
+        assert emitted[-1] == "thinking"
+        await relay(
+            ToolExecutionStartEvent(
+                tool_call_id="c1", tool_name="bash", args={}, intent="listing files"
+            )
+        )
+        assert emitted[-1] == "listing files"
+        assert "responding" not in emitted
+        await relay(
+            ToolExecutionEndEvent(
+                tool_call_id="c1",
+                tool_name="bash",
+                result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")]),
+            )
+        )
+        assert emitted[-1] == "thinking"
+
+        # Turn 2: prose. ``responding`` appears on the FIRST text delta and
+        # only there: later deltas are not news, and relaying each one is the
+        # flood the relay exists to prevent.
+        second = Message.assistant()
+        await relay(MessageStartEvent(message=second))
+        assert emitted[-1] == "thinking"
+        before = len(emitted)
+        await relay(MessageUpdateEvent(message=second, delta="Here "))
+        assert emitted[-1] == "responding"
+        assert len(emitted) == before + 1
+        await relay(MessageUpdateEvent(message=second, delta="is "))
+        await relay(MessageUpdateEvent(message=second, delta="the answer."))
+        assert len(emitted) == before + 1, "subsequent deltas must not re-report"
+        await relay(MessageEndEvent(message=second))
+        assert emitted[-1] == "thinking"
+
+    asyncio.run(_drive())
+    assert emitted == [
+        "thinking",
+        "thinking",
+        "listing files",
+        "thinking",
+        "thinking",
+        "responding",
+        "thinking",
+    ]
+    # Every child event still lands in the trajectory, deltas included: the
+    # throttle is on the parent stream, not on the page's ledger.
+    assert job.trajectory is not None
+    assert [e["type"] for e in job.trajectory].count("message_update") == 3
+
+
+def test_relay_reports_responding_once_per_message_and_never_over_a_running_tool() -> None:
+    """The flag resets per message, and a running tool outranks arriving text.
+
+    The first is what lets a child that answers, calls a tool, then answers
+    again say ``responding`` twice. The second is the main working line's own
+    priority: a running call is the activity, and narration beside it does
+    not replace the intent the row is already showing.
+    """
+    relay, emitted, _job = _progress_relay()
+
+    async def _drive() -> None:
+        first = Message.assistant()
+        await relay(MessageStartEvent(message=first))
+        await relay(MessageUpdateEvent(message=first, delta="one"))
+        await relay(MessageEndEvent(message=first))
+        second = Message.assistant()
+        await relay(MessageStartEvent(message=second))
+        # An empty delta is not text (the TUI ignores those too).
+        await relay(MessageUpdateEvent(message=second, delta=""))
+        assert emitted[-1] == "thinking"
+        await relay(MessageUpdateEvent(message=second, delta="two"))
+        assert emitted.count("responding") == 2
+        # Text arriving while a tool runs does not displace the tool's intent.
+        await relay(
+            ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
+        )
+        await relay(MessageUpdateEvent(message=second, delta="more"))
+        assert emitted[-1] == "probing"
+
+    asyncio.run(_drive())
+
+
 def test_fold_survives_junk_without_raising() -> None:
     """Entries come from another session's internals. This surface is
     observability, and observability may not take the app down."""
@@ -844,6 +981,59 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     app._open_subagent_view(str(job.id))
     await pilot.pause()
     return app.query_one(SubagentView)
+
+
+@pytest.mark.asyncio
+async def test_live_wire_tool_details_match_reentered_history() -> None:
+    """A JSON delta and a later owner fetch must paint the same tool receipt."""
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        FrontendUpdate,
+        JobState,
+    )
+
+    state = FrontendSessionState(session_id="synthetic", epoch="test")
+    owner, follower = FrontendStateStore(state), FrontendStateStore(state)
+    job = _job_with([], status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        rows = [
+            _call("wire-call", "read", path="README.md"),
+            _result("wire-call", "read", "Synthetic documentation"),
+        ]
+        for end in (1, 2):
+            update = owner.mutate(
+                jobs=[JobState(id=job.id, type="subagent", trajectory=rows[:end])]
+            )
+            assert update is not None
+            assert follower.apply_update(
+                FrontendUpdate.model_validate_json(update.model_dump_json())
+            )
+            job.trajectory = follower.state.jobs[0].trajectory
+            app._refresh_subagent_view(job.id)
+            await pilot.pause()
+            card = view.query_one(ToolCard)
+            assert card._args == {"path": "README.md"}
+            assert "README.md" in card._summary
+        assert card._output == ["Synthetic documentation"]
+        assert card.can_expand()
+        await pilot.click(card)
+        await pilot.pause()
+        assert card._expanded
+        assert card.size.height > 1
+        await pilot.press("escape")
+        assert app._subagent_view is None
+        job.trajectory = rows
+        app._open_subagent_view(job.id)
+        await pilot.pause()
+        restored = app.query_one(SubagentView).query_one(ToolCard)
+        assert restored._args == card._args
+        assert restored._output == card._output
+        assert restored.can_expand()
 
 
 @pytest.mark.parametrize("size", [(100, 30), (140, 40)])
@@ -947,7 +1137,8 @@ async def test_narrow_subagent_mode_preserves_a_useful_transcript_viewport() -> 
         for _ in range(3):
             await pilot.pause()
         assert app.screen.has_class("subagent-compact")
-        assert app.query_one("#band").display is False
+        assert app.query_one("#input-row").display is False
+        assert app.query_one("#input-shell").size.height >= 1
         assert view._body.size.height >= 8, view._body.size
         assert app.screen.virtual_size.height <= app.screen.size.height
 
@@ -2187,7 +2378,7 @@ async def test_the_page_renders_the_childs_messages_and_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_attempt_opens_and_selects_the_current_visible_row() -> None:
+async def test_historical_attempt_opens_current_identity_and_restores_root_row() -> None:
     session = FakeSession()
     manager = AsyncJobManager()
     current = AsyncJob(
@@ -2230,8 +2421,11 @@ async def test_historical_attempt_opens_and_selects_the_current_visible_row() ->
         panel = app._subagent_panel
         assert view.job_id == "current"
         assert panel is not None
+        assert not panel._rows  # a viewed child is not its own descendant
+        await pilot.press("escape")
+        await pilot.pause()
         assert list(panel._rows) == ["current"]
-        assert panel._rows["current"].current is True
+        assert panel._rows["current"].current is False
 
 
 @pytest.mark.asyncio
@@ -3849,12 +4043,21 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
 
 
 def _long_error_notice() -> dict[str, Any]:
-    """An error that wraps past a 62x24 body's viewport.
+    """An error that wraps past a 62x20 body's viewport.
 
     A two-line wrap still fits above the working line on a 9-row body, so
     sticky-tail following never bisects it. The glyph only sits above the
     fold when the notice itself is taller than the viewport-minus-tail,
     which is the D3 frame: first visible line is a hanging continuation.
+
+    Sized against the notice's REAL height. The first version of this text
+    wrapped to seven rows at the 57-cell body, and seven plus the gap and the
+    working line is exactly the nine-row viewport — the premise above then
+    held only because ``NoticeBlock`` was reserving ten rows for seven (a
+    stale box-model measurement, fixed in #625 by pinning the authored
+    height). The extra clause keeps the notice genuinely taller than the
+    viewport-minus-tail, so the landing has a row head SHORT of the tail to
+    snap to, which is what the two tests below are about.
     """
     return {
         "type": "notice",
@@ -3864,7 +4067,8 @@ def _long_error_notice() -> dict[str, Any]:
             "while calling edit on local_operator/tui/widgets/subagent_view.py "
             "with a payload that also failed validation on every subsequent "
             "field of the same call: path, old_text, new_text, replace_all, "
-            "and the trailing context the child included to justify the edit"
+            "and the trailing context the child included to justify the edit, "
+            "which the schema rejects as an unknown property on this tool"
         ),
     }
 
@@ -3887,7 +4091,7 @@ async def test_the_truncation_note_stays_in_the_viewport_when_the_body_scrolls()
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 22)) as pilot:
         view = await _open(pilot, app, job)
         for _ in range(8):
             await pilot.pause()
@@ -3938,7 +4142,18 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     monkeypatch: pytest.MonkeyPatch,
     late_batch_landing: bool,
 ) -> None:
-    """At 62x24 the first visible transcript line must be a row HEAD.
+    """At 62x20 the first visible transcript line must be a row HEAD.
+
+    Compact detail mode reclaims the disabled composer. At the former 24-row
+    fixture its larger viewport lands on the deliberate gap before the notice,
+    and after #625 pinned ``NoticeBlock`` to its authored height (8 rows here,
+    not the 10 a stale box-model measurement reserved) the 22-row fixture does
+    the same: the followed tail sits on the unowned gap row above the notice,
+    where there is no block head to snap to and the one-shot rightly stays
+    armed. 20 rows puts the tail one row INSIDE the notice again, which is
+    the bisected first glance this test exists to reject. Mutation: skip the
+    snap's ``scroll_to`` and this fails with ``landing sits 1 rows into a
+    block``.
 
     Sticky-tail following can bisect a wrapping notice so the glyph sits
     above the fold and the first glance is a hanging-indented continuation
@@ -3995,7 +4210,7 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 20)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)
@@ -4042,7 +4257,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
     ``main``, because the sibling test above asserts the landing and then stops
     looking.
 
-    This is that missing half. It opens the same 62x24 page, waits for the same
+    This is that missing half. It opens the same 62x20 page, waits for the same
     landing, then appends one live row — the ordinary thing a running child
     does — and requires the first visible line to still be a row head.
 
@@ -4074,7 +4289,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 20)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)

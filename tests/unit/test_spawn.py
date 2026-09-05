@@ -170,8 +170,6 @@ class TestCmuxArgv:
         assert workspace_argv("/opt/bin/cmux", launch) == [
             "/opt/bin/cmux",
             "new-workspace",
-            "--name",
-            "fork · Refactor the loader",
             "--cwd",
             "/Users/x/projects/thing",
             "--command",
@@ -245,11 +243,24 @@ class TestEmulatorArgv:
             "Ghostty.app",
             "--args",
             "--working-directory=/Users/x/projects/thing",
-            "-e",
-            "/Users/x/.local/bin/lop",
-            "--resume",
-            FORK_ID,
+            f"--initial-command=/Users/x/.local/bin/lop --resume {FORK_ID}",
         ]
+
+    def test_ghostty_macos_quotes_each_argument(self) -> None:
+        import shlex
+
+        argv = ("/Applications/Operator's Tools/lop", "--resume", "id ; $HOME $(pwd)")
+        launch = ForkLaunch(
+            session_id=FORK_ID,
+            executable=argv[0],
+            argv=argv,
+            cwd="/tmp/space and 'quotes'",
+            title="fork",
+        )
+        command = macos_argv(launch)
+        assert "-e" not in command
+        assert command[-2] == "--working-directory=/tmp/space and 'quotes'"
+        assert shlex.split(command[-1].removeprefix("--initial-command=")) == list(argv)
 
     def test_ghostty_on_linux_uses_the_cli(self, launch: ForkLaunch) -> None:
         assert linux_argv("/usr/bin/ghostty", launch) == [

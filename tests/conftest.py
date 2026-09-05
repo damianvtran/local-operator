@@ -31,18 +31,40 @@ from pathlib import Path
 
 import pytest
 
-#: Environment variables that steer credential resolution, config discovery or
-#: provider selection. Any of these leaking in from the developer's shell can
-#: change what the code under test does.
+#: Environment variables that steer credential resolution, config discovery,
+#: provider selection — or NAME A REAL-MACHINE RESOURCE. Any of these leaking
+#: in from the developer's shell can change what the code under test does, or
+#: point it at something live. ``tests/unit/test_ambient_env_isolation.py``
+#: walks the package for every variable production code reads and fails when
+#: one is neither here nor explained there; add new entries HERE when the
+#: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # A runtime child spawned by the mobile daemon carries its session id,
+    # provider, model and cwd here. A test suite run from inside such a
+    # session (agents do this) inherited LOP_MOBILE_CHILD_RESUME and created
+    # THAT id inside its store (QA round 1 of #645).
+    "LOP_MOBILE_CHILD_RESUME",
+    "LOP_MOBILE_CHILD_PROVIDER",
+    "LOP_MOBILE_CHILD_MODEL",
+    "LOP_MOBILE_CHILD_CWD",
+    "LOP_MOBILE_PASSWORD",
+    # The calling cmux workspace/surface. A headless fork e2e test inherited
+    # these through an isolated HOME and renamed the operator's LIVE window
+    # (#648). Nothing in a test may address a real pane.
+    "CMUX_WORKSPACE_ID",
+    "CMUX_SURFACE_ID",
+    "CMUX_PANEL_ID",
+    "CMUX_TAB_ID",
+    "CMUX_SOCKET",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this
@@ -179,6 +201,29 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_implicit_local_discovery(monkeypatch):
+    """Keyless discovery must not read a developer's default-port runtimes.
+
+    Activation now refreshes live capacity, unlike a hosted catalogue cache.
+    Explicit test clients and configured random-port HTTP fixtures remain real;
+    an implicit preset lookup gets the ordinary unavailable-server fallback.
+    """
+    from local_operator.model import discovery
+    from local_operator.providers.local import LOCAL_PRESETS, resolve_base_url
+
+    fetch = discovery.fetch_models
+
+    def isolated(provider_id, **kwargs):
+        if provider_id in LOCAL_PRESETS and kwargs.get("client") is None:
+            endpoint = resolve_base_url(provider_id, override=kwargs.get("base_url"))
+            if endpoint == LOCAL_PRESETS[provider_id][1]:
+                return None
+        return fetch(provider_id, **kwargs)
+
+    monkeypatch.setattr(discovery, "fetch_models", isolated)
+
+
+@pytest.fixture(autouse=True)
 def reset_store_maintenance() -> Iterator[None]:
     """Give every test a process that has not yet swept the session store.
 
@@ -265,3 +310,21 @@ def terminal_output(tmp_path) -> Iterator[Path]:
         os.dup2(saved, 2)
         os.close(saved)
         sink.close()
+
+
+@pytest.fixture(autouse=True)
+def fresh_served_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no model selector recorded as served.
+
+    ``failover._SERVED_SELECTORS`` is process-wide by design — a served id is
+    proof the id exists for every session in the process — which makes it
+    cross-test state: any test that streams a success on ``openai/gpt-4o``
+    would turn a later test's flat unknown-model 400 on that id into a
+    catalogue flap and re-ask it three times instead of aborting at once.
+    Several suites drive ``stream_with_failover``, so the reset lives here
+    rather than in one test module. Tests that need served evidence set it
+    explicitly, which is also the honest way to state that precondition.
+    """
+    import local_operator.providers.failover as failover
+
+    monkeypatch.setattr(failover, "_SERVED_SELECTORS", set())

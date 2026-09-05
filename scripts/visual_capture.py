@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -30,9 +31,17 @@ _SANDBOX: tempfile.TemporaryDirectory[str] | None = None
 
 
 def isolate_capture() -> None:
-    """Call before app imports: config and caches independently consult HOME."""
+    """Call before app imports: config and caches independently consult HOME.
+
+    Prefer ``import scripts.probe_isolation`` as the FIRST import of a
+    script — it does this on import and refuses if any ``local_operator``
+    module is already loaded, which is the failure this function cannot
+    catch (an app imported above the call). Kept for the scripts that
+    already call it; a script that imported ``probe_isolation`` first is
+    already sandboxed and this is a no-op.
+    """
     global _SANDBOX
-    if _SANDBOX is not None:
+    if _SANDBOX is not None or "scripts.probe_isolation" in sys.modules:
         return
     _SANDBOX = tempfile.TemporaryDirectory(prefix="lop-visual-")
     os.environ["HOME"] = _SANDBOX.name

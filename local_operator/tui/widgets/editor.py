@@ -1203,7 +1203,7 @@ DEFAULT_PLACEHOLDER = "Message Local Operator…"
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
 #: being ignored is how to get a composer that accepts them.
-READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
+READ_ONLY_PLACEHOLDER = "Read-only · esc back"
 
 #: What the composer says while the `/btw` aside card owns it — what the FIELD
 #: does, in ``DEFAULT_PLACEHOLDER``'s shape, and nothing about how to leave.
@@ -2348,7 +2348,12 @@ class Editor(TextArea):
                 # Deferred like every other escape meaning, so `⌥←` with the
                 # model list open moves by word instead of closing the list and
                 # nudging one character (ux round 1, U3).
-                self._defer_escape(self._model_picker.close)
+                #
+                # `dismiss`, not `close`: the text survives, so the next key's
+                # pre-routing resync sees the same `/model …` and would reopen
+                # the list (and re-announce it) — dismissal is what makes the
+                # resync decline until the query changes.
+                self._defer_escape(self._model_picker.dismiss)
                 event.stop()
                 event.prevent_default()
                 return
@@ -2367,37 +2372,23 @@ class Editor(TextArea):
                 event.stop()
                 event.prevent_default()
                 return
-            if (
-                key == "d"
-                and not self._model_picker.query_text()
-                and self._model_picker.navigated()
-            ):
-                # `d` SAVES the highlighted row as the boot default (#369).
-                #
-                # Gated on an EMPTY query, which is the whole reason this is
-                # safe here: every printable key in this picker belongs to the
-                # filter, so `d` typed while narrowing (`/model d` → deepseek)
-                # must keep filtering. Only once the query is empty is `d` free
-                # to be an action, and that is exactly the state a user is in
-                # after arrowing to a row they already found.
-                #
-                # ...and gated on the user having NAVIGATED the list, because an
-                # empty query is ALSO the state one keystroke into typing
-                # `/model default <p>/<id>`: the picker opens on `/model ` with
-                # the current model highlighted, and the `d` of `default` was
-                # eaten as "save this row" — a silent config write of the
-                # current model, then a switch to a model named `efault …`
-                # (UX round 1, U8; QA Q4). Arrowing to a row is what says "this
-                # one"; typing straight after the space says "I am spelling a
-                # subcommand", and the letter goes to the composer.
-                row = self._model_picker.highlighted()
-                if row is not None:
-                    handler = getattr(self.app, "_persist_default_from_picker", None)
-                    if callable(handler):
-                        handler()
-                        event.stop()
-                        event.prevent_default()
-                        return
+            # NO printable key is an action in this picker, and `d` in
+            # particular must not become one again. It briefly saved the
+            # highlighted row as the boot default (#369), gated on an empty
+            # query so that `/model d` → deepseek kept filtering. The gate
+            # worked and the affordance still had to go: a key that filters in
+            # one state and writes config in another is a mode the user cannot
+            # see, so the first `d` of a model they were about to type landed
+            # as a config write on whatever row the cursor happened to be on.
+            # The two supported routes to a default are both explicit and both
+            # undoable by re-reading them — `/model default` and the
+            # `/settings` model rows — and they are what `app.PERSIST_HINT`
+            # advertises. Do not re-add a key here; #369's ambiguity is closed
+            # by `/model default` writing again, not by a keystroke.
+            #
+            # (#624 had narrowed the key further with a `navigated()` gate on
+            # the picker so the `d` of a typed `default` was not eaten; that
+            # gate and the picker flag behind it went with the key.)
             if key in ("tab", "enter"):
                 row = self._model_picker.highlighted()
                 if row is not None:
@@ -5587,14 +5578,22 @@ class Editor(TextArea):
         if argument is None:
             if self._model_picker.is_open():
                 self._model_picker.close()
+            # Leaving `/model …` expires an Esc, exactly as `CommandPicker.sync`
+            # forgets its dismissal when the caret leaves slash context: the
+            # next entry into the argument is a fresh opening.
+            self._model_picker.forget_dismissal()
             self._picker_phase_at_last_sync = self._picker_phase()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
-        else:
-            self._model_picker.open(argument)
-            # Transition only. Posting per keystroke would re-fetch every provider
-            # for each character the user types into the query.
+        elif self._model_picker.open(argument):
+            # Transition only, and only a REAL one. Posting per keystroke would
+            # re-fetch every provider for each character the user types into
+            # the query; posting on a declined open (the picker holding an Esc
+            # for this same query) announced a list that never appeared, once
+            # per Esc-then-edit cycle, and the app printed the persist-hint
+            # notice for each (UX review round 2, U8). This pre-routing sync
+            # runs on EVERY key, so that decline is the common case after Esc.
             self.post_message(ModelQueryOpened())
         # Recorded after both list branches so a later caret-only move can
         # tell whether the parse PHASE changed (#393 reopen vs. an

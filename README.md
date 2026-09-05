@@ -129,8 +129,14 @@ commands, `/exit` quits.
   <img src="./static/tui-welcome.png" alt="The Local Operator welcome screen with rotating tips and the composer ready for a first prompt" width="720">
 </p>
 
-Prefer a fully local model? Install [Ollama](https://ollama.com/download),
-pull a model, and point the agent at it:
+Prefer a local model? Start [LM Studio](https://lmstudio.ai), load a chat model,
+and enable its server in the Developer tab. Inside Local Operator, enter
+`/login lmstudio` to choose the endpoint and model without command-line setup.
+`/login` also offers Ollama, vLLM, llama.cpp, and a generic compatible server.
+See the [local-provider guide](docs/LOCAL_PROVIDERS.md).
+
+Existing CLI configuration still works for a model installed in
+[Ollama](https://ollama.com/download):
 
 ```bash
 lop --hosting ollama --model qwen2.5:14b
@@ -190,7 +196,7 @@ current session's cost live).
 
 | Command | What it does |
 | --- | --- |
-| `/model` | Switch model for this session; `/model default` saves it for new ones |
+| `/model` | Switch model for this session; `/model default` saves the current one for new ones, `/model saved` switches back to it (`/settings` sets it too) |
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
 | `/fast` | Toggle fast mode where the provider sells one — the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
@@ -229,7 +235,10 @@ current session's cost live).
 
 One agent, your choice of brain. OAuth providers sign in through the browser
 and use your existing subscription; API-key providers prompt once and store
-the key locally; Ollama runs models on your own hardware.
+the key locally. Local servers use the same model picker and can be configured
+in the app with `/login`, including endpoints and optional masked API tokens.
+See [Local and self-hosted providers](docs/LOCAL_PROVIDERS.md) for setup,
+metadata overrides, desktop-app support, and server-specific limitations.
 
 | Provider | Access |
 | --- | --- |
@@ -244,7 +253,8 @@ the key locally; Ollama runs models on your own hardware.
 | Mistral | `MISTRAL_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` — one key, many models |
 | Radient | `RADIENT_API_KEY` — automatic per-step model selection |
-| Ollama | Local, no key, no network |
+| LM Studio, Ollama, vLLM, llama.cpp | User-operated server; optional token |
+| OpenAI-compatible | Explicit server URL; optional token; MLX/LocalAI/proxy escape hatch |
 
 ```bash
 lop login              # list login-capable providers
@@ -308,6 +318,24 @@ background workers, then keeps working while they run. Each worker is
 addressable: peek at its transcript, send it a note, ask it a question, steer
 it onto a different course, pause it, or resume it later — all without
 burning its attention on status meetings.
+
+Opening a worker shows its own live todo list and its direct children, not the
+root session's plan or unrelated workers. Click a child to inspect it; `Esc`
+returns one parent at a time, `[` / `]` cycle peers, and `c` opens the first
+child. The reader stays read-only. At shorter terminal heights the disabled
+composer is collapsed so the transcript, child controls, and plan remain useful;
+`ctrl+t` and `ctrl+g` expose the scrollable full plan and child list.
+
+Attached terminals fetch child details only while that worker is open. A plan
+that has not arrived is labeled **Loading todos**; an empty fetched plan says
+**No todos**. Older owners, unavailable history, or a child plan exceeding
+128 KiB of serialized JSON show **Todos unavailable** rather than a partial
+list. The full plan stays on the owner; this limit does not truncate the todo
+store or prevent attaching to the root session. Child plans are not copied into
+the root's durable frontend checkpoint. After an owner restart, saved child
+plans and the recorded child hierarchy/status remain inspectable, but the
+in-memory tool-event window is gone; attached child pages do not yet page the
+full saved transcript and continue to report that history limitation.
 
 **Roles are capability boundaries, not just prompts.** A subagent launched as
 `reviewer` carries vetted review guidance *and loses the tools to edit code*
@@ -493,8 +521,15 @@ Exit code 0 on success — pipeline-friendly.
 
 ```bash
 pip install "local-operator[server]"
-lop serve                 # http://localhost:1111, docs at /docs
+lop serve                 # http://127.0.0.1:1111, docs at /docs
 ```
+
+The legacy HTTP API has no authentication and defaults to loopback. Keep it
+away from untrusted clients; an explicit `--host` can widen the bind only when
+you provide access controls in front. This is separate from the authenticated
+mobile relay. See [API filesystem boundaries](./docs/API_FILESYSTEM_BOUNDARIES.md)
+for fresh-ID profile imports, workspace-confined edit reads and live editor
+buffers.
 
 **Phone access** — an optional session daemon lets you watch and steer
 your sessions from your phone. See

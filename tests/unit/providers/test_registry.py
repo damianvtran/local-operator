@@ -130,10 +130,10 @@ def test_test_provider_is_mock_wire() -> None:
     assert definition.wire == "mock"
 
 
-def test_list_login_providers_excludes_keyless_hosts() -> None:
+def test_list_login_providers_includes_local_setup_but_not_test_host() -> None:
     ids = {p.id for p in list_login_providers()}
     assert {"openai", "anthropic", "kimi", "xai", "xai-oauth"} <= ids
-    assert "ollama" not in ids
+    assert {"ollama", "lmstudio", "vllm", "llamacpp", "openai-compatible"} <= ids
     assert "test" not in ids
 
 

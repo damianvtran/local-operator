@@ -218,6 +218,12 @@ class RemoteSession:
         self._desktop_can_notify = False
         self._desktop_seen = 0.0
         self._client: AttachClient | None = None
+        #: The pid of the runtime this viewer is dialed into, ``None`` while
+        #: cold or between owners. Read by the TUI's startup-cleanup notice to
+        #: tell "MY runtime removed sessions" from "some other launch did":
+        #: the record on disk names the removing pid, and the viewer attached
+        #: to that runtime is the one that should announce (UX round 3, U14).
+        self._runtime_pid: int | None = None
         #: Where a runtime for this session should be started. Only a cold
         #: viewer needs it (an attached one inherits the runtime's own cwd);
         #: ``cold()`` sets the real value.
@@ -299,6 +305,10 @@ class RemoteSession:
         self._approval_handler: ApprovalGate | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
+        self._gates_detached = False
+        # Snapshot creation is not retryable: navigation must retire the UI,
+        # not close the response channel after the owner has begun a copy.
+        self._snapshot_clients: dict[AttachClient, int] = {}
         # One ask card keeps its request id while advancing through questions.
         # The question index is therefore part of the gate identity: request id
         # alone made Q2 look like a duplicate of Q1 and stranded the owner gate.
@@ -1099,6 +1109,7 @@ class RemoteSession:
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
+        self._runtime_pid = record.pid
         loop = asyncio.get_running_loop()
         self._frontend_future = loop.create_future()
 
@@ -1576,6 +1587,8 @@ class RemoteSession:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
+        if self._gates_detached:
+            return
         if pending is None:
             pending = _pending_request(self.frontend_state.pending_gate)
         if pending is None or self._gate_task is not None:
@@ -1656,6 +1669,7 @@ class RemoteSession:
     # -- owner loss ---------------------------------------------------------
 
     def _on_disconnected(self, _reason: str) -> None:
+        self._runtime_pid = None
         if self._disposed or self._recovering:
             return
         # A disconnect that follows OUR stop request (or arrives after the
@@ -1917,7 +1931,12 @@ class RemoteSession:
         the page can say so instead of rendering the child as empty.
         """
         client = self._client
-        if client is None:
+        store = self._frontend_store
+        if client is None or store is None:
+            return False
+        epoch = store.state.epoch
+        identity = next((job for job in store.state.jobs if job.id == job_id), None)
+        if identity is None:
             return False
         try:
             await client.watch_job(job_id)
@@ -1928,11 +1947,14 @@ class RemoteSession:
         rows: list[dict[str, Any]] = []
         offset = 0
         base_seq: int | None = None
+        details: Mapping[str, Any] = {}
         try:
             while True:
                 payload = await client.job_trajectory(job_id, offset=offset)
                 if not isinstance(payload, Mapping):
                     return False
+                if offset == 0:
+                    details = payload
                 page = [row for row in (payload.get("rows") or []) if isinstance(row, dict)]
                 page_base = payload.get("base_seq")
                 page_base = page_base if isinstance(page_base, int) else None
@@ -1950,13 +1972,35 @@ class RemoteSession:
                     break
         except (ConnectionError, RuntimeError):
             return False
-        store = self._frontend_store
-        if store is None:
-            return False
+        current = next((job for job in store.state.jobs if job.id == job_id), None)
+        if (
+            self._client is not client
+            or self._frontend_store is not store
+            or store.state.epoch != epoch
+            or current is None
+            or current.session_id != identity.session_id
+        ):
+            return False  # detached/reconnected/resumed while the request was in flight
         # Into the canonical state, where the live append stream will extend it
         # from here; see ``FrontendStateStore.seed_job_trajectory``.
         if not store.seed_job_trajectory(job_id, rows):
             return False
+        detail_sequence = details.get("detail_sequence")
+        if (
+            details.get("detail_job_id") == job_id
+            and details.get("detail_epoch") == epoch
+            and isinstance(detail_sequence, int)
+            and "todos" in details
+        ):
+            todos = details["todos"]
+            if todos is None or isinstance(todos, list):
+                store.seed_job_todos(
+                    job_id,
+                    todos,
+                    epoch=epoch,
+                    sequence=detail_sequence,
+                    session_id=details.get("detail_session_id"),
+                )
         self._apply_frontend_facades(store.state)
         return True
 
@@ -2006,6 +2050,11 @@ class RemoteSession:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def runtime_pid(self) -> int | None:
+        """Pid of the runtime this viewer is attached to; ``None`` while cold."""
+        return self._runtime_pid
 
     @property
     def agent_id(self) -> str:
@@ -2114,6 +2163,44 @@ class RemoteSession:
         if answer and on_delta is not None:
             on_delta(answer)
         return answer
+
+    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+        """The owner serializes the copy; a viewer never raw-copies a live store."""
+        await self._ensure_bound()
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError("session is reconnecting; retry /fork when it is ready")
+        self._snapshot_clients[client] = self._snapshot_clients.get(client, 0) + 1
+        try:
+            return await client.fork_snapshot(message)
+        except RuntimeError as error:
+            if "unknown op" in str(error):
+                raise RuntimeError("this owner cannot fork; update it and retry /fork") from error
+            raise
+        finally:
+            remaining = self._snapshot_clients[client] - 1
+            if remaining:
+                self._snapshot_clients[client] = remaining
+            else:
+                del self._snapshot_clients[client]
+                if self._disposed or self._client is not client:
+                    client.close()
+
+    async def detach_viewer_gates(self) -> None:
+        """Withdraw this UI's waiters without answering the owner's questions.
+
+        A fork switch must stop the answer bridge BEFORE the app clears its
+        approval widgets. Clearing first resolves those widgets as denied, which
+        would silently reject an original session's pending tool on departure.
+        The next attach recreates the bridge from the unchanged owner state.
+        """
+        # A sibling frontend may settle Q1 while detach awaits cancellation.
+        # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
+        self._gates_detached = True
+        task, self._gate_task = self._gate_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.
@@ -2447,6 +2534,12 @@ class RemoteSession:
         client = self._client
         if client is None or not client.connected:
             return "no runtime attached"
+        if self._snapshot_clients:
+            # The connection dispatches requests serially. Waiting for a retire
+            # reply behind a held copy blocks navigation until BOTH RPCs time
+            # out, losing the very result its socket lease protects. A copy is
+            # ongoing work, never evidence of an unused runtime; keep it alive.
+            return "fork snapshot is still in progress"
         ask = getattr(client, "retire_if_pristine", None)
         if not callable(ask):
             return "client cannot ask for retirement"
@@ -2466,7 +2559,10 @@ class RemoteSession:
             # interrupts adoption halfway through and strands the lease winner.
             self._recovery_task.cancel()
         if self._client is not None:
-            self._client.close()
+            if self._client not in self._snapshot_clients:
+                self._client.close()
+            # A pending snapshot owns the final close, including failure and
+            # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
 
 

@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import field_validator, model_validator
 
+from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
 from local_operator.evaluation.adapters.api import (
     AckResult,
     AdapterResult,
@@ -269,6 +270,7 @@ class AdapterSupervisor:
 
     def __init__(self, selector: AdapterSelector, process: subprocess.Popen[bytes]) -> None:
         self.selector = selector
+        self.action_surface = LEGACY_ACTION_SURFACE
         self.process = process
         self.pgid = process.pid
         self.stdout_tail = _Tail()
@@ -399,6 +401,7 @@ class AdapterSupervisor:
         if result.selector != self.selector:
             await self.terminate()
             raise SupervisionError("adapter handshake selector differs")
+        self.action_surface = result.metadata.capabilities.action_surface()
         return result
 
     async def terminate(self) -> None:
@@ -748,6 +751,11 @@ class VerifiedAdapterSession:
         if current is None:
             raise SupervisionError("execute has no current observation")
         params.action_batch.validate_for(current)
+        # Known unsupported input has not touched the worker and must not enter
+        # the ambiguous-mutation poison path. Legacy/fake supervisors fail closed
+        # for the new action until their handshake explicitly advertises it.
+        surface = getattr(self._supervisor, "action_surface", LEGACY_ACTION_SURFACE)
+        surface.validate_batch(params.action_batch)
         self._ensure_usable()
         result = await self._mutating_call(
             "execute",

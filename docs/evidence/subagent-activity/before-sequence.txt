@@ -1,0 +1,19 @@
+=== BEFORE: child trajectory (boundary events) ===
+  message_start role=user
+  turn_start
+  message_start role=assistant
+  message_end role=assistant
+  tool_execution_start tool=bash
+  tool_execution_end tool=bash
+  turn_end
+  turn_start
+  message_start role=assistant
+  message_update delta='Here '
+  message_update delta='is the '
+  message_update delta='answer.'
+  message_end role=assistant
+  turn_end
+  agent_end
+=== BEFORE: SubagentProgressEvent.progress sequence (parent stream) ===
+  responding -> responding -> thinking -> Sleeping briefly -> thinking -> responding -> thinking
+=== BEFORE: final job.status=completed latest_details.progress='thinking'

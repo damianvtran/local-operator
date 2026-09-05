@@ -1660,7 +1660,8 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
         assert zip_path.exists()
         # Import the agent (should create a new agent with a new id)
         imported_agent = registry.import_agent(zip_path)
-    assert imported_agent.id == agent.id
+    assert imported_agent.id != agent.id
+    assert registry.get_agent(agent.id) == agent
     assert imported_agent.name == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
     assert imported_agent.model == ""

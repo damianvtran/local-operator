@@ -1,0 +1,130 @@
+"""Capture the sequence of SubagentProgressEvent.progress values a real child emits.
+
+Usage: cd <worktree> && .venv/bin/python docs/evidence/subagent-activity/progress_capture.py.txt <label>
+
+Stands up a real parent Session (production subagent wiring: run_subagent,
+_make_relay, AsyncJobManager) with a scripted provider stream. The child does:
+
+  call 1: message_start -> tool-call delta only (no text) -> bash tool runs
+  call 2: message_start -> text deltas x3 -> message_end
+
+and prints every progress value relayed onto the parent stream, tagged with the
+child event that produced it, plus the job's latest_details snapshots.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+
+import tempfile  # noqa: E402
+
+from local_operator.harness.types import (  # noqa: E402
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    SubagentProgressEvent,
+)
+from local_operator.session.session import Session  # noqa: E402
+from local_operator.session.transcript import Transcript  # noqa: E402
+
+MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+BARRIER = asyncio.Event()
+
+
+class Scripted:
+    def __init__(self) -> None:
+        self.child_calls = 0
+
+    def __call__(self, request: ChatRequest, signal=None):
+        body = "\n".join(
+            m.text for m in request.messages if isinstance(m, Message) and m.role == "user"
+        )
+        is_child = "CHILD_PROMPT" in body and "background job" not in body
+
+        async def stream(req, sig=None):
+            if not is_child:
+                yield StreamTextDelta(delta="ack")
+                yield StreamEndEvent(stop_reason="stop")
+                return
+            self.child_calls += 1
+            if self.child_calls == 1:
+                # Model call in flight: message_start already fired before this.
+                await asyncio.sleep(0.05)
+                yield StreamToolCallDelta(
+                    index=0,
+                    id="t1",
+                    name="bash",
+                    argument_delta=json.dumps({"command": "sleep 0.1", "i": "Sleeping briefly"}),
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            await asyncio.sleep(0.05)
+            for piece in ("Here ", "is the ", "answer."):
+                yield StreamTextDelta(delta=piece)
+                await asyncio.sleep(0.02)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return stream(request, signal)
+
+
+async def main() -> None:
+    label = sys.argv[1] if len(sys.argv) > 1 else "run"
+    tmp = Path(tempfile.mkdtemp(prefix="lop-sa-evidence-"))
+    import os
+
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp / "config")
+    parent = Session(
+        model=MODEL,
+        stream_fn=Scripted(),
+        tools=[],
+        transcript=Transcript(tmp / "parent"),
+        system_blocks_provider=lambda: ["parent"],
+        cwd=str(tmp),
+        yolo=True,
+    )
+    await parent.async_init()
+    seen: list[str] = []
+
+    def on_event(event) -> None:
+        if isinstance(event, SubagentProgressEvent):
+            seen.append(event.progress)
+
+    parent.subscribe(on_event)
+    job_id = parent._launch_subagent(label="worker", prompt="CHILD_PROMPT do the thing")
+    await asyncio.wait_for(parent.jobs.settled_event(job_id).wait(), 20)
+    job = parent.jobs.get(job_id)
+    assert job is not None
+    # Pair each relayed progress with the child event that produced it, from the
+    # trajectory the same relay appends to (every child event lands there).
+    traj = job.trajectory or []
+    timeline = []
+    for rec in traj:
+        t = rec.get("type")
+        if t in ("message_start", "message_update", "message_end", "tool_execution_start",
+                 "tool_execution_end", "turn_start", "turn_end", "agent_end"):
+            extra = ""
+            if t == "message_update":
+                extra = f" delta={rec.get('delta')!r}"
+            elif t in ("tool_execution_start", "tool_execution_end"):
+                extra = f" tool={rec.get('tool_name')}"
+            elif t in ("message_start", "message_end"):
+                extra = f" role={rec.get('message', {}).get('role')}"
+            timeline.append(f"{t}{extra}")
+    print(f"=== {label}: child trajectory (boundary events) ===")
+    for line in timeline:
+        print("  " + line)
+    print(f"=== {label}: SubagentProgressEvent.progress sequence (parent stream) ===")
+    print("  " + " -> ".join(seen))
+    print(f"=== {label}: final job.status={job.status} latest_details.progress={job.latest_details.get('progress') if job.latest_details else None!r}")
+    await parent.dispose()
+
+
+asyncio.run(main())

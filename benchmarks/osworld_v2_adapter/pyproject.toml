@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lop-osworld-v2-adapter"
-version = "0.1.1"
+version = "0.1.2"
 description = "OSWorld 2.0 evaluation adapter for local-operator"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -46,11 +46,17 @@ osworld = [
 [project.entry-points."local_operator.evaluation_adapters.v1"]
 osworld-v2 = "lop_osworld_v2_adapter:create"
 
+[tool.setuptools]
+# Preserve the upstream Apache notice with the byte-identical runtime helper
+# package; gated task classes remain exclusively in the pinned workspace.
+license-files = ["OSWORLD-LICENSE"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 lop_osworld_v2_adapter = ["py.typed"]
+evaluation_examples = ["UPSTREAM.json"]
 
 [tool.uv]
 # OSWorld declares ``requests~=2.31.0`` while local-operator requires

@@ -36,7 +36,7 @@ jobs:
     permissions:
       contents: write  # upload the zip as a release asset
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need history to diff the release tag against the previous tag and
           # decide whether extension/ changed.
@@ -79,7 +79,7 @@ jobs:
         with:
           version: 11.22.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: ${{ steps.ext-changed.outputs.changed == 'true' }}
         with:
           node-version: '24'
@@ -112,7 +112,7 @@ jobs:
 
       - name: Attach the extension zip to the GitHub Release
         if: ${{ steps.ext-changed.outputs.changed == 'true' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.ext-build.outputs.asset }}
 
@@ -127,7 +127,7 @@ jobs:
       skip_build: ${{ steps.tag-check.outputs.skip_build }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -139,7 +139,7 @@ jobs:
           echo "Release tag detected: $CURRENT_TAG"
           echo "skip_build=false" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         with:
           python-version: "3.12"
@@ -196,7 +196,7 @@ jobs:
 
     steps:
       - name: Retrieve release distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-dists
           path: dist/

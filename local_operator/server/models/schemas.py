@@ -938,7 +938,8 @@ class AgentEditFileRequest(BaseModel):
     Attributes:
         hosting: The hosting service to use for the edit.
         model: The model to use for the edit.
-        file_path: The path to the file to edit.
+        file_path: The workspace path, or display identity when content is supplied.
+        file_content: Optional live editor buffer; an empty string is a valid buffer.
         edit_prompt: The prompt for the edit.
         selection: The selection to edit.
         attachments: The attachments to use for the edit.
@@ -946,7 +947,17 @@ class AgentEditFileRequest(BaseModel):
 
     hosting: str = Field(..., description="The hosting service to use for the edit.")
     model: str = Field(..., description="The model to use for the edit.")
-    file_path: str = Field(..., description="The path to the file to edit.")
+    file_path: str = Field(
+        ...,
+        description="Workspace file path, or display identity when file_content is supplied.",
+    )
+    file_content: Optional[str] = Field(
+        None,
+        description=(
+            "Live editor buffer. When supplied (including an empty string), the server does "
+            "not read file_path. When omitted or null, reads are confined to the agent workspace."
+        ),
+    )
     selection: Optional[str] = Field(None, description="The selection to edit.")
     edit_prompt: str = Field(..., description="The prompt for the edit.")
     attachments: Optional[List[str]] = Field(

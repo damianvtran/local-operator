@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
@@ -1448,6 +1448,7 @@ class AgentRegistry:
         Import an agent from a ZIP file.
 
         The ZIP file should contain agent state files with an agent.yml file.
+        Every import receives a fresh local ID; archive IDs never select storage.
         The current working directory will be reset to local-operator-home.
         For security, serialized execution context (`context.pkl`) is not imported.
 
@@ -1484,8 +1485,14 @@ class AgentRegistry:
                 with open(agent_yml_path, "r", encoding="utf-8") as f:
                     agent_data = yaml.safe_load(f)
 
-                # Create a new agent with the imported data
-                agent_id = agent_data["id"]
+                if not isinstance(agent_data, dict):
+                    raise ValueError("Invalid agent metadata in agent.yml")
+
+                # An archive describes a profile, not a destination on this host.
+                # Ignore its identity even when it looks like a valid local UUID:
+                # preserving one would allow a normal import to destroy an agent.
+                agent_id = str(uuid.uuid4())
+                agent_data["id"] = agent_id
                 agent_data["current_working_directory"] = default_agent_cwd()
                 # Older profile bundles duplicated the final conversation turn
                 # into agent.yml. History files are ignored below, but leaving
@@ -1500,47 +1507,57 @@ class AgentRegistry:
                 if "model" in agent_data:
                     del agent_data["model"]
 
-                # Save the updated agent.yml
+                # Validate before allocating anything in the registry. Malformed
+                # profiles must not leave partially imported metadata behind.
+                try:
+                    imported_agent = AgentData.model_validate(agent_data)
+                except ValidationError as exc:
+                    raise ValueError("Invalid agent metadata in agent.yml") from exc
+
                 with open(agent_yml_path, "w", encoding="utf-8") as f:
-                    yaml.dump(agent_data, f, default_flow_style=False)
+                    yaml.dump(imported_agent.model_dump(), f, default_flow_style=False)
 
-                # Create the agent directory in the registry
                 agent_dir = self.agents_dir / agent_id
-                # Always overwrite the agent directory if it exists
-                if agent_dir.exists():
-                    shutil.rmtree(agent_dir)
-                agent_dir.mkdir(parents=True, exist_ok=True)
+                # mkdir is an exclusive reservation, not an exists/check pair:
+                # even a UUID collision, dangling symlink or concurrent import
+                # must fail closed rather than replace an existing destination.
+                if agent_id in self._agents:
+                    raise ValueError("Import destination already exists; retry the import")
+                try:
+                    agent_dir.mkdir(mode=0o700)
+                except FileExistsError as exc:
+                    raise ValueError("Import destination already exists; retry the import") from exc
 
-                # Copy instruction files only. Conversation history, execution
-                # traces, learnings, schedules and pickled context are private
-                # to whoever authored the archive — even a hub listing that
-                # still carries them from an older build must not land in the
-                # importer's registry. ``context.pkl`` is also untrusted
-                # serialized code.
-                extracted_agent_dir = agent_yml_path.parent
-                for item in extracted_agent_dir.iterdir():
-                    if item.is_file():
-                        if item.name in self._EXPORT_SKIP_NAMES:
-                            logging.info(
-                                "Skipping imported %s (agent: %s)",
-                                item.name,
-                                agent_id,
-                            )
-                            continue
-                        shutil.copy2(item, agent_dir)
+                try:
+                    # Copy instruction files only. Conversation history, execution
+                    # traces, learnings, schedules and pickled context are private
+                    # to whoever authored the archive. ``context.pkl`` is also
+                    # untrusted serialized code.
+                    extracted_agent_dir = agent_yml_path.parent
+                    for item in extracted_agent_dir.iterdir():
+                        if item.is_file():
+                            if item.name in self._EXPORT_SKIP_NAMES:
+                                logging.info(
+                                    "Skipping imported %s (agent: %s)",
+                                    item.name,
+                                    agent_id,
+                                )
+                                continue
+                            shutil.copy2(item, agent_dir)
 
-                # Create a new AgentData object directly from the data
-                agent_data = AgentData.model_validate(agent_data)
+                    # Imported profiles start with empty history; persistence stays
+                    # on the same path as a locally created profile.
+                    self.save_agent(imported_agent)
+                except Exception:
+                    # Only this invocation's exclusively reserved directory can
+                    # reach cleanup. A pre-existing directory or symlink fails
+                    # above, outside this block, and is never removed.
+                    self._agents.pop(agent_id, None)
+                    if agent_dir.exists():
+                        shutil.rmtree(agent_dir)
+                    raise
 
-                # Save the agent to the registry. Conversation / learnings are
-                # intentionally NOT seeded: an imported profile is an
-                # instruction set, and pretending it has a prior conversation
-                # with the importer is how private history used to leak across
-                # the hub.
-                self.save_agent(agent_data)
-
-                # Return the agent data
-                return agent_data
+                return imported_agent
 
             except zipfile.BadZipFile:
                 raise ValueError("Invalid ZIP file")

@@ -119,7 +119,7 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "credential"}
+_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "fork_snapshot", "credential"}
 
 
 def _accepts_locality(fn: Any) -> bool:
@@ -1624,6 +1624,24 @@ class RuntimeServer:
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data."""
         h = self._handle
+        if op == "fork_snapshot":
+            # Fork destinations are resumed from this machine's session store.
+            # A foreign viewer must not receive a local id it cannot reach, nor
+            # select another parent's path through the authenticated owner.
+            if locality != "local":
+                raise ValueError("fork requires a terminal on the session's machine")
+            if set(frame) - {"op", "req", "message"}:
+                raise ValueError("fork_snapshot accepts only a message")
+            message = frame.get("message", "")
+            if not isinstance(message, str):
+                raise ValueError("fork message must be text")
+            snapshot = getattr(h, "fork_snapshot", None)
+            if not callable(snapshot):
+                raise ValueError("this owner cannot fork; update it and retry /fork")
+            result = snapshot(message)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         if op == "slash_result":
             run = getattr(h, "run_slash_authoritative", None)
             if not callable(run):

@@ -22,6 +22,7 @@ import yaml
 
 from local_operator import settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
 
 
@@ -48,7 +49,13 @@ def _consumer_defaults() -> dict[str, object]:
         CONNECTIVITY_MAX_RETRIES,
         RetrySettings,
     )
-    from local_operator.session.retention import DEFAULT_REAP_UNUSED
+    from local_operator.session.cleanup import (
+        DEFAULT_ENABLED,
+        DEFAULT_MAX_INACTIVE_DAYS,
+        DEFAULT_MAX_SESSIONS,
+        DEFAULT_MAX_TOTAL_BYTES,
+        DEFAULT_REMOVE_EMPTY,
+    )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
     from local_operator.session.runtime.owned import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.spawn.policy import (
@@ -80,7 +87,11 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.fallbackChains": dict(retry.fallback_chains),
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
-        "session.reap_unused": DEFAULT_REAP_UNUSED,
+        "session.cleanup.enabled": DEFAULT_ENABLED,
+        "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,
+        "session.cleanup.max_inactive_days": DEFAULT_MAX_INACTIVE_DAYS,
+        "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
+        "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
         "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -106,6 +117,11 @@ def _consumer_defaults() -> dict[str, object]:
     for key, value in DEFAULT_CONFIG.values.items():
         if not isinstance(value, dict):
             consumers.setdefault(key, value)
+    from local_operator.providers.local import DEFAULT_MODEL_OVERRIDES, LOCAL_PRESETS
+
+    for provider, (_name, endpoint, _url) in LOCAL_PRESETS.items():
+        consumers[f"providers.{provider}.base_url"] = endpoint
+        consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     return consumers
 
 
@@ -211,6 +227,140 @@ def test_display_flag_round_trips_through_the_reader(
     assert settings_get("display.shimmer") is False
 
 
+def _sample_value(setting: settings_io.Setting) -> object:
+    """A valid, NON-default value for ``setting``, so the round trip cannot
+    pass by reading back the default it never wrote."""
+    from local_operator.settings_io import Kind
+
+    if setting.kind is Kind.BOOL:
+        return not bool(setting.default)
+    if setting.kind is Kind.INT:
+        base = int(setting.default or 0)
+        candidate = base + 1
+        if setting.maximum is not None and candidate > setting.maximum:
+            candidate = base - 1
+        return candidate
+    if setting.kind is Kind.FLOAT:
+        base = float(setting.default or 0)
+        candidate = base + 0.5
+        if setting.maximum is not None and candidate > setting.maximum:
+            candidate = base - 0.5
+        return candidate
+    if setting.kind is Kind.ENUM:
+        for choice in setting.resolved_choices:
+            if choice.value != setting.default:
+                return choice.value
+        return setting.default
+    if setting.kind is Kind.LIST:
+        return list(setting.members[:1]) or []
+    if setting.kind is Kind.TEXT:
+        if setting.validate_value is not None:
+            # A validated TEXT setting rejects an arbitrary probe by design
+            # (a typo must not disable a working endpoint). Each validator
+            # needs a valid, non-default sample here; a new validator without
+            # one fails loudly on KeyError rather than silently skipping the
+            # round trip.
+            return _VALID_TEXT_SAMPLES[setting.validate_value]
+        return "round-trip-probe"
+    return setting.default
+
+
+_VALID_TEXT_SAMPLES: dict[object, str] = {
+    local_providers.validate_endpoint_setting: "http://127.0.0.1:9/v1",
+    local_providers.model_overrides: '{"round-trip-probe":{"context_window":8192}}',
+}
+
+
+_ROUND_TRIPPABLE = [
+    s
+    for s in settings_io.SETTINGS
+    if s.kind not in (settings_io.Kind.READONLY, settings_io.Kind.CASCADE)
+]
+
+
+@pytest.mark.parametrize("setting", _ROUND_TRIPPABLE, ids=lambda s: s.key)
+def test_every_setting_round_trips_through_the_consumer_accessor(
+    setting: settings_io.Setting, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``write_setting(v)`` then read it back through the accessor the
+    CONSUMING code uses — never through ``settings_io.read_setting``, which
+    shares the writer's notion of the path and would agree with it by
+    construction.
+
+    The consumer accessor is decided by the registry's own declaration:
+
+    - a ONE-element path is a top-level key, read with
+      ``ConfigManager.get_config_value(path[0])`` (this covers the flat-dotted
+      ``display.*`` keys — the literal dotted string is the top-level key);
+    - a longer path is nested, read with ``ConfigManager.get_nested_value(path)``.
+
+    The #576 reaper's opt-out failed because its consumer called
+    ``get_config_value("session.reap_unused")`` — the flat accessor — for a
+    setting the registry declared NESTED. This test would have failed on that
+    setting by name, and it fails today for any consumer that reads through
+    the wrong accessor for its declared shape.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    value = _sample_value(setting)
+    settings_io.write_setting(manager, setting, value)
+
+    fresh = ConfigManager(tmp_path)  # what a consumer in another process sees
+    if len(setting.path) == 1:
+        assert fresh.get_config_value(setting.path[0], _MISSING) == value, setting.key
+        assert fresh.get_nested_value(setting.path, _MISSING) == value, setting.key
+    else:
+        assert fresh.get_nested_value(setting.path, _MISSING) == value, setting.key
+        # And the FLAT accessor on the dotted key must see NOTHING: if it did,
+        # a consumer reading the wrong way would appear to work.
+        assert (
+            fresh.get_config_value(setting.key, _MISSING) is _MISSING
+        ), f"{setting.key}: nested setting is also visible under the flat dotted key"
+
+
+_MISSING = object()
+
+
+def test_no_consumer_reads_a_nested_setting_through_the_flat_accessor() -> None:
+    """Source-level belt for the round trip: no ``get_config_value("a.b")``
+    call in the package names a key the registry declares as NESTED."""
+    import re
+    from pathlib import Path as _Path
+
+    package = _Path(settings_io.__file__).parent
+    nested = {s.key for s in settings_io.SETTINGS if len(s.path) > 1}
+    pattern = re.compile(r"""get_config_value\(\s*["']([^"']+\.[^"']+)["']""")
+    offenders: list[str] = []
+    for path in package.rglob("*.py"):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in pattern.finditer(line):
+                if match.group(1) in nested:
+                    offenders.append(
+                        f"{path.relative_to(package.parent)}:{number}: {match.group(0)}"
+                    )
+    assert not offenders, "\n".join(offenders)
+
+
+def test_cleanup_settings_are_nested_under_session_cleanup(manager: ConfigManager) -> None:
+    """The five cleanup rows share ``cleanup.CLEANUP_PATH`` with the consumer,
+    and a write lands as a nested ``session: {cleanup: {...}}`` block."""
+    from local_operator.session.cleanup import CLEANUP_PATH, policy_from_config
+
+    for key in (
+        "session.cleanup.enabled",
+        "session.cleanup.max_sessions",
+        "session.cleanup.max_inactive_days",
+        "session.cleanup.max_total_bytes",
+        "session.cleanup.remove_empty",
+    ):
+        assert settings_io.BY_KEY[key].path[:2] == CLEANUP_PATH, key
+    settings_io.write_setting(manager, settings_io.BY_KEY["session.cleanup.max_inactive_days"], 9)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["session"]["cleanup"]["max_inactive_days"] == 9
+    assert "session.cleanup.max_inactive_days" not in stored
+    assert policy_from_config(ConfigManager(manager.config_dir)).max_inactive_days == 9
+
+
 def test_nested_write_preserves_siblings(manager: ConfigManager) -> None:
     """``_load_config`` back-fills missing TOP-LEVEL keys only, so a partial
     ``retry`` block never regains its siblings. A replacing writer would delete
@@ -301,7 +451,7 @@ def test_validation_rejects_unknown_enum_and_list_members(manager: ConfigManager
 
 
 def test_retired_settings_cannot_be_written(manager: ConfigManager) -> None:
-    setting = settings_io.BY_KEY["session_retention_max_sessions"]
+    setting = settings_io.BY_KEY["conversation_length"]
     with pytest.raises(ValueError):
         settings_io.write_setting(manager, setting, 5)
     with pytest.raises(ValueError):
@@ -832,3 +982,16 @@ def test_an_unresolvable_choice_list_says_so_rather_than_offering_nothing() -> N
     assert problem is not None
     assert "could not be read" in problem
     assert not problem.endswith(": ")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("false", False), ("no", False), ("banana", False), ("yes", True), (1, True), ([], False)],
+)
+def test_bool_settings_read_strictly(tmp_path: Path, raw: object, expected: bool) -> None:
+    """``read_setting`` on a BOOL goes through ``strict_bool`` (R2-4), so the
+    page cannot paint ``on`` for a value the consumer reads as off."""
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"session": {"cleanup": {"enabled": raw}}})
+    setting = settings_io.BY_KEY["session.cleanup.enabled"]
+    assert settings_io.read_setting(ConfigManager(tmp_path), setting) is expected

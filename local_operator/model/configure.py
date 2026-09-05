@@ -488,6 +488,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     )
 
     canonical = "test" if hosting == "noop" else hosting
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
+
+    if canonical in LOCAL_PROVIDER_IDS:
+        return local_model_spec(canonical, model_name)
     if info is None:
         try:
             info = resolve_model_info(canonical, model_name)
@@ -865,6 +869,20 @@ def validate_model(hosting: str, model: str, api_key: SecretStr | str) -> bool:
     # it: any run that reaches a client pays it then.
     import requests
 
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
+    if hosting in LOCAL_PROVIDER_IDS:
+        key = api_key.get_secret_value() if isinstance(api_key, SecretStr) else str(api_key)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        response = requests.get(
+            resolve_base_url(hosting) + "/models",
+            headers=headers,
+            timeout=10,
+            allow_redirects=False,
+        )
+        return response.status_code == 200 and _check_model_exists_payload(
+            "openai", model, response.json()
+        )
     descriptor = VALIDATION_ENDPOINTS.get(hosting)
     if descriptor is None:
         return True
@@ -1874,6 +1892,12 @@ def resolve_model_info(
     resolve many models in one process. The copy is a few dozen field assignments
     against the ~25ms JSON parse this memo exists to avoid.
     """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_info
+
+    if provider in LOCAL_PROVIDER_IDS:
+        # Local arbitrary IDs are scoped to a configured endpoint, not the
+        # cloud memo's provider/id pair. Paint from the endpoint-scoped cache.
+        return local_model_info(provider, model_id)
     bucket = int(time.time() // DEFAULT_TTL_S)
     if provider == "openai":
         from local_operator.model.discovery import _cache_key
@@ -2206,8 +2230,8 @@ def configure_model(
     if definition is None:
         raise ValueError(f"Unsupported hosting platform: {hosting}")
 
-    if canonical == "ollama" and not model_name:
-        raise ValueError("Model is required for ollama hosting")
+    if definition.local_setup and not model_name:
+        raise ValueError(f"Model is required for {canonical} hosting")
     if not model_name:
         model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
 
@@ -2239,6 +2263,10 @@ def configure_model(
         model_info = resolve_model_info(canonical, model_name)
 
     spec = build_model_spec(canonical, model_name, model_info)
+    if definition.local_setup:
+        from local_operator.providers.local import local_model_info
+
+        model_info = local_model_info(canonical, model_name, spec=spec)
     # Sampling rides on the ModelSpec: the loop builds its ChatRequest without
     # temperature/top_p, so the wire clients fall back to ``request.model.*``.
     # Without this copy an agent's stored temperature (and the server's
@@ -4540,14 +4568,14 @@ class SessionStreamFn:
 
         if self._cache_lineage_id and request.prompt_cache_key is None:
             # The transcript directory name is stable for the session, so
-            # reusing it keeps every turn on the same provider cache without
+            # reusing it helps related turns find reusable cached prefixes without
             # coupling the harness loop to session storage. For a FORK this is
             # the PARENT's id (see ``_cache_lineage_id``): the fork replays a
             # byte-identical transcript, so it really is the same prefix, and a
             # routing/stickiness hint is exactly what should follow it. Without
             # the inheritance a fork's first request routes as a fresh prefix —
             # the same class of regression measured when this key was stripped
-            # entirely, which moved cache-read rates from ~97-98% to ~89-90%.
+            # entirely. It remains a routing hint, never a cache-hit guarantee.
             #
             # Only the OpenAI-shaped wire reads this key
             # (``OpenAICompatClient._build_responses_body``); Anthropic keys its

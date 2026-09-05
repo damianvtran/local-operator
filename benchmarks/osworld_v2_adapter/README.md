@@ -17,6 +17,16 @@ of the installed wheel — so it must be a *separate* distribution, or every
 harness release would invalidate the adapter pin. Isolation comes from the
 wheel + digest + isolated worker, not from the source's location.
 
+## Computer input capability
+
+Adapter 0.1.2 uses RPC 1.5 and explicitly advertises clipboard `paste_text`
+with caller-chosen keys and overwrite policy. Native `type` remains ASCII-only
+on this backend; Unicode requires the explicit paste action, never an automatic
+fallback. See [the negotiated computer-input contract](../../docs/benchmarks/computer-input.md)
+for limits, clipboard ownership, application semantics and frozen-environment
+compatibility. Historical 0.1.1 environment examples below are not migration
+instructions: new proofs need a newly built wheel and exact selector pins.
+
 ## Prerequisite: the gated inputs, in a DURABLE root
 
 OSWorld 2.0's 108 task classes and its 4.2 GB of assets are **gated** Hugging
@@ -48,6 +58,49 @@ sha, every task file sha, task count, prepared checkout commit — and refuses
 records their manifest sha in `inputs.json`, and the adapter re-verifies the
 live root against it at every `reset_start`.
 
+## Runtime helper packaging and pre-allocation checks
+
+Upstream's pinned `osworld` wheel explicitly excludes `evaluation_examples`,
+but 16 of the 108 release tasks import its runtime helper. Task 010 therefore
+failed at `vendor_bridge.instantiate_task` before model spend, but **after** VM
+allocation. A working task 001 was not evidence of complete dependency packaging.
+
+The adapter wheel now owns the exact upstream namespace and three-file runtime
+closure: `evaluation_examples/__init__.py`, `task_class/__init__.py`, and
+`task_class/generated_task_utils.py`. They are byte-identical git objects from
+`d578d2d4e0dc82b43e270fdaa7fa89d9708cd154`, with SHA-256s in the wheel's
+`evaluation_examples/UPSTREAM.json` and the upstream Apache license in
+`OSWORLD-LICENSE` (also included in wheel metadata). The helper SHA-256 is
+`cf0945bc4cd15253631f41dfcd96ca0874116523f07fc34989cce2f23df1bbb0`.
+All three Python files and provenance are covered by the adapter's RECORD and
+`package_digest`. Do not reformat vendored source, install a namespace alias,
+add `PYTHONPATH`, or copy gated task classes into this package. To update the
+closure, audit all pinned task AST imports plus helper imports, copy the exact
+required upstream git objects and package ancestors, update provenance, and
+repeat the isolated import census. A release change is not a wildcard copy of
+`evaluation_examples` (which also contains task classes and setup scripts).
+
+Only when an AWS episode names its task at `reset_start`, before constructing
+or allocating its provider, the adapter parses that task and the packaged helper
+closure. Missing mandatory distributions or upstream runtime modules fail
+locally. This does not execute task code, import dependency package initialisers,
+run setup/evaluate, or scan anything on normal CLI/TUI startup. Stdlib imports
+are admitted; `TYPE_CHECKING` bodies are skipped; imports guarded by an import
+error handler are optional by upstream's contract. Third-party dynamic aliases
+(such as `requests.packages`) are checked by distribution import root, not as
+on-disk submodules. For pinned upstream package `from` imports, initializer
+source declarations distinguish required child modules from ordinary exported
+values; explicit re-exports also require their providing module. Initializers
+are parsed, never executed. This cheap static presence check is not a general
+Python execution or evaluator-correctness proof.
+
+The release census has 94 mandatory module paths with no missing dependency in
+the locked environment. Task 057 alone names absent `lpips`/`torch`, inside an
+explicit `try/except Exception` fallback; they are **optional**, not grounds to
+exclude that task or install heavyweight packages for tasks 010/080/103. All 108
+task modules loaded in a fresh isolated subprocess with network and process
+execution denied, inert controller settings, and no setup/evaluate calls.
+
 ## Build, lock, install
 
 ```sh
@@ -58,7 +111,8 @@ cd benchmarks/osworld_v2_adapter
 #    schema 1.2 the worker speaks).
 uv lock --upgrade-package local-operator   # writes uv.lock (committed)
 
-# 2. build the wheel
+# 2. build the adapter wheel, including the pinned runtime helper closure.
+#    No harness release/publish is needed for this adapter-only rebuild.
 uv build --wheel --out-dir dist/
 
 # 3. create the dedicated interpreter + install the locked set.
@@ -103,7 +157,9 @@ uv export --frozen --no-emit-project --extra osworld --no-hashes \
     -o "$VENV/build/requirements.locked.txt"
 sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
     "$VENV/build/requirements.locked.txt"   # macOS sed; GNU sed wants -i without ''
-uv pip install --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
+# The export is the full resolved closure. --no-deps preserves those rows and
+# the lock's requests override instead of re-resolving upstream's stale pin.
+uv pip install --no-deps --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
 
 # The one expected `uv pip check` incompatibility is the documented
 # requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from textual.widgets import Static
@@ -477,114 +477,6 @@ class TestForkRuntimeOwnership:
             "child-descendant"
         )
         assert descendant_resume.subagent_comms.session_dir_of("fork-job") is None
-
-
-class TestForkCmuxOwnership:
-    def test_parent_never_schedules_a_cmux_rename(self, tmp_path: Path, monkeypatch) -> None:
-        from local_operator.tui.app import OperatorApp
-
-        parent = _seed_parent(tmp_path)
-        scheduled: list[Any] = []
-        app = cast(
-            OperatorApp,
-            type(
-                "ForkNameHarness",
-                (),
-                {
-                    "_session": type("SessionStub", (), {"session_id": parent.name})(),
-                    "_fork_cmux_name": "",
-                    "run_worker": lambda self, awaitable, **kwargs: scheduled.append(awaitable),
-                },
-            )(),
-        )
-        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
-
-        OperatorApp._sync_fork_cmux_name(app, "Parent work")
-
-        assert scheduled == []
-        assert app._fork_cmux_name == ""
-
-    def test_fork_schedules_only_its_owned_target_rename(self, tmp_path: Path, monkeypatch) -> None:
-        from local_operator.tui.app import OperatorApp
-
-        _seed_parent(tmp_path)
-        fork_id = fork_session(tmp_path, PARENT_ID)
-        scheduled: list[Any] = []
-        app = cast(
-            OperatorApp,
-            type(
-                "ForkNameHarness",
-                (),
-                {
-                    "_session": type("SessionStub", (), {"session_id": fork_id})(),
-                    "_fork_cmux_name": "",
-                    "_fork_cmux_name_worker_running": False,
-                    "run_worker": lambda self, awaitable, **kwargs: scheduled.append(awaitable),
-                },
-            )(),
-        )
-        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
-
-        OperatorApp._sync_fork_cmux_name(app, "  Divergent   work ")
-
-        assert app._fork_cmux_name == "Divergent work"
-        assert len(scheduled) == 1
-        # The harness deliberately does not run the worker: argv construction is
-        # covered separately, and closing avoids a false un-awaited warning.
-        scheduled[0].close()
-
-    @pytest.mark.asyncio
-    async def test_out_of_order_requests_converge_on_the_latest_title(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        import asyncio
-
-        from local_operator.tui.app import OperatorApp
-
-        _seed_parent(tmp_path)
-        fork_id = fork_session(tmp_path, PARENT_ID)
-        started = asyncio.Event()
-        release = asyncio.Event()
-        applied: list[str] = []
-        tasks: list[asyncio.Task[None]] = []
-
-        async def to_thread(func, env, title, **kwargs):
-            if title == "Old title":
-                started.set()
-                await release.wait()
-            applied.append(title)
-            return True
-
-        app = cast(
-            OperatorApp,
-            type(
-                "ForkNameHarness",
-                (),
-                {
-                    "_session": type("SessionStub", (), {"session_id": fork_id})(),
-                    "_fork_cmux_name": "",
-                    "_fork_cmux_name_worker_running": False,
-                    "_config_values": lambda self: {},
-                    "run_worker": lambda self, awaitable, **kwargs: tasks.append(
-                        asyncio.create_task(awaitable)
-                    ),
-                },
-            )(),
-        )
-        monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
-        monkeypatch.setattr("local_operator.tui.app.asyncio.to_thread", to_thread)
-
-        OperatorApp._sync_fork_cmux_name(app, "Old title")
-        await started.wait()
-        OperatorApp._sync_fork_cmux_name(app, "Newest title")
-        OperatorApp._sync_fork_cmux_name(app, "Newest title")
-        assert len(tasks) == 1
-        release.set()
-        await tasks[0]
-
-        assert applied == ["Old title", "Newest title"]
-        assert app._fork_cmux_name == "Newest title"
-        assert app._fork_cmux_name_worker_running is False
 
 
 class TestTheClonedTranscriptIsLegalOnTheWire:
@@ -1088,7 +980,7 @@ class TestTheSwitchReceiptCannotNarrateTheWrongSession:
 
         source = inspect.getsource(OperatorApp._reload_session)
         assert (
-            "self._pending_fork_receipt = None" in source
+            "self._pending_fork_receipt = self._pending_fork_receipt, None" in source
         ), "the failed-transition branch does not drop the fork receipt"
 
 
@@ -1508,7 +1400,7 @@ class TestAPendingForkIsVisibleAndRevocable:
 
         source = inspect.getsource(OperatorApp._cmd_fork)
 
-        assert "esc to cancel" in source
+        assert "esc to stay here" in source
 
     def test_the_band_shows_a_pending_fork(self) -> None:
         from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT, StatusLine
@@ -1572,6 +1464,7 @@ def _band():
     band._approvals_auto = False
     band._approvals_always = False
     band._attention = False
+    band._failed = False
     band._active_seconds = 0.0
     band._turn_started_at = None
     band._spinner_index = 0

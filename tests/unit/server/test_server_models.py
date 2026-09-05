@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from local_operator.clients.ollama import OllamaClient, OllamaModelData
 from local_operator.clients.openrouter import (
     OpenRouterClient,
     OpenRouterListModelsResponse,
@@ -15,11 +14,12 @@ from local_operator.clients.openrouter import (
     OpenRouterModelPricing,
 )
 from local_operator.env import get_env_config
+from local_operator.model.discovery import DiscoveredModel
 from local_operator.server.app import app
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Create a test client for the FastAPI app, with the state it depends on.
 
     A bare ``TestClient(app)`` does NOT run the lifespan handler — that only
@@ -46,6 +46,11 @@ def client():
     # Restored afterwards so a lifespan-backed value from another test in the
     # same process is not clobbered — this fixture owns the value only for the
     # duration of its own test.
+    # Local runtime integration has its own owned-HTTP tests. Enumeration
+    # tests must not inspect whichever server a developer has running today.
+    monkeypatch.setattr(
+        "local_operator.server.routes.models.available_models", lambda *a, **kw: ([], "static")
+    )
     had_env_config = hasattr(app.state, "env_config")
     previous = getattr(app.state, "env_config", None)
     if not had_env_config or previous is None:
@@ -148,33 +153,17 @@ def test_list_providers_with_ollama_inactive(client):
         for provider_id in expected_providers:
             assert provider_id in provider_ids
 
-        # Verify Ollama provider is NOT present
-        assert "ollama" not in provider_ids
+        # Stopped servers remain discoverable so the desktop can configure them.
+        assert "ollama" in provider_ids
 
 
-def test_list_models_with_ollama_active(client, mock_credential_manager):
+def test_list_models_with_ollama_active(client, mock_credential_manager, monkeypatch):
     """Test the list_models endpoint with Ollama server active."""
-    # Mock the Ollama client to report that the server is healthy
-
-    patch.object(OllamaClient, "is_healthy", return_value=True).start()
-    patch.object(
-        OllamaClient,
-        "list_models",
-        return_value=[
-            OllamaModelData(
-                name="qwen-2.5:14b",
-                modified_at="2024-03-15T10:30:00Z",
-                size=4000000000,
-                digest="sha256:abc123",
-            ),
-            OllamaModelData(
-                name="phi-4:14b",
-                modified_at="2024-03-20T14:45:00Z",
-                size=5000000000,
-                digest="sha256:def456",
-            ),
-        ],
-    ).start()
+    rows = [DiscoveredModel(id="qwen-2.5:14b"), DiscoveredModel(id="phi-4:14b")]
+    monkeypatch.setattr(
+        "local_operator.server.routes.models.available_models",
+        lambda provider, **kw: (rows if provider == "ollama" else [], "ok"),
+    )
 
     response = client.get("/v1/models")
     assert response.status_code == 200
@@ -202,8 +191,6 @@ def test_list_models_with_ollama_active(client, mock_credential_manager):
     assert phi is not None
     assert phi["name"] == "phi-4:14b"
     assert phi["provider"] == "ollama"
-
-    patch.stopall()
 
 
 def test_list_models_with_ollama_inactive(client, mock_credential_manager):
