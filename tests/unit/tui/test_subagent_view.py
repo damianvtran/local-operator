@@ -3992,6 +3992,15 @@ def _long_error_notice() -> dict[str, Any]:
     sticky-tail following never bisects it. The glyph only sits above the
     fold when the notice itself is taller than the viewport-minus-tail,
     which is the D3 frame: first visible line is a hanging continuation.
+
+    Sized against the notice's REAL height. The first version of this text
+    wrapped to seven rows at the 57-cell body, and seven plus the gap and the
+    working line is exactly the nine-row viewport — the premise above then
+    held only because ``NoticeBlock`` was reserving ten rows for seven (a
+    stale box-model measurement, fixed in #625 by pinning the authored
+    height). The extra clause keeps the notice genuinely taller than the
+    viewport-minus-tail, so the landing has a row head SHORT of the tail to
+    snap to, which is what the two tests below are about.
     """
     return {
         "type": "notice",
@@ -4001,7 +4010,8 @@ def _long_error_notice() -> dict[str, Any]:
             "while calling edit on local_operator/tui/widgets/subagent_view.py "
             "with a payload that also failed validation on every subsequent "
             "field of the same call: path, old_text, new_text, replace_all, "
-            "and the trailing context the child included to justify the edit"
+            "and the trailing context the child included to justify the edit, "
+            "which the schema rejects as an unknown property on this tool"
         ),
     }
 
