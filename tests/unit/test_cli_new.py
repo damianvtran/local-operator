@@ -854,7 +854,9 @@ def test_main_interactive_tty_uses_tui(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
         # Recorded so the test can prove the CLI actually WIRED these. A fake
@@ -1065,7 +1067,9 @@ def test_main_preflight_missing_hosting_tty_enters_setup(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         # Prove the setup-state plumbing reached the app: the reconciliation
         # hook is wired so a first-run /login can take effect.
         seen["on_config_changed"] = on_config_changed
@@ -1121,7 +1125,9 @@ def test_main_preflight_unknown_hosting_tty_enters_setup(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         seen["launched"] = True
         return 0
 
@@ -1208,7 +1214,9 @@ def test_main_interactive_missing_api_key_warns_and_starts(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         await session_factory()
         return 0
 
@@ -1306,7 +1314,9 @@ def test_main_preflight_env_key_passes(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         seen.setdefault("provider_controller", provider_controller)
         await session_factory()
         return 0
@@ -1344,7 +1354,9 @@ def test_tui_flag_forces_tui_on_non_tty(
         provider_controller=None,
         resume_factory=None,
         on_config_changed=None,
+        warm_session_imports=True,
     ) -> int:
+        assert warm_session_imports is False, "CLI viewers must skip owner imports"
         seen.setdefault("provider_controller", provider_controller)
         seen["ran"] = True
         return 0

@@ -8675,7 +8675,13 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            self._run_slash_command(text, attachments)
+            operation = self._run_slash_command(text, attachments, _inline_remote=True)
+            if operation is not None:
+                # Stay in the worker that joined the bind at commitment time.
+                # Scheduling another worker lets the next prompt waiter send
+                # first. The runtime serializes this socket's requests through
+                # mutation completion, so send the committed mutation now.
+                await operation
 
         self.run_worker(run(), thread=False, group="warm-engage", exclusive=False)
 
@@ -14461,9 +14467,17 @@ class OperatorApp(App[None]):
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
-        self, text: str, attachments: Mapping[int, Marked] | None = None
-    ) -> None:
+        self,
+        text: str,
+        attachments: Mapping[int, Marked] | None = None,
+        *,
+        _inline_remote: bool = False,
+    ) -> Awaitable[None] | None:
         """Dispatch a typed slash command (with arguments) to its handler.
+
+        Ordinary callers schedule remote work and return None. The cold-bind
+        worker requests the SAME operation inline so queued commands reach the
+        owner before a later prompt can overtake an extra scheduling hop.
 
         ``attachments`` is the composer's index→image map at submit time, passed
         through so the two prompt-sending commands (``/team``/``/agent``) can
@@ -14590,7 +14604,18 @@ class OperatorApp(App[None]):
                 self._open_model_picker()
                 return
 
+            route_session = self._session
+            route_generation = getattr(self, "_frontend_session_generation", 0)
+
             async def run_remote_slash() -> None:
+                # A queued operation belongs to its committed session, and an
+                # already-sent operation's receipt must not paint a replacement
+                # opened by /new or /resume while the owner was answering.
+                if (
+                    self._session is not route_session
+                    or getattr(self, "_frontend_session_generation", 0) != route_generation
+                ):
+                    return
                 try:
                     typed_route = cast(
                         Callable[[str, str, Sequence[ImageContent]], Awaitable[Any]], remote_route
@@ -14598,10 +14623,20 @@ class OperatorApp(App[None]):
                     images = resolve_markers(arg, attachments or {})
                     outcome = await typed_route(command.removeprefix("/"), arg, images)
                 except Exception as error:
-                    self._system_notice(str(error), "warning")
+                    if (
+                        self._session is route_session
+                        and getattr(self, "_frontend_session_generation", 0) == route_generation
+                    ):
+                        self._system_notice(str(error), "warning")
                 else:
-                    self._render_authoritative_slash(command, arg, outcome, attachments)
+                    if (
+                        self._session is route_session
+                        and getattr(self, "_frontend_session_generation", 0) == route_generation
+                    ):
+                        self._render_authoritative_slash(command, arg, outcome, attachments)
 
+            if _inline_remote:
+                return run_remote_slash()
             self.run_worker(run_remote_slash(), thread=False, group="session")
             return
 
