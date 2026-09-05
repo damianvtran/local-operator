@@ -730,6 +730,13 @@ class EpisodeRunner:
                 return
             decision = await self._decide(current)
             batch = decision.action_batch
+            if decision.public_reply is not None:
+                # _decide_once has already redacted and published this reply.
+                # Keep it on the current observation through _close_turn so
+                # accepted replay cannot silently collapse back to actions.
+                self._turns[-1] = self._turns[-1].model_copy(
+                    update={"public_reply": decision.public_reply}
+                )
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 self._append_batch(batch, terminal="finish")
@@ -781,7 +788,10 @@ class EpisodeRunner:
         nothing -- a missing usage record leaves an unclosed operation and the
         bundle cannot reach a terminal.
         """
-        from local_operator.evaluation.runner.model import DecisionRejected
+        from local_operator.evaluation.runner.model import (
+            DecisionRejected,
+            ModelDecision,
+        )
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
         message_count = len(self._turns)
@@ -858,6 +868,17 @@ class EpisodeRunner:
         # not know one); the requested route is the honest stand-in because
         # nothing served was accepted.
         served_route = decision.route or self._spec.requested_route
+        response_artifact = None
+        if isinstance(decision, ModelDecision) and decision.public_reply is not None:
+            from local_operator.evaluation.runner.public_reply import (
+                redact_public_reply,
+            )
+
+            public_reply = redact_public_reply(decision.public_reply, self._redactions)
+            decision = decision.model_copy(update={"public_reply": public_reply})
+            response_artifact = self._publish(
+                public_reply.encode("utf-8"), media_type="application/json"
+            )
         self._append(
             "model_request",
             ModelRequestPayload(
@@ -886,6 +907,7 @@ class EpisodeRunner:
                 cache_read_tokens=decision.usage.cache_read_tokens,
                 cache_write_tokens=decision.usage.cache_write_tokens,
                 tool_call_count=decision.tool_call_count,
+                redacted_response=response_artifact,
             ),
         )
         self._append(
@@ -1617,6 +1639,9 @@ class EpisodeRunner:
             metadata={
                 **dict(spec.metadata),
                 "action_surface": canonical_bytes(self._action_surface.schema()).decode("utf-8"),
+                # Reply fields are NOT tools. Keep their advertised schema and
+                # identity separate, and absent for clients that never used it.
+                **getattr(self._model, "model_reply_metadata", {}),
             },
         )
 
