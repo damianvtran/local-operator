@@ -9,8 +9,10 @@ import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
+  isRepeatAsk,
   noticeForRejectedDecision,
   originPromptView,
+  preselectedScope,
   scopeLatchKey,
   scopeOptions,
   type DecidedOrigin,
@@ -47,8 +49,10 @@ let locallyPaired = false;
 // same race: `origin_decision` goes to the worker, but session storage and
 // /health keep echoing the prompt until that round-trip lands, so a render in
 // the window would resurrect the three buttons over a click that already took
-// effect. Keyed by origin so a different pending origin still prompts (A6).
-// See origin-flow.ts.
+// effect. Keyed by origin AND by the generation (entry id) it answered: a
+// same-origin sibling or a re-ask under a new generation is a live request
+// that must be shown, while an absent pending generation is this decision's
+// own echo (A6/U7). See origin-flow.ts, which owns the rule.
 let decidedOrigin: DecidedOrigin | null = null;
 
 // The origin the prompt is currently showing, whichever source supplied it.
@@ -80,6 +84,14 @@ let shownBroadKey: string | undefined;
 // the next click would grant the whole registrable domain (A1/U1). Options
 // are rebuilt only when the entry they describe actually changes.
 let scopeBuiltForEntryId: string | undefined;
+// Whether the option list currently on screen was built for a REPEAT ask.
+// Latched beside the option list rather than recomputed per render: the
+// decision that identifies a repeat is consumed by the render that first
+// shows the new generation, and a second storage event lands a render later
+// with nothing left to compare. Recomputing there cleared the banner while
+// the rebuild guard kept the preselected scope, so the card silently lost
+// half of the U9 fix.
+let scopeBuiltAsRepeatAsk = false;
 
 interface Health {
   extension_connected: boolean;
@@ -145,6 +157,7 @@ async function render(): Promise<void> {
     shownPromptId = "";
     decidedOrigin = null;
     scopeBuiltForEntryId = undefined;
+    scopeBuiltAsRepeatAsk = false;
   }
   // Hold the acknowledgement while session storage and /health still echo the
   // GENERATION the user just decided. Without this the echo redraws the full
@@ -157,8 +170,12 @@ async function render(): Promise<void> {
   // be shown, not swallowed as this decision's echo (A6/U7).
   const pendingEntryId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
   if (originPromptView(pendingOriginValue, decidedOrigin, pendingEntryId) === "ack") return;
-  // A different generation reached the user: the previous decision's latch is
-  // spent and must not linger to swallow a later echo comparison.
+  // A different generation reached the user. The latch is spent for echo
+  // suppression, but the decision it holds is still needed twice below: to
+  // preselect the scope the user just chose, and to mark the card as a repeat
+  // ask (U9). Captured here, then cleared, so no later render can treat it as
+  // a live echo.
+  const justDecided = decidedOrigin;
   decidedOrigin = null;
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
@@ -186,7 +203,15 @@ async function render(): Promise<void> {
     renderScopeSelect(
       selected ?? (pendingOriginValue ? { origin: pendingOriginValue } : undefined),
       scopeKey,
+      justDecided,
+      pendingOriginValue,
     );
+    // A repeat ask for a just-decided origin is otherwise indistinguishable
+    // from the request the user answered, and the ack that would confirm the
+    // first click is gone within a frame or two (U9). Read from the latch
+    // renderScopeSelect just set, so it survives the follow-up render exactly
+    // as the preselected scope does.
+    document.getElementById("origin-again")?.classList.toggle("hidden", !scopeBuiltAsRepeatAsk);
     shownBroadScope = selected?.broad?.scope;
     shownBroadKey = selected?.broad?.key;
     // A fresh prompt must arrive with live buttons even if a previous
@@ -421,6 +446,8 @@ function setOriginBusy(busy: boolean): void {
 function renderScopeSelect(
   entry: Pick<AccessQueueEntry, "origin" | "broad"> | undefined,
   entryId: string,
+  justDecided: DecidedOrigin | null = null,
+  pendingOrigin?: string,
 ): void {
   const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
   if (!select) return;
@@ -429,9 +456,10 @@ function renderScopeSelect(
     renderScopeDetail();
     return;
   }
-  const { options, defaultValue } = scopeOptions(entry);
+  const built = scopeOptions(entry);
+  scopeBuiltAsRepeatAsk = isRepeatAsk(pendingOrigin, justDecided);
   select.replaceChildren(
-    ...options.map((option) => {
+    ...built.options.map((option) => {
       const element = document.createElement("option");
       element.value = option.value;
       element.textContent = option.label;
@@ -439,7 +467,11 @@ function renderScopeSelect(
       return element;
     }),
   );
-  select.value = defaultValue;
+  // Never wider than the choice the user just made for this origin: a
+  // reflexive second click on a card that looks unchanged must not escalate
+  // (U9). preselectedScope falls back to the fail-closed default for anything
+  // that is not a repeat ask.
+  select.value = preselectedScope(built, pendingOrigin, justDecided);
   scopeBuiltForEntryId = entryId;
   renderScopeDetail();
 }

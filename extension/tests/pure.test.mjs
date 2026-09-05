@@ -201,34 +201,76 @@ test("normalizedSiteGrants refuses any record this build cannot preserve", async
   } finally { await module.close(); }
 });
 
-test("the ack latch holds a stale echo but never a new generation of the same origin", async () => {
+test("the ack latch: all eight prompt/ack transitions", async () => {
   const module = await load("src/popup/origin-flow.ts");
   try {
     const { originPromptView } = module.loaded;
-    const origin = "https://qa-app.qa.gominerva.com";
-    const decided = { origin, decision: "once", entryId: "gen-1" };
-    // The echo window: session storage and /health keep reporting the SAME
-    // generation until the worker round-trip lands. Redrawing the prompt there
-    // reads as "the click did not work" and invites a second click, which
-    // under the scope model lands on a select reset to the domain default and
-    // widens a deliberate "just this once" to the whole domain (A1/U1).
-    assert.equal(originPromptView(origin, decided, "gen-1"), "ack");
-    // A NEW generation for the same origin is a live request the user must be
-    // able to act on. `once` is spent on one navigation, so the same site
-    // re-prompting is designed behaviour; two live entries can also share an
-    // origin because dedupe is origin+requester, and once/deny resolve only
-    // the selected entry, so a sibling survives the click. Holding the ack
-    // there strands a live request behind "Site allowed." (A6/U7).
-    assert.equal(originPromptView(origin, decided, "gen-2"), "prompt");
-    assert.equal(originPromptView(origin, { ...decided, decision: "deny" }, "gen-2"), "prompt");
-    // A DIFFERENT origin is a genuinely new decision and must prompt.
-    assert.equal(originPromptView(origin, { origin: "https://other.example", decision: "once", entryId: "gen-1" }, "gen-1"), "prompt");
-    assert.equal(originPromptView(origin, null, "gen-1"), "prompt");
-    // The echo clearing retires the popup rather than holding a stale ack.
-    assert.equal(originPromptView(undefined, decided, "gen-1"), "none");
-    // The /health-only fallback carries no generation on either side, so it
-    // falls back to origin equality: exactly the U1 behaviour it had before.
-    assert.equal(originPromptView(origin, { origin, decision: "once", entryId: "" }, ""), "ack");
+    const A = "https://qa-app.qa.gominerva.com";
+    const B = "https://other.example";
+    const decided = { origin: A, decision: "once", entryId: "gen-1" };
+    // The full matrix. Requiring the two ids to be EQUAL passes the sibling
+    // case but fails the ordinary end of every real decision: the queue write
+    // fires render() at once while /health's pending_origin only clears after
+    // a websocket round-trip, so the popup sees a truthy origin with no entry.
+    // An ABSENT pending generation means "nothing distinguishes this from my
+    // own echo", not "mismatch" (A6).
+    const cases = [
+      ["U1 same-generation echo",        [A, decided, "gen-1"], "ack"],
+      ["A6 live same-origin sibling",    [A, decided, "gen-2"], "prompt"],
+      ["/health-only echo (no ids)",     [A, { ...decided, entryId: "" }, ""], "ack"],
+      ["real entry then /health echo",   [A, decided, ""], "ack"],
+      ["TTL sweep while ack is up",      [A, decided, undefined], "ack"],
+      ["different origin",               [B, decided, "gen-9"], "prompt"],
+      ["echo cleared",                   [undefined, decided, ""], "none"],
+      ["no decision made",               [A, null, "gen-1"], "prompt"],
+    ];
+    for (const [label, args, want] of cases) {
+      assert.equal(originPromptView(...args), want, label);
+    }
+    // Deny takes the same transitions: the copy is confidently wrong if a live
+    // re-ask is swallowed as "Site denied.".
+    assert.equal(originPromptView(A, { ...decided, decision: "deny" }, "gen-2"), "prompt");
+    assert.equal(originPromptView(A, { ...decided, decision: "deny" }, ""), "ack");
+  } finally { await module.close(); }
+});
+
+test("a re-ask never preselects a scope wider than the one just chosen", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { preselectedScope, scopeOptions, isRepeatAsk } = module.loaded;
+    const A = "https://qa-app.qa.gominerva.com";
+    const entry = { origin: A, broad: { scope: "domain", key: "gominerva.com" } };
+    const built = scopeOptions(entry);
+    assert.equal(built.defaultValue, "domain", "the broad default is what makes this dangerous");
+    // The card is byte-identical to the request just answered and the ack is
+    // gone within a frame or two, so a user who reads it as "my click did not
+    // register" clicks again. That second click must not hand over more than
+    // the first one did (U9).
+    for (const decision of ["once", "site", "domain"]) {
+      assert.equal(
+        preselectedScope(built, A, { origin: A, decision, entryId: "gen-1" }),
+        decision,
+        `a repeat ask after ${decision} must preselect ${decision}`,
+      );
+    }
+    // Not a repeat ask: the fail-closed default stands.
+    assert.equal(preselectedScope(built, A, null), "domain");
+    assert.equal(preselectedScope(built, A, { origin: "https://b.example", decision: "once", entryId: "g" }), "domain");
+    assert.equal(preselectedScope(built, undefined, { origin: A, decision: "once", entryId: "g" }), "domain");
+    // Deny carries no scope to repeat.
+    assert.equal(preselectedScope(built, A, { origin: A, decision: "deny", entryId: "g" }), "domain");
+    // A decision this entry cannot offer (a domain choice on an IP literal,
+    // after a worker restart drops `broad`) falls back rather than inventing
+    // an option that is not in the list.
+    const narrow = scopeOptions({ origin: "http://10.0.0.5:8080" });
+    assert.deepEqual(narrow.options.map((o) => o.value), ["site", "once"]);
+    assert.equal(preselectedScope(narrow, "http://10.0.0.5:8080", { origin: "http://10.0.0.5:8080", decision: "domain", entryId: "g" }), "site");
+    // The card must also SAY it is asking again; the preselect protects a user
+    // who reads nothing, the banner explains it to one who does.
+    assert.equal(isRepeatAsk(A, { origin: A, decision: "once", entryId: "gen-1" }), true);
+    assert.equal(isRepeatAsk(A, null), false);
+    assert.equal(isRepeatAsk(A, { origin: "https://b.example", decision: "once", entryId: "g" }), false);
+    assert.equal(isRepeatAsk(undefined, { origin: A, decision: "once", entryId: "g" }), false);
   } finally { await module.close(); }
 });
 

@@ -332,6 +332,22 @@ input:disabled {
 .actions {
   margin-top: 16px;
 }
+/* The repeat-ask line. Deliberately NOT the danger register: nothing has gone
+ * wrong and the previous decision was honoured, so this is information the
+ * user needs to read the card correctly, not an alarm. It takes the --sunken
+ * well the trough uses, in the body face rather than monospace, because it is
+ * prose about the request rather than the authority being granted (U9). */
+.again {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--sunken);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
 /* The all-sites line is the popup's only surface for the mode where the
  * consent gate is off entirely, so it inherits the options page's danger
  * vocabulary instead of rendering as the quietest text in the card (D6), and

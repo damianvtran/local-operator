@@ -165,10 +165,59 @@ export function originPromptView(
 ): "prompt" | "ack" | "none" {
   if (!pendingOrigin) return "none";
   if (!decided || decided.origin !== pendingOrigin) return "prompt";
-  // Normalize both sides: a missing id and an empty id are the same "no
-  // generation to compare" state, and they must not read as a mismatch, or
-  // the /health-only path would prompt over its own ack and reopen U1.
-  return (decided.entryId ?? "") === (pendingEntryId ?? "") ? "ack" : "prompt";
+  // An ABSENT pending generation means "nothing here distinguishes this from
+  // my own echo", never "mismatch". Requiring equality broke the ordinary end
+  // of every real decision: the queue write fires render() immediately, while
+  // /health's pending_origin only clears after a websocket round-trip, so the
+  // popup sees a truthy origin with no entry and resurrected the prompt over a
+  // click that had already taken effect. That render has no entry, so the
+  // select falls back to `site` — re-presenting a deliberate "once" as a
+  // standing grant, which is worse than the U1 it reopened. The TTL sweep
+  // lands in the same state. Only a DIFFERENT, present generation is a live
+  // request that must be shown (A6).
+  const pending = pendingEntryId ?? "";
+  return pending === "" || pending === (decided.entryId ?? "") ? "ack" : "prompt";
+}
+
+/** The scope to preselect when a prompt is rendered.
+ *
+ * A new generation for an origin the user JUST decided is byte-identical to
+ * the request they answered — same heading, host, body and position — and the
+ * acknowledgement that would confirm the first click lives 0-81ms in the
+ * ordinary two-session case, under the ~100ms floor at which a change reads as
+ * feedback. So the card looks untouched, the user clicks again, and the reset
+ * select hands over `domain` when they chose `once` twice. Carrying their
+ * previous choice makes the reflexive second click grant what they granted a
+ * second ago instead of the widest option (U9).
+ *
+ * Only ever NARROWS relative to the default: an unrelated prompt, or a decision
+ * whose scope this entry cannot offer (a `domain` choice on an IP literal),
+ * falls through to the fail-closed default. `deny` carries nothing — there is
+ * no scope to repeat. */
+export function preselectedScope(
+  options: ScopeOptions,
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): ScopeOption["value"] {
+  if (!decided || !pendingOrigin || decided.origin !== pendingOrigin) return options.defaultValue;
+  if (decided.decision === "deny") return options.defaultValue;
+  const repeat = options.options.find((option) => option.value === decided.decision);
+  return repeat ? repeat.value : options.defaultValue;
+}
+
+/** Is this prompt a REPEAT ask for an origin the user just decided?
+ *
+ * The card is otherwise byte-identical to the request they answered, and the
+ * acknowledgement is gone within a frame or two, so without a positive signal
+ * the only available reading is "my click did not register" (U9). The banner
+ * this drives is the signal; it is not a substitute for narrowing the
+ * preselected scope, because a user who reads nothing still must not
+ * over-grant. */
+export function isRepeatAsk(
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): boolean {
+  return !!decided && !!pendingOrigin && decided.origin === pendingOrigin;
 }
 
 /** The identity the scope select's option list is cached against.

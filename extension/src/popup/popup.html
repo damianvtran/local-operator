@@ -163,6 +163,15 @@
           </div>
           <p class="label" id="origin-host-label">Site</p>
           <p class="trough" id="origin-host"></p>
+          <!-- Shown only when this prompt is a NEW request for the origin the
+               user just decided. Without it the card is byte-identical to the
+               request they answered and the acknowledgement is gone within a
+               frame or two, so "my click did not register" is the only
+               available reading and a second click follows (U9). The scope
+               preselect is the safeguard; this is the explanation. -->
+          <p class="again hidden" id="origin-again" role="status">
+            This site is asking again. Your last answer has already been used.
+          </p>
           <div class="queue-nav" aria-label="Site approval queue">
             <button id="origin-previous" class="btn compact" aria-label="Previous site request">Previous</button>
             <button id="origin-next" class="btn compact" aria-label="Next site request">Next</button>
