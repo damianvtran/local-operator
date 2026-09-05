@@ -14,6 +14,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
 )
 from local_operator.mobile.types import AskOptionWire, PendingRequest
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
@@ -387,3 +388,64 @@ async def test_a_refused_sync_leaves_the_viewer_cold_and_holds_no_connection(
             await viewer.dispose()
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The recovery loop's dial-failure branch must leave no trace of the try.
+
+    ``_dial`` stamps ``_runtime_pid`` from the record on ENTRY, before it can
+    know the dial will fail, and installs ``self._client`` only as its LAST
+    statement (it closes the client it built on every raise path). So what a
+    failed redial leaks is not a socket — it is the IDENTITY: the branch
+    ``continue``d straight to the next pass, so a viewer that never bound kept
+    reporting ``runtime_pid`` as the pid it merely tried, where the property
+    promises None while cold, and ``_go_cold`` does not clear it either.
+
+    That pid is not cosmetic. ``take_unannounced_cleanup`` compares it against
+    the pid that wrote the cleanup record to decide WHICH terminal announces a
+    cleanup, so a stale match makes this viewer claim a notice belonging to a
+    runtime it never attached to, and the terminal that should have printed it
+    stays blank (review round 1, F3).
+
+    Driven through the real loop: a live-looking record whose control port
+    refuses is exactly what recovery sees while a runtime is going away.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    viewer = await RemoteSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never_take_over
+    )
+    try:
+        dead = registry.SessionRecord(
+            pid=424242,
+            kind="tui",
+            session_id="s1",
+            conversation_name="gone",
+            cwd=str(tmp_path),
+            model_label="test/model",
+            control_port=1,  # nothing listens here, so `_dial` raises
+            control_key="k",
+            protocol=5,
+            capabilities=[FRONTEND_CAPABILITY],
+        )
+
+        # Feed the loop that unreachable record instead of the registry, then
+        # let it take a few passes and go cold on its own deadline.
+        monkeypatch.setattr(
+            "local_operator.session.remote.find_owner_record",
+            lambda *_a, **_k: (dead, None),
+        )
+        monkeypatch.setattr("local_operator.session.remote.COLD_FALLBACK_S", 0.4)
+        await viewer._recover_owner()
+
+        assert viewer._client is None, "a failed dial installs no client"
+        assert viewer.is_cold is True
+        assert (
+            viewer.runtime_pid is None
+        ), "a viewer that never bound must not report the pid it failed to dial"
+        assert viewer._frontend_future is None, "the abandoned sync wait must not survive"
+    finally:
+        await viewer.dispose()

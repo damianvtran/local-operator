@@ -329,3 +329,40 @@ async def test_abandon_closes_without_reporting_owner_loss(config: Path) -> None
         assert r.attach_clients() == 0
     finally:
         r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one(
+    config: Path,
+) -> None:
+    """Locks the pump's clause ORDER, which is load-bearing and invisible.
+
+    ``ConnectionResetError`` and ``BrokenPipeError`` are ``ConnectionError``
+    subclasses, and ``ConnectionError`` is an ``OSError``. So the pump's three
+    handlers are ordered reset -> ConnectionError -> OSError, and every one of
+    them is reachable only because of that order: hoisting the bare
+    ``ConnectionError`` clause above the reset clause would silently retag a
+    dead transport as "a frame this client refused", which is the opposite
+    diagnosis — the host redials for a fresh snapshot instead of reporting the
+    owner as gone. Nothing about the source says that, so this pins it
+    (review round 1, F4).
+    """
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        # A transport death, raised out of the pump's read exactly as a peer
+        # RST would surface it.
+        assert client._reader is not None
+        client._reader.set_exception(ConnectionResetError("peer reset"))
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not disconnected:
+            await asyncio.sleep(0.05)
+        assert disconnected == ["owner connection reset"]
+        assert not client.connected
+    finally:
+        r.close()

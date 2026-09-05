@@ -1814,6 +1814,24 @@ class RemoteSession:
                     try:
                         await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):
+                        # ``_dial`` closes the client it built on every raise
+                        # path and installs ``self._client`` only as its last
+                        # statement, so a failed redial leaks no socket. What it
+                        # DOES leave is the identity it stamped on entry:
+                        # ``_runtime_pid = record.pid`` (and a pending
+                        # ``_frontend_future``) for a runtime this viewer never
+                        # attached to. That outlives the pass — ``_go_cold``
+                        # does not clear it either — so a viewer that never
+                        # bound reports ``runtime_pid`` as a live pid where the
+                        # property promises None while cold, and
+                        # ``take_unannounced_cleanup`` reads that pid to decide
+                        # whether THIS viewer owns the cleanup notice: a stale
+                        # match claims another runtime's notice and blanks the
+                        # terminal that should have shown it (review round 1,
+                        # F3). Discarding here keeps the whole loop on one
+                        # rule — a pass that did not bind leaves no trace of
+                        # the runtime it tried.
+                        self._discard_rejected_client()
                         await asyncio.sleep(delay)
                         delay = min(delay * 1.7, 0.5)
                         continue
