@@ -985,13 +985,30 @@ class EvidenceWriter:
         expected_sha256: str | None = None,
         expected_byte_count: int | None = None,
     ) -> EvidenceArtifactRef:
+        return self._publish_artifact(
+            source,
+            media_type=media_type,
+            expected_sha256=expected_sha256,
+            expected_byte_count=expected_byte_count,
+        )
+
+    def _publish_artifact(
+        self,
+        source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
+        *,
+        media_type: str,
+        expected_sha256: str | None = None,
+        expected_byte_count: int | None = None,
+        scoring_details: bool = False,
+    ) -> EvidenceArtifactRef:
         with self._thread_lock:
             self._ensure_open()
             if self._recovery_only:
                 raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
-            if marker.state != "open":
-                raise EvidenceTerminal("artifact publication is closed after finalization begins")
+            expected_state = "finalizing" if scoring_details else "open"
+            if marker.state != expected_state:
+                raise EvidenceTerminal("artifact publication is closed in this phase")
             stream: Iterable[bytes]
             if isinstance(source, (bytes, bytearray, memoryview)):
                 stream = (bytes(source),)
@@ -1274,6 +1291,7 @@ class EvidenceWriter:
         self,
         payload: ScoringResultPayload,
         *,
+        details_source: bytes | None = None,
         monotonic_ns: int | None = None,
         wall_time_ms: int | None = None,
     ) -> EventRecord:
@@ -1299,12 +1317,28 @@ class EvidenceWriter:
                 or starts[0].scoring_operation_id != payload.scoring_operation_id
             ):
                 raise EvidenceBundleInvalid("scoring result does not match scoring start")
-            return self._append_locked(
+            event = self._build_event(
                 "scoring_result",
                 payload,
                 monotonic_ns=monotonic_ns,
                 wall_time_ms=wall_time_ms,
             )
+            if details_source is not None:
+                details = payload.score.details
+                if details is None:
+                    raise EvidenceBundleInvalid("scoring detail bytes require a score detail ref")
+                # The evaluator runs only AFTER durable scoring_start. Ordinary
+                # publication stays closed: this one exception is bound to the
+                # validated, exactly-once scoring receipt and its asserted ref.
+                # Reuse the same confinement, redaction, media and fsync path.
+                self._publish_artifact(
+                    details_source,
+                    media_type=details.media_type,
+                    expected_sha256=details.sha256,
+                    expected_byte_count=details.byte_count,
+                    scoring_details=True,
+                )
+            return self._persist_prevalidated_event(event)
 
     def seal(self, draft: OutcomeDraft) -> OutcomeSeal:
         with self._thread_lock:

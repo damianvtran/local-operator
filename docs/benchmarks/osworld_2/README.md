@@ -10,14 +10,13 @@ which this document cross-references rather than duplicates. For the harness's
 own cost and throughput measurements — a different subject — see
 [`docs/BENCHMARKS.md`](../../BENCHMARKS.md).
 
-**Status at time of writing (2026-09-02): no score exists.** One paid episode
-has been run; it failed on its first decision, and the two suite-wide numbers
-this apparatus is designed to produce (per-task binary completion, aggregate
-completion over the 108 tasks) have never been measured. Everything below
-describes an apparatus that is built and partly exercised, not a result.
-[Status and honest limitations](#status-and-honest-limitations) states exactly
-what has and has not been done, and it is the section to read first if the
-question is "can I trust a number from this?".
+**Historical baseline (2026-09-02):** one paid episode had failed on its first
+decision and no score existed at that point. The dated observations under
+[Status and honest limitations](#status-and-honest-limitations) preserve that
+baseline, not the current episode count. See [the matched-model pilot ledger](MODEL_PILOT.md)
+for subsequent attempts, current apparatus validation and reference caveats.
+Neither an individual score nor the offline checks below establish a full-suite
+benchmark result.
 
 ## 1. The benchmark
 
@@ -63,11 +62,28 @@ disk against the pin above and refuses, naming the path, on any mismatch.
 An episode's score comes from the task's own upstream `evaluate()` and is
 mapped by `scoring.score_to_artifact` on a **scored-or-raise** contract:
 
-- exact `0.0` → `binary=0`; exact `1.0` → `binary=1`;
-- any other in-range value → `partial_ppm = round(v * 1_000_000)` (the
-  protocol's portable-metadata subset excludes floats; V2's `conj: "avg"`
-  and `"sum"` evaluators produce genuine fractions, so this path is real);
-- NaN, infinity, out-of-range, non-numeric, or a missing evaluator → **raise**.
+- every valid score records both metrics: `binary=1` only for exact raw `1.0`,
+  otherwise `binary=0`, and `partial_ppm = round(v * 1_000_000)`;
+- a near miss can round to `partial_ppm=1000000` while remaining `binary=0`;
+  partial reward rounding never promotes binary completion;
+- the full upstream return value is retained as bounded canonical JSON in
+  `score.details`, including any returned checkpoint, safety or error fields.
+  A scalar return cannot recover checkpoint data upstream already discarded;
+- NaN, infinity, out-of-range, non-numeric, missing evaluator, or invalid or
+  over-budget detail data → **raise**.
+
+The worker stages the raw detail bytes. The runner verifies them, then the
+writer publishes them through its existing confinement, redaction, media and
+fsync checks before committing the exactly-once scoring receipt. Ordinary
+artifact publication remains closed during finalization; only the validated
+score receipt authorizes this narrow exception. Publication failure triggers
+resource rescue and leaves the run unsealed, without evaluating a second time.
+No score-detail bytes enter model context.
+
+This evidence-publication correction requires the matching harness **and**
+adapter builds. Development wheels from the same reviewed source commit suffice;
+there is no need to publish or release the harness to test them. The helper
+packaging correction by itself remains adapter-only.
 
 The raise matters. Upstream's `evaluate()` swallows metric exceptions into
 `0.0` and logs a missing evaluator rather than failing. Mapping "could not
@@ -193,6 +209,30 @@ such.
 That key records the value **requested** on the command line. It is only
 honest because the runner refuses the one case that would make it a lie — see
 below.
+
+#### Expanded-task dependency packaging
+
+The expanded pilot exposed a packaging failure, not a model failure: task 010
+imports `evaluation_examples.task_class.generated_task_utils`, which the upstream
+`osworld` wheel excludes. The exception occurred after VM allocation with zero
+model spend. Task 001 did not exercise that import subset. Sixteen release tasks
+need the same helper; the adapter now packages the complete three-file runtime
+helper closure under its upstream namespace, with unchanged upstream bytes,
+license and SHA-256 provenance covered by the adapter wheel RECORD. No gated
+task/answer files are added to the wheel or model context.
+
+The pre-allocation static check runs only for the selected AWS task and helper
+closure, without importing tasks or executing setup. The offline acceptance
+census parsed and loaded all 108 task modules in an isolated interpreter, with
+network/process execution prohibited and no setup/evaluate calls. This proves
+import packaging, not environment setup, evaluator behavior or task scores.
+Optional `lpips`/`torch` imports in task 057 retain upstream's guarded fallback.
+
+Rebuild the adapter wheel and a **new** workspace/selector via the
+[adapter setup recipe](../../../benchmarks/osworld_v2_adapter/README.md#runtime-helper-packaging-and-pre-allocation-checks).
+The changed `package_digest`, not the reused `0.1.1` version string, identifies
+this artifact. Existing pilot evidence and installed environments remain intact;
+no harness publication is needed to test this adapter packaging correction.
 
 #### The adapter source and the pinned wheel both call themselves `0.1.1`
 
