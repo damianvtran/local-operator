@@ -283,6 +283,13 @@ ControlOp = Literal[
     # unknown-op and the stop ladder proceeds to identity-confirmed SIGTERM,
     # which old runtimes already honour, so no version bump and no split-brain.
     "stop",  # {}
+    # A viewer that engaged a runtime at mount and is leaving without having
+    # used it offers the runtime back. The RUNTIME decides: it stops only if
+    # nothing durable ever happened in the session and no other attach
+    # client is connected, and answers "kept: …" otherwise. Additive like
+    # `stop` — an old runtime answers unknown-op, the viewer logs it, and the
+    # residency drain reaps the runtime seconds later as it always did.
+    "retire_if_pristine",  # {} — ack detail is "retired" or "kept: <why>"
 ]
 
 # Events the registrant streams to the daemon.

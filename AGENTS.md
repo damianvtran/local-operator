@@ -501,6 +501,46 @@ so they are opt-in (`LO_RUN_SNAPSHOTS=1`) and regenerated with
 `--snapshot-update`. Do not add a golden as a substitute for looking at the
 change.
 
+### 6. Evidence goes on the PR, never into the repository
+
+**Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
+screenshots, terminal byte captures, measurement logs, review-round
+transcripts, or a `docs/evidence/<change>/`, `docs/assets/pr-<n>/` or
+`docs/pr-<n>/` directory of any kind. Those directories used to exist and
+were removed in one sweep: they had grown to ~60 MB of frames that nothing in
+the code or tests loaded, that every clone paid for forever, and that
+described a UI several releases out of date.
+
+The evidence still has to exist; it just lives where the review does. Attach
+images to the PR description or the review comment (drag them into the GitHub
+editor, or `gh pr comment --body-file` with the rendered markdown), paste
+measured numbers and commands inline, and keep the capture *scripts* — the
+reusable part — under `scripts/` when they are worth reusing. A PR reviewer
+reads the PR; a future agent reads `git log` and the PR it links to; neither
+needs the frames in the tree.
+
+What DOES belong in the tree: the shot scripts in `scripts/`, the opt-in SVG
+goldens under `tests/unit/tui/__snapshots__` (a design aid, see above), and
+design/proposal documents under `docs/` that would be read on their own. A
+document whose only purpose is to hold a PR's proof is a PR comment, not a
+doc.
+
+Comments and docstrings still cite a few of the removed directories by path
+(`docs/evidence/cmd-chords/MEASURED.md`, the compaction-ruler measurements,
+and so on). Those citations are kept as-is — the measurements they name are
+real and the reasoning built on them still holds — and the files are one
+`git show` away. Last commit that carried each:
+
+| directory | `git show <sha>:docs/evidence/<dir>/…` |
+|---|---|
+| `cmd-chords`, `aside-chord` | `f3ae0441`, `1634a53b` |
+| `compaction-ruler` | `9eb9bb33` |
+| `compaction-advisor` | `c60cf8c2` |
+| `fork-ux`, `fork-cache` | `a70e3460` |
+| `browser-extension` | `39691ea0` |
+| `sibling-modes-boot-layout` | `2c4ebc77` |
+| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `5cbea141` (the last `main` before the sweep) |
+
 ## Timing, flakes, and how to assert that something is fast
 
 A test that spends a fixed budget waiting for asynchronous work, then asserts

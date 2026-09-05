@@ -293,3 +293,127 @@ async def test_a_viewer_runs_a_team_and_holds_a_credential(
             await viewer.dispose()
         server.close()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """#622 × #624: the runtime a cold `/team x req` just engaged must survive the quit.
+
+    Since #622 a viewer that leaves offers its runtime back
+    (``retire_if_pristine``) and the runtime refuses when anything durable
+    exists. #624 makes a cold viewer engage a runtime and route ``/team
+    <name> <request>`` through it — an attach plus a turn. The sequence to
+    rule out is: cold `/team x req` → `ctrl+d` before the turn's first row is
+    durable → the runtime reads as pristine → the stop lands on a turn in
+    flight and the user's request is lost.
+
+    Driven end to end with nothing stubbed on the runtime side: a production
+    ``OwnedSessionHandle`` behind a production ``RuntimeServer`` (the same
+    ``is_pristine`` probe and the same refusal path a real child runs), a real
+    ``RemoteSession.cold(<minted id>)`` whose ``engage_runtime`` is pointed at
+    that server, the real ``OperatorApp`` submitting the command as one paste
+    + Enter and then quitting on the very next tick.
+    """
+    import os
+    import uuid
+
+    from textual import events
+
+    from local_operator.session.remote import RemoteSession
+    from local_operator.session.runtime import launch as launch_module
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+
+    (headless_tui_env / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+    )
+    TeamRegistry(headless_tui_env).create_team(
+        TeamEditFields(
+            name="quitteam", description="d", manager="manager", members=[TeamMember(role="coder")]
+        )
+    )
+    session_id = uuid.uuid4().hex[:12]
+    directory = headless_tui_env / "sessions" / session_id
+    directory.mkdir(parents=True)
+    # A slow reply keeps the turn IN FLIGHT across the quit — the window the
+    # retirement decision must respect.
+    session, handle, server = await _runtime(directory, ["ack", "ack"])
+    session.team_registry = TeamRegistry(headless_tui_env)
+    retire_details: list[str] = []
+    real_retire = server._retire_if_pristine
+
+    async def spy_retire(*, leaving: Any) -> str:
+        detail = await real_retire(leaving=leaving)
+        retire_details.append(detail)
+        return detail
+
+    server._retire_if_pristine = spy_retire  # type: ignore[method-assign]
+
+    async def engage_here(sid: str, cwd: str, work: Any, *, config_dir: Path, deadline_s=30.0):
+        # Stand in for the spawn only: the record, the dial and the sync are
+        # production code against this real server.
+        await server.start_in_process()
+        (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+        await _wait_for_record(config_dir, sid)
+        return None
+
+    original = launch_module.engage_runtime
+    launch_module.engage_runtime = engage_here  # type: ignore[assignment]
+    try:
+
+        async def factory() -> RemoteSession:
+            return await RemoteSession.cold(
+                session_id,
+                config_dir=headless_tui_env,
+                cwd=str(directory),
+                takeover_factory=_never_take_over,
+            )
+
+        OperatorApp._check_for_update = lambda self: None  # type: ignore[method-assign]
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            viewer = app._session
+            assert isinstance(viewer, RemoteSession)
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            app.post_message(events.Paste("/team quitteam ship it"))
+            await pilot.pause()
+            await pilot.press("enter")
+            # Wait only for the ROUTE to land (the attach is synchronous on the
+            # owner inside the slash handler), then quit at once.
+            for _ in range(400):
+                await pilot.pause()
+                if session.active_team_name == "quitteam":
+                    break
+                await asyncio.sleep(0.01)
+            assert session.active_team_name == "quitteam", "the cold route never attached"
+            app.exit()
+        # Quit ran `_retire_unused_runtime` before dispose.
+        assert retire_details, "the viewer never offered the runtime back"
+        assert retire_details[-1].startswith("kept:"), retire_details
+        assert not handle.is_pristine(), "a session with a stamped team and a turn is not pristine"
+        # The runtime was NOT stopped: the turn it was given still lands.
+        deadline = asyncio.get_running_loop().time() + 15
+        body = ""
+        while asyncio.get_running_loop().time() < deadline:
+            body = (
+                (directory / "transcript.jsonl").read_text()
+                if (directory / "transcript.jsonl").exists()
+                else ""
+            )
+            if "ship it" in body and "ack" in body:
+                break
+            await asyncio.sleep(0.05)
+        assert "ship it" in body and "ack" in body, f"the turn was lost to retirement:\n{body}"
+    finally:
+        launch_module.engage_runtime = original  # type: ignore[assignment]
+        server.close()
+        await handle.dispose()

@@ -490,6 +490,23 @@ class AttachClient:
         """
         return await self._request("stop")
 
+    async def retire_if_pristine(self) -> str:
+        """Offer the owner back when this viewer never used it.
+
+        The counterpart to the eager engage a viewer performs at mount. The
+        answer is the RUNTIME's, not ours: it retires only if nothing durable
+        ever happened in the session and no other viewer is still attached
+        (see ``RuntimeServer._retire_if_pristine``). We ask; it decides.
+
+        The returned detail says which branch ran ("retired", or "kept: …")
+        and is logged rather than shown — a viewer shutting down has no
+        surface left to paint on, and a refusal is a normal outcome rather
+        than an error. An owner too old to know the op answers the standard
+        unknown-op error, which the caller treats the same way: leave it to
+        the ordinary residency drain.
+        """
+        return await self._request("retire_if_pristine")
+
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         """Fetch one page of a child job's retained events from the owner.
 

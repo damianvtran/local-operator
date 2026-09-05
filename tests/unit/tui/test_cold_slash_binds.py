@@ -159,6 +159,10 @@ async def _boot(app: OperatorApp, pilot: Any) -> RemoteSession:
             break
     session = app._session
     assert isinstance(session, RemoteSession)
+    # Since #622 the mount engage is already in flight here (the stub delays
+    # it), so this is the state a real `lop` is in for its first 1–3 s: cold,
+    # advertising nothing, with a runtime on the way. The submit below lands
+    # inside that window, which is exactly the race under test.
     assert session.is_cold and session.session_id, "the shape lop boots into"
     assert not session.frontend_state.slash_capabilities, "cold advertises nothing"
     return session
@@ -196,6 +200,13 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "sessions").mkdir()
+    # A configured provider, as every real `lop` has: since #622 the TUI
+    # engages at mount and every engage trigger — mount, keystroke, and the
+    # bind-then-route seam — is gated on ``_runtime_can_start``, which refuses
+    # to spawn against an empty config (the first-run screen).
+    (tmp_path / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+    )
     return tmp_path
 
 
@@ -281,7 +292,10 @@ async def test_credential_on_a_cold_viewer_opens_the_paste_only_after_binding(
             session = await _boot(app, pilot)
             await _paste_and_enter(app, pilot, "/credential DEMO_TOKEN")
             # The old path opened the prompt HERE, on a session with no store.
-            assert app._key_prompt is None, "no paste prompt before the runtime exists"
+            # The invariant is "never open before bound" rather than "not open
+            # yet": the mount engage (#622) may already have landed.
+            if app._key_prompt is not None:
+                assert session.is_cold is False, "a paste prompt opened on a cold viewer"
             assert "not reachable" not in _transcript_text(app), _transcript_text(app)
 
             opened = await _until(pilot, lambda: app._key_prompt is not None)
@@ -305,10 +319,17 @@ async def test_credential_on_a_cold_viewer_opens_the_paste_only_after_binding(
 
 
 @pytest.mark.asyncio
-async def test_listings_and_chart_stay_local_and_engage_nothing(
+async def test_listings_and_chart_stay_local_and_engage_nothing_extra(
     isolated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Opening `lop` and pressing `/team` must not cost a process."""
+    """A listing never routes through the bind seam.
+
+    Since #622 the MOUNT engages a runtime (that is the one engagement seen
+    here); the property this pins is that `/team`, `/agent` and `/team chart`
+    do not go through ``_needs_runtime_first`` — they neither wait for the
+    runtime nor start a second one, and they render from local config
+    whether or not the mount engage has landed.
+    """
     from local_operator.teams import TeamEditFields, TeamRegistry
 
     TeamRegistry(isolated).create_team(
@@ -318,13 +339,19 @@ async def test_listings_and_chart_stay_local_and_engage_nothing(
     try:
         async with app.run_test(size=(110, 30)) as pilot:
             session = await _boot(app, pilot)
+            assert not any(
+                app._needs_runtime_first(c, a)
+                for c, a in (("/team", ""), ("/agent", ""), ("/team", "chart lopdev"))
+            ), "a listing must not route through the bind seam"
             for line in ("/team", "/agent", "/team chart lopdev"):
                 app._run_slash_command(line)
                 await pilot.pause()
+            # Rendered from local config immediately, while still cold.
+            assert "lopdev" in _transcript_text(app)
+            await _until(pilot, lambda: not session.is_cold)
             await asyncio.sleep(0.3)
             await pilot.pause()
-            assert engagements == [], "a listing engaged a runtime"
-            assert session.is_cold is True
-            assert "lopdev" in _transcript_text(app)
+            assert engagements == [1], "only the mount engage; the listings added none"
+            assert not any(c[0] == "run_slash_authoritative" for c in handle.calls)
     finally:
         server.close()
