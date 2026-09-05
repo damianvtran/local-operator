@@ -174,13 +174,20 @@ def scan_streaming_intent(prefix: str) -> str | None:
 
 
 #: What a session is doing between one visible step and the next: a model call
-#: is in flight and nothing is on the ledger to show for it. The main
-#: conversation's working line calls that "thinking" and the subagent rows say
-#: the same word, because a reader who learns the vocabulary on one surface
-#: must not have to learn it again on the other.
+#: is in flight and nothing is on the ledger to show for it — no tool running,
+#: no prose streamed yet. The main conversation's working line calls that
+#: "thinking" and the subagent rows say the same word, because a reader who
+#: learns the vocabulary on one surface must not have to learn it again on the
+#: other.
 ACTIVITY_THINKING = "thinking"
 
-#: Prose is streaming. Same word on both surfaces, same reason.
+#: Prose is ACTUALLY streaming: at least one text delta of the current message
+#: has arrived and no tool call is running. Same word on both surfaces, same
+#: reason. The trigger is the first text delta, never ``message_start``: the
+#: loop yields ``message_start`` from a placeholder at the top of every provider
+#: call, before the first token, and a turn that only emits tool calls never
+#: streams a word of prose after it — a renderer that flips to this word on
+#: ``message_start`` claims the model is writing for the whole of every call.
 ACTIVITY_RESPONDING = "responding"
 
 

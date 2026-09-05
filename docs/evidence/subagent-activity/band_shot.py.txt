@@ -1,0 +1,81 @@
+"""Render the Subagents band with a child whose model call is in flight.
+
+Usage: cd <worktree> && env -u NO_COLOR TERM=xterm-256color \
+    .venv/bin/python /tmp/lop-sa-evidence/band_shot.py out.svg
+
+The child's row text is produced by the REAL relay (`_make_relay`), fed the
+exact event the harness loop yields at the start of every provider call
+(`MessageStartEvent` for the assistant placeholder, before any token has
+streamed). Whatever the relay reports into `latest_details.progress` is what
+the band paints, so the frame is the code under test rather than a seeded
+string.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path.cwd()))
+
+from local_operator.harness.jobs import AsyncJob  # noqa: E402
+from local_operator.harness.subagent import _make_relay  # noqa: E402
+from local_operator.harness.types import Message, MessageStartEvent  # noqa: E402
+from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
+from tests.unit.tui.test_band_panels import FakeSession, _fake_jobs  # noqa: E402
+
+
+async def _async_factory(session: FakeSession) -> FakeSession:
+    return session
+
+
+async def main() -> None:
+    out = sys.argv[1]
+    session = FakeSession()
+    import time
+
+    now = time.time()
+    # A restored running job is marked interrupted by the manager, so hand the
+    # band a live-looking job through the same fake manager the band tests use.
+    job = AsyncJob(
+        id="j1",
+        type="task",
+        status="running",
+        start_time=now - 12,
+        started_at=now - 12,
+        label="audit the ingest path",
+        model_label="anthropic/claude-sonnet-4",
+    )
+    manager = _fake_jobs(job)
+    session.jobs = manager
+
+    async def _emit(_event: Any) -> None:
+        return None
+
+    def _report(text: str) -> None:
+        job.latest_details = {"progress": text}
+
+    relay = _make_relay("j1", job.label, job, manager, _emit, _report, {"text": "", "error": None})
+    # Exactly what loop._model_turn yields at the top of every provider call,
+    # before the first token: a placeholder assistant message.
+    await relay(MessageStartEvent(message=Message.assistant()))
+    print("latest_details.progress =", repr(job.latest_details.get("progress")))
+
+    app = OperatorApp(lambda: _async_factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._append_block(UserBlock("audit the ingest path in the background"))
+        app._refresh_band()
+        await pilot.pause()
+        await pilot.pause()
+        app.save_screenshot(out)
+        print("saved", out)
+
+
+asyncio.run(main())

@@ -131,6 +131,7 @@ from local_operator.harness.types import (
     Message,
     MessageEndEvent,
     MessageStartEvent,
+    MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
     SubagentEndEvent,
@@ -857,32 +858,47 @@ def _make_relay(
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
-    EVERY child event lands in the trajectory; only message boundaries and
-    tool starts/ends become parent-stream progress events — per-delta relaying
-    would flood the parent stream while a child streams a long message.
+    EVERY child event lands in the trajectory; only message boundaries, tool
+    starts/ends and the FIRST text delta of a message become parent-stream
+    progress events — per-delta relaying would flood the parent stream while
+    a child streams a long message.
 
     The progress string is what the child's ROW says it is doing, and it is
     phrased the way the main conversation's working line phrases the parent's
     step (:mod:`local_operator.harness.intent`): the model's own intent while a
-    tool runs, ``running N tools`` for a batch, ``responding`` while prose
-    streams, ``thinking`` in the model call between them. It used to read
-    ``tool: bash done`` — the mechanism rather than the work, which is the
-    exact narration the intent field exists to replace, and a reader watching
-    both surfaces at once should not have to learn two vocabularies for one
-    state.
+    tool runs, ``running N tools`` for a batch, ``responding`` while prose is
+    actually streaming, ``thinking`` for a model call in flight with nothing
+    streamed yet. It used to read ``tool: bash done`` — the mechanism rather
+    than the work, which is the exact narration the intent field exists to
+    replace, and a reader watching both surfaces at once should not have to
+    learn two vocabularies for one state.
+
+    ``responding`` is keyed to the first ``MessageUpdateEvent`` with text, NOT
+    to ``MessageStartEvent``. The loop yields ``message_start`` from a
+    placeholder at the top of EVERY provider call, before the request is even
+    built (``loop._model_turn``), and a tool-only turn streams tool-call
+    deltas that never become a ``MessageUpdateEvent`` at all — so keying on
+    ``message_start`` said ``responding`` for the whole of every model call,
+    including ones that never produced a word of prose. The main working line
+    already keys on the first delta (it mounts its streaming block there), and
+    this relay has to agree with it.
 
     ``running`` is the live tool-call set, kept because the phrase for a batch
     is a COUNT: a relay that only remembered the last event said ``thinking``
     the moment one call of three settled, with two still running.
     """
     running: dict[str, str] = {}
+    #: Whether the current assistant message has already reported
+    #: ``responding``. One report per message: the transition is the news, and
+    #: re-reporting on every delta is the flood the docstring rules out.
+    streaming = False
     #: Events relayed by this job so far. Counts RELAYS, not retained entries,
     #: so it keeps rising past the cap and never reissues a number an evicted
     #: event already used — see :data:`TRAJECTORY_SEQ_KEY`.
     relayed = 0
 
     async def relay(event: AgentEvent) -> None:
-        nonlocal relayed
+        nonlocal relayed, streaming
         if job is not None and job.trajectory is not None:
             record = event.model_dump(mode="json")
             # Stamped BEFORE the append and never revised, because this is the
@@ -899,6 +915,7 @@ def _make_relay(
                 del job.trajectory[:overflow]
         progress: str | None = None
         if isinstance(event, ToolExecutionStartEvent):
+            streaming = False
             running[event.tool_call_id] = tool_activity(event.tool_name, event.intent)
             progress = batch_activity(list(running.values()))
         elif isinstance(event, ToolExecutionEndEvent):
@@ -908,8 +925,25 @@ def _make_relay(
             # already carries its outcome.
             progress = batch_activity(list(running.values())) if running else ACTIVITY_THINKING
         elif isinstance(event, MessageStartEvent):
-            progress = ACTIVITY_RESPONDING
+            # A model call is in flight and nothing has streamed: that is
+            # ``thinking``, not ``responding`` — see the docstring for why this
+            # event cannot mean prose. The user placeholder the loop yields for
+            # a steered prompt is not a model call, so it reports nothing.
+            streaming = False
+            message = event.message
+            if isinstance(message, Message) and message.role == "assistant":
+                progress = ACTIVITY_THINKING
+        elif isinstance(event, MessageUpdateEvent):
+            # Text is actually arriving. Report the transition once per
+            # message, and only when no tool is running: a call that is still
+            # executing is the child's activity, and prose arriving beside it
+            # (a provider that narrates before a batch settles) does not
+            # outrank it — the same priority the main working line applies.
+            if event.delta and not streaming and not running:
+                streaming = True
+                progress = ACTIVITY_RESPONDING
         elif isinstance(event, MessageEndEvent):
+            streaming = False
             message = event.message
             if isinstance(message, Message) and message.role == "assistant":
                 # Capture the last assistant text as the job's result.
