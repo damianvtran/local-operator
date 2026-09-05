@@ -27,7 +27,7 @@ export function useCompletionView(
 			if (cancelled || pending || acknowledged ||
 				document.visibilityState !== "visible" || !document.hasFocus()) return;
 			const element = root.current?.querySelector<HTMLElement>(
-				`[data-completion-anchor="${CSS.escape(anchor)}"]`,
+				`[data-completion-anchor="${CSS.escape(anchor)}"][data-completion-complete="true"]`,
 			);
 			if (!element) return;
 			const rect = element.getBoundingClientRect();

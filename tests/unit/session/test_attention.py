@@ -184,6 +184,33 @@ async def test_crash_and_fork_journal_identity(tmp_path: Path) -> None:
     assert not store.state("session/fork")["unseen"]
 
 
+@pytest.mark.parametrize(
+    "damage", ["corrupt_bytes", "partial_schema", "missing_receipts", "dropped_schema"]
+)
+def test_existing_database_damage_is_not_an_empty_read_state(tmp_path: Path, damage: str) -> None:
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    if damage == "corrupt_bytes":
+        path.write_bytes(b"this is not a SQLite database")
+    elif damage == "missing_receipts":
+        store.publish("session/a", str(uuid.uuid4()), "result", "complete")
+        with sqlite3.connect(path) as conn:
+            conn.execute("DROP TABLE receipts")
+    else:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE completions(sequence INTEGER)")
+            if damage == "dropped_schema":
+                conn.execute("DROP TABLE completions")
+    before = path.read_bytes()
+    with pytest.raises(sqlite3.DatabaseError):
+        store.state_many(["session/a"])
+    with pytest.raises(sqlite3.DatabaseError):
+        store.revision()
+    with pytest.raises(sqlite3.DatabaseError):
+        store.publish("session/a", str(uuid.uuid4()), "result", "complete")
+    assert path.read_bytes() == before
+
+
 def test_agent_profiles_cannot_alias_session_conversations(tmp_path: Path) -> None:
     assert conversation_identity(tmp_path / "agents" / "same") == "agent/same"
     assert conversation_identity(tmp_path / "sessions" / "same") == "session/same"

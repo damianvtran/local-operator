@@ -1285,6 +1285,10 @@ class MobileDaemon:
                     else await asyncio.to_thread(_durable_projection, session_id)
                 )
                 if projection is not None:
+                    if entry is None:
+                        # A receipt changes no transcript generation. Reuse the
+                        # relay's existing epoch/fencing before a cold repaint.
+                        projection = self.capture_subagent_details(projection)
                     projection.attention = attention_states.get(
                         f"session/{session_id}", projection.attention
                     )

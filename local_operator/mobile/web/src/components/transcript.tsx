@@ -360,7 +360,7 @@ export function Transcript({
 				/* A boundary per row: one malformed entry must not unmount the
 				   whole app (the "tap → blank screen" failure). */
 				<RowBoundary key={e.id}>
-					<div data-completion-anchor={e.id}>
+					<div data-completion-anchor={e.id} data-completion-complete={e.final && e.text_complete === true}>
 						<Entry entry={e} pid={pid} />
 					</div>
 				</RowBoundary>

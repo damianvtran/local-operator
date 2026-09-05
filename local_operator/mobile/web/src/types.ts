@@ -61,6 +61,8 @@ export interface PeerSender {
 }
 
 export interface TranscriptEntry {
+	/** Explicitly true only when transport caps retained the real row ending. */
+	text_complete?: boolean;
 	id: string;
 	kind: EntryKind;
 	text: string;

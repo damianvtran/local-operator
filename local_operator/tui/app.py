@@ -11674,7 +11674,18 @@ class OperatorApp(App[None]):
             token, anchor = state.get("completion_token"), state.get("anchor_id")
             if self._session is not session:
                 return
-            if anchor and state.get("kind") in {"error", "interrupted"}:
+            if getattr(session, "is_streaming", False):
+                # A resumed follower can first encounter an older outcome while
+                # a retry is already running. Do not later insert that historical
+                # failure at the retry's tail if it settles without a new outcome.
+                self._attention_retry_token = (id(session), token)
+                return
+            if (
+                anchor
+                and state.get("unseen")
+                and state.get("kind") in {"error", "interrupted"}
+                and getattr(self, "_attention_retry_token", None) != (id(session), token)
+            ):
                 transcript = self._transcript_view()
                 if not any(
                     getattr(block, "completion_anchor_id", "") == anchor

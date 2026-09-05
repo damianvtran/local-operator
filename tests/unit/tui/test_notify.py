@@ -290,15 +290,15 @@ def test_the_notify_send_command_is_transient_and_attributed() -> None:
 def test_a_focused_session_is_never_notified() -> None:
     """The user is looking at the frame that already says this."""
     sink = Sink()
-    notifier = Notifier(sink, env=GHOSTTY_ENV)  # starts focused
+    notifier = Notifier(sink, env=GHOSTTY_ENV)
+    notifier.set_focused(True)
     assert notifier.notify_turn_complete(running_children=0) is False
     assert sink.writes == []
 
 
-def test_the_notifier_starts_focused() -> None:
-    """Textual reports focus only on a CHANGE, so assuming unfocused would
-    notify on the very first turn of every session."""
-    assert Notifier(Sink(), env=GHOSTTY_ENV).focused is True
+def test_the_notifier_does_not_assume_initial_focus() -> None:
+    """Background-launched terminals must not suppress their first notification."""
+    assert Notifier(Sink(), env=GHOSTTY_ENV).focused is False
 
 
 def test_a_finished_turn_notifies_once_the_terminal_is_unfocused() -> None:

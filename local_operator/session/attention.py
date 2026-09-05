@@ -89,26 +89,52 @@ class AttentionStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Exclusive creation sets permissions before SQLite can write contents.
+        # A new placeholder must be private before SQLite writes any contents.
         self.path.touch(mode=0o600, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=2.0)
         conn.row_factory = sqlite3.Row
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS completions (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation TEXT NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                anchor TEXT NOT NULL,
-                kind TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS completion_conversation
-                ON completions(conversation, sequence);
-            CREATE TABLE IF NOT EXISTS receipts (
-                conversation TEXT PRIMARY KEY,
-                acknowledged INTEGER NOT NULL
-            );
-            """)
-        return conn
+        try:
+            # Publish the complete schema in one transaction. Concurrent readers
+            # can see the positively identified empty database or both tables,
+            # never an intermediate schema with a missing receipt table.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if self._uninitialized(conn):
+                    conn.execute(
+                        "CREATE TABLE completions ("
+                        "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
+                        "anchor TEXT NOT NULL, kind TEXT NOT NULL)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX completion_conversation "
+                        "ON completions(conversation, sequence)"
+                    )
+                    conn.execute(
+                        "CREATE TABLE receipts ("
+                        "conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
+                    )
+                else:
+                    # Missing tables/columns in an established database are
+                    # corruption, not permission to rebuild an empty watermark.
+                    conn.execute(
+                        "SELECT sequence,conversation,token,anchor,kind FROM completions LIMIT 0"
+                    )
+                    conn.execute("SELECT conversation,acknowledged FROM receipts LIMIT 0")
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    @staticmethod
+    def _uninitialized(conn: sqlite3.Connection) -> bool:
+        # A first publisher's private 0600 placeholder is a valid zero-schema
+        # SQLite database. Check BOTH facts rather than swallowing OperationalError:
+        # corrupt bytes, dropped tables and partial schemas must remain errors.
+        return (
+            conn.execute("PRAGMA schema_version").fetchone()[0] == 0
+            and conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None
+        )
 
     @staticmethod
     def _state(conn: sqlite3.Connection, conversation: str) -> dict[str, Any]:
@@ -155,6 +181,8 @@ class AttentionStore:
         ) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return states
             for offset in range(0, len(identities), 500):
                 chunk = identities[offset : offset + 500]
                 placeholders = ",".join("?" for _ in chunk)
@@ -229,6 +257,9 @@ class AttentionStore:
         with closing(
             sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
         ) as conn:
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return (0, 0)
             row = conn.execute(
                 "SELECT COALESCE(MAX(sequence),0), "
                 "(SELECT COALESCE(SUM(acknowledged),0) FROM receipts) FROM completions"

@@ -18,6 +18,33 @@ describe("openEventStream", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		FakeEventSource.instances = [];
+		vi.unstubAllGlobals();
+	});
+
+	it("ignores data, open and error callbacks from a retired source", () => {
+		vi.useFakeTimers();
+		vi.stubGlobal("EventSource", FakeEventSource);
+		const data: string[] = [];
+		const opened = vi.fn();
+		const disconnected = vi.fn();
+		const close = openEventStream("/events", "projection", value => data.push(value), opened, disconnected);
+		const first = FakeEventSource.instances[0];
+		first.onopen?.();
+		first.onerror?.();
+		vi.advanceTimersByTime(1000);
+		const current = FakeEventSource.instances[1];
+		current.onopen?.();
+		first.listeners.get("projection")?.({ data: "retired" } as MessageEvent);
+		first.onopen?.();
+		first.onerror?.();
+		expect(current.closed).toBe(false);
+		expect(opened).toHaveBeenCalledTimes(2);
+		expect(disconnected).toHaveBeenCalledTimes(1);
+		current.listeners.get("projection")?.({ data: "current" } as MessageEvent);
+		expect(data).toEqual(["current"]);
+		close();
+		current.listeners.get("projection")?.({ data: "after close" } as MessageEvent);
+		expect(data).toEqual(["current"]);
 	});
 
 	it("reports a post-connect disconnect and clears it on reconnect", () => {

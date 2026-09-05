@@ -76,7 +76,7 @@ afterEach(() => {
 function focusedResult() {
 	vi.useFakeTimers();
 	const p = projection();
-	p.transcript = [{ id: "result-a", kind: "assistant", text: "Finished result", final: true,
+	p.transcript = [{ id: "result-a", kind: "assistant", text: "Finished result", final: true, text_complete: true,
 		tool_call_id: "", tool_name: "", tool_state: "done", summary: "", intent: "",
 		diff_added: 0, diff_removed: 0, elapsed_s: 0, error: "", details: {} }];
 	p.attention = { conversation_id: "session/s1", completion_token: "token-a", anchor_id: "result-a", kind: "complete", unseen: true, revision: [1, 0] };
@@ -103,13 +103,15 @@ describe("SessionScreen seen handshake", () => {
 		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 
-	it.each(["hidden", "blurred", "covered", "scrollback", "streaming", "disconnected"])("does not acknowledge %s results", async (reason) => {
+	it.each(["hidden", "blurred", "covered", "scrollback", "streaming", "disconnected", "truncated", "unknown completeness"])("does not acknowledge %s results", async (reason) => {
 		const p = focusedResult();
 		if (reason === "hidden") vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
 		if (reason === "blurred") vi.spyOn(document, "hasFocus").mockReturnValue(false);
 		if (reason === "covered") vi.spyOn(document, "elementFromPoint").mockReturnValue(document.body);
 		if (reason === "scrollback") vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 200, innerHeight + 100));
 		if (reason === "streaming") p.streaming = true;
+		if (reason === "truncated") p.transcript[0].text_complete = false;
+		if (reason === "unknown completeness") delete p.transcript[0].text_complete;
 		if (reason === "disconnected") slot.connected = false;
 		render(<SessionScreen sessionId="s1" />);
 		await sample();

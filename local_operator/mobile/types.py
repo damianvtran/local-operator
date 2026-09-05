@@ -365,6 +365,9 @@ class TranscriptEntry:
     images: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
+    # Settled streaming is not the same as complete representation: transport
+    # caps can replace this row with a prefix while preserving its message ID.
+    text_complete: bool = True
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -604,7 +607,15 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
 
     def build(cls: type, items: list[dict[str, Any]]) -> list[Any]:
         known = {f.name for f in fields(cls)}
-        return [cls(**{k: v for k, v in item.items() if k in known}) for item in items]
+        result = []
+        for item in items:
+            values = {k: v for k, v in item.items() if k in known}
+            if cls is TranscriptEntry:
+                # Older owners did not say whether the real row ending survived.
+                # Unknown completeness cannot authorize a completion receipt.
+                values["text_complete"] = item.get("text_complete") is True
+            result.append(cls(**values))
+        return result
 
     known = {f.name for f in fields(SessionProjection)}
     base = {
