@@ -802,6 +802,34 @@ def test_the_status_row_is_kept_once_painted_so_the_card_does_not_reflow() -> No
     assert len(fresh) == len(settled) - 1, fresh
 
 
+def test_a_dismissed_query_declines_to_reopen_until_it_changes() -> None:
+    """Esc holds until the query TEXT moves (UX review round 2, U8).
+
+    The editor re-derives the list from the buffer on every key, so a plain
+    ``close`` was undone — and re-announced — by the next keystroke's resync.
+    ``dismiss`` records the query; ``open`` on that same query declines and
+    says so, a different query opens as usual, and a plain ``close`` (the
+    buffer leaving `/model …`) leaves the latch to ``forget_dismissal``, which
+    is the editor's leave-edge hook.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    assert picker.open("") is True
+    picker.dismiss()
+    assert picker.is_open() is False
+    assert picker.open("") is False
+    assert picker.is_open() is False
+    # A changed query is a fresh opening, and it clears the latch.
+    assert picker.open("op") is True
+    assert picker.is_open() is True
+    picker.close()
+    assert picker.open("op") is True
+    # The leave-edge expiry: after it, the once-dismissed query opens again.
+    picker.dismiss()
+    picker.forget_dismissal()
+    assert picker.open("op") is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("height", [12, 30, 45])
 async def test_the_held_row_is_paid_for_out_of_the_row_budget_when_mounted(height: int) -> None:

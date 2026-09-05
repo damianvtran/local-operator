@@ -15639,7 +15639,13 @@ class OperatorApp(App[None]):
         if lowered == "saved":
             self._cmd_model_saved(notice)
             return
-        if persist_default and not target and session is None and self._setup_state:
+        if (
+            persist_default
+            and not target
+            and session is None
+            and self._setup_state
+            and self._model_missing_for
+        ):
             # The setup-state TRAP (UX review U1). The picker footer advertises
             # a bare `/model default` there too, and with no session there is
             # no current model to elide to — so, left to the generic guard
@@ -15649,6 +15655,12 @@ class OperatorApp(App[None]):
             # is the state's own next step, and worded to name both ways out
             # (a row in the picker, or the explicit spelling), because those
             # are the two routes `_recover_from_missing_model` actually takes.
+            #
+            # Gated on ``_model_missing_for`` — the predicate the escape below
+            # checks — so the advice is only given where following it works.
+            # In the no-hosting and unknown-hosting variants `/model default
+            # <p>/<id>` falls to the generic guard too, and the splash's
+            # `/login` is the real next step (code review round 2, R7).
             self._system_notice(
                 "no model yet — usage: /model default <provider>/<model-id>, "
                 "or pick a row in /model",
@@ -15935,15 +15947,23 @@ class OperatorApp(App[None]):
         the user back to the model they were already trying to leave.
         """
         session = self._session
-        if session is None and self._setup_state:
-            # The setup state is BY DEFINITION the state with no usable saved
+        if session is None and self._setup_state and self._model_missing_for:
+            # The setup state is BY DEFINITION the state with no usable boot
             # default — that is why there is no session — so "session is still
             # starting…" would be the same dead end U1 closes for the bare
             # `/model default`: nothing is starting, and the honest answer is
             # that there is nothing to switch back to yet, plus the route that
             # creates one. Ordered above the generic guard for that reason.
+            #
+            # Gated on ``_model_missing_for`` because the route this names
+            # (`/model default <p>/<id>`) only WORKS in that variant — it is
+            # the same predicate `_cmd_model`'s escape checks. The other two
+            # setup variants (no hosting, unknown hosting) have no model escape
+            # and their next step is `/login`, which the splash already says;
+            # naming the model route there would re-create the trap one step
+            # later (code review round 2, R7).
             self._system_notice(
-                "no saved default to switch to yet — /model default "
+                "no boot default to switch to yet — /model default "
                 "<provider>/<model-id> sets one, or pick a row in /model",
                 "warning",
             )
@@ -16077,16 +16097,23 @@ class OperatorApp(App[None]):
         a user who did not arrive with a command in mind.
 
         The nouns are placed so each pronoun sits beside its antecedent (design
-        review D4): "this" is the model on the band, "the saved default" is
+        review D4): "this" is the model on the band, "the boot default" is
         restated before "set it" so "it" does not have to reach back past
-        "this".
+        "this". "Boot default" is the ONE noun for the thing `/model default`
+        writes — the receipt says `boot default saved to …` and `/model saved`
+        refuses with `no boot default …` — so the user is never left wondering
+        whether a "saved default" and a "boot default" are two settings
+        (design review round 2, D6).
+
+        The `/model saved` clause is DROPPED in the setup state (UX review
+        round 2, U11): that state is by definition the one with no usable boot
+        default, and `_cmd_model_saved` refuses there, so naming the route
+        would advertise a dead end the app already knows about.
         """
         session = self._session
         label = session.model_label if session is not None else ""
-        routes = (
-            f"{PERSIST_HINT} · /model saved switches back to the saved default "
-            "· or set it in /settings"
-        )
+        back = "" if self._setup_state else " · /model saved switches back to the boot default"
+        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
         if not label:
             return routes
         return f"model: {label} — {routes}"
@@ -16916,9 +16943,22 @@ class OperatorApp(App[None]):
         user configuring the app, not starting a conversation, and a plain
         notice ends the empty state — which collapses the boot composition and
         makes the centred prompt unreachable.
+
+        The notice is skipped when the ledger's LAST row already says it. The
+        message is meant to fire once per visible opening, and the editor now
+        keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
+        round 2, U8, where each Esc-then-edit cycle stacked another copy). This
+        is the second line of defence for the same property: no sequence of
+        opens that produces nothing between them can print the hint twice,
+        whatever the editor's resync does in future. Compared on the text, so
+        a hint that changed (a switch landed between two opens) still prints.
         """
         message.stop()
-        self._system_notice(self._persist_hint_notice())
+        hint = self._persist_hint_notice()
+        blocks = self._transcript_view().blocks()
+        last = blocks[-1] if blocks else None
+        if not (isinstance(last, NoticeBlock) and last.text() == hint):
+            self._system_notice(hint)
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:

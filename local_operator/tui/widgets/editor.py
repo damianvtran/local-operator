@@ -2348,7 +2348,12 @@ class Editor(TextArea):
                 # Deferred like every other escape meaning, so `⌥←` with the
                 # model list open moves by word instead of closing the list and
                 # nudging one character (ux round 1, U3).
-                self._defer_escape(self._model_picker.close)
+                #
+                # `dismiss`, not `close`: the text survives, so the next key's
+                # pre-routing resync sees the same `/model …` and would reopen
+                # the list (and re-announce it) — dismissal is what makes the
+                # resync decline until the query changes.
+                self._defer_escape(self._model_picker.dismiss)
                 event.stop()
                 event.prevent_default()
                 return
@@ -5573,14 +5578,22 @@ class Editor(TextArea):
         if argument is None:
             if self._model_picker.is_open():
                 self._model_picker.close()
+            # Leaving `/model …` expires an Esc, exactly as `CommandPicker.sync`
+            # forgets its dismissal when the caret leaves slash context: the
+            # next entry into the argument is a fresh opening.
+            self._model_picker.forget_dismissal()
             self._picker_phase_at_last_sync = self._picker_phase()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
-        else:
-            self._model_picker.open(argument)
-            # Transition only. Posting per keystroke would re-fetch every provider
-            # for each character the user types into the query.
+        elif self._model_picker.open(argument):
+            # Transition only, and only a REAL one. Posting per keystroke would
+            # re-fetch every provider for each character the user types into
+            # the query; posting on a declined open (the picker holding an Esc
+            # for this same query) announced a list that never appeared, once
+            # per Esc-then-edit cycle, and the app printed the persist-hint
+            # notice for each (UX review round 2, U8). This pre-routing sync
+            # runs on EVERY key, so that decline is the common case after Esc.
             self.post_message(ModelQueryOpened())
         # Recorded after both list branches so a later caret-only move can
         # tell whether the parse PHASE changed (#393 reopen vs. an

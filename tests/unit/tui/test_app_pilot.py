@@ -2302,6 +2302,170 @@ async def test_the_picker_notice_is_exactly_its_rows_tall(size: tuple[int, int])
 
 
 @pytest.mark.asyncio
+async def test_escaping_the_model_list_then_editing_prints_no_second_notice() -> None:
+    """Esc-dismissing the list and clearing the line leaves one notice, not a
+    stack (UX review round 2, U8).
+
+    The editor re-derives every list from the buffer on EVERY key before
+    routing, so a bare ``close()`` on Esc was undone by the next keystroke's
+    pre-sync: the list reopened on the unchanged `/model `, posted
+    ``ModelQueryOpened``, and the key's own edit closed it again in the same
+    tick — nothing showed, but the app printed the hint once per cycle. Five
+    cycles left ten identical notices and a transcript scrollbar. Esc is now a
+    ``dismiss`` the picker holds until the query changes. Driven through the
+    exact reported gesture, three times, and asserted on both the count and
+    the scrollbar the stack produced.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    # Counted separately from the notices so the ROOT fix is pinned on its own:
+    # the dedupe guard in `on_model_query_opened` would hide a resync that
+    # still announced a phantom opening, and this is the handler's other call.
+    opens: list[int] = []
+    populate = app._populate_model_picker
+
+    def counted_populate() -> None:
+        opens.append(1)
+        populate()
+
+    app._populate_model_picker = counted_populate  # type: ignore[method-assign]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for cycle in range(1, 4):
+            await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+            for _ in range(4):
+                await pilot.pause()
+            assert editor.model_picker.is_open()
+            await pilot.press("escape")
+            for _ in range(3):
+                await pilot.pause()
+            assert not editor.model_picker.is_open()
+            await pilot.press("backspace")
+            for _ in range(3):
+                await pilot.pause()
+            # The dismissed list stays dismissed: the edit did not resurrect it,
+            # and — the root of U8 — did not ANNOUNCE it either.
+            assert not editor.model_picker.is_open()
+            assert len(opens) == cycle, opens
+            # Leaving `/model …` is what expires the Esc for the next cycle.
+            editor.clear_content()
+            await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
+        assert len(notices) == 1, [n.text() for n in notices]
+        assert transcript.virtual_size.height <= transcript.size.height, (
+            transcript.virtual_size,
+            transcript.size,
+        )
+        assert transcript.show_vertical_scrollbar is False
+
+
+@pytest.mark.asyncio
+async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> None:
+    """The control for the U8 fix: Esc then a CHANGED query is a real new
+    opening and prints again. Two openings that show a list are two notices;
+    the dismissal expires the moment the query text moves, so a user who
+    pressed Esc still gets the list back by typing."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(3):
+            await pilot.pause()
+        assert not editor.model_picker.is_open()
+        # A typed character changes the query: the list is back, and so is the
+        # hint — but only this once, not once per keystroke after it.
+        await pilot.press("o")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open()
+        assert editor.model_picker.query_text() == "o"
+        await pilot.press("p")
+        for _ in range(3):
+            await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
+        # ONE, not two: the second open showed the same list under the same
+        # hint, and the ledger's last row already says it (the belt-and-braces
+        # guard in `on_model_query_opened`). The picker's rows were refilled
+        # either way — that is what `is_open` above proves.
+        assert len(notices) == 1, [n.text() for n in notices]
+        # The guard compares TEXT, not "a notice was printed": once a switch
+        # has changed the hint's subject, the next opening prints the new one.
+        editor.clear_content()
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        for _ in range(3):
+            await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        hints = [b.text() or "" for b in app.query(NoticeBlock) if PERSIST_HINT in (b.text() or "")]
+        # The first hint, the switch receipt (it carries PERSIST_HINT too), and
+        # the second hint naming the new model.
+        assert len(hints) == 3, hints
+        assert hints[0].startswith("model: openrouter/"), hints[0]
+        assert hints[-1].startswith("model: anthropic/claude-opus-5"), hints[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["typed", "pasted"])
+async def test_a_fully_typed_selector_prints_the_hint_once_above_its_receipt(
+    route: str,
+) -> None:
+    """A selector typed in full (or pasted whole) still gets ONE hint, above the
+    receipt — recorded, not fixed (UX review round 2, U10).
+
+    The list opens on the space after `/model`, before any id exists, so the
+    hint has to decide before it can know the user will type a full selector;
+    the space is the same moment a bare `/model ` opens on, which printed this
+    notice before this PR. What this pins is the bound: one hint for the
+    opening and none for the keystrokes after it, on both routes. The paste
+    goes through the app like a real clipboard drop, since the editor's paste
+    handler re-inserts a payload posted straight to it.
+    """
+    from textual import events
+
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        if route == "pasted":
+            app.post_message(events.Paste("/model anthropic/claude-opus-5"))
+            for _ in range(10):
+                await pilot.pause()
+        else:
+            for char in "/model anthropic/claude-opus-5":
+                await pilot.press({"/": "slash", " ": "space", "-": "minus"}.get(char, char))
+            for _ in range(4):
+                await pilot.pause()
+        assert editor.text == "/model anthropic/claude-opus-5", editor.text
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        notices = [b.text() or "" for b in app.query(NoticeBlock)]
+    assert len(notices) == 2, notices
+    assert notices[0].startswith("model: openrouter/deepseek/deepseek-chat — "), notices[0]
+    assert "→ anthropic/claude-opus-5 (this session)" in notices[1], notices[1]
+    assert session.model_label == "anthropic/claude-opus-5"
+
+
+@pytest.mark.asyncio
 async def test_clear_resets_transcript_and_bookkeeping() -> None:
     """TUI-009: /clear resets _streaming_block/_tool_cards AND posts a
     notice that history is untouched (cosmetic clear)."""
@@ -8615,7 +8779,7 @@ async def test_model_default_and_saved_in_setup_state_name_the_way_out(
     assert _unwrapped("session is still starting") not in after_saved, after_saved
     assert _unwrapped("usage: /model default <provider>/<model-id>") in after_default
     assert _unwrapped("pick a row in /model") in after_default, after_default
-    assert _unwrapped("no saved default to switch to") in after_saved, after_saved
+    assert _unwrapped("no boot default to switch to") in after_saved, after_saved
     assert _unwrapped("/model default <provider>/<model-id>") in after_saved, after_saved
     assert still_setup is True
     assert (tmp_path / "config.yml").read_bytes() == before, "the setup state wrote config"
@@ -8671,6 +8835,78 @@ async def test_typing_model_default_letter_by_letter_is_not_eaten_by_the_d_key(
     assert session.model_label == "anthropic/claude-opus-5", session.model_label
     assert "efault anthropic" not in text, text
     assert "unknown provider" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_setup_state_notice_does_not_advertise_model_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bare-`/model` notice drops the `/model saved` clause in the setup
+    state (UX review round 2, U11): the state is the one with no boot default,
+    and `/model saved` refuses there, so naming it advertises a dead end the app
+    already knows about. The other two routes stay."""
+    from local_operator.session_factory import ModelNotConfiguredError
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+
+    async def _no_model_factory():
+        raise ModelNotConfiguredError("no model for openrouter", hosting="openrouter")
+
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(_no_model_factory, provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        app._run_slash_command("/model")
+        for _ in range(4):
+            await pilot.pause()
+        notices = [b.text() or "" for b in app.query(NoticeBlock)]
+    hints = [n for n in notices if PERSIST_HINT in n]
+    assert len(hints) == 1, notices
+    assert "/model saved" not in hints[0], hints[0]
+    assert "/settings" in hints[0], hints[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["no_hosting", "unknown_hosting"])
+async def test_model_default_and_saved_in_other_setup_variants_fall_to_the_guard(
+    variant: str,
+) -> None:
+    """The setup-state answers are gated on the variant they are true in (code
+    review round 2, R7).
+
+    `no model yet — usage: /model default <p>/<id>` and `no boot default … sets
+    one` both name a route that only works when `_model_missing_for` is set:
+    the escape in `_cmd_model` is gated on it. In the no-hosting and
+    unknown-hosting variants following that advice answered "session is still
+    starting…" — the same trap one step later. Those variants keep the generic
+    guard; their real next step is `/login`, which the splash already names.
+    """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    async def _bad_hosting_factory():
+        raise HostingUnknownError("…not a known provider.", "anthropicxyq")
+
+    factory = _no_hosting_factory if variant == "no_hosting" else _bad_hosting_factory
+    app = OperatorApp(factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._model_missing_for is None
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        after_default = _unwrapped(_transcript_text(app))
+        app._run_slash_command("/model saved")
+        await pilot.pause()
+        after_saved = _unwrapped(_transcript_text(app))
+    assert _unwrapped("no model yet — usage") not in after_default, after_default
+    assert _unwrapped("no boot default to switch to") not in after_saved, after_saved
+    assert after_saved.count(_unwrapped("session is still starting")) == 2, after_saved
 
 
 @pytest.mark.asyncio

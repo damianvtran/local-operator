@@ -438,6 +438,19 @@ class ModelPicker(Static):
         # so a bare `render_text` call (the unit tests do this) holds the row
         # too; only `close()` releases it.
         self._status_row_held = False
+        # The query Esc dismissed, or ``None``. The counterpart of
+        # ``CommandPicker._dismissed_query``, and it exists for the same reason:
+        # the editor re-derives every list from the buffer on EVERY key, before
+        # routing, so a bare ``close()`` was undone by the next keystroke's
+        # pre-sync — ``open()`` ran on the unchanged `/model ` buffer, posted
+        # ``ModelQueryOpened``, and the key's own edit closed the list again in
+        # the same tick. Nothing showed, but the app answered the message: the
+        # rows were refilled and the persist-hint notice printed once per
+        # Esc-then-edit cycle (UX review round 2, U8). The latch makes
+        # ``open()`` on the dismissed query a no-op, so a dismissal holds until
+        # the query TEXT changes — the same expiry the command picker uses, so
+        # a user who pressed Esc still gets the list back by typing.
+        self._dismissed_query: str | None = None
         # A closed picker takes no layout space at all; `visible: hidden` would
         # reserve the rows and leave a hole above the input.
         self.display = False
@@ -509,18 +522,28 @@ class ModelPicker(Static):
         end = min(total, self._window_start + self._row_budget())
         return self._window_start, end, total
 
-    def open(self, query: str = "") -> None:
-        """Show the list, filtered by ``query``.
+    def open(self, query: str = "") -> bool:
+        """Show the list, filtered by ``query``; ``True`` when it actually opened.
 
         On an EMPTY query the highlight lands on the session's current model. That
         makes the first frame answer "what am I on" as well as "what could I be on",
         and it makes the first Enter a no-op instead of an unrequested switch to
         whatever happened to sort first. A non-empty query is the user having
         already narrowed, so the best match wins as usual.
+
+        Declines — returning ``False`` and staying closed — while ``query`` is
+        the one :meth:`dismiss` recorded. The editor treats a closed→open call
+        as the transition that posts ``ModelQueryOpened``, so this answer is
+        what keeps an Esc from being re-announced by the next keystroke's
+        resync (see ``_dismissed_query``).
         """
+        if query == self._dismissed_query:
+            return False
+        self._dismissed_query = None
         self._open = True
         self._query = query
         self._refilter(keep=self._current if not query.strip() else None)
+        return True
 
     def set_query(self, query: str) -> None:
         """Re-filter to ``query`` without changing open/closed state."""
@@ -532,8 +555,32 @@ class ModelPicker(Static):
         # command picker makes the same choice for the same reason.
         self._refilter()
 
+    def forget_dismissal(self) -> None:
+        """Expire an Esc: the buffer has left `/model …`, so the next entry is
+        a fresh opening. Called by the editor's resync on the leave edge, the
+        way ``CommandPicker.sync`` forgets its own dismissal when the caret
+        leaves slash context — the two lists expire an Esc on the same rule."""
+        self._dismissed_query = None
+
+    def dismiss(self) -> None:
+        """Hide the list for the CURRENT query without touching the text.
+
+        Esc's meaning, as distinct from :meth:`close` (a choice, a completion,
+        or the buffer leaving `/model …`): the query survives in the buffer, so
+        the list must remember not to come back for it until it changes.
+        """
+        self._dismissed_query = self._query
+        self.close()
+
     def close(self) -> None:
-        """Hide the list and release a row's pointer shape."""
+        """Hide the list and release a row's pointer shape.
+
+        Does NOT touch ``_dismissed_query``. The latch expires in exactly two
+        places — a changed query in :meth:`open`, or the editor's leave-edge
+        :meth:`forget_dismissal` — and neither is this one: a plain close is
+        also what the pre-routing resync calls in the same tick it reopened a
+        dismissed list, so clearing here would let that resync forget the Esc.
+        """
         self._open = False
         self._matches = []
         self._selected = 0
