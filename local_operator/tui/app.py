@@ -16180,8 +16180,17 @@ class OperatorApp(App[None]):
         before/after frames: the notice was honest and the footer was not).
 
         The predicate is ``_model_missing_for``, the same one `_cmd_model`'s
-        escape is gated on, so "the footer offers it" and "the command performs
-        it" cannot drift apart.
+        escape is gated on, so across the three SETUP-STATE variants "the
+        footer offers it" and "the command performs it" cannot drift apart.
+
+        That is the full extent of the claim (code review round 1, R2). It is
+        not a general equivalence: `_cmd_model` ALSO refuses `/model default`
+        when :meth:`_session_runs_elsewhere` is true, and this predicate does
+        not consult it, so on a genuinely remote session the footer still
+        advertises a command that answers with the "run it on the terminal
+        whose launches it should govern" refusal. That case is pre-existing and
+        outside #641's scope — recorded here rather than fixed so the next
+        reader does not take the coupling for wider than it is.
         """
         if self._setup_state and not self._model_missing_for:
             return ""
@@ -16207,6 +16216,15 @@ class OperatorApp(App[None]):
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
 
+        The measurement above is about the NOTICE's own last row and about
+        command names spanning a fold — nothing stronger (QA round 1, Q1). An
+        earlier revision of this docstring claimed `/settings` "is never the
+        final token at ANY body width from 38 to 90", which is false: it ends a
+        folded, non-final row in 62 combinations across 39 widths. A clause
+        that continues on the next row is not the defect D8 named; a command
+        the reader must re-join two rows to recover is, and that is what is
+        actually pinned.
+
         The nouns are placed so each pronoun sits beside its antecedent (design
         review D4). "Boot default" is the ONE noun for the thing `/model
         default` writes — the receipt says `boot default saved to …` and
@@ -16219,18 +16237,44 @@ class OperatorApp(App[None]):
         the three widths the block actually renders at — body budgets 70/69/76
         cells for 80/100/120 columns — the fold left `/settings` alone on the
         last row for most model labels: the row length varies with the label,
-        so a single label measuring clean proves nothing. The `/settings`
-        clause is therefore in the MIDDLE and carries the noun
-        (`/settings edits the boot default too`), which does three things at
-        once: it moves the command token off the fold, it puts the D6 noun
-        early enough that the trailing `it` has an antecedent one clause back
-        (design review round 3, D10 — with the `/model saved` clause dropped in
-        the setup state, the old `set it in /settings` left `it` reaching back
-        past `this`), and it ends the sentence on `reverts to it`, a three-word
-        tail that cannot orphan a command name. Measured over 11 representative
-        labels x the three rendered widths: zero lone-token last rows, and
-        `/settings` is never the final token at ANY body width from 38 to 90.
-        `test_the_bare_model_notice_does_not_orphan_a_route_token` pins it.
+        so a single label measuring clean proves nothing.
+
+        TWO defect classes, not one, and a fix for the first can create the
+        second (design review round 4 D1 / UX round 4 U3). D8's harness scored
+        only LONE-TOKEN LAST ROWS, so the arrangement it picked
+        (`… · /settings edits the boot default too · /model saved reverts to
+        it`) scored a clean 0 while quietly moving the damage into the middle
+        of the block: a row ending on a bare `/model` whose next row opens
+        `saved reverts to it` splits the two-word COMMAND NAME across the fold,
+        which costs the reader exactly what D8 cost them — the command cannot
+        be read off one row. That measured 5 splits over 11 labels x the three
+        rendered widths, and the frame shipped as D8's own evidence contained
+        one.
+
+        Both classes are scored now, and the lever turned out to be structural
+        rather than lexical: it is WHERE a two-word command name sits in its
+        clause. A name that OPENS a clause (`/model saved reverts to it`) sits
+        one word from the `·` seam, so it breaks across the fold whenever that
+        seam lands near the margin; a name at the clause's END has ordinary
+        words ahead of it to absorb the fold. So `/model saved` moved to the
+        end of its clause and the split count goes 5 -> 0. `/settings` keeps
+        its leading position because four words follow it either way.
+
+        Measured over 11 representative labels x the three rendered body widths
+        (70/69/76), across all THREE variants this method emits: 0 command
+        tokens alone on a last row and 0 split command names, against 0 and 5
+        for the arrangement D8 shipped.
+
+        What is NOT claimed: this does not promise every row ends on a
+        multi-word phrase. An ordinary word can still land alone on the last
+        row (`too` at one label x width here), which is ordinary prose wrapping
+        rather than the defect these findings are about — the reader can still
+        read every command off a single row, which is the property being
+        bought. A 2,240-combination search over clause wordings and orders
+        found no arrangement that is clean on all three classes across all
+        three variants, so this is the measured optimum and not a claim of
+        perfection. `test_the_bare_model_notice_does_not_orphan_a_route_token`
+        pins the two that matter.
 
         The `/model saved` clause is DROPPED in the setup state (UX review
         round 2, U11): that state is by definition the one with no usable boot
@@ -16256,6 +16300,12 @@ class OperatorApp(App[None]):
         # Named once: it is the one clause every variant below shares, and the
         # wrap analysis above measured this exact string.
         settings_clause = "/settings edits the boot default too"
+        # `/model saved` sits at its clause's END, which is what removes the
+        # split: as the clause's FIRST word it sat one word from the `·` seam
+        # and broke across the fold at 5 of 33 rendered label x width
+        # combinations. `/settings` is left leading its own clause because it
+        # is followed by four words, so the fold has slack after it either way.
+        saved_clause = "come back with /model saved"
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
@@ -16263,7 +16313,7 @@ class OperatorApp(App[None]):
         elif self._setup_state:
             routes = f"{PERSIST_HINT} · {settings_clause}"
         else:
-            routes = f"{PERSIST_HINT} · {settings_clause} · /model saved reverts to it"
+            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
         return f"model: {label} — {routes}"

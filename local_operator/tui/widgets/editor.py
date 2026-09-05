@@ -2404,7 +2404,7 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
-        if key == "tab" and (self._model_picker.is_dismissed() or self._picker.is_dismissed()):
+        if key == "tab" and self._latched_picker_at_caret():
             # A COMPLETION KEY WITH A LATCHED ESC IS A NO-OP, not a tab (UX
             # review round 3, U13). Esc hides the list but leaves the token in
             # the buffer, so the branches above — which are gated on a list
@@ -2417,6 +2417,19 @@ class Editor(TextArea):
             # in between. Consumed as a no-op so the buffer survives exactly as
             # typed, which is the same discipline the loading-reserve branch
             # below applies for the same class of premature completion.
+            #
+            # SCOPED TO THE CARET'S OWN PHASE, not to latch state alone (code
+            # review round 1, R1). Gating on `is_dismissed()` by itself was
+            # correct only while a latch expired as soon as the caret moved;
+            # R10 deliberately made the model latch STICKY (it survives until
+            # the buffer holds no `/model` token anywhere), so the two fixes
+            # together turned Tab into a permanent no-op everywhere else in the
+            # buffer — `/model ` Esc, newline, `/them` left the command picker
+            # open and offering `theme` while Tab did nothing, and plain prose
+            # lost the literal indent this widget is constructed with
+            # (`tab_behavior="indent"`). Both reproduced against the base tree,
+            # neither is visible to the user when it happens. The latch may
+            # only swallow Tab where its OWN list would have been showing.
             #
             # Tab ONLY. Enter still submits: with the list dismissed a typed
             # `/model anthropic/claude-opus-5` is a complete command the user
@@ -5365,6 +5378,51 @@ class Editor(TextArea):
             return "command"
         return None
 
+    def _latched_picker_at_caret(self) -> bool:
+        """Whether the list the CARET is inside is holding an Esc.
+
+        The U13 no-op's gate. Latch state alone is not enough (code review
+        round 1, R1): R10 made the model latch survive until the buffer holds
+        no `/model` token *anywhere*, so `is_dismissed()` stays true while the
+        user goes on to type something unrelated. Answering "is the caret
+        inside the latched list's own phase?" keeps U13's no-op exactly where
+        it belongs — the token the Esc was pressed over — and lets every other
+        Tab through, including a live command picker on a second line and the
+        literal indent in plain prose.
+
+        Each latch is asked about with the SAME parse that decides whether its
+        own list is live, so this cannot drift from what the user sees. The
+        model list is driven by ``slash_argument`` over ``MODEL_COMMANDS`` in
+        :meth:`_sync_picker` — deliberately not by :meth:`_picker_phase`, whose
+        ``"argument"`` answer covers ``_argument_commands`` and reports ``None``
+        on a `/model` argument, because the model list is a separate widget
+        with its own vocabulary. The command word's phase is
+        :meth:`_picker_phase`'s ``"command"``, which is the command picker's
+        own.
+
+        The model half is asked at the caret's LINE END rather than at the
+        caret, which is the same question :meth:`_text_holds_model_token` asks
+        and for the same reason (R10): the terminating space of `/model ` sits
+        OUTSIDE the argument span, so a caret resting on it — where a single
+        `←` after Esc puts it — reads as having left the command and would let
+        Tab fall through to ``TextArea`` and type into the query U13 exists to
+        protect. Scoping to the line rather than to the buffer is what keeps
+        R10's sticky latch from swallowing Tab everywhere else (R1): line 1's
+        Esc has no claim on a `/them` the user is typing on line 2.
+
+        A caret sitting outside both — plain prose, a `$skill` token, another
+        command's argument — is claimed by neither, which is the whole point.
+        """
+        text = self.text
+        cursor = self._caret_offset()
+        newline = text.find("\n", cursor)
+        line_end = len(text) if newline == -1 else newline
+        if slash_argument(text, self.MODEL_COMMANDS, line_end, self._command_names) is not None:
+            return self._model_picker.is_dismissed()
+        if self._picker_phase() == "command":
+            return self._picker.is_dismissed()
+        return False
+
     def _sync_picker_if_phase_changed(self) -> None:
         """Re-sync the picker only when the caret crossed a parse phase.
 
@@ -5615,7 +5673,16 @@ class Editor(TextArea):
             # question here is the one the user would ask: is this still a
             # `/model` line? Only when the buffer holds no model token at all
             # is the Esc genuinely spent.
-            if not self._text_holds_model_token():
+            #
+            # Guarded on the latch FIRST, because the scan is O(lines) with a
+            # real `slash_argument` parse per line and this branch is the one
+            # every ordinary prose keystroke takes (code review round 1, R3).
+            # Measured on the keystroke path: 0.19 ms at 50 lines, 7.46 ms at
+            # 500, 14.05 ms at 2000 — pasted drafts that size are ordinary in
+            # this composer. `forget_dismissal()` is a no-op when nothing is
+            # latched, so the scan bought nothing in exactly the common case;
+            # the short-circuit leaves the cost only where the answer is used.
+            if self._model_picker.is_dismissed() and not self._text_holds_model_token():
                 self._model_picker.forget_dismissal()
             self._picker_phase_at_last_sync = self._picker_phase()
             return

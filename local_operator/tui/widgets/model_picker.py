@@ -74,6 +74,23 @@ PERSIST_HINT_PREFIX = "/model default"
 #: asserts they stay in step with the handler's own dispatch.
 _PERSIST_KEYWORDS = frozenset({"default", "saved"})
 
+
+def _keyword_row(keyword: str) -> str:
+    """The empty-state row for a `/model` argument that is a COMMAND word.
+
+    Held to the same budget ``PERSIST_HINT`` is (design review round 1, D2).
+    The footer's body is ``width - _GUTTER_CELLS - _EDGE_MARGIN``, so 47 cells
+    at the 50-column floor; the first version of this row read `default is a
+    command, not a model — enter runs it` at 49 cells and truncated there to
+    `…not a model — enter…`, cutting the actionable half and leaving only the
+    negative clause at exactly the width where the user has least room to work
+    out what to do instead. The shorter carrier keeps BOTH halves — what the
+    word is, and what Enter will do with it — at every width the picker
+    renders at. `test_the_keyword_row_fits_the_narrow_footer` pins the ceiling.
+    """
+    return f"{keyword} is a command — enter runs it"
+
+
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
@@ -881,12 +898,37 @@ class ModelPicker(Static):
             # ever match a row, so the empty list is the correct and expected
             # state for them rather than a report about the catalogue. The row
             # says what pressing Enter will do instead. Compared against the
-            # same lowered spelling `_cmd_model` dispatches on, and only for an
-            # EXACT word: `/model default anthropic/claude-opus-5` is a
-            # selector being typed and genuinely has no matches until it
+            # same lowered spelling `_cmd_model` dispatches on.
+            #
+            # PREFIX-AWARE, not exact-match only (UX review round 1, U1). An
+            # exact test fixed the settled state and left the contradiction
+            # reachable on the way there: typing `/model default` one character
+            # at a time printed `no matching models` directly above a footer
+            # advertising that exact phrase for FOUR consecutive keystrokes
+            # (`def`, `defa`, `defau`, `defaul`), resolving only on the final
+            # `t`. That is precisely the pairing U3 was filed against, so the
+            # suppression has to cover every prefix a user passes through
+            # rather than only the word they arrive at. A prefix is not yet a
+            # runnable command, so it gets the neutral half of the sentence
+            # without the `enter runs it` promise, which would be false there.
+            #
+            # Still only for a BARE word: `/model default anthropic/claude-opus-5`
+            # is a selector being typed and genuinely has no matches until it
             # resolves, so it keeps the ordinary message.
-            if query.lower() in _PERSIST_KEYWORDS:
-                bits.append(f"{query.lower()} is a command, not a model — enter runs it")
+            lowered = query.lower()
+            partial = next(
+                (k for k in sorted(_PERSIST_KEYWORDS) if lowered and k.startswith(lowered)),
+                "",
+            )
+            if lowered in _PERSIST_KEYWORDS:
+                bits.append(_keyword_row(lowered))
+            elif partial:
+                # Same subject and same shape as the settled row, differing only
+                # in the half that says what to do — so the row the user is
+                # reading does not change out from under them on the keystroke
+                # that completes the word. The two keywords share no common
+                # prefix, so a prefix names exactly one of them.
+                bits.append(f"{partial} is a command — keep typing")
             else:
                 bits.append("no matching models" if query else "no models available")
         elif total > end - start:

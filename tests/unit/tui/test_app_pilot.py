@@ -2550,6 +2550,75 @@ async def test_tab_after_an_escape_does_not_type_into_the_query(surface: str) ->
 
 
 @pytest.mark.asyncio
+async def test_a_held_model_latch_does_not_swallow_tab_elsewhere_in_the_buffer() -> None:
+    """R1: the U13 no-op belongs to the latched TOKEN, not to the whole buffer.
+
+    The gap the parametrised U13 test could not see. It exercises one picker at
+    a time, so it never puts a live token of one kind alongside a held latch of
+    the other — which is exactly the state R10 newly made reachable by keeping
+    the model latch until the buffer holds no `/model` token ANYWHERE. Gating
+    the Tab branch on latch state alone therefore made Tab a permanent no-op:
+    the command picker below is open and offering `theme`, and Tab did nothing.
+    Reproduced against `f4e9613a9`, where both halves pass.
+
+    The plain-prose half is the second victim of the same gate: this editor is
+    constructed ``tab_behavior="indent"`` precisely so Tab is a literal indent
+    outside a picker, and a held latch three lines up swallowed that too.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        # Latch the MODEL picker, then leave the line without clearing the token.
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_dismissed()
+
+        # A COMMAND picker on the next line still completes: the model latch
+        # has no claim on a token it was never pressed over.
+        await pilot.press("shift+enter")
+        await pilot.press("slash", "t", "h", "e", "m")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.picker.is_open(), editor.text
+        assert editor.model_picker.is_dismissed(), "the latch must still be held"
+        await pilot.press("tab")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text == "/model \n/theme ", editor.text
+
+        # And plain prose keeps the literal indent while that latch is held.
+        editor.clear_content()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_dismissed()
+        await pilot.press("shift+enter")
+        await pilot.press("h", "i")
+        for _ in range(3):
+            await pilot.pause()
+        before = editor.text
+        await pilot.press("tab")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text != before, "Tab must still indent in prose"
+        assert editor.text.startswith("/model \nhi"), editor.text
+
+
+@pytest.mark.asyncio
 async def test_the_hint_dedupe_guard_sees_past_a_pinned_working_line() -> None:
     """R12: the guard reads the last block a caller appended, not the pin.
 
@@ -9178,8 +9247,9 @@ async def test_the_no_model_setup_variant_still_names_its_working_model_route(
     assert PERSIST_HINT in footer, footer
 
 
-def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
-    """D8: no rendered width may leave a command name alone on the last row.
+@pytest.mark.asyncio
+async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
+    """D8 + D1/U3: a command name must be readable off ONE row, at every width.
 
     The finding was measured at 80 and 100 columns for ONE model label, but the
     row length varies with the label, so a single measurement proves nothing —
@@ -9188,6 +9258,19 @@ def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
     Body budgets come from ``NoticeBlock.body_budget`` rather than being
     hardcoded, so a change to the block's own fold re-measures instead of
     silently invalidating the numbers.
+
+    TWO defect classes, because fixing the first created the second (design
+    review round 4 D1, UX round 4 U3). A lone command token on the LAST row is
+    what D8 named; a row ending on a bare `/model` whose next row opens `saved`
+    splits the two-word command NAME across the fold, which costs the reader the
+    same thing. The shipped D8 copy scored 0 on the first and 5 on the second.
+
+    ASSERTED AGAINST THE STRING THE APP EMITS, not a local rebuild of it (code
+    review round 1, R4). This test previously assembled `routes` as its own
+    literal, so it passed against the pre-fix `app.py` and pinned nothing: the
+    clause order it exists to protect could be reordered in the app and the
+    test stayed green. It now drives the real method, which is what makes a
+    reordering fail here.
     """
     from local_operator.tui.widgets.transcript import NoticeBlock, wrap_cells
 
@@ -9207,19 +9290,71 @@ def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
     # which is exactly what `body_budget` accounts for.
     block_widths = {80: 76, 100: 75, 120: 82}
 
-    routes = (
-        f"{PERSIST_HINT} · /settings edits the boot default too" " · /model saved reverts to it"
-    )
-    for label in labels:
-        for cols, block_width in block_widths.items():
-            body = NoticeBlock.body_budget(block_width)
-            rows = wrap_cells(f"model: {label} — {routes}", body)
-            if len(rows) == 1:
-                continue
-            last = rows[-1].split()
-            assert len(last) > 1, (cols, label, rows)
-            # The specific shape D8 reported: the command name alone.
-            assert rows[-1].strip() != "/settings", (cols, label, rows)
+    # The sentence under test is the one the app builds, read back from the
+    # real method rather than restated here (R4). The label is stripped so the
+    # matrix below can substitute each of its own.
+    # All THREE sentences this method emits, each read back from the method
+    # itself under the state that produces it (R4). The setup variants drop a
+    # clause (U11/U12) and therefore fold differently, and the dead-end variant
+    # is a single clause whose own tail can orphan — measuring only the
+    # ordinary one is how the shipped copy scored clean while two variants were
+    # not.
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    sentences: dict[str, str] = {}
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        for variant, setup, missing in (
+            ("ordinary", False, None),
+            ("setup", True, "openrouter"),
+            ("deadend", True, None),
+        ):
+            app._setup_state = setup
+            app._model_missing_for = missing
+            notice = app._persist_hint_notice()
+            sentences[variant] = notice.split(" — ", 1)[1] if " — " in notice else notice
+        app._setup_state = False
+        app._model_missing_for = None
+
+    routes = sentences["ordinary"]
+    # The clauses D8/D10/D6 put in the sentence are all still in it: this test
+    # is about where they FOLD, so it must fail loudly if one simply went away.
+    assert PERSIST_HINT in routes, routes
+    assert "/settings" in routes and "boot default" in routes, routes
+    assert "/model saved" in routes, routes
+    # U11/U12: the dead-end variant names /settings and no /model route at all.
+    assert "/model" not in sentences["deadend"], sentences["deadend"]
+    assert "/settings" in sentences["deadend"], sentences["deadend"]
+
+    # The two-word command names a reader must not have to re-join across rows.
+    atoms = ("/model default", "/model saved")
+    for variant, sentence in sentences.items():
+        for label in labels:
+            for cols, block_width in block_widths.items():
+                body = NoticeBlock.body_budget(block_width)
+                rows = wrap_cells(f"model: {label} — {sentence}", body)
+                if len(rows) == 1:
+                    continue
+                # D8: the last row is never a COMMAND NAME standing alone.
+                # Scoped to command tokens on purpose — an ordinary word left
+                # alone by the fold is prose wrapping, not a route the reader
+                # cannot act on, and no phrasing that survived the wider search
+                # avoided it at every label and width (see the docstring in
+                # `_persist_hint_notice`).
+                last = rows[-1].split()
+                assert not (len(last) == 1 and last[0].startswith("/")), (
+                    variant,
+                    cols,
+                    label,
+                    rows,
+                )
+                # D1/U3: no fold falls INSIDE a two-word command name.
+                for i, row in enumerate(rows[:-1]):
+                    head, nxt = row.split(), rows[i + 1].split()
+                    if not head or not nxt:
+                        continue
+                    assert f"{head[-1]} {nxt[0]}" not in atoms, (variant, cols, label, rows)
 
 
 @pytest.mark.asyncio

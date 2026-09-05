@@ -595,7 +595,7 @@ def test_a_command_keyword_is_not_reported_as_a_failed_search(keyword: str) -> N
     picker.open(keyword)
     plain = picker.render_text(90).plain
     assert "no matching models" not in plain, plain
-    assert f"{keyword} is a command, not a model" in plain, plain
+    assert f"{keyword} is a command — enter runs it" in plain, plain
     # The protected hint row still renders: the two rows must not be traded off
     # against each other, since together they are the whole explanation.
     picker.set_rows(_rows(), status=_PERSIST_CLAUSE)
@@ -614,7 +614,70 @@ def test_a_keyword_with_a_selector_after_it_is_still_an_ordinary_search() -> Non
     picker.open("default zzzznope")
     plain = picker.render_text(90).plain
     assert "no matching models" in plain, plain
-    assert "is a command, not a model" not in plain, plain
+    assert "is a command" not in plain, plain
+
+
+@pytest.mark.parametrize("keyword", sorted(_PERSIST_KEYWORDS))
+def test_no_prefix_of_a_keyword_reports_a_failed_search(keyword: str) -> None:
+    """U1: U3's contradiction must not be reachable on the way to the word.
+
+    The exact-match test fixed the settled state only. Typing `/model default`
+    one character at a time printed `no matching models` directly above a
+    footer advertising that exact phrase for four consecutive keystrokes,
+    resolving only on the final `t` — the same pairing U3 was filed against,
+    still reachable by the user who types deliberately rather than at speed.
+
+    Asserted over every prefix that actually EMPTIES the list, which is the
+    only place the defect can appear: a short prefix like `d` still ranks real
+    models (`deepseek…`), and a list with rows in it is an ordinary search, not
+    a contradiction. The empty ones are `defau`+ and `sav`+ against this
+    fixture, and they are found rather than hardcoded so a fixture change
+    cannot quietly empty the matrix.
+    """
+    picker = ModelPicker(lambda row: None)
+    checked = 0
+    for stop in range(1, len(keyword)):
+        prefix = keyword[:stop]
+        picker.set_rows(_rows())
+        picker.open(prefix)
+        if picker.suggestions():
+            continue  # still a real search: the empty state is not reached
+        checked += 1
+        plain = picker.render_text(90).plain
+        assert "no matching models" not in plain, (prefix, plain)
+        # Named, and in the settled row's own shape, so the row does not change
+        # its subject on the keystroke that completes the word.
+        assert f"{keyword} is a command" in plain, (prefix, plain)
+        # The promise `enter runs it` is NOT made while the word is partial:
+        # Enter there is an ordinary failed search, not the command.
+        assert "enter runs it" not in plain, (prefix, plain)
+    assert checked, f"no empty-list prefix of {keyword!r} was exercised"
+
+
+def test_the_keyword_row_fits_the_narrow_footer() -> None:
+    """D2: the row must survive whole at the width where it matters most.
+
+    The first version read `default is a command, not a model — enter runs it`
+    at 49 cells against a 47-cell budget at 50 columns, so it truncated to
+    `…not a model — enter…` — cutting the actionable half and leaving only the
+    negative clause. ``PERSIST_HINT`` is held to 42 cells for exactly this
+    budget; this row is on the same surface and is held to the same one.
+    """
+    from local_operator.tui.widgets.model_picker import (
+        _EDGE_MARGIN,
+        _GUTTER_CELLS,
+        _keyword_row,
+    )
+
+    budget = 50 - _GUTTER_CELLS - _EDGE_MARGIN
+    for keyword in sorted(_PERSIST_KEYWORDS):
+        assert cell_len(_keyword_row(keyword)) <= budget, keyword
+        # And it really does render whole, not merely measure short.
+        picker = ModelPicker(lambda row: None)
+        picker.set_rows(_rows())
+        picker.open(keyword)
+        assert "…" not in picker.render_text(50).plain, keyword
+        assert "enter runs it" in picker.render_text(50).plain, keyword
 
 
 def test_persist_keywords_match_the_words_the_command_actually_consumes() -> None:
@@ -624,15 +687,36 @@ def test_persist_keywords_match_the_words_the_command_actually_consumes() -> Non
     Mirrors ``test_persist_hint_prefix_matches_app``: both guard a constant this
     module holds because of the import direction, not because the vocabulary is
     the picker's to define.
+
+    PINS THE DISPATCH, NOT THE PROSE (code review round 1, R5). This asserted
+    `f'"{keyword}"' in inspect.getsource(_cmd_model)`, and `getsource` returns
+    the comments and docstring too — `_cmd_model` is heavily commented about
+    both words, so deleting the `if lowered == "saved":` dispatch entirely left
+    the test green while the picker went on advertising a command that no
+    longer existed. Matching only executable lines is what makes the guard real:
+    the comments that mention these words are stripped before the search, so
+    the assertion can only be satisfied by code.
     """
+    import ast
+    import textwrap
+
     from local_operator.tui import app as app_mod
 
-    source = inspect.getsource(app_mod.OperatorApp._cmd_model)
+    source = textwrap.dedent(inspect.getsource(app_mod.OperatorApp._cmd_model))
+    function = ast.parse(source).body[0]
+    assert isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)), function
+    # Comments are not in the AST at all, and the docstring is the one string
+    # node to drop explicitly — what remains is the code's own literals.
+    literals = {
+        node.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    literals.discard(ast.get_docstring(function))
     for keyword in _PERSIST_KEYWORDS:
-        # The handler dispatches on the lowered argument; each keyword must
-        # appear as a literal it compares against, or the picker is describing
-        # a command that no longer exists.
-        assert f'"{keyword}"' in source, keyword
+        # The handler dispatches on the lowered argument, so each keyword must
+        # survive as a string literal the CODE compares against.
+        assert keyword in literals, (keyword, sorted(literals))
 
 
 # -- the buffer parse that drives it -----------------------------------------
