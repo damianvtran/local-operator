@@ -333,3 +333,57 @@ async def test_remote_adopt_aside_and_cancel_route_to_owner(tmp_path: Path, monk
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sync_leaves_the_viewer_cold_and_holds_no_connection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#573's viewer half: a rejected bind must not leave a connected client.
+
+    An owner whose canonical state names ANOTHER session (a fork serving its
+    parent's checkpoint before the restore re-stamped it) is refused by
+    ``_install_frontend``. Before this, ``_dial`` had already installed the
+    client, so the facade stayed "bound": ``is_cold`` said False, RPCs still
+    reached the owner, no state was ever installed, and every recovery pass
+    dialled ANOTHER connection on top — the runtime's attach cap evicted them
+    in bursts. The refusal must leave exactly what a failed engage leaves:
+    a cold viewer and zero attach clients on the runtime.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    # The owner is hosting "s1" (welcome identity passes) but its canonical
+    # state was restored from a checkpoint stamped with another session.
+    handle._frontend.mutate(session_id="parent000001")
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    try:
+        record = await _wait_record(tmp_path)
+        with pytest.raises(ConnectionError, match="belongs to another session"):
+            await RemoteSession.connect(
+                record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+            )
+        # Cold path: the same refusal through ``_ensure_bound`` on a viewer
+        # that will keep living (the TUI's mount engage).
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never_take_over
+        )
+        try:
+            with pytest.raises(ConnectionError, match="belongs to another session"):
+                await viewer._bind_to(record)
+            assert viewer.is_cold is True, "a refused bind must not leave the facade bound"
+            # Two refusals, zero leaked sockets: give the server a few ticks
+            # to observe the closes.
+            for _ in range(50):
+                if registrant.attach_clients() == 0:
+                    break
+                await asyncio.sleep(0.02)
+            assert registrant.attach_clients() == 0
+            # And no recovery loop was started by our own close.
+            await asyncio.sleep(0.1)
+            assert viewer._recovery_task is None
+        finally:
+            await viewer.dispose()
+    finally:
+        registrant.close()
