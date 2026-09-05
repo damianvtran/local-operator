@@ -983,6 +983,59 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     return app.query_one(SubagentView)
 
 
+@pytest.mark.asyncio
+async def test_live_wire_tool_details_match_reentered_history() -> None:
+    """A JSON delta and a later owner fetch must paint the same tool receipt."""
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        FrontendUpdate,
+        JobState,
+    )
+
+    state = FrontendSessionState(session_id="synthetic", epoch="test")
+    owner, follower = FrontendStateStore(state), FrontendStateStore(state)
+    job = _job_with([], status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        rows = [
+            _call("wire-call", "read", path="README.md"),
+            _result("wire-call", "read", "Synthetic documentation"),
+        ]
+        for end in (1, 2):
+            update = owner.mutate(
+                jobs=[JobState(id=job.id, type="subagent", trajectory=rows[:end])]
+            )
+            assert update is not None
+            assert follower.apply_update(
+                FrontendUpdate.model_validate_json(update.model_dump_json())
+            )
+            job.trajectory = follower.state.jobs[0].trajectory
+            app._refresh_subagent_view(job.id)
+            await pilot.pause()
+            card = view.query_one(ToolCard)
+            assert card._args == {"path": "README.md"}
+            assert "README.md" in card._summary
+        assert card._output == ["Synthetic documentation"]
+        assert card.can_expand()
+        await pilot.click(card)
+        await pilot.pause()
+        assert card._expanded
+        assert card.size.height > 1
+        await pilot.press("escape")
+        assert app._subagent_view is None
+        job.trajectory = rows
+        app._open_subagent_view(job.id)
+        await pilot.pause()
+        restored = app.query_one(SubagentView).query_one(ToolCard)
+        assert restored._args == card._args
+        assert restored._output == card._output
+        assert restored.can_expand()
+
+
 @pytest.mark.parametrize("size", [(100, 30), (140, 40)])
 @pytest.mark.asyncio
 async def test_the_page_takes_the_whole_view_when_opened_from_the_splash(
@@ -1084,7 +1137,8 @@ async def test_narrow_subagent_mode_preserves_a_useful_transcript_viewport() -> 
         for _ in range(3):
             await pilot.pause()
         assert app.screen.has_class("subagent-compact")
-        assert app.query_one("#band").display is False
+        assert app.query_one("#input-row").display is False
+        assert app.query_one("#input-shell").size.height >= 1
         assert view._body.size.height >= 8, view._body.size
         assert app.screen.virtual_size.height <= app.screen.size.height
 
@@ -2324,7 +2378,7 @@ async def test_the_page_renders_the_childs_messages_and_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_attempt_opens_and_selects_the_current_visible_row() -> None:
+async def test_historical_attempt_opens_current_identity_and_restores_root_row() -> None:
     session = FakeSession()
     manager = AsyncJobManager()
     current = AsyncJob(
@@ -2367,8 +2421,11 @@ async def test_historical_attempt_opens_and_selects_the_current_visible_row() ->
         panel = app._subagent_panel
         assert view.job_id == "current"
         assert panel is not None
+        assert not panel._rows  # a viewed child is not its own descendant
+        await pilot.press("escape")
+        await pilot.pause()
         assert list(panel._rows) == ["current"]
-        assert panel._rows["current"].current is True
+        assert panel._rows["current"].current is False
 
 
 @pytest.mark.asyncio
@@ -3986,7 +4043,7 @@ async def test_a_history_page_lands_in_order_when_the_cap_is_crossed_mid_read(tm
 
 
 def _long_error_notice() -> dict[str, Any]:
-    """An error that wraps past a 62x24 body's viewport.
+    """An error that wraps past a 62x20 body's viewport.
 
     A two-line wrap still fits above the working line on a 9-row body, so
     sticky-tail following never bisects it. The glyph only sits above the
@@ -4034,7 +4091,7 @@ async def test_the_truncation_note_stays_in_the_viewport_when_the_body_scrolls()
     session = FakeSession()
     session.jobs = _fake_jobs(job)
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 22)) as pilot:
         view = await _open(pilot, app, job)
         for _ in range(8):
             await pilot.pause()
@@ -4085,7 +4142,18 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     monkeypatch: pytest.MonkeyPatch,
     late_batch_landing: bool,
 ) -> None:
-    """At 62x24 the first visible transcript line must be a row HEAD.
+    """At 62x20 the first visible transcript line must be a row HEAD.
+
+    Compact detail mode reclaims the disabled composer. At the former 24-row
+    fixture its larger viewport lands on the deliberate gap before the notice,
+    and after #625 pinned ``NoticeBlock`` to its authored height (8 rows here,
+    not the 10 a stale box-model measurement reserved) the 22-row fixture does
+    the same: the followed tail sits on the unowned gap row above the notice,
+    where there is no block head to snap to and the one-shot rightly stays
+    armed. 20 rows puts the tail one row INSIDE the notice again, which is
+    the bisected first glance this test exists to reject. Mutation: skip the
+    snap's ``scroll_to`` and this fails with ``landing sits 1 rows into a
+    block``.
 
     Sticky-tail following can bisect a wrapping notice so the glyph sits
     above the fold and the first glance is a hanging-indented continuation
@@ -4142,7 +4210,7 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 20)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)
@@ -4189,7 +4257,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
     ``main``, because the sibling test above asserts the landing and then stops
     looking.
 
-    This is that missing half. It opens the same 62x24 page, waits for the same
+    This is that missing half. It opens the same 62x20 page, waits for the same
     landing, then appends one live row — the ordinary thing a running child
     does — and requires the first visible line to still be a row head.
 
@@ -4221,7 +4289,7 @@ async def test_the_landing_survives_the_next_extent_change(tmp_path) -> None:
         "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
     )()
     app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(62, 24)) as pilot:
+    async with app.run_test(size=(62, 20)) as pilot:
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)

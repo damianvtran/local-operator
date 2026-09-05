@@ -504,6 +504,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
+        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
+        "<path>.replace",
+        "self.replace(state): FrontendStateStore.replace, an in-memory snapshot swap",
+    ),
+    (
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
         "<path>.replace",
         "in-memory .replace",
@@ -772,6 +777,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
+        # self.replace(state) = in-memory snapshot swap
+        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/remote.py::RemoteSession._install_frontend",  # facade
         "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",  # facade

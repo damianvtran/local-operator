@@ -1826,7 +1826,12 @@ class RemoteSession:
         the page can say so instead of rendering the child as empty.
         """
         client = self._client
-        if client is None:
+        store = self._frontend_store
+        if client is None or store is None:
+            return False
+        epoch = store.state.epoch
+        identity = next((job for job in store.state.jobs if job.id == job_id), None)
+        if identity is None:
             return False
         try:
             await client.watch_job(job_id)
@@ -1837,11 +1842,14 @@ class RemoteSession:
         rows: list[dict[str, Any]] = []
         offset = 0
         base_seq: int | None = None
+        details: Mapping[str, Any] = {}
         try:
             while True:
                 payload = await client.job_trajectory(job_id, offset=offset)
                 if not isinstance(payload, Mapping):
                     return False
+                if offset == 0:
+                    details = payload
                 page = [row for row in (payload.get("rows") or []) if isinstance(row, dict)]
                 page_base = payload.get("base_seq")
                 page_base = page_base if isinstance(page_base, int) else None
@@ -1859,13 +1867,35 @@ class RemoteSession:
                     break
         except (ConnectionError, RuntimeError):
             return False
-        store = self._frontend_store
-        if store is None:
-            return False
+        current = next((job for job in store.state.jobs if job.id == job_id), None)
+        if (
+            self._client is not client
+            or self._frontend_store is not store
+            or store.state.epoch != epoch
+            or current is None
+            or current.session_id != identity.session_id
+        ):
+            return False  # detached/reconnected/resumed while the request was in flight
         # Into the canonical state, where the live append stream will extend it
         # from here; see ``FrontendStateStore.seed_job_trajectory``.
         if not store.seed_job_trajectory(job_id, rows):
             return False
+        detail_sequence = details.get("detail_sequence")
+        if (
+            details.get("detail_job_id") == job_id
+            and details.get("detail_epoch") == epoch
+            and isinstance(detail_sequence, int)
+            and "todos" in details
+        ):
+            todos = details["todos"]
+            if todos is None or isinstance(todos, list):
+                store.seed_job_todos(
+                    job_id,
+                    todos,
+                    epoch=epoch,
+                    sequence=detail_sequence,
+                    session_id=details.get("detail_session_id"),
+                )
         self._apply_frontend_facades(store.state)
         return True
 

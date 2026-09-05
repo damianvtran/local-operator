@@ -2051,31 +2051,12 @@ class Session:
         # concurrent children than a hosted one. An unset or unusable config
         # contributes NO kwarg, so the manager's own default stands and the
         # behaviour is exactly what it was before this was configurable.
-        def on_job_change() -> None:
-            store = getattr(self, "_frontend_state_store", None)
-            # No terminal or attach subscriber can observe these snapshots yet.
-            # Avoid serializing large child trajectories solely for an unused
-            # in-process state object; the first subscription snapshots live data.
-            if store is None or not store.has_subscribers:
-                return
-            if getattr(self, "_frontend_jobs_refresh_scheduled", False):
-                return
-            self._frontend_jobs_refresh_scheduled = True
-            try:
-                # Child trajectory events arrive in bursts. A 50 ms coalesce
-                # keeps progress perceptibly live without serializing six full
-                # rosters on every shared-loop event.
-                asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
-            except RuntimeError:
-                self._frontend_jobs_refresh_scheduled = False
-                store.refresh_jobs(self)
-
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
             # One mutation seam persists resumability and publishes the live
             # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
-            on_job_change=on_job_change,
+            on_job_change=self._schedule_frontend_jobs,
             **_configured_max_running(),
         )
         self._wake = WakeScheduler(
@@ -2900,6 +2881,11 @@ class Session:
         """
         if self._subagent_comms is None:
             self._subagent_comms = SubagentComms(self)
+            # Only the root creates the registry. Children inherit it and must
+            # not each subscribe a second projector to the same graph.
+            self._unsubscribe_subagent_state = self._subagent_comms.subscribe_changes(
+                self._schedule_frontend_jobs
+            )
         return self._subagent_comms
 
     @property
@@ -5251,6 +5237,22 @@ class Session:
         return await asyncio.to_thread(count)
 
     # -- events ---------------------------------------------------------------
+
+    def _schedule_frontend_jobs(self) -> None:
+        """Share one subscriber-aware coalescer across root and descendant jobs."""
+        store = getattr(self, "_frontend_state_store", None)
+        # Fresh subscriptions take a full graph snapshot. Unobserved sessions
+        # need no eager projection, particularly while a manager is waiting.
+        if store is None or not store.has_subscribers:
+            return
+        if getattr(self, "_frontend_jobs_refresh_scheduled", False):
+            return
+        self._frontend_jobs_refresh_scheduled = True
+        try:
+            asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
+        except RuntimeError:
+            self._frontend_jobs_refresh_scheduled = False
+            store.refresh_jobs(self)
 
     def _flush_frontend_jobs(self) -> None:
         """Coalesce a burst of child trajectory/progress mutations per loop tick."""
@@ -10193,6 +10195,10 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
+        if unsubscribe_state is not None:
+            unsubscribe_state()
+            self._unsubscribe_subagent_state = None
         # No later boundary can drain producer steers once disposal starts.
         # Reject them while owner callbacks and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.
