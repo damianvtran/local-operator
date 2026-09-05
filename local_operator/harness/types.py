@@ -1692,6 +1692,25 @@ class ModelSpec(BaseModel):
     # knowledge out of the widgets — the division ``model.effort`` claims in its
     # own docstring and which those two sites were quietly breaking.
     reasoning_default_effort: str | None = None
+    # Whether this ROUTE can serve this model at the provider's fast tier, and
+    # whether the user has asked it to. Same division of labour as the effort
+    # pair above, and for the same reason: the wire clients need "do I send the
+    # key", while ``/fast`` and the status band need "is this dial even
+    # available here" so the command can say so instead of accepting a toggle
+    # the request would silently drop.
+    #
+    # Derived once in ``build_model_spec`` from ``model.speed`` — which is keyed
+    # on the PROVIDER AND MODEL together, unlike the effort table's model-only
+    # key, because the dialect belongs to the route: the same Claude model takes
+    # ``speed: "fast"`` direct and ``service_tier: "priority"`` through an
+    # aggregator. Keeping the derivation there is what leaves the wire clients
+    # and every widget free of model-name knowledge.
+    #
+    # Fast mode is a SPEED dial, not a depth dial: it buys the same answer
+    # sooner at a premium price, where ``reasoning_effort`` changes how hard the
+    # model thinks. The two are set and reported independently.
+    supports_fast_mode: bool = False
+    fast_mode: bool = False
     # The model's HUMAN name as metadata resolution found it — "Claude Opus 5"
     # for ``anthropic/claude-opus-5``, "MoonshotAI: Kimi K2" for an OpenRouter
     # id no registry row covers. Carried on the spec rather than looked up by
