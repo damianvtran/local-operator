@@ -725,6 +725,15 @@ submit bug reports and feature requests, set up a development environment,
 and open pull requests. `docs/` covers the architecture
 ([REWRITE.md](./docs/REWRITE.md)), benchmarks, and verification evidence.
 
+### Inside a multiplexer
+
+Run a column of `lop` sessions as panes and `lop` meets the host halfway:
+it publishes a per-pane crash-restore binding
+([multiplexer-resume.md](./docs/multiplexer-resume.md)) and, inside a
+[Herdr](https://herdr.dev) pane, reports its live state — `idle`, `working`,
+`blocked` on an approval — to the Agents panel
+([herdr-agents.md](./docs/herdr-agents.md)).
+
 ## 🙏 Credits and Acknowledgements
 
 Local Operator stands on the shoulders of the broader open-source agent
