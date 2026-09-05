@@ -263,3 +263,21 @@ def terminal_output(tmp_path) -> Iterator[Path]:
         os.dup2(saved, 2)
         os.close(saved)
         sink.close()
+
+
+@pytest.fixture(autouse=True)
+def fresh_served_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no model selector recorded as served.
+
+    ``failover._SERVED_SELECTORS`` is process-wide by design — a served id is
+    proof the id exists for every session in the process — which makes it
+    cross-test state: any test that streams a success on ``openai/gpt-4o``
+    would turn a later test's flat unknown-model 400 on that id into a
+    catalogue flap and re-ask it three times instead of aborting at once.
+    Several suites drive ``stream_with_failover``, so the reset lives here
+    rather than in one test module. Tests that need served evidence set it
+    explicitly, which is also the honest way to state that precondition.
+    """
+    import local_operator.providers.failover as failover
+
+    monkeypatch.setattr(failover, "_SERVED_SELECTORS", set())
