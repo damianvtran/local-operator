@@ -33,6 +33,10 @@ from typing import TYPE_CHECKING, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 
 if TYPE_CHECKING:
@@ -89,7 +93,7 @@ async def main() -> None:
             if label != "connecting…" or app._setup_state:
                 break
         await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
         label = app._status._model_label if app._status is not None else "?"
         print(f"saved={out} setup_state={app._setup_state} band={label!r}")
         print(f"splash_notice={app._splash_notice!r}")
