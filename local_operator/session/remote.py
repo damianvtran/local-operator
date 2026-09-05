@@ -1061,6 +1061,7 @@ class RemoteSession:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import (
+                ActionableConnectionError,
                 RuntimeStartupError,
                 WarmErrand,
                 engage_runtime,
@@ -1080,7 +1081,13 @@ class RemoteSession:
                 # the vetted user-facing sentence when there is one, instead of
                 # a generic timeout nobody can act on (QA Q1).
                 logger.warning("engage failed for %s: %s", self._session_id, error)
-                raise ConnectionError(error.actionable or self._unavailable_reason()) from error
+                # The vetted sentence rides a TYPE, so a relay can echo it
+                # without having to guess from the text which messages are safe
+                # to show. Anything unvetted stays a plain ConnectionError and
+                # gets the generic sentence at the surface.
+                if error.actionable:
+                    raise ActionableConnectionError(error.actionable) from error
+                raise ConnectionError(self._unavailable_reason()) from error
             # Re-checked AFTER the engage, which is the long await here (a
             # spawn plus up to ~2 s of construction). The TUI engages at mount
             # now, so `/resume` or `/new` typed in that first second disposes

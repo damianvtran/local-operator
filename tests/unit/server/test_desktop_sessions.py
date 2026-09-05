@@ -369,3 +369,56 @@ def test_command_and_answer_shapes_are_closed():
         Answer(epoch="epoch", request_id="request", value="answer")
     with pytest.raises(ValueError):
         Image(data_b64="not base64", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
+    """`errors()` echoes a ConnectionError's text only when its TYPE vouches for it.
+
+    The relay used to echo `str(error)` for EVERY ConnectionError on the
+    strength of a docstring claiming they were limited to the vetted startup
+    reasons. Nothing enforced that, and `attach_client` raises bare
+    ConnectionErrors from a dozen places, so the renderer was shown an internal
+    control port and another session's id verbatim -- painted as "The message
+    was not sent: ..." (review round 2, MAJOR-1).
+
+    Vettedness cannot be recovered from message text, so it rides the type.
+    """
+    from fastapi import HTTPException
+
+    from local_operator.server.routes.desktop_sessions import errors
+    from local_operator.session.runtime.launch import ActionableConnectionError
+
+    generic = "Session owner is unavailable. Reconnect and reconcile before retrying."
+
+    async def relay(error: BaseException) -> str:
+        with pytest.raises(HTTPException) as raised:
+            async with errors():
+                raise error
+        assert raised.value.status_code == 503
+        return str(raised.value.detail)
+
+    leaky = [
+        ConnectionError(
+            "owner socket unreachable: [Errno 61] Connect call failed ('127.0.0.1', 54321)"
+        ),
+        ConnectionError("owner moved to another conversation (abc123secretsession)"),
+        ConnectionError("owner replied 'refused', not its state"),
+        ConnectionError("owner runs protocol v1; attach needs >= 2"),
+    ]
+    for error in leaky:
+        detail = await relay(error)
+        assert detail == generic, detail
+        # The specific values from the reproduction must be absent, not merely
+        # reworded: these are an internal port and another session's identifier.
+        assert "54321" not in detail
+        assert "abc123secretsession" not in detail
+        assert "127.0.0.1" not in detail
+
+    # The vetted sentence still survives -- suppressing it would re-break the
+    # "no model provider configured" case this relay exists to report (QA Q1).
+    vetted = (
+        "No model provider is configured yet. Connect one in Settings > Providers, "
+        "then send the message again."
+    )
+    assert await relay(ActionableConnectionError(vetted)) == vetted
