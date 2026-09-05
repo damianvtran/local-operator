@@ -1366,13 +1366,18 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_unrelated_store", [False, True])
 async def test_dispose_closes_auth_store(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, with_unrelated_store: bool
 ) -> None:
-    """CL-08: session.dispose() closes the AuthStore (its SQLite connection,
-    hence the file lock) — verified via a spy subclass, and re-opening the db
-    exclusively succeeds afterward."""
+    """CL-08: dispose closes its owned store, not every store in the process.
+
+    Cold model discovery opens and closes a separate listing-credential store
+    before session construction. Counting all constructors made this assertion
+    depend on whether another test had warmed the model cache.
+    """
     import local_operator.providers.auth_store as auth_mod
+    from local_operator.model.configure import SessionStreamFn
 
     closed: list[auth_mod.AuthStore] = []
     created: list[auth_mod.AuthStore] = []
@@ -1399,22 +1404,42 @@ async def test_dispose_closes_auth_store(
         credential_manager,
         cast("AgentRegistry", registry),
     )
-    assert len(created) == 1  # exactly one store per session
-    assert len(closed) == 0  # still open before dispose
-    store = created[0]
-
-    await session.dispose()
-    assert len(closed) == 1  # dispose closed the session's store
-    assert closed[0] is store
-
-    # The connection is really gone: a fresh exclusive transaction succeeds.
-    db_path = auth_mod.default_db_path()
-    probe = sqlite3.connect(str(db_path))
+    # Use the store actually wired into this session's stream, not the first
+    # constructor observed by a process-wide spy (which may belong to discovery).
+    assert isinstance(session, Session)
+    stream = session._stream_fn
+    assert isinstance(stream, SessionStreamFn)
+    store = stream._auth_store
+    unrelated = auth_mod.AuthStore() if with_unrelated_store else None
     try:
-        probe.execute("BEGIN EXCLUSIVE")
-        probe.execute("ROLLBACK")
+        assert isinstance(store, SpyAuthStore)
+        assert created.count(store) == 1
+        assert closed.count(store) == 0  # this session's store is still open
+
+        await session.dispose()
+        assert closed.count(store) == 1  # exactly its own close, even with other stores
+        # An exclusive SQLite transaction alone can succeed beside an idle WAL
+        # connection. Also prove the owned connection is really closed, rather
+        # than just observing a call to a spy that forgot to delegate close().
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            store.list_credentials()
+        if unrelated is not None:
+            assert unrelated not in closed
+            assert unrelated.list_credentials() == []
+
+        db_path = auth_mod.default_db_path()
+        probe = sqlite3.connect(str(db_path))
+        try:
+            probe.execute("BEGIN EXCLUSIVE")
+            probe.execute("ROLLBACK")
+        finally:
+            probe.close()
+        await session.dispose()
+        assert closed.count(store) == 1  # repeated disposal does not close twice
     finally:
-        probe.close()
+        await session.dispose()
+        if unrelated is not None:
+            unrelated.close()
 
 
 @pytest.mark.asyncio

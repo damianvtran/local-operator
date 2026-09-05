@@ -366,8 +366,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--host",
         type=str,
-        default="0.0.0.0",
-        help="Host address for the server (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help=(
+            "Host address (default: 127.0.0.1). This API has no authentication; "
+            "use a non-loopback address only behind trusted access controls."
+        ),
     )
     serve_parser.add_argument(
         "--port",

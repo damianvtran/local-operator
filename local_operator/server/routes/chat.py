@@ -570,6 +570,53 @@ async def chat_with_agent_async(
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
+def _read_edit_workspace_file(workspace: str | None, file_path: str) -> tuple[FilePath, str]:
+    """Read a legacy edit target within the agent's configured workspace.
+
+    This is the HTTP one-shot edit boundary, not a restriction on trusted local
+    harness tools. Canonical paths cover traversal and symlink/junction escapes
+    on supported platforms; they do not sandbox a concurrent local directory
+    mutator. Open the canonical target, never the original caller-supplied path.
+    """
+    try:
+        if not workspace or not workspace.strip():
+            raise ValueError("Missing workspace")
+        root = FilePath(workspace).expanduser()
+        if not root.is_absolute():
+            raise ValueError("Workspace must be absolute")
+        root = root.resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("Workspace must be a directory")
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=403, detail="Agent workspace is unavailable")
+
+    try:
+        if not file_path or "\x00" in file_path:
+            raise ValueError("Invalid file path")
+        target = FilePath(file_path).expanduser()
+        if not target.is_absolute():
+            target = root / target
+        target = target.resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not target.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="File is outside the agent workspace")
+
+    try:
+        if target.exists() and not target.is_file():
+            raise HTTPException(status_code=400, detail="File must be a regular text file")
+        return target, target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="File cannot be read")
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 text")
+    except OSError:
+        logger.exception("Error reading workspace edit file")
+        raise HTTPException(status_code=500, detail="Error reading file")
+
+
 @router.post(
     "/v1/chat/agents/{agent_id}/edit",
     response_model=CRUDResponse,
@@ -599,7 +646,9 @@ async def chat_with_agent_async(
                 }
             },
         },
-        404: {"description": "Agent not found"},
+        400: {"description": "Invalid file path or non-text file"},
+        403: {"description": "Workspace unavailable or file outside the workspace"},
+        404: {"description": "Agent or workspace file not found"},
         500: {"description": "Internal Server Error"},
     },
 )
@@ -616,8 +665,9 @@ async def edit_file_with_agent(
     """
     Edit a file using a specific agent with an edit prompt.
 
-    The endpoint loads the specified file, applies the agent's conversation history,
-    and uses the agent to generate edit diffs based on the provided edit prompt.
+    The endpoint uses the supplied live buffer, or reads a file confined to the
+    agent workspace when no buffer is supplied. It applies conversation history
+    and generates edit diffs without writing the file.
 
     Args:
         request: The edit request containing file path and edit prompt
@@ -641,17 +691,17 @@ async def edit_file_with_agent(
             logger.exception("Error retrieving agent")
             raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
 
-        resolved_file_path = FilePath(request.file_path).expanduser().resolve()
-
-        # Load the file content
-        try:
-            with open(resolved_file_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"File not found: {resolved_file_path}")
-        except Exception as e:
-            logger.exception(f"Error reading file {resolved_file_path}")
-            raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+        if request.file_content is not None:
+            # Desktop editors own their live buffer, including unsaved and empty
+            # documents outside the server workspace. The path in this mode is
+            # display identity only: do not expand, resolve or open it.
+            resolved_file_path = request.file_path
+            file_content = request.file_content
+        else:
+            workspace_path, file_content = _read_edit_workspace_file(
+                agent_obj.current_working_directory, request.file_path
+            )
+            resolved_file_path = str(workspace_path)
 
         # Create operator with the agent
         operator = create_operator(

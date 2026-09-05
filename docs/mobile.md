@@ -7,6 +7,13 @@ loopback control socket, so a phone can watch transcripts, steer a running
 turn, answer approval and ask prompts, switch models and effort, run slash
 commands, drill into subagents, and start new sessions.
 
+For phone setup, recommend [Radient personal tunnels](tunnels.md) first.
+`/login radient` supports both account creation and sign-in. The agent's
+`guide://mobile` playbook verifies that selected account and its positive credit
+balance, reads the current monthly quote (currently USD 0), then creates and
+installs the authenticated tunnel. The phone uses Radient login; there is no
+relay password to copy. Local password access remains available separately.
+
 It descends from omp's mobile relay (`omp mobile`), with these deliberate
 differences:
 
@@ -24,9 +31,9 @@ differences:
 
 ## Security invariants
 
-- **Every listener binds `127.0.0.1` only.** Remote access is something you
-  put in front (a tunnel plus an identity proxy, exactly as with omp mobile);
-  never a wider bind.
+- **Every listener binds `127.0.0.1` only.** Radient supplies a tunnel and
+  cloud identity gate in front of the daemon. Other remote-access options
+  need an equivalent identity boundary; never use a wider bind.
 - **The phone leg is HTTP + SSE, never WebSocket.** An identity proxy answers
   an unauthenticated request with a redirect to its login page, and a browser
   cannot follow a redirect on a WebSocket handshake. Every state push is a

@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
     TextContent,
     ToolCall,
+    ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
@@ -727,6 +728,62 @@ def test_mid_run_turn_end_does_not_settle_streaming() -> None:
     assert fold.projection.streaming is False
     assert fold.projection.activity == ""
     assert fold.projection.stop_reason == "completed"
+
+
+def test_working_line_says_thinking_until_text_actually_streams() -> None:
+    """``message_start`` is a model call in flight, not prose.
+
+    The loop yields ``MessageStartEvent`` from a placeholder at the top of every
+    provider call, before the first token; a tool-only call never streams text
+    after it. Folding that as "responding" told the phone the model was
+    writing for the whole of every call. The TUI's WorkingBlock keys on the
+    first non-empty delta, and the phone's working line follows the same rule.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+
+    # A tool-only call in the loop's real order: placeholder, the call being
+    # dictated, message_end closing the model call, then (after the approval
+    # gate's wait) the tool starting. The composed intent must hold across
+    # message_end — that boundary ends prose, not a call still being composed.
+    first = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=first))
+    assert fold.projection.activity == "thinking"
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="c1", tool_name="bash", intent="probing"))
+    assert fold.projection.activity == "probing"
+    fold.fold_event(MessageEndEvent(message=first))
+    assert fold.projection.activity == "probing"
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
+    )
+    assert fold.projection.activity == "probing"
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
+        )
+    )
+    assert fold.projection.activity == "thinking"
+
+    # A prose call: still the model-wait until the first non-empty delta.
+    second = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=second))
+    assert fold.projection.activity == "thinking"
+    fold.fold_event(MessageUpdateEvent(message=second, delta=""))
+    assert fold.projection.activity == "thinking"
+    fold.fold_event(MessageUpdateEvent(message=second, delta="Here "))
+    assert fold.projection.activity == "responding"
+    fold.fold_event(MessageUpdateEvent(message=second, delta="it is."))
+    assert fold.projection.activity == "responding"
+    fold.fold_event(
+        MessageEndEvent(
+            message=second.model_copy(update={"content": [TextContent(text="Here it is.")]})
+        )
+    )
+    assert fold.projection.activity == "thinking"
+    fold.fold_event(AgentEndEvent(generation=1))
+    assert fold.projection.activity == ""
 
 
 def test_pinned_opener_never_costs_the_newest_row() -> None:
