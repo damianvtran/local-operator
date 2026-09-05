@@ -45,6 +45,13 @@ from local_operator.evaluation.runner.model import (
     ModelDecision,
     ModelUsage,
 )
+from local_operator.evaluation.runner.public_reply import (
+    REJECTED_PUBLIC_REPLY,
+    REPLY_VERSION,
+    decode_public_reply,
+    is_public_reply,
+    public_reply_contract,
+)
 from local_operator.logger import get_logger
 
 if TYPE_CHECKING:
@@ -235,8 +242,9 @@ def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
     return f"""You are operating a computer to complete one task.
 
 Each user message is one observation of the screen: its text, and a screenshot
-when one is attached. Your own earlier replies are the actions you already
-took. "{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+when one is attached. Your own earlier replies contain the actions you already
+took and any public factual observations you recorded.
+"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
 previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
 this step, which is normal for a screenshot-only benchmark and means the
 screenshot is the whole state; "[screenshot omitted ...]" marks an older
@@ -267,7 +275,18 @@ observation with a corrected batch; nothing was executed.
 Reply with a single JSON object and nothing else, with no prose and no code
 fence:
 
-  {{"actions": [ ... ]}}
+  {{"reply_version": "{REPLY_VERSION}", "action_batch": {{"actions": [ ... ]}},
+   "public_observations": ""}}
+
+This is a MODEL-REPLY envelope, not the adapter protocol. Use exactly these
+three keys; action_batch contains only actions. public_observations is a string
+of at most 2000 characters; empty is valid. Record only concise NEW factual data
+or visible progress observed on the CURRENT screen that may be needed later,
+because old screenshots are removed before text summarization. Do not repeat
+prior notes, invent facts, record credentials/secrets, or provide deliberation,
+plans, explanations of your decision, or private reasoning. Do not claim the
+chosen actions succeeded until a later observation shows their result.
+Legacy replies containing only {{"actions": [ ... ]}} are also accepted.
 
 Every action is an object whose type is given by the key "kind" (NOT "type"),
 and every action must carry the "observation_id" of the observation you are
@@ -451,6 +470,10 @@ def _batch_observation_ids(value: Any) -> set[str]:
 
     if not isinstance(value, Mapping):
         return set()
+    if is_public_reply(value):
+        value = value.get("action_batch")
+        if not isinstance(value, Mapping):
+            return set()
     actions = value.get("actions")
     if not isinstance(actions, list) or not actions:
         return set()
@@ -495,6 +518,16 @@ def parse_decision(
     decoded, trailing = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
+    public_reply = None
+    if is_public_reply(decoded):
+        try:
+            envelope = decode_public_reply(payload)
+        except ValueError as error:
+            raise DecisionParseError(str(error)) from error
+        decoded = envelope["action_batch"]
+        # Keep the visible response, not a reconstruction from its actions. It
+        # is redacted at the runner's resolved-secret boundary before replay.
+        public_reply = payload.strip()
     if trailing:
         # Tolerated, but never silent. A model that reliably appends junk is a
         # signal worth seeing -- it may point at a prompt or provider problem
@@ -535,6 +568,7 @@ def parse_decision(
         raise DecisionParseError(f"decision does not match this observation: {error}") from error
     return ModelDecision(
         action_batch=batch,
+        public_reply=public_reply,
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
@@ -619,7 +653,10 @@ class _ContextBuilder:
                 self._messages.append(
                     Message(
                         role="assistant",
-                        content=[TextContent(text=turn.batch.to_canonical_json().decode("utf-8"))],
+                        content=[TextContent(
+                            text=(turn.public_reply if turn.public_reply is not None
+                                  else turn.batch.to_canonical_json().decode("utf-8"))
+                        )],
                     )
                 )
                 self._closed_turns.add(index)
@@ -782,6 +819,12 @@ class ProviderModelClient:
         self._last_provider_context_tokens: int | None = None
         self._last_request_ms = _now_ms()
 
+    @property
+    def model_reply_metadata(self) -> dict[str, Any]:
+        # Optional client capability: scripted/historic clients must not claim
+        # a prompt contract they never used. The runner stays provider-free.
+        return public_reply_contract()
+
     async def decide(
         self,
         observation: Observation,
@@ -848,12 +891,25 @@ class ProviderModelClient:
             # is corrective by construction. The billing provenance rides on
             # the exception so the runner can write this attempt's triple.
             diagnostic = _rejection_prompt(str(error), observation)
-            self._context.append_rejection(text, diagnostic)
+            # Invalid notes are not factual memory. For envelope failures do
+            # not quote their unvalidated (possibly secret) text on retries or
+            # in evidence. Legacy rejection evidence remains unchanged.
+            shown = text
+            try:
+                rejected_value, _ = json.JSONDecoder().raw_decode(text.lstrip())
+            except (ValueError, RecursionError):
+                rejected_value = None
+            if is_public_reply(rejected_value) or any(
+                key in text
+                for key in ('"reply_version"', '"public_observations"', '"action_batch"')
+            ):
+                shown = REJECTED_PUBLIC_REPLY
+            self._context.append_rejection(shown, diagnostic)
             raise DecisionRejected(
                 diagnostic,
                 # Truncated with the same bound the context replay uses: a
                 # runaway reply must not be able to inflate the bundle either.
-                reply=text[:MAX_REJECTED_REPLY_CHARS],
+                reply=shown[:MAX_REJECTED_REPLY_CHARS],
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
