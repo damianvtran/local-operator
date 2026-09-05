@@ -136,6 +136,74 @@ def test_resumed_manager_alias_resolves_to_one_current_node() -> None:
     assert parent is not None and parent.job_id == "manager"
 
 
+def test_follower_comms_answers_session_dir_from_wire_then_derives_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The follower's history seam: the full-page view pages durable history
+    through ``comms.session_dir_of``, and a ``None`` there is treated as a
+    PERMANENT absence by the view, so every answer below is load-bearing."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    comms = SnapshotSubagentComms(
+        [
+            # A current owner stamps the directory on the wire; it wins even
+            # when it disagrees with where the session_id would derive to.
+            JobState(
+                id="wired",
+                type="task",
+                session_id="abc123",
+                session_dir=str(tmp_path / "elsewhere" / "abc123"),
+            ),
+            # A pre-fix owner sends only the session_id: derive the path the
+            # child was created at so the operator's already-running daemon
+            # gains history without a restart.
+            JobState(id="derived", type="task", session_id="def456"),
+            # A job with neither (a bash job, a swept child) has nothing to read.
+            JobState(id="bare", type="task"),
+        ]
+    )
+    assert comms.session_dir_of("wired") == tmp_path / "elsewhere" / "abc123"
+    assert comms.session_dir_of("derived") == tmp_path / "sessions" / "def456"
+    assert comms.session_dir_of("bare") is None
+    assert comms.session_dir_of("unknown") is None
+    # The node carries the same answer, which is what the todo panel reads.
+    node = comms.node("derived")
+    assert node is not None and node.session_dir == tmp_path / "sessions" / "def456"
+
+
+def test_lineage_stamps_the_child_session_dir_as_a_string() -> None:
+    """``_with_lineage`` is where an owner projects its registry onto the
+    wire; ``Path`` is not JSON-native so the projection is a string, and a
+    node without a directory projects ``None`` rather than ``"None"``."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from local_operator.session.frontend_state import _with_lineage
+
+    def comms_with(session_dir):  # noqa: ANN001, ANN202
+        node = SimpleNamespace(
+            job_id="child",
+            parent_job_id="root",
+            session_id="abc123",
+            session_dir=session_dir,
+            attempt_aliases=(),
+            live=False,
+        )
+        return SimpleNamespace(node=lambda _job_id: node)
+
+    job = JobState(id="child", type="task")
+    stamped = _with_lineage(job, comms_with(Path("/tmp/sessions/abc123")))
+    assert stamped.session_dir == "/tmp/sessions/abc123"
+    assert stamped.session_id == "abc123"
+    # Survives a JSON round trip, which is how a follower receives it.
+    wire = JobState.model_validate_json(stamped.model_dump_json())
+    assert wire.session_dir == "/tmp/sessions/abc123"
+    assert _with_lineage(job, comms_with(None)).session_dir is None
+    # An owner from before the field existed sends no key at all; the model
+    # must default it rather than reject the frame.
+    old = JobState.model_validate({"id": "child", "type": "task", "session_id": "abc123"})
+    assert old.session_dir is None
+
+
 @pytest.mark.parametrize("saved", [[], _todos("Previously saved child task")])
 @pytest.mark.asyncio
 async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_rows(

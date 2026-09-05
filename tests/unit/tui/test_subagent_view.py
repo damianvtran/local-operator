@@ -70,6 +70,7 @@ from local_operator.tui.widgets.subagent_view import (
     COLLAPSE_AFFORDANCE,
     EXPAND_HINT,
     HISTORY_ERROR_NOTE,
+    HISTORY_PAGE_ROWS,
     HISTORY_START_NOTE,
     HISTORY_UNAVAILABLE_NOTE,
     INSTRUCTION_ROWS,
@@ -4720,3 +4721,120 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         # And the reader sees one stable, truthful note throughout — no blink
         # between the absence and an error nobody asked to hear about.
         assert footers == {f"{HISTORY_UNAVAILABLE_NOTE} · {READ_ONLY_NOTE}"}, footers
+
+
+@pytest.mark.asyncio
+async def test_follower_pages_durable_history_from_the_projected_session_dir(
+    tmp_path, monkeypatch
+) -> None:
+    """An ATTACHED viewer must lazy-load the child's transcript off disk.
+
+    A follower has no live comms registry — ``_subagent_comms`` is a
+    ``SnapshotSubagentComms`` rebuilt from the wire ``JobState`` rows — and its
+    ``session_dir_of`` answered ``None`` for every child. The view treats a
+    ``None`` directory as a PERMANENT absence, so a subagent running for an
+    hour showed only the in-memory 500-event window under "earlier activity
+    dropped", with "no saved transcript" in the footer, while the child's
+    ``transcript.jsonl`` sat fully on disk.
+
+    Built from the production facades rather than a lambda-comms double, so
+    the test fails if the projection stops carrying a directory. Both wire
+    shapes are covered: an owner that stamps ``session_dir`` and an older one
+    that sends only ``session_id`` (derived under the isolated config dir).
+    """
+    from local_operator.session.frontend_state import (
+        JobState,
+        SnapshotJobs,
+        SnapshotSubagentComms,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # 120 durable rows: more than one HISTORY_PAGE_ROWS page, so the initial
+    # tail page and a Home page-back are both distinguishable.
+    for shape, session_id in (("wired", "aaaaaaaaaaaa"), ("derived", "bbbbbbbbbbbb")):
+        directory = tmp_path / "sessions" / session_id
+        transcript = Transcript(directory)
+        for index in range(120):
+            await transcript.append_message(Message.assistant(f"{shape} durable {index}"))
+        row = JobState(
+            id=f"sub-{shape}",
+            type="task",
+            status="completed",
+            label="audit the ingest path",
+            start_time=1_700_000_000.0,
+            settled_at=1_700_000_042.0,
+            trajectory=[],
+            session_id=session_id,
+            session_dir=str(directory) if shape == "wired" else None,
+        )
+        session = FakeSession()
+        # What the production ``RemoteSession`` says of itself; it keeps the
+        # app from standing up an owner-side mobile registrant over a fake.
+        session.is_remote = True  # type: ignore[attr-defined]
+        session.jobs = SnapshotJobs([row])
+        session._subagent_comms = SnapshotSubagentComms([row])
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(90, 28)) as pilot:
+            view = await _open(pilot, app, row)
+            await _wait_history(pilot, view)
+            assert not view._history_absent_final, shape
+            assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text(), shape
+            page = " ".join(view.rendered_rows())
+            assert f"{shape} durable 119" in page, shape
+            assert len(view._history_ids) == HISTORY_PAGE_ROWS, shape
+
+            while not view._history_exhausted:
+                view.action_home()
+                await _wait_history(pilot, view)
+            assert len(view._history_ids) == 120, shape
+            assert f"{shape} durable 0" in " ".join(view.rendered_rows()), shape
+            settled = f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
+            for _ in range(50):
+                if view._state_hint.rendered().endswith(settled):
+                    break
+                await pilot.pause()
+            assert view._state_hint.rendered().endswith(settled), shape
+
+
+@pytest.mark.asyncio
+async def test_a_follower_page_that_gains_a_directory_re_arms_history(tmp_path) -> None:
+    """None → path on the SAME job must un-finalise the absence and load.
+
+    A follower can open a child's page off a frame that carried no directory
+    (a job registered before ``attach`` bound its session, or a frame from an
+    owner that only later learned it) and receive the path on a later frame.
+    ``_history_absent_final`` is correct for the first frame — nothing to
+    read — but it must be a fact about that frame, not about the page: the
+    retarget branch in ``show()`` has to reset history and issue the initial
+    tail read itself, because ``on_mount`` (the other place the first read
+    starts) has already run.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(30):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    answer: dict[str, Any] = {"dir": None}
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: answer["dir"]}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert view._history_absent_final
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+        assert "durable 29" not in " ".join(view.rendered_rows())
+
+        # The later frame: same job, now with a directory.
+        answer["dir"] = transcript.directory
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+        assert not view._history_absent_final
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert len(view._history_ids) == 30
+        page = " ".join(view.rendered_rows())
+        assert "durable 29" in page
+        # The live trajectory rows the first frame painted are still there.
+        assert "Reading the ingest path." in page

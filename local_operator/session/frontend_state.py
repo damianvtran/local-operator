@@ -26,6 +26,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -734,6 +735,16 @@ class JobState(BaseModel):
     # than silently doing nothing.
     parent_job_id: str | None = None
     session_id: str | None = None
+    #: The child's durable session directory, as a string (``Path`` is not
+    #: JSON-native). Projected here for the same reason ``session_id`` is:
+    #: the owner's ``SubagentComms`` registry never crosses the socket, and
+    #: the full-page view lazy-loads the child's ``transcript.jsonl`` through
+    #: ``comms.session_dir_of(job_id)``. A follower with no directory treated
+    #: every child as "no saved transcript" and could show only the 500-event
+    #: in-memory trajectory window of a child that had hours of history on
+    #: disk. ``None`` from an owner that predates this field is tolerated —
+    #: ``SnapshotSubagentComms`` derives the path from ``session_id`` then.
+    session_dir: str | None = None
     attempt_aliases: list[str] = Field(default_factory=list)
     # Child plans are detail payloads, not roster metadata. None is unavailable;
     # an empty list is an authoritative clear and must never restore a stale plan.
@@ -1335,6 +1346,13 @@ class SnapshotSubagentComms:
     all of which ``JobState`` now carries. This facade answers the SAME methods
     the app calls on ``_subagent_comms`` from ``state.jobs``, so the hierarchy
     keys work identically on a follower (U5) with no attach-specific code path.
+
+    ``session_dir_of`` is the one method whose answer is not pure graph: it is
+    a filesystem path the view reads durable history from. It is answered
+    from the projected ``session_dir``/``session_id`` (see
+    :func:`_snapshot_session_dir`) because the alternative — fetching the
+    child's history over the socket — would put an hour-long transcript on
+    the wire that a same-machine follower can page straight off disk.
     """
 
     def __init__(self, jobs: Iterable[JobState] = ()) -> None:
@@ -1352,7 +1370,7 @@ class SnapshotSubagentComms:
             label=job.label or job.agent or job.id,
             parent_job_id=job.parent_job_id,
             session_id=job.session_id,
-            session_dir=None,
+            session_dir=_snapshot_session_dir(job),
             prompt=job.prompt or "",
             agent_role=job.agent_role or "",
             effort=job.effort or "",
@@ -1394,8 +1412,52 @@ class SnapshotSubagentComms:
         rows.reverse()
         return rows
 
-    def session_dir_of(self, job_id: str) -> Any | None:
-        return None
+    def session_dir_of(self, job_id: str) -> Path | None:
+        """Where the child's durable transcript lives, for lazy history paging.
+
+        The owner answers this from its live registry; a follower answers it
+        from the projected job (see :func:`_snapshot_session_dir`). Existence
+        is deliberately NOT checked here: the view already re-probes a
+        directory whose ``transcript.jsonl`` is missing on every refresh
+        (``SubagentView._reconsider_missing_history``), and a path that never
+        materialises on this machine degrades to the same "no saved
+        transcript" note a missing file does.
+        """
+        node = self.node(job_id)
+        return getattr(node, "session_dir", None) if node is not None else None
+
+
+def _snapshot_session_dir(job: JobState) -> Path | None:
+    """Resolve a projected job's child session directory on a follower.
+
+    Two sources, in order of authority:
+
+    1. The wire ``session_dir`` the owner stamped (``_with_lineage``). This is
+       the owner's own ``Path`` and is right by construction.
+    2. ``config_dir() / "sessions" / session_id`` when the owner sent only a
+       ``session_id``. Children are always created there
+       (``harness/subagent.py``: ``session_id`` IS ``session_dir.name``), and a
+       TUI attached to a daemon on the same machine reads the same config
+       root. The derivation exists so an already-running daemon from before
+       ``session_dir`` rode the wire — the exact situation an operator is in
+       when they upgrade the viewer under a long-lived owner — gets history
+       without a restart, rather than only after the owner is relaunched.
+
+    A follower on ANOTHER machine (the mobile daemon relaying a remote
+    session) derives a path that does not exist locally. That is accepted on
+    purpose: the view treats a directory with no transcript as "no saved
+    transcript" and keeps painting the live trajectory, which is exactly the
+    behaviour every follower had before this field existed, so the fallback
+    can only add history, never take a page away.
+    """
+    wire = job.session_dir
+    if wire:
+        return Path(str(wire))
+    if job.session_id:
+        from local_operator.paths import config_dir
+
+        return config_dir() / "sessions" / str(job.session_id)
+    return None
 
 
 class SnapshotMcpManager:
@@ -2309,10 +2371,15 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
 
     child_id = getattr(node, "session_id", None)
     has_plan = bool(child_id) and (bool(getattr(node, "live", False)) or child_id in TODO_STORE)
+    # Stringified: the wire is JSON and ``Path`` is not. A follower's
+    # ``SnapshotSubagentComms`` turns it back into a ``Path``; the owner-side
+    # view never reads this field, it asks the live registry directly.
+    session_dir = getattr(node, "session_dir", None)
     return job.model_copy(
         update={
             "parent_job_id": getattr(node, "parent_job_id", None),
             "session_id": getattr(node, "session_id", None),
+            "session_dir": str(session_dir) if session_dir is not None else None,
             "attempt_aliases": list(getattr(node, "attempt_aliases", ())),
             "todos": (
                 [phase.model_dump(mode="json") for phase in _todo_state(node.session_id)]
