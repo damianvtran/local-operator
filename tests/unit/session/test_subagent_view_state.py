@@ -143,6 +143,16 @@ def test_follower_comms_answers_session_dir_from_wire_then_derives_it(
     through ``comms.session_dir_of``, and a ``None`` there is treated as a
     PERMANENT absence by the view, so every answer below is load-bearing."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # The derived answer is only trusted once the directory proves it is this
+    # child's session (see ``_derived_dir_belongs_to``), so stamp the marker
+    # ``run_subagent`` writes at creation. Written BEFORE the facade is built:
+    # ``replace()`` resolves every node's directory eagerly.
+    derived_dir = tmp_path / "sessions" / "def456"
+    derived_dir.mkdir(parents=True)
+    (derived_dir / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "label": "worker", "agent": "coder"}),
+        encoding="utf-8",
+    )
     comms = SnapshotSubagentComms(
         [
             # A current owner stamps the directory on the wire; it wins even
@@ -156,18 +166,120 @@ def test_follower_comms_answers_session_dir_from_wire_then_derives_it(
             # A pre-fix owner sends only the session_id: derive the path the
             # child was created at so the operator's already-running daemon
             # gains history without a restart.
-            JobState(id="derived", type="task", session_id="def456"),
+            JobState(
+                id="derived",
+                type="task",
+                session_id="def456",
+                label="worker",
+                agent_role="coder",
+            ),
             # A job with neither (a bash job, a swept child) has nothing to read.
             JobState(id="bare", type="task"),
         ]
     )
     assert comms.session_dir_of("wired") == tmp_path / "elsewhere" / "abc123"
-    assert comms.session_dir_of("derived") == tmp_path / "sessions" / "def456"
+    assert comms.session_dir_of("derived") == derived_dir
     assert comms.session_dir_of("bare") is None
     assert comms.session_dir_of("unknown") is None
     # The node carries the same answer, which is what the todo panel reads.
     node = comms.node("derived")
-    assert node is not None and node.session_dir == tmp_path / "sessions" / "def456"
+    assert node is not None and node.session_dir == derived_dir
+
+
+def test_a_derived_path_is_refused_unless_the_directory_proves_ownership(
+    tmp_path, monkeypatch
+) -> None:
+    """The guess must prove itself; the wire value never has to.
+
+    ``session_id`` is a 48-bit truncated uuid and carries no ownership proof,
+    and the derivation reads the PROCESS-GLOBAL ``config_dir()`` rather than
+    whichever root a follower attached against — so an unrelated local session
+    is directly reachable, no collision required (review round 1, M2; QA hit
+    the config-root half of this with a "wrong config root" cell that resolved
+    anyway).
+
+    Every case below degrades to ``None``, which the view already renders as
+    the "no saved transcript" note — the behaviour followers had before the
+    derivation existed. Failing closed can only withhold history; failing open
+    renders somebody else's conversation under this child's name.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+
+    # 1. Nothing on disk at all: a remote/mobile follower whose children live
+    #    on another machine. Must NOT be trusted, and must not create anything.
+    absent = JobState(id="absent", type="task", session_id="aaaaaaaaaaaa", label="w")
+    assert SnapshotSubagentComms([absent]).session_dir_of("absent") is None
+    assert not (sessions / "aaaaaaaaaaaa").exists(), "resolution must not touch disk"
+
+    # 2. A real local session that is the USER'S OWN, not anyone's child. It
+    #    has no origin marker, which is precisely how a user session looks.
+    user_dir = sessions / "bbbbbbbbbbbb"
+    user_dir.mkdir(parents=True)
+    (user_dir / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    stranger = JobState(id="stranger", type="task", session_id="bbbbbbbbbbbb", label="w")
+    assert SnapshotSubagentComms([stranger]).session_dir_of("stranger") is None
+
+    # 3. A subagent session, but a DIFFERENT child's: the id matched, the
+    #    identity does not.
+    other_dir = sessions / "cccccccccccc"
+    other_dir.mkdir(parents=True)
+    (other_dir / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "label": "someone-else", "agent": "reviewer"}),
+        encoding="utf-8",
+    )
+    mismatched = JobState(
+        id="mismatched", type="task", session_id="cccccccccccc", label="w", agent_role="coder"
+    )
+    assert SnapshotSubagentComms([mismatched]).session_dir_of("mismatched") is None
+
+    # 4. The real thing: same id, and the marker agrees about who it is.
+    mine_dir = sessions / "dddddddddddd"
+    mine_dir.mkdir(parents=True)
+    (mine_dir / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "label": "w", "agent": "coder"}),
+        encoding="utf-8",
+    )
+    mine = JobState(
+        id="mine", type="task", session_id="dddddddddddd", label="w", agent_role="coder"
+    )
+    assert SnapshotSubagentComms([mine]).session_dir_of("mine") == mine_dir
+
+    # 5. A WIRE-supplied directory is the owner's own answer and is trusted
+    #    without a marker — the owner knows where it put the child.
+    bare = sessions / "eeeeeeeeeeee"
+    wired = JobState(
+        id="wired", type="task", session_id="ffffffffffff", session_dir=str(bare), label="w"
+    )
+    assert SnapshotSubagentComms([wired]).session_dir_of("wired") == bare
+
+
+def test_a_missing_marker_is_not_memoised_as_a_verdict(tmp_path, monkeypatch) -> None:
+    """The ownership verdict is cached, so a child that is still STARTING
+    must not be pinned as unusable.
+
+    ``session_dir_of`` rides the page's 1 Hz refresh and QA measured this path
+    at 1.08 stats/s with 0 page reads, so the marker read is memoised. The
+    memo may only hold facts about CONTENT: a directory whose marker is not
+    there yet (or briefly unreadable) has to be re-asked, exactly as
+    ``resume._session_origin_read`` declines to cache an ``OSError``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    job = JobState(
+        id="starting", type="task", session_id="abcabcabcabc", label="w", agent_role="coder"
+    )
+    comms = SnapshotSubagentComms([job])
+    assert comms.session_dir_of("starting") is None
+
+    directory = tmp_path / "sessions" / "abcabcabcabc"
+    directory.mkdir(parents=True)
+    (directory / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "label": "w", "agent": "coder"}),
+        encoding="utf-8",
+    )
+    # A later frame re-projects the node; the answer must now be the directory.
+    comms.replace([job])
+    assert comms.session_dir_of("starting") == directory
 
 
 def test_lineage_stamps_the_child_session_dir_as_a_string() -> None:

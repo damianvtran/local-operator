@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
@@ -4756,11 +4757,19 @@ async def test_follower_pages_durable_history_from_the_projected_session_dir(
         transcript = Transcript(directory)
         for index in range(120):
             await transcript.append_message(Message.assistant(f"{shape} durable {index}"))
+        # The ownership marker ``run_subagent`` stamps at creation. A DERIVED
+        # path is refused without it (review round 1, M2); the wire shape does
+        # not need it, and carries it here only because a real child has one.
+        (directory / "origin.json").write_text(
+            json.dumps({"origin": "subagent", "label": "audit the ingest path", "agent": "coder"}),
+            encoding="utf-8",
+        )
         row = JobState(
             id=f"sub-{shape}",
             type="task",
             status="completed",
             label="audit the ingest path",
+            agent_role="coder",
             start_time=1_700_000_000.0,
             settled_at=1_700_000_042.0,
             trajectory=[],
@@ -4838,3 +4847,157 @@ async def test_a_follower_page_that_gains_a_directory_re_arms_history(tmp_path) 
         assert "durable 29" in page
         # The live trajectory rows the first frame painted are still there.
         assert "Reading the ingest path." in page
+
+
+@pytest.mark.asyncio
+async def test_a_restored_swept_child_pages_its_transcript_on_a_follower(
+    tmp_path, monkeypatch
+) -> None:
+    """The operator's reported case, as a regression guard.
+
+    A child swept by retention and then restored across a restart reaches a
+    follower as a ``restored`` reader row: ``session_id`` but NO trajectory
+    and no wire ``session_dir`` (the pre-fix owner never sent one). The page
+    must still reach its transcript, because the file outlives the process —
+    observed live as a 1153-row transcript rendered as "no saved transcript".
+
+    The empty trajectory is deliberate and stays empty: in-memory execution
+    evidence is exactly what the sweep releases, and the durable transcript is
+    its replacement. The assertion is therefore about HISTORY, not rows.
+    """
+    from local_operator.session.frontend_state import (
+        JobState,
+        SnapshotJobs,
+        SnapshotSubagentComms,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_id = "e72882c37267"
+    transcript = Transcript(tmp_path / "sessions" / session_id)
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    # The real marker for this child, copied from the operator's own machine:
+    # {"origin": "subagent", "label": "desktop-ui-implementation", "agent": "coder"}.
+    # A derived path is only trusted once it proves ownership (round 1, M2).
+    (transcript.directory / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "label": "desktop-ui-implementation", "agent": "coder"}),
+        encoding="utf-8",
+    )
+    row = JobState(
+        id="b76f9293544d",
+        type="task",
+        status="completed",
+        label="desktop-ui-implementation",
+        agent_role="coder",
+        start_time=1_700_000_000.0,
+        settled_at=1_700_000_042.0,
+        # The shape the comms-node fallback builds: identity, no trajectory,
+        # and no wire directory — the derivation is the only way home.
+        restored=True,
+        trajectory=[],
+        session_id=session_id,
+    )
+    session = FakeSession()
+    session.is_remote = True  # type: ignore[attr-defined]
+    session.jobs = SnapshotJobs([row])
+    session._subagent_comms = SnapshotSubagentComms([row])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, row)
+        await _wait_history(pilot, view)
+        assert not view._history_absent_final
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable 139" in " ".join(view.rendered_rows())
+
+        while not view._history_exhausted:
+            view.action_home()
+            await _wait_history(pilot, view)
+        assert len(view._history_ids) == 140
+        assert "durable 0" in " ".join(view.rendered_rows())
+        settled = f"{HISTORY_START_NOTE} · {READ_ONLY_NOTE}"
+        for _ in range(50):
+            if view._state_hint.rendered().endswith(settled):
+                break
+            await pilot.pause()
+        assert view._state_hint.rendered().endswith(settled)
+
+
+@pytest.mark.asyncio
+async def test_an_owner_page_survives_the_sweep_of_its_own_job_row(tmp_path) -> None:
+    """Owner-side parity, and the case where the sweep lands mid-read.
+
+    An owner reads the LIVE comms registry rather than the wire, so its page
+    keeps the transcript directory when retention deletes the execution row
+    underneath it (``_ChildRecord.job_ref`` is what carries the row itself).
+    The page then reports the ledger loss — ``LEDGER_GONE_NOTE``, which is
+    true — while the durable history stays readable, which is the whole point
+    of the distinction between execution evidence and the transcript.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(30):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with(TRAJECTORY, status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        assert len(view._history_ids) == 30
+
+        # Retention removes the row while the page is open: the ledger lookup
+        # now misses, but the registry (and so the directory) is untouched.
+        session.jobs = _fake_jobs()
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert view._status == "gone"
+        page = " ".join(view.rendered_rows())
+        assert LEDGER_GONE_NOTE in page
+        # The durable half is unaffected — identity outlived the sweep.
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert len(view._history_ids) == 30
+        assert "durable 29" in page
+
+
+@pytest.mark.asyncio
+async def test_a_swept_child_with_no_directory_anywhere_keeps_the_note(tmp_path) -> None:
+    """The other half: no directory is still a genuine, permanent absence.
+
+    A swept row carrying neither a wire ``session_dir`` nor a ``session_id``
+    (a job that never started a durable session) has nothing to derive from
+    and nothing to read. The note is the truth, and the derivation must not
+    invent a path for it — an invented path would send the page reading a
+    directory that describes some other session.
+    """
+    from local_operator.session.frontend_state import (
+        JobState,
+        SnapshotJobs,
+        SnapshotSubagentComms,
+    )
+
+    row = JobState(
+        id="never-started",
+        type="task",
+        status="cancelled",
+        label="parked",
+        start_time=1_700_000_000.0,
+        settled_at=1_700_000_002.0,
+        restored=True,
+        trajectory=[],
+    )
+    session = FakeSession()
+    session.is_remote = True  # type: ignore[attr-defined]
+    session.jobs = SnapshotJobs([row])
+    comms = SnapshotSubagentComms([row])
+    assert comms.session_dir_of("never-started") is None
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, row)
+        await _wait_history(pilot, view)
+        assert view._history_absent_final
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()

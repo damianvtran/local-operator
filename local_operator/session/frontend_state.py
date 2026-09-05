@@ -1427,13 +1427,86 @@ class SnapshotSubagentComms:
         return getattr(node, "session_dir", None) if node is not None else None
 
 
+#: Memoised ownership verdicts for DERIVED child directories, keyed by
+#: ``(path, label, agent_role)`` — the exact question asked, so a second job
+#: cannot reuse a first job's answer. The value is the verdict alone.
+#:
+#: A cache rather than a per-call read because ``session_dir_of`` sits on the
+#: page's 1 Hz refresh: QA measured this path at 1.08 stats/s and 0 page reads
+#: over 5.6 s idle, and an ``origin.json`` read per tick would regress exactly
+#: that. Safe to memoise because the marker is written ONCE by whoever creates
+#: the directory (``mark_session_origin``) and never rewritten — unlike the
+#: transcript's presence, which the view deliberately re-probes because it can
+#: appear later.
+#:
+#: Only NEGATIVE-able facts are cached: an ``OSError`` (a transient EMFILE, a
+#: volume blip) yields no entry, so a moment's failure cannot pin a wrong
+#: verdict for the life of the process — the same distinction
+#: ``resume._session_origin_read`` draws with its ``readable`` flag.
+_DERIVED_OWNERSHIP: dict[tuple[str, str, str], bool] = {}
+
+
+def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> bool:
+    """Whether a DERIVED directory really is this child's session.
+
+    The derivation below turns a ``session_id`` into a path by construction,
+    and a 48-bit truncated uuid is not an ownership proof: any local session
+    with that id answers to it. Worse, the id space is per-config-root while
+    the derivation reads the PROCESS-GLOBAL ``config_dir()`` — so a follower
+    attached with a different ``config_dir`` still resolves against this
+    process's root, and an unrelated local session's transcript could render
+    under a remote child's page (review round 1, M2; QA reproduced the
+    config-root half of it directly).
+
+    ``origin.json`` is the proof already on disk: ``run_subagent`` stamps it
+    with ``{"origin": "subagent", "label": ..., "agent": ...}`` at creation.
+    The predicate is therefore "this is a subagent session AND it is the one
+    the node describes": origin must be ``subagent``, and whichever of
+    label/agent the marker recorded must match the node. Matching only the
+    fields present keeps a marker written by an older release (which may
+    predate one of the details) usable, while still refusing a directory that
+    positively disagrees.
+
+    A missing or unreadable marker is NOT ownership. That is the safe
+    direction and costs nothing real: failing closed degrades to the existing
+    "no saved transcript" note, which is exactly what a follower saw before
+    the derivation existed, whereas failing open renders another session's
+    conversation under this child's name.
+    """
+    from local_operator.resume import ORIGIN_NAME, ORIGIN_SUBAGENT
+
+    key = (str(directory), label, agent_role)
+    cached = _DERIVED_OWNERSHIP.get(key)
+    if cached is not None:
+        return cached
+    try:
+        raw = (directory / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # A fact about this MOMENT, not about the file: do not memoise it.
+        return False
+    verdict = False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("origin") == ORIGIN_SUBAGENT:
+        marked_label = payload.get("label")
+        marked_agent = payload.get("agent")
+        verdict = (not isinstance(marked_label, str) or not label or marked_label == label) and (
+            not isinstance(marked_agent, str) or not agent_role or marked_agent == agent_role
+        )
+    _DERIVED_OWNERSHIP[key] = verdict
+    return verdict
+
+
 def _snapshot_session_dir(job: JobState) -> Path | None:
     """Resolve a projected job's child session directory on a follower.
 
     Two sources, in order of authority:
 
     1. The wire ``session_dir`` the owner stamped (``_with_lineage``). This is
-       the owner's own ``Path`` and is right by construction.
+       the owner's own ``Path`` and is right by construction, so it is trusted
+       as-is — the owner knows where it put the child.
     2. ``config_dir() / "sessions" / session_id`` when the owner sent only a
        ``session_id``. Children are always created there
        (``harness/subagent.py``: ``session_id`` IS ``session_dir.name``), and a
@@ -1441,14 +1514,21 @@ def _snapshot_session_dir(job: JobState) -> Path | None:
        root. The derivation exists so an already-running daemon from before
        ``session_dir`` rode the wire — the exact situation an operator is in
        when they upgrade the viewer under a long-lived owner — gets history
-       without a restart, rather than only after the owner is relaunched.
+       without a restart, rather than only after the owner is relaunched. It
+       is also what rescues a child rebuilt from the comms graph after a
+       restart, which carries a ``session_id`` and never had a wire directory.
+
+    Only the GUESS is verified (:func:`_derived_dir_belongs_to`): a path this
+    function invented must prove it is the right child's session before the
+    page reads it, because the id alone is not an ownership proof.
 
     A follower on ANOTHER machine (the mobile daemon relaying a remote
-    session) derives a path that does not exist locally. That is accepted on
-    purpose: the view treats a directory with no transcript as "no saved
-    transcript" and keeps painting the live trajectory, which is exactly the
-    behaviour every follower had before this field existed, so the fallback
-    can only add history, never take a page away.
+    session) derives a path that does not exist locally, and now also one that
+    cannot prove ownership. Both degrade to ``None``: the view treats that as
+    "no saved transcript" and keeps painting the live trajectory, which is
+    exactly the behaviour every follower had before this field existed, so the
+    fallback can only add history, never take a page away or show the wrong
+    one.
     """
     wire = job.session_dir
     if wire:
@@ -1456,7 +1536,9 @@ def _snapshot_session_dir(job: JobState) -> Path | None:
     if job.session_id:
         from local_operator.paths import config_dir
 
-        return config_dir() / "sessions" / str(job.session_id)
+        derived = config_dir() / "sessions" / str(job.session_id)
+        if _derived_dir_belongs_to(derived, job.label or job.agent or "", job.agent_role or ""):
+            return derived
     return None
 
 

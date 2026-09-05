@@ -241,10 +241,23 @@ def todo_items(
 
 
 def _read_restored_todos(transcript_directory: str) -> list[dict[str, Any]]:
-    """Read a historical child snapshot; callers must run this in a worker."""
+    """Read a historical child snapshot; callers must run this in a worker.
+
+    ``defer_materialise`` because this is a pure READ of somebody else's
+    session and must leave nothing behind. ``Transcript`` otherwise mkdirs its
+    directory on construction, so merely opening a child's page created an
+    empty session directory in the real store whenever the path did not exist
+    — and the path can now be DERIVED from a ``session_id`` (see
+    ``frontend_state._snapshot_session_dir``), so a remote follower whose
+    children live on another machine would litter this one with a phantom
+    directory per page open (review round 1, M1).
+    """
     from local_operator.session.transcript import Transcript
 
-    details = Transcript(transcript_directory).latest_custom("todo_snapshot") or {}
+    details = (
+        Transcript(transcript_directory, defer_materialise=True).latest_custom("todo_snapshot")
+        or {}
+    )
     candidate = details.get("items") or []
     return candidate if isinstance(candidate, list) else []
 
