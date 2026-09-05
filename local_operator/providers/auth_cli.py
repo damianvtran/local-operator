@@ -221,10 +221,24 @@ def _invalidate_cached_usage(provider_id: str, auth_store: "AuthStore") -> None:
     The TUI's ``/login`` already does this (``ProviderController.login``): a
     completed login is positive evidence the grant is alive, which contradicts
     any ``sign-in expired`` (``credential_invalid``) verdict the cached row
-    still carries, and re-authenticating an already-stored account keeps the
-    cache key unchanged so nothing else observes the event. Without this the
-    shell path kept showing the dead-grant note for the cache TTL (~5 min)
-    after ``local-operator login <provider>`` had fixed it (#618 R11).
+    still carries. Without this the shell path kept showing the dead-grant note
+    for the cache TTL (~5 min) after ``local-operator login <provider>`` had
+    fixed it (#618 R11).
+
+    **This call is load-bearing on the OAuth route and belt-and-braces on the
+    api_key one**, and the difference is worth stating because the two look
+    identical from here. ``_identity_key_for`` dedupes an OAuth re-login onto
+    the SAME row (an explicit per-provider constant where the IdP returns no
+    account id), so the account fingerprint -- and with it the cache key -- is
+    unchanged and NOTHING else in the system observes the event: only this
+    drop clears the verdict. An api_key credential deliberately dedupes on
+    nothing (``source: login`` returns ``None``), so a re-login INSERTS a
+    second row, the fingerprint changes and the key moves. That path is still
+    correct without this call, by a different mechanism: the row under the old
+    key is orphaned rather than served, and the new key simply misses, so the
+    next read is a live fetch. Measured on both routes (#626 Q1): api_key
+    ``deepseek:aabba6a1…`` -> ``deepseek:73b5fded…`` with 2 stored rows;
+    OAuth kimi key byte-identical across the re-login with 1 row.
 
     Routed through the controller rather than re-deriving the cache key here:
     the key folds in storage-id aliasing and the account fingerprint, and the

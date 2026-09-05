@@ -502,9 +502,14 @@ class ProviderController:
         # The cached usage row is wrong for the same reason and one more: a
         # completed login is positive evidence this account's grant is alive,
         # which directly contradicts any ``credential_invalid`` verdict the row
-        # still carries. Re-authenticating an ALREADY-stored account keeps the
-        # account fingerprint (and so the cache key) identical, so nothing else
-        # in the system observes this event -- see ``UsageCacheStore.invalidate``.
+        # still carries. Re-authenticating an ALREADY-stored OAUTH account keeps
+        # the account fingerprint (and so the cache key) identical, so nothing
+        # else in the system observes this event and only this drop clears the
+        # verdict -- see ``UsageCacheStore.invalidate``. An api_key re-login
+        # dedupes on nothing and inserts a second row, so there the key MOVES
+        # and the drop is redundant rather than load-bearing (the orphaned row
+        # is never served and the new key misses to a live fetch). The
+        # asymmetry is spelled out in full on ``auth_cli._invalidate_cached_usage``.
         self.invalidate_cached_usage(storage)
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
