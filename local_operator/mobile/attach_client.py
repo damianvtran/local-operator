@@ -567,6 +567,17 @@ class AttachClient:
             "slash_result", command=command, args=args, images=images or []
         )
 
+    async def credential(self, action: str, key: str = "", value: str = "") -> Any:
+        """Run one ``/credential`` verb against the owner's variable store.
+
+        ``value`` carries a SECRET for the ``store`` action and is empty for
+        every other verb. It has its own named field rather than riding the
+        generic ``args`` string of ``slash_result`` so that the one place a
+        secret appears on the wire is the one place that must handle it
+        carefully — nothing echoes, logs, or transcribes this field.
+        """
+        return await self._request_payload("credential", action=action, key=key, value=value)
+
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork an aside exchange into the conversation on the authoritative owner."""
         return await self._request("adopt_aside", messages=messages)
