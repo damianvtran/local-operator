@@ -249,7 +249,8 @@ lop = "local_operator.cli:main"
 [tool.black]
 line-length = 100
 target-version = ['py312']
-extend-exclude = "F401"
+# Vendored release helpers stay byte-identical to their recorded upstream SHA.
+extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/"
 
 [tool.pylint."messages control"]
 ignore = ["__init__.py"]
@@ -263,6 +264,7 @@ enable = [
 
 [tool.isort]
 profile = "black"
+extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples"]
 
 [tool.pyright]
 reportMissingTypeArgument = true
@@ -299,7 +301,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # runtime surface the gate exists to protect. Excluding `docs/` keeps the
 # type-check gate focused on `local_operator/` and `tests/` without weakening it
 # for real code or littering a throwaway generator with per-line ignores.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/xlang-ai/OSWorld-V2",
+  "commit": "d578d2d4e0dc82b43e270fdaa7fa89d9708cd154",
+  "files": {
+    "evaluation_examples/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evaluation_examples/task_class/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evaluation_examples/task_class/generated_task_utils.py": "cf0945bc4cd15253631f41dfcd96ca0874116523f07fc34989cce2f23df1bbb0"
+  }
+}
