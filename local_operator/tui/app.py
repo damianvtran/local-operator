@@ -261,6 +261,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.skills.discovery import Skill
+    from local_operator.tui.widgets.session_panel import SessionDiagnostics
 
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
@@ -682,6 +683,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("context", "Show prompt, tool-schema and message token usage"),
+    SlashCommand("session", "Current-session usage, cost and request diagnostics"),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
     # OFFER — a bare `/analytics` opens the usage view rather than doing
@@ -15011,6 +15013,8 @@ class OperatorApp(App[None]):
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
             self._cmd_analytics(arg, notice)
+        elif command == "/session":
+            self._cmd_session(arg, notice)
         elif command == "/context":
             block = self._context_block()
             if block is not None:
@@ -18504,6 +18508,47 @@ class OperatorApp(App[None]):
         self.push_screen(
             AnalyticsScreen(aggregate, daily=daily, monthly=monthly, window_totals=window_totals)
         )
+
+    def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
+        """Read only this session's ledger; never interpret arguments as a prompt."""
+        from local_operator.tui.widgets.session_panel import SessionDiagnostics
+
+        if arg.strip():
+            self._system_notice(
+                "/session takes no arguments; it reports the current session", "warning"
+            )
+            return
+        session = self._session
+        if session is None:
+            self._system_notice("session is not ready yet", "warning")
+            return
+        # Capture mutable identity and model selection BEFORE yielding. A /new
+        # or /resume during the disk read must not put an old bill over a new
+        # conversation. Object identity also catches resuming the same ID.
+        runtime = SessionDiagnostics.capture(session)
+        self.run_worker(
+            self._open_session_report_worker(session, runtime),
+            thread=False,
+            group="session-report",
+            exclusive=True,
+        )
+
+    async def _open_session_report_worker(
+        self, session: SessionProtocol, runtime: SessionDiagnostics
+    ) -> None:
+        from local_operator.analytics import AnalyticsStore
+        from local_operator.tui.widgets.session_panel import SessionScreen
+
+        report = await asyncio.to_thread(AnalyticsStore().session_report, runtime.session_id)
+        if self._session is not session or session.session_id != runtime.session_id:
+            return
+        # A mirrored facade may survive an owner replacement for the SAME ID.
+        # Its public epoch, unlike the per-event sequence, changes only across
+        # that lifecycle boundary and must not invalidate ordinary live usage.
+        state = getattr(session, "frontend_state", None)
+        if runtime.epoch is not None and getattr(state, "epoch", None) != runtime.epoch:
+            return
+        self.push_screen(SessionScreen(report, runtime))
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""

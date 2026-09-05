@@ -490,6 +490,56 @@ class UsageAggregate:
 
 
 @dataclass(frozen=True)
+class TimingSummary:
+    """Observed logical-request timing; absent samples are never zero latency."""
+
+    samples: int = 0
+    mean_ms: float | None = None
+    min_ms: float | None = None
+    max_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class SessionRequest:
+    """A bounded recent-ledger row, deliberately excluding payloads and errors."""
+
+    request_id: str
+    ts_ms: int
+    provider: str
+    model_id: str
+    purpose: str
+    outcome: str
+    usage_reported: bool | None
+    context_tokens: int
+    output_tokens: int
+    duration_ms: float | None
+    ttft_ms: float | None
+    preparation_ms: float | None
+
+
+@dataclass(frozen=True)
+class SessionReport:
+    """One consistent exact-ID ledger snapshot, not a transcript-derived bill.
+
+    No child IDs or copied fork history are joined. A resumed ID sees its
+    retained rows; queued recorder writes and pruned history cannot be recovered.
+    ``available=False`` is distinct from an available report with zero calls.
+    """
+
+    session_id: str
+    available: bool = True
+    aggregate: UsageAggregate = field(default_factory=UsageAggregate)
+    by_model: dict[tuple[str, str], UsageAggregate] = field(default_factory=dict)
+    by_purpose_outcome: dict[tuple[str, str], int] = field(default_factory=dict)
+    missing_usage_calls: int = 0
+    unknown_usage_calls: int = 0
+    timings: dict[str, TimingSummary] = field(default_factory=dict)
+    recent: tuple[SessionRequest, ...] = ()
+    first_ts_ms: int | None = None
+    last_ts_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class UsagePeriod:
     """One row of the daily/monthly rollup: a calendar bucket's summed spend.
 
