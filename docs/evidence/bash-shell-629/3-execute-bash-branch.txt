@@ -1,0 +1,8 @@
+tree: /private/tmp/lop-629/local_operator
+is_error: False
+exit code: 0
+--- stdout ---
+a
+
+--- stderr ---
+(empty)

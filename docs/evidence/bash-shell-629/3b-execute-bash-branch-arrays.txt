@@ -1,0 +1,9 @@
+tree: /private/tmp/lop-629/local_operator
+is_error: False
+exit code: 0
+--- stdout ---
+arrays+[[ ]] ok: x y z
+BASH_VERSION=5.3.9(1)-release
+
+--- stderr ---
+(empty)

@@ -1,0 +1,9 @@
+tree: /Users/damian/local-operator/local_operator
+is_error: False
+exit code: 2
+--- stdout ---
+(empty)
+--- stderr ---
+/bin/sh: -c: line 0: syntax error near unexpected token `('
+/bin/sh: -c: line 0: `comm -12 <(echo a) <(echo a)'
+
