@@ -22,6 +22,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.teams import (  # noqa: E402
     MAX_ORG_DEPTH,
     TeamEditFields,
@@ -208,7 +212,7 @@ async def main() -> None:
                 view.action_toggle_legend()
             await pilot.pause()
             await pilot.pause()
-        app.save_screenshot(out)
+        save_capture(app, out)
 
 
 asyncio.run(main())

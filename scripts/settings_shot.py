@@ -98,15 +98,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# The scratch config dir has to exist BEFORE the app imports anything that
-# resolves `config_dir()`, which is why this runs above the local imports.
-_SCRATCH = tempfile.mkdtemp(prefix="lo-settings-shot-")
-os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+_SCRATCH = os.environ["LOCAL_OPERATOR_CONFIG_DIR"]
 
 from local_operator import settings_io  # noqa: E402
 from local_operator.config import ConfigManager  # noqa: E402
@@ -211,7 +210,7 @@ async def main() -> None:
             # halves: the page has to take the screen, and the composition it
             # displaced has to come back whole (splash, card clamp, and the
             # rows `_sync_boot_composition` reserves below the card).
-            app.save_screenshot(out)
+            save_capture(app, out)
             # Measured while the page is still up: the geometry line below is
             # the numbers behind THIS frame, and the view is unmounted a
             # moment from now.
@@ -219,7 +218,7 @@ async def main() -> None:
             app._close_settings_view()
             await pilot.pause()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".splash.svg"))
+            save_capture(app, out.replace(".svg", ".splash.svg"))
             welcome = app._welcome
             geometry += (
                 " || after leaving: "
@@ -233,14 +232,14 @@ async def main() -> None:
             # CONSECUTIVE frames. A two-pane layout inside a mode is exactly
             # where a post-paint reflow shows: if frame 1 differs from frame 2,
             # the user sees motion on open whether or not anyone intended it.
-            app.save_screenshot(out)
+            save_capture(app, out)
             await pilot.pause()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".frame2.svg"))
+            save_capture(app, out.replace(".svg", ".frame2.svg"))
         elif state == "fork":
             _select(view, "fork.mode")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "fork-open":
             # ENUM rows expand in place, so the choices and their descriptions
             # are only visible activated — which is the state a user picking
@@ -252,21 +251,21 @@ async def main() -> None:
             await pilot.pause()
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "fork-placement":
             _select(view, "fork.cmux_placement")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "fork-placement-open":
             _select(view, "fork.cmux_placement")
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "enum":
             _select(view, "tool_approval_mode")
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "error":
             _select(view, "retry.maxRetries")
             view.action_activate()
@@ -274,12 +273,12 @@ async def main() -> None:
             view._buffer = "9999"
             view._commit_edit()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "cascade":
             _select_chain(view, "default")
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "cascade-corrupt":
             # TWO frames of the RECOVERY, not of the bug. The corrupt value is
             # written through the page's own writer (see `_corrupt_cascade`) so
@@ -298,11 +297,11 @@ async def main() -> None:
             # photographs one half of it and proves nothing.
             _scroll_to_show_group(view)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             geometry = _geometry(app, view, state, size)
             view.action_reset()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".cleared.svg"))
+            save_capture(app, out.replace(".svg", ".cleared.svg"))
             geometry += f" || after r: notice={view.notice_text!r}"
         elif state == "cascade-row":
             # TWO frames, for the reason the `theme` state takes two: the bug
@@ -311,10 +310,10 @@ async def main() -> None:
             # `{'default': [...]}` on a row that has no scalar to edit.
             _select(view, "retry.fallbackChains")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".open.svg"))
+            save_capture(app, out.replace(".svg", ".open.svg"))
         elif state == "confirm-long":
             # The SAME ask on a 26-character chain name. The `confirm` frames
             # use `default` (7 characters), which fits everywhere and therefore
@@ -323,7 +322,7 @@ async def main() -> None:
             _select_chain(view, "openrouter-budget-fallback")
             view._delete_hop()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "confirm":
             # The UX round 1 U5 fix: `d` on a CHAIN row asks first, because it
             # destroys every hop in it and immediate-write has no undo. A still
@@ -332,22 +331,22 @@ async def main() -> None:
             _select_chain(view, "default")
             view._delete_hop()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state in ("teams", "agents"):
             while view._pane != state:
                 view.action_pane(1)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "theme":
             # TWO frames: the row at rest, then the row activated. The m1 fix
             # changes what activation DOES (free-text editor -> choice
             # expansion), so a still of the resting row alone would not show it.
             _select(view, "tui.theme")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".open.svg"))
+            save_capture(app, out.replace(".svg", ".open.svg"))
         elif state == "reset-default":
             # THREE frames. The `r` safety patch is a DETAIL-LINE question, not
             # a footer one: the hint stays lit on a default row (withholding it
@@ -360,17 +359,17 @@ async def main() -> None:
             view._manager.reload()
             view._repaint()
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             geometry = _geometry(app, view, state, size)
             view.action_reset()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".pressed.svg"))
+            save_capture(app, out.replace(".svg", ".pressed.svg"))
             geometry += f" || after r at default: notice={view.notice_text!r}"
             settings_io.write_setting(view._manager, _require("display.shimmer"), False)
             view._manager.reload()
             view._repaint()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".offdefault.svg"))
+            save_capture(app, out.replace(".svg", ".offdefault.svg"))
             geometry += f" || off-default hints={view.rendered_hints()!r}"
         elif state == "bool-open":
             # TWO frames, for the reason `theme` and `cascade-row` take two:
@@ -381,10 +380,10 @@ async def main() -> None:
             # default, with nothing written.
             _select(view, "retry.enabled")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             view.action_activate()
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".open.svg"))
+            save_capture(app, out.replace(".svg", ".open.svg"))
         elif state == "choosing":
             # The expansion BROWSED, not merely opened. The claim under test is
             # that moving the cursor across a value space writes nothing, and
@@ -396,7 +395,7 @@ async def main() -> None:
             await pilot.pause()
             view.action_move(1)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "preview":
             # TWO frames: browsed onto a theme that is not the stored one, then
             # `esc`. The revert is the load-bearing half — a preview with no
@@ -411,12 +410,12 @@ async def main() -> None:
             view.action_move(1)
             view.action_move(1)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             geometry = _geometry(app, view, state, size)
             geometry += f" || previewing={theme_mod.current_theme()}"
             await pilot.press("escape")
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".reverted.svg"))
+            save_capture(app, out.replace(".svg", ".reverted.svg"))
             geometry += f" restored={theme_mod.current_theme()}"
         elif state == "reset-offered":
             # A CONTRAST, in two frames. `r` is offered only where it would do
@@ -426,16 +425,16 @@ async def main() -> None:
             # baseDelayMs is left untouched at its shipped value.
             _select(view, "retry.maxRetries")
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
             _select(view, "retry.baseDelayMs")
             await pilot.pause()
-            app.save_screenshot(out.replace(".svg", ".default.svg"))
+            save_capture(app, out.replace(".svg", ".default.svg"))
         elif state == "retired":
             for _ in range(len(view._rows)):
                 view.action_jump(1)
                 break
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         elif state == "top":
             # TRAVELLED to the top, not opened at it. The two are not the same
             # frame: arriving by held `up` is what settled the viewport one row
@@ -446,9 +445,9 @@ async def main() -> None:
             for _ in range(80):
                 view.action_move(-1)
             await pilot.pause()
-            app.save_screenshot(out)
+            save_capture(app, out)
         else:
-            app.save_screenshot(out)
+            save_capture(app, out)
 
         print(geometry if geometry is not None else _geometry(app, view, state, size))
 
