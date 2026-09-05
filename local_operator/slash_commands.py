@@ -142,16 +142,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # typed selector, which may have been elided to `default`.
     SlashCommand(
         "model",
-        # Terse by necessity — the description column wraps past ~55 cells at 80
-        # columns, and `Switch model; ` + the 42-cell hint measured 56 and
-        # orphaned "sessions" on its own line (design review D2). "Switch" alone
-        # keeps the row whole at 80 (49 cells) and still carries PERSIST_HINT
-        # verbatim rather than a fifth paraphrase; the command name beside it
-        # already says what is being switched. The `<provider>/<id>` shape it
-        # used to show moved to the tip pool, which has the room (`welcome.TIPS`).
-        # `/model saved` is not here for the same reason: the notice a bare
-        # `/model` prints is the surface with room for the third command.
-        f"Switch; {PERSIST_HINT}",
+        # A `/help`-specific carrier, NOT `PERSIST_HINT` verbatim: the footer
+        # hint is sized by the picker (42 cells), and every ≤12-cell lead that
+        # kept it whole here left the row a fragment (`Switch;` was 49 cells
+        # and stayed whole, but read as a broken sentence beside the
+        # `Switch color theme; …` neighbour — design review round 2, D7).
+        # `Switch model; ` + the hint measured 56 cells at 80 columns and
+        # orphaned "sessions" on its own line (D2), so the answer is a shorter
+        # sentence of its own: name the thing being switched and drop the
+        # "saves this" carrier the footer needs for its 43-cell budget. The
+        # notice a bare `/model` prints is the surface with room for the full
+        # three-route sentence; `/help` needs only the persist command's name.
+        "Switch model; /model default saves it for new sessions",
         aliases=("models",),
     ),
     # Next to `/model` because it is the same question one level down: which

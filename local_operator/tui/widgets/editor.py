@@ -2404,6 +2404,26 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
+        if key == "tab" and (self._model_picker.is_dismissed() or self._picker.is_dismissed()):
+            # A COMPLETION KEY WITH A LATCHED ESC IS A NO-OP, not a tab (UX
+            # review round 3, U13). Esc hides the list but leaves the token in
+            # the buffer, so the branches above — which are gated on a list
+            # being open — do not run, and Tab fell through to ``TextArea``'s
+            # own handling and inserted literal whitespace INTO the query
+            # (`/model ` became `/model  `, `/no` became `/no    `). The user
+            # then pressed Tab again, the second press hit a picker that had
+            # reopened on the changed query, and the completion finally landed —
+            # one gesture needing two presses and silently corrupting the word
+            # in between. Consumed as a no-op so the buffer survives exactly as
+            # typed, which is the same discipline the loading-reserve branch
+            # below applies for the same class of premature completion.
+            #
+            # Tab ONLY. Enter still submits: with the list dismissed a typed
+            # `/model anthropic/claude-opus-5` is a complete command the user
+            # means to run, and swallowing Enter would strand it.
+            event.stop()
+            event.prevent_default()
+            return
         if key in ("tab", "enter") and self._picker.is_loading():
             # U2-2: the one dim row on screen is a TRANSIENT loading reserve,
             # not an answer — real rows replace it the moment the session
@@ -5581,7 +5601,22 @@ class Editor(TextArea):
             # Leaving `/model …` expires an Esc, exactly as `CommandPicker.sync`
             # forgets its dismissal when the caret leaves slash context: the
             # next entry into the argument is a fresh opening.
-            self._model_picker.forget_dismissal()
+            #
+            # Asked of the TEXT, not of the caret (code review round 2, R10).
+            # The argument parse is caret-anchored, and the terminating space is
+            # NOT in the argument (`slash_argument_context` requires the column
+            # to be past it), so on `/model ` a single `←` parked the caret on
+            # that space and read as having left the command entirely. The Esc
+            # was forgotten, the following `→` re-entered the argument, and the
+            # list reopened and re-announced itself — while `CommandPicker` on
+            # the same gesture stayed dismissed, because its word phase spans
+            # the whole word and a caret inside it never leaves slash context.
+            # A latch that a caret move can clear is not a dismissal, so the
+            # question here is the one the user would ask: is this still a
+            # `/model` line? Only when the buffer holds no model token at all
+            # is the Esc genuinely spent.
+            if not self._text_holds_model_token():
+                self._model_picker.forget_dismissal()
             self._picker_phase_at_last_sync = self._picker_phase()
             return
         if self._model_picker.is_open():
@@ -5644,6 +5679,35 @@ class Editor(TextArea):
         line/slash split.
         """
         return slash_word(self.text, self._caret_offset(), self._command_names)
+
+    def _text_holds_model_token(self) -> bool:
+        """Whether the BUFFER still contains a ``/model …`` argument anywhere.
+
+        Deliberately caret-independent, and that is the whole point: it answers
+        the question the model list's dismissal latch needs (R10) — "is this
+        still a `/model` line?" — which the caret-anchored
+        :func:`slash_argument` cannot, because the terminating space sits
+        outside the argument span and a caret resting on it reads as having
+        left the command.
+
+        Implemented by re-asking the ordinary parse at each line's END rather
+        than by matching text: the line end is always inside the argument phase
+        when a terminated command word is on that line, so this inherits every
+        rule the real parse already encodes (inline slashes, the nested-slash
+        vocabulary, CRLF tolerance) instead of introducing a second, drifting
+        notion of what counts as a model token.
+        """
+        offset = 0
+        for line in self.text.split("\n"):
+            if (
+                slash_argument(
+                    self.text, self.MODEL_COMMANDS, offset + len(line), self._command_names
+                )
+                is not None
+            ):
+                return True
+            offset += len(line) + 1  # +1 for the newline the split consumed
+        return False
 
     def _complete_model(self, row: ModelRow) -> None:
         """Put ``row``'s selector in the ``/model`` argument without acting on it.
