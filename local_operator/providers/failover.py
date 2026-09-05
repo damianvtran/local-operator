@@ -2579,13 +2579,27 @@ async def stream_with_failover(
 
                 # Resolve after EVERY account selection, even when the selector
                 # is unchanged. Metadata is local budget, not a provider wire flag.
-                resolved = await asyncio.to_thread(context_spec_for_access, spec, access, settings)
+                #
+                # Resolved from the REQUEST's model, not the route `spec`, and
+                # the difference is a hang. The loop clamps knobs onto
+                # `current_request.model` as it goes — the fast-mode latch above
+                # and the refusal retry below both rewrite `fast_mode` there —
+                # while `spec` stays the unclamped route. Rebinding from `spec`
+                # restored `fast_mode=True` on every attempt, so a refused fast
+                # request re-asked for fast on its "standard" retry, was
+                # refused again, and spun with no attempt counter and no sleep
+                # (15,592 attempts in 8 s, review round 5 F15). The budget
+                # comparison keeps reading `spec` because that is what a change
+                # in budget is a change FROM.
+                resolved = await asyncio.to_thread(
+                    context_spec_for_access, current_request.model, access, settings
+                )
                 changed_budget = any(
                     getattr(resolved, key) != getattr(spec, key)
                     for key in ("context_window", "default_context_window", "max_context_window")
                 )
                 spec = resolved
-                current_request = current_request.model_copy(update={"model": spec})
+                current_request = current_request.model_copy(update={"model": resolved})
                 # An API request whose budget did not move remains a transparent
                 # stream. OAuth still publishes unknown-resolution provenance.
                 if changed_budget or access.kind == "oauth":

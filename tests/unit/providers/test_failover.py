@@ -4632,11 +4632,11 @@ class _FastThenStandard:
         yield StreamEndEvent(stop_reason="stop")
 
 
-def _fast_request() -> ChatRequest:
+def _fast_request(provider: str = "anthropic", model_id: str = "claude-opus-5") -> ChatRequest:
     return ChatRequest(
         model=ModelSpec(
-            provider="anthropic",
-            model_id="claude-opus-5",
+            provider=provider,
+            model_id=model_id,
             supports_fast_mode=True,
             fast_mode=True,
         )
@@ -4772,3 +4772,56 @@ async def test_a_refusal_does_not_occupy_the_reported_error_slot() -> None:
             pass
     assert "max_tokens" in str(info.value)
     assert "fast mode" not in str(info.value)
+
+
+async def test_the_openai_context_rebind_keeps_the_standard_speed_clamp() -> None:
+    """Round-5 F15: the per-attempt OpenAI context rebind (#631) must not
+    restore `fast_mode` onto the retry.
+
+    The rebind rewrote `current_request.model` from the unclamped route
+    `spec`, so a refused fast request re-asked for fast on its "standard"
+    retry, was refused again, and spun with no attempt counter and no sleep
+    (15,592 attempts in 8 s on the reproduction). Anthropic never takes the
+    rebind, which is why the anthropic-only driver tests above stayed green.
+    """
+    client = _FastThenStandard(ProviderError(400, "Unsupported service_tier: priority"))
+    auth = FakeAuth({"openai": ["k1"]})
+    route_state = FailoverRouteState()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return client
+
+    got = await asyncio.wait_for(
+        _collect(
+            stream_with_failover(
+                _fast_request("openai", "gpt-5.4"),
+                auth,
+                {"retry": {"enabled": True, "maxRetries": 3}},
+                client_for,
+                route_state=route_state,
+            )
+        ),
+        timeout=10,
+    )
+    assert [type(e).__name__ for e in got if not type(e).__name__.startswith("StreamModel")] == [
+        "StreamTextDelta",
+        "StreamEndEvent",
+    ]
+    assert client.attempts == [(True, "k1"), (False, "k1")], "one refusal, one standard retry"
+    assert route_state.fast_refused_for("openai/gpt-5.4")
+
+    # And the latch survives the rebind on the NEXT request too.
+    async for _e in stream_with_failover(
+        _fast_request("openai", "gpt-5.4"),
+        auth,
+        {"retry": {"enabled": True, "maxRetries": 3}},
+        client_for,
+        route_state=route_state,
+    ):
+        pass
+    assert client.attempts[-1] == (False, "k1")
+    assert len(client.attempts) == 3
+
+
+async def _collect(stream: AsyncIterator[Any]) -> list[Any]:
+    return [event async for event in stream]
