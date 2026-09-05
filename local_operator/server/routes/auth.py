@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, SecretStr
 
+from local_operator.credentials import CredentialManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -16,6 +17,7 @@ from local_operator.providers.registry import (
     get_provider_definition,
     resolve_env_key,
 )
+from local_operator.server.dependencies import get_credential_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.desktop_auth import DesktopAuth, LoginOperation
@@ -41,11 +43,28 @@ class LoginInput(SecretInput):
     prompt_id: str
 
 
-async def get_desktop_auth(request: Request) -> DesktopAuth:
+async def get_desktop_auth(
+    request: Request,
+    manager: CredentialManager = Depends(get_credential_manager),
+) -> DesktopAuth:
+    # The credential manager arrives as a DECLARED dependency rather than being
+    # read off `app.state` here. FastAPI's `dependency_overrides` only
+    # substitutes what a signature declares, so reading state directly made this
+    # helper opaque to them -- and it is reached INDIRECTLY
+    # (`get_provider_auth_store` calls it, and the models routes depend on
+    # that), so mounting one router and overriding its dependencies, the
+    # documented way to test a route in isolation, still landed on the
+    # un-overridable read.
+    #
+    # The store's directory comes from the canonical resolver rather than from a
+    # manager attribute. `app.py` builds every manager from this one call, so it
+    # is the same directory by construction, and it does not make the location
+    # of the auth database depend on which manager a caller happened to inject.
+    from local_operator.paths import config_dir as resolve_config_dir
+
     host = getattr(request.app.state, "desktop_auth", None)
     if host is None:
-        manager = request.app.state.credential_manager
-        root = request.app.state.config_manager.config_dir
+        root = resolve_config_dir()
         host = DesktopAuth(AuthStore(root / "auth.db", credential_manager=manager), manager)
         request.app.state.desktop_auth = host
     return host

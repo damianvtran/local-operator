@@ -1,6 +1,6 @@
 import os
 
-from fastapi import Request, WebSocket
+from fastapi import Depends, Request, WebSocket
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients.radient import RadientClient
@@ -55,7 +55,15 @@ def get_scheduler_service(request: Request) -> SchedulerService:
     return request.app.state.scheduler_service
 
 
-async def get_provider_auth_store(request: Request) -> AuthStore:
+async def get_provider_auth_store(
+    request: Request,
+    manager: CredentialManager = Depends(get_credential_manager),
+) -> AuthStore:
+    # The managers are DECLARED rather than read off `app.state` inside the
+    # chain below. `dependency_overrides` only substitutes what a signature
+    # declares, and this dependency sits between the models routes and
+    # `get_desktop_auth`, so an override supplied by a caller that mounts one
+    # router in isolation was silently skipped on the way through.
     from local_operator.server.desktop import require_desktop
     from local_operator.server.routes.auth import get_desktop_auth
 
@@ -63,7 +71,10 @@ async def get_provider_auth_store(request: Request) -> AuthStore:
     # endpoint merely because that endpoint historically accepted local keys.
     if os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"):
         require_desktop(request)
-    return (await get_desktop_auth(request)).store
+    # Passed explicitly: `get_desktop_auth` is invoked as a plain function here,
+    # so its own `Depends(...)` defaults would arrive as `Depends` objects
+    # rather than resolving themselves.
+    return (await get_desktop_auth(request, manager=manager)).store
 
 
 async def get_radient_client(request: Request) -> RadientClient:
