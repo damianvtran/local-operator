@@ -1060,14 +1060,27 @@ class RemoteSession:
             if not self.is_cold or self._disposed:
                 return
             from local_operator.mobile.attach_client import find_owner_record
-            from local_operator.session.runtime.launch import WarmErrand, engage_runtime
-
-            await engage_runtime(
-                self._session_id,
-                self._cwd,
-                WarmErrand(),
-                config_dir=self._config_dir,
+            from local_operator.session.runtime.launch import (
+                RuntimeStartupError,
+                WarmErrand,
+                engage_runtime,
             )
+
+            try:
+                await engage_runtime(
+                    self._session_id,
+                    self._cwd,
+                    WarmErrand(),
+                    config_dir=self._config_dir,
+                )
+            except RuntimeStartupError as error:
+                # engage_runtime now fails FAST once no candidate can start,
+                # carrying the child's own cause. Re-raised as ConnectionError
+                # so it takes the existing owner-unavailable path, but keeping
+                # the vetted user-facing sentence when there is one, instead of
+                # a generic timeout nobody can act on (QA Q1).
+                logger.warning("engage failed for %s: %s", self._session_id, error)
+                raise ConnectionError(error.actionable or self._unavailable_reason()) from error
             # Re-checked AFTER the engage, which is the long await here (a
             # spawn plus up to ~2 s of construction). The TUI engages at mount
             # now, so `/resume` or `/new` typed in that first second disposes
