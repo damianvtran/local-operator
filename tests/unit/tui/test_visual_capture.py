@@ -118,5 +118,45 @@ def test_all_current_sample_writers_adopt_helper() -> None:
                 if node.func.id == "save_capture":
                     writers.append(path.name)
         if path.name in writers:
-            assert "isolate_capture()" in path.read_text()
+            # Either sandbox is acceptable; ``probe_isolation`` is the stricter
+            # (import-time, refuses a late import) and is what new scripts use.
+            text = path.read_text()
+            assert (
+                "isolate_capture()" in text or "import scripts.probe_isolation" in text
+            ), f"{path.name} writes captures without re-homing HOME/config first"
     assert len(set(writers)) >= 23
+
+
+def test_probe_isolation_refuses_a_late_import(tmp_path: Path) -> None:
+    """The helper is only useful FIRST: an app module already imported has
+    already resolved HOME. Importing it late must raise, not silently
+    re-home a process that has the real config in memory."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[3]
+    late = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import local_operator.paths; import scripts.probe_isolation",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert late.returncode != 0 and "must be imported BEFORE" in late.stderr, late.stderr
+    early = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import scripts.probe_isolation as p, os; "
+            "from local_operator.paths import config_dir; "
+            "assert str(config_dir()).startswith(str(p.SANDBOX)), config_dir(); "
+            "assert os.environ['HOME'] == str(p.SANDBOX); print('ok')",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert early.returncode == 0 and early.stdout.strip() == "ok", early.stderr

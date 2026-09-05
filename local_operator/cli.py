@@ -491,10 +491,78 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     sessions_parser = subparsers.add_parser(
         "sessions",
-        help="List active lop sessions and their resource usage",
+        help=(
+            "List active lop sessions and their resource usage; "
+            "`sessions cleanup` previews or runs the session cleanup policy"
+        ),
         parents=[parent_parser],
     )
     sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    # `lop sessions cleanup`: the explicit, previewable way to run the session
+    # cleanup policy. An optional sub-subcommand (dest defaults to None) so
+    # bare `lop sessions` keeps listing.
+    #
+    # THE MASTER SWITCH GOVERNS THIS COMMAND. With `session.cleanup.enabled`
+    # false the non-dry run refuses (rc 2) and says where to turn it on;
+    # `--dry-run` still lists what the limits would take and says the switch
+    # is off. `--force` overrides the switch, but only after printing the
+    # list and reading a typed confirmation (`--yes` skips the prompt for
+    # scripts). Round 1 let the bare command run past an OFF switch on the
+    # theory that typing it was consent — /settings leaves the limits in the
+    # file when the switch is turned off, so that was the incident's shape
+    # (QA Q1, UX U2, review R1-5). Every hard guard (live claim/lease, armed
+    # wake, unread mail, the 10 most recent) applies whatever the flags.
+    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
+    cleanup_parser = sessions_subparsers.add_parser(
+        "cleanup",
+        help="Run the session cleanup policy now (use --dry-run to preview)",
+        description=(
+            "Apply session.cleanup.* from config (each limit overridable below) to the "
+            "session store. Requires session.cleanup.enabled: true unless --force. "
+            "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
+        ),
+        parents=[parent_parser],
+    )
+    cleanup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be removed and why, without removing anything",
+    )
+    cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="run even when session.cleanup.enabled is false (lists first, then asks)",
+    )
+    cleanup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask for confirmation before removing",
+    )
+    cleanup_parser.add_argument(
+        "--max-sessions",
+        type=_non_negative_int,
+        default=None,
+        help="keep only the N most recently active sessions (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--max-inactive-days",
+        type=_non_negative_int,
+        default=None,
+        help="remove sessions idle longer than N days (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--max-total-bytes",
+        type=_non_negative_int,
+        default=None,
+        help="trim the least recently active sessions past this store size (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--remove-empty",
+        action="store_true",
+        default=None,
+        help="remove directories that never got a transcript (overrides config)",
+    )
+    cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -1181,12 +1249,8 @@ def config_list_command() -> int:
         "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
         "replaces conversation_length/detail_length",
         "tui": "TUI settings (theme)",
-        "session_retention_max_sessions": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
-        "session_retention_max_bytes": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
-        "session_retention_max_age_days": "[RETIRED] Session transcripts are never deleted "
-        "automatically; this ceiling no longer does anything at any value",
+        "session": "Session settings; session.cleanup.* is the opt-in cleanup policy "
+        "(off by default: nothing removes a session directory unless enabled)",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
@@ -1689,6 +1753,208 @@ def send_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _non_negative_int(text: str) -> int:
+    """argparse type for the cleanup limits: `/settings` enforces `minimum=0`
+    on every one of them and the CLI must not be the lax door (UX U7)."""
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _cleanup_row(candidate: Any, verb: str) -> str:
+    """One decision, with what a user needs to judge it: name, age, size."""
+    # Budgeted to 100 columns with a 12-hex id, the origin column and the
+    # longest reason (`[max_inactive_days] idle over 365d`): title 16 cells,
+    # one space between columns. At 110 cols a 48-char title wrapped every
+    # row and a 9-row list read as 13 lines (UX round 2, U13). The reasons
+    # state the LIMIT; the age and size columns state the fact.
+    title = candidate.title or "(no title)"
+    if len(title) > 16:
+        title = title[:15] + "…"
+    # One decimal under 100 d so a session just past a whole-day limit does
+    # not print the same figure as the limit it exceeded.
+    days = candidate.idle_days
+    age = f"{days:.1f}d" if days < 100 else f"{days:.0f}d"
+    # ``origin`` says whose the row is: on a store that is mostly subagent
+    # runs, a list of ids and titles cannot tell the user which rows are
+    # their own conversations (UX round 3, U15). 8 cells: "subagent".
+    origin = getattr(candidate, "origin", "user") or "user"
+    return (
+        f"  {verb:<12} {candidate.session:<12} {origin:<8} {title:<16} {age:>5} "
+        f"{_format_bytes(candidate.size_bytes):>6} [{candidate.policy}] {candidate.reason}"
+    )
+
+
+def sessions_cleanup_command(args: argparse.Namespace) -> int:
+    """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
+
+    Order of operations for a real run is LIST, CONFIRM, REMOVE — never the
+    reverse (UX U2). The listing is the dry run over the same policy, so what
+    the user confirms is exactly what goes.
+
+    Exit codes: 0 ran (or dry run); 1 nothing to apply (no limits); 2 refused
+    (switch off without ``--force``, or confirmation declined); 3 ran with
+    errors. ``--json`` always emits a JSON object on stdout, whatever the
+    outcome, and carries ``enabled`` so a script can see the switch state.
+    """
+    import dataclasses
+    import json as _json
+
+    from local_operator.session.cleanup import (
+        CLEANUP_LOG_NAME,
+        CleanupResult,
+        apply_cleanup,
+        policy_from_config,
+        run_cleanup,
+    )
+
+    root = config_dir()
+    policy = policy_from_config(ConfigManager(root))
+    overrides = {
+        name: value
+        for name, value in (
+            ("max_sessions", args.max_sessions),
+            ("max_inactive_days", args.max_inactive_days),
+            ("max_total_bytes", args.max_total_bytes),
+            ("remove_empty", args.remove_empty),
+        )
+        if value is not None
+    }
+    policy = dataclasses.replace(policy, **overrides)
+    record_path = root / "sessions" / CLEANUP_LOG_NAME
+    switch_hint = (
+        "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
+        "or pass --force to run once"
+    )
+
+    def emit_json(result: CleanupResult, *, outcome: str, confirmed: bool | None = None) -> None:
+        print(
+            _json.dumps(
+                {
+                    "outcome": outcome,
+                    "enabled": policy.enabled,
+                    "forced": bool(args.force),
+                    "dry_run": result.dry_run,
+                    "scanned": result.scanned,
+                    "removed": [dataclasses.asdict(c) for c in result.removed],
+                    "protected": [
+                        {"session": name, "guard": guard} for name, guard in result.protected
+                    ],
+                    "errors": result.errors,
+                    "skipped": result.skipped,
+                    "confirmed": confirmed,
+                    "record": str(record_path),
+                },
+                indent=2,
+            )
+        )
+
+    if not policy.has_any_limit:
+        message = (
+            "no cleanup limits configured: set session.cleanup.* in /settings or pass "
+            "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
+        )
+        if not policy.enabled:
+            message += f"\n{switch_hint}"
+        if args.json:
+            emit_json(CleanupResult(skipped="no limits configured"), outcome="nothing-to-do")
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    if not policy.enabled and not args.force and not args.dry_run:
+        if args.json:
+            emit_json(CleanupResult(skipped="disabled"), outcome="refused")
+        else:
+            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+            print("preview what the limits would remove with --dry-run", file=sys.stderr)
+        return 2
+
+    # The LISTING is always a dry run first, so a real run shows the user the
+    # same rows before anything is removed.
+    preview = run_cleanup(root, policy, dry_run=True, force=bool(args.force), actor="cli")
+    policy_line = (
+        f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
+        f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
+        f"remove_empty={policy.remove_empty}"
+    )
+
+    if args.dry_run:
+        if args.json:
+            emit_json(preview, outcome="dry-run")
+            return 0
+        print(policy_line)
+        if not policy.enabled:
+            print(f"note: {switch_hint}; this is a preview only")
+        print(f"scanned {preview.scanned} sessions; would remove {len(preview.removed)}")
+        for candidate in preview.removed:
+            print(_cleanup_row(candidate, "would remove"))
+        for name, guard in preview.protected:
+            print(f"  kept         {name}  ({guard})")
+        print(f"nothing was removed (dry run); the record of real removals is {record_path}")
+        return 0
+
+    if not args.json:
+        print(policy_line)
+        if not policy.enabled:
+            print(f"WARNING: {switch_hint}; running because --force was given")
+        print(f"scanned {preview.scanned} sessions; about to remove {len(preview.removed)}")
+        for candidate in preview.removed:
+            print(_cleanup_row(candidate, "will remove"))
+        for name, guard in preview.protected:
+            print(f"  kept         {name}  ({guard})")
+    if not preview.removed:
+        if args.json:
+            emit_json(preview, outcome="nothing-to-do")
+        else:
+            print("nothing to remove")
+        return 0
+
+    confirmed: bool | None = None
+    if not args.yes:
+        if not sys.stdin.isatty():
+            if args.json:
+                emit_json(preview, outcome="refused", confirmed=False)
+            else:
+                print(
+                    "refusing: not a terminal and --yes was not given, so nothing was removed",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            answer = input(f"remove {len(preview.removed)} session(s)? type 'yes' to confirm: ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        confirmed = answer.strip().lower() == "yes"
+        if not confirmed:
+            if args.json:
+                emit_json(preview, outcome="refused", confirmed=False)
+            else:
+                print("not confirmed; nothing was removed")
+            return 2
+
+    # The removal WARNINGs go to the rotating file (`local-operator.log`),
+    # not the console: the stdout listing below already carries every fact
+    # and the console copy doubled each line in a terminal (UX U3, QA Q7).
+    # ``file_logging`` detaches the console handlers for the block and puts
+    # them back afterwards. ``apply_cleanup(preview)`` removes EXACTLY the
+    # rows the user just confirmed — a second scan could rank a session
+    # created meanwhile and take one shown as kept (review round 2, R2-2).
+    with file_logging():
+        result = apply_cleanup(root, preview, actor="cli")
+    if args.json:
+        emit_json(result, outcome="removed", confirmed=confirmed)
+        return 3 if result.errors else 0
+    print(f"removed {len(result.removed)} session(s)")
+    for candidate in result.removed:
+        print(_cleanup_row(candidate, "removed"))
+    if result.errors:
+        print(f"  {result.errors} error(s); see the log", file=sys.stderr)
+    print(f"record: {record_path}")
+    return 3 if result.errors else 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -1697,6 +1963,9 @@ def sessions_command(args: argparse.Namespace) -> int:
     otherwise. HEARTBEAT_AGE surfaces wedged-ness numerically so counts can be
     eyeballed against reality."""
     import json as _json
+
+    if getattr(args, "sessions_command", None) == "cleanup":
+        return sessions_cleanup_command(args)
 
     from local_operator.mobile.resources import session_resource_usage
     from local_operator.session.runtime import registry
@@ -3592,6 +3861,12 @@ def main() -> int:
         # own env config and the session factory does the same lazily — a
         # dead local would only invite drift.
         base_dir = config_dir()
+        # THE ONE place config migrations run: the `lop` entry point, for the
+        # config dir this command is about to use. Never from ConfigManager
+        # construction — see ``local_operator.config_migrations``.
+        from local_operator.config_migrations import run_startup_migrations
+
+        run_startup_migrations(base_dir)
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never

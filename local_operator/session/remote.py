@@ -213,6 +213,12 @@ class RemoteSession:
         self._session_id = session_id
         self._takeover_factory = takeover_factory
         self._client: AttachClient | None = None
+        #: The pid of the runtime this viewer is dialed into, ``None`` while
+        #: cold or between owners. Read by the TUI's startup-cleanup notice to
+        #: tell "MY runtime removed sessions" from "some other launch did":
+        #: the record on disk names the removing pid, and the viewer attached
+        #: to that runtime is the one that should announce (UX round 3, U14).
+        self._runtime_pid: int | None = None
         #: Where a runtime for this session should be started. Only a cold
         #: viewer needs it (an attached one inherits the runtime's own cwd);
         #: ``cold()`` sets the real value.
@@ -1014,6 +1020,7 @@ class RemoteSession:
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
+        self._runtime_pid = record.pid
         loop = asyncio.get_running_loop()
         self._frontend_future = loop.create_future()
 
@@ -1557,6 +1564,7 @@ class RemoteSession:
     # -- owner loss ---------------------------------------------------------
 
     def _on_disconnected(self, _reason: str) -> None:
+        self._runtime_pid = None
         if self._disposed or self._recovering:
             return
         # A disconnect that follows OUR stop request (or arrives after the
@@ -1907,6 +1915,11 @@ class RemoteSession:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def runtime_pid(self) -> int | None:
+        """Pid of the runtime this viewer is attached to; ``None`` while cold."""
+        return self._runtime_pid
 
     @property
     def agent_id(self) -> str:

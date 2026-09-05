@@ -8275,6 +8275,17 @@ def test_help_mentions_the_window_title_toggle() -> None:
     assert "lo ›" in text and "lo ⣾" in text and "lo !" in text
 
 
+def test_help_names_the_cleanup_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """UX round 2, U6 residual: the removal happens in the runtime process,
+    whose log is not the `logs` row's file, so a user asking "what happened
+    to my session" from /help must be pointed at the record itself."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    text = _renderable_plain(app._help_block().renderable)
+    assert "cleanup record" in text
+    assert str(tmp_path / "sessions" / ".cleanup-log.jsonl") in text
+
+
 @pytest.mark.asyncio
 async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     """Both key-reference rows fit on ONE line at the commonest terminal width.
@@ -11048,3 +11059,144 @@ async def test_a_bang_command_carries_the_conversation_title_to_its_tools() -> N
     session.set_conversation_name("Renamed mid-command")
     assert context.session_name_provider is not None
     assert context.session_name_provider() == "Renamed mid-command"
+
+
+@pytest.mark.asyncio
+async def test_a_boot_that_removed_sessions_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1, U1 (second half): a launch whose cleanup pass removed
+    sessions must not paint an identical splash — the incident's shape. The
+    pass runs in the runtime, in the background, after the first frame, and
+    the TUI may be a viewer, so the fact travels via
+    ``sessions/last-cleanup.json``: written by the removing pass, announced
+    by the first viewer to adopt, then acknowledged so a second boot (or a
+    ``/resume`` in another terminal) does not repeat it."""
+    from local_operator.session.cleanup import (
+        Candidate,
+        CleanupResult,
+        mark_store,
+        write_last_cleanup,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    result = CleanupResult(scanned=19)
+    # Real conversations went (active=True): a never-active-only sweep is
+    # deliberately silent (design round 3, N6) and is pinned separately.
+    result.removed = [Candidate("s00", "max_inactive_days", "idle over 30d")] * 3
+    write_last_cleanup(sessions, result, actor="startup")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        notices: list[str] = []
+        for _ in range(10):
+            await pilot.pause()
+            notices = [b.text() or "" for b in app.query(NoticeBlock)]
+            if any("session cleanup removed 3 sessions at launch" in t for t in notices):
+                break
+        else:
+            raise AssertionError(f"no launch notice: {notices}")
+        assert any("3 by max_inactive_days" in t and "--dry-run" in t for t in notices)
+        # The notice is a system notice: the empty state is intact.
+        assert app._welcome_visible is True
+        # D11: the block's region is exactly its content — no dead rows that
+        # would scroll the wordmark off at 80x24 on the timer path.
+        block = next(b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or ""))
+        content = block.get_content_height(block.size, block.container_size, block.size.width)
+        assert block.region.height == content, (block.region.height, content)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(5):
+            await pilot.pause()
+        assert not [b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")]
+
+
+@pytest.mark.asyncio
+async def test_a_timer_delivered_notice_keeps_the_wordmark_in_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 3, D11: the record lands AFTER adoption (the pass runs in
+    the runtime after the first frame), so the app's recheck timer delivers
+    it. That block was built detached, measured at the 80-column fold and
+    laid out 3 rows too tall — at 80x24 the dead rows scrolled the wordmark
+    off the top. The notice now pins its authored height, on this path and
+    the adopt path alike."""
+    import asyncio
+
+    from local_operator.session.cleanup import (
+        Candidate,
+        CleanupResult,
+        mark_store,
+        write_last_cleanup,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+    from local_operator.tui.widgets.welcome import WelcomeView
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    result = CleanupResult(scanned=19)
+    result.removed = [Candidate("s00", "max_inactive_days", "idle over 30d")] * 5
+
+    for size in ((100, 40), (80, 24)):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            write_last_cleanup(sessions, result, actor="startup")  # after adoption
+            blocks: list[NoticeBlock] = []
+            for _ in range(40):
+                await asyncio.sleep(0.1)
+                await pilot.pause()
+                blocks = [
+                    b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")
+                ]
+                if blocks:
+                    break
+            assert blocks, f"the timer never delivered the notice at {size}"
+            block = blocks[0]
+            content = block.get_content_height(block.size, block.container_size, block.size.width)
+            assert block.region.height == content, (size, block.region.height, content)
+            assert app._welcome_visible is True
+            splash = app.query_one(WelcomeView)
+            assert splash.region.y >= 0, f"wordmark scrolled off at {size}: y={splash.region.y}"
+
+
+@pytest.mark.asyncio
+async def test_a_never_active_only_sweep_does_not_announce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 3, N6: `remove_empty` of an idle open-and-quit directory
+    is real but happens on every launch; announcing it would train the user
+    to ignore the notice. The record says why it is pre-acknowledged."""
+    import json
+
+    from local_operator.session.cleanup import (
+        LAST_CLEANUP_NAME,
+        Candidate,
+        CleanupResult,
+        mark_store,
+        write_last_cleanup,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    result = CleanupResult(scanned=19)
+    result.removed = [Candidate("e00", "remove_empty", "no transcript", active=False)]
+    write_last_cleanup(sessions, result, actor="startup")
+    record = json.loads((sessions / LAST_CLEANUP_NAME).read_text())
+    assert record["acknowledged"] is True and "never-active" in record["quiet"]
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(8):
+            await pilot.pause()
+        assert not [b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")]

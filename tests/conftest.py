@@ -31,16 +31,38 @@ from pathlib import Path
 
 import pytest
 
-#: Environment variables that steer credential resolution, config discovery or
-#: provider selection. Any of these leaking in from the developer's shell can
-#: change what the code under test does.
+#: Environment variables that steer credential resolution, config discovery,
+#: provider selection — or NAME A REAL-MACHINE RESOURCE. Any of these leaking
+#: in from the developer's shell can change what the code under test does, or
+#: point it at something live. ``tests/unit/test_ambient_env_isolation.py``
+#: walks the package for every variable production code reads and fails when
+#: one is neither here nor explained there; add new entries HERE when the
+#: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # A runtime child spawned by the mobile daemon carries its session id,
+    # provider, model and cwd here. A test suite run from inside such a
+    # session (agents do this) inherited LOP_MOBILE_CHILD_RESUME and created
+    # THAT id inside its store (QA round 1 of #645).
+    "LOP_MOBILE_CHILD_RESUME",
+    "LOP_MOBILE_CHILD_PROVIDER",
+    "LOP_MOBILE_CHILD_MODEL",
+    "LOP_MOBILE_CHILD_CWD",
+    "LOP_MOBILE_PASSWORD",
+    # The calling cmux workspace/surface. A headless fork e2e test inherited
+    # these through an isolated HOME and renamed the operator's LIVE window
+    # (#648). Nothing in a test may address a real pane.
+    "CMUX_WORKSPACE_ID",
+    "CMUX_SURFACE_ID",
+    "CMUX_PANEL_ID",
+    "CMUX_TAB_ID",
+    "CMUX_SOCKET",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this

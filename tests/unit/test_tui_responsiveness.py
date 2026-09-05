@@ -302,8 +302,7 @@ async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
     import os
 
     from local_operator import resume as resume_mod
-    from local_operator.session import retention as retention_mod
-    from local_operator.session.retention import EMPTY_DIR_GRACE_SECONDS
+    from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import (
         _prepare,
         _start_store_maintenance,
@@ -316,9 +315,12 @@ async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
     config_dir.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     titleless = [_titleless_session(config_dir, f"{index:08x}abcd") for index in range(120)]
+    # An empty, ancient, unclaimed directory: every shape the old retention
+    # sweep would have reaped. With cleanup OFF (the default) it must survive
+    # the real maintenance pass untouched.
     abandoned = config_dir / "sessions" / "deadbeefcafe"
     abandoned.mkdir()
-    old = time.time() - EMPTY_DIR_GRACE_SECONDS - 60
+    old = time.time() - 400 * 86400
     os.utime(abandoned, (old, old))
 
     loop_thread = threading_get_ident()
@@ -337,9 +339,9 @@ async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
         return wrapped
 
     monkeypatch.setattr(
-        retention_mod,
-        "sweep_from_config",
-        record_real("retention", retention_mod.sweep_from_config),
+        cleanup_mod,
+        "cleanup_from_config",
+        record_real("retention", cleanup_mod.cleanup_from_config),
     )
     monkeypatch.setattr(
         group_reaper_mod,
@@ -382,7 +384,7 @@ async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
     for name, thread_ids in callback_threads.items():
         assert len(thread_ids) == 1, f"{name} ran {len(thread_ids)} times instead of once"
         assert thread_ids[0] != loop_thread, f"{name} ran on the event-loop thread"
-    assert not abandoned.exists(), "the real retention sweep did not reap an abandoned store"
+    assert abandoned.exists(), "the maintenance pass removed a session directory with cleanup OFF"
     assert all((directory / TITLE_SCAN_SENTINEL_NAME).exists() for directory in titleless)
 
 

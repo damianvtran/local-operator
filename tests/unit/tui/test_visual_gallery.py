@@ -87,17 +87,36 @@ def test_all_sample_isolation_precedes_app_imports() -> None:
             # gallery uses its isolated unconfigured path, never operator auth.
             assert "CAPTURE_REQUIRES_LIVE_OPT_IN = True" in text
         tree = ast.parse(text)
-        isolation = next(
-            n.lineno
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name)
-            and n.func.id == "isolate_capture"
+        # Two sanctioned forms: the ``isolate_capture()`` call, or the
+        # stricter import-time ``scripts.probe_isolation`` (which also refuses
+        # if an app module is already loaded). Either must precede the first
+        # ``local_operator`` import — a ``from`` OR a plain ``import``.
+        isolation = min(
+            [
+                n.lineno
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "isolate_capture"
+            ]
+            + [
+                n.lineno
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Import)
+                and any(alias.name == "scripts.probe_isolation" for alias in n.names)
+            ],
+            default=None,
         )
+        assert isolation is not None, f"{path.name} has no isolation step"
         imports = [
             n.lineno
             for n in ast.walk(tree)
             if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("local_operator")
+        ] + [
+            n.lineno
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Import)
+            and any(alias.name.startswith("local_operator") for alias in n.names)
         ]
         assert isolation < min(imports), path.name
 
