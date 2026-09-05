@@ -27,6 +27,12 @@ Three things are deliberate.
   ASCII ``>``. It is the mark this UI already uses to point at what follows,
   and "the user's turn" is exactly a prompt pointing at the user.
 
+Forks use this same title channel. cmux follows it unless a user explicitly
+named the workspace or surface; socket renames would pin that override and
+freeze the sidebar while this title continues updating. A forked transcript is
+not proof of native workspace ownership: it can be resumed in any surface,
+including a headless test inheriting the developer's cmux environment.
+
 Everything here is either a pure function or a small state holder with an
 injected sink, because the alternative — writing to ``sys.stdout`` — is a
 correctness bug and not a style choice: Textual serialises terminal output
