@@ -32,7 +32,7 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
     TYPE_CHECKING,
@@ -16144,6 +16144,12 @@ class OperatorApp(App[None]):
         discovery surface. So a missing current row is rebuilt from the registry
         rather than merely spared.
         """
+        from local_operator.model.configure import _openai_use_max_context_window
+
+        settings = getattr(self._session, "routing_settings", None)
+        use_max_context = _openai_use_max_context_window(
+            settings if settings is not None else self._config_values()
+        )
         usable = self._usable_providers()
         current = self._current_selector()
         # A follower merges the OWNER's published catalogue: the session runs
@@ -16173,6 +16179,8 @@ class OperatorApp(App[None]):
                         model_id=str(row.get("model_id", "") or ""),
                         label=str(row.get("label", "") or row.get("model_id", "") or ""),
                         context_window=int(row.get("context_window", 0) or 0),
+                        default_context_window=row.get("default_context_window"),
+                        max_context_window=row.get("max_context_window"),
                         input_price=float(row.get("input_price", 0.0) or 0.0),
                         output_price=float(row.get("output_price", 0.0) or 0.0),
                         connected=bool(row.get("connected", False)),
@@ -16199,7 +16207,15 @@ class OperatorApp(App[None]):
                 provider=entry.provider,
                 model_id=entry.model_id,
                 label=entry.label,
-                context_window=entry.context_window,
+                context_window=(
+                    entry.default_context_window
+                    if entry.provider == "openai"
+                    and not use_max_context
+                    and entry.default_context_window
+                    else entry.context_window
+                ),
+                default_context_window=entry.default_context_window,
+                max_context_window=entry.max_context_window,
                 input_price=entry.input_price,
                 output_price=entry.output_price,
                 connected=entry.connected,
@@ -16209,6 +16225,24 @@ class OperatorApp(App[None]):
             for entry in entries
             if usable is None or entry.provider in usable or entry.selector == current
         ]
+        active = _effective_spec(session)
+        if active is not None and getattr(active, "default_context_window", None):
+            # A session can be sticky to a different account than the generic
+            # catalogue lookup. Its current row must describe its serving spec.
+            active_selector = f"{active.provider}/{active.model_id}"
+            rows = [
+                (
+                    replace(
+                        row,
+                        context_window=active.context_window,
+                        default_context_window=active.default_context_window,
+                        max_context_window=active.max_context_window,
+                    )
+                    if row.selector == active_selector
+                    else row
+                )
+                for row in rows
+            ]
         # Count what the catalogue FILTER dropped before appending a current
         # row that was never in ``entries``. Subtracting the rescued row made
         # one real hidden catalogue entry disappear from the footer; flooring
@@ -16263,6 +16297,8 @@ class OperatorApp(App[None]):
                 model_id=entry.model_id,
                 label=entry.label,
                 context_window=entry.context_window,
+                default_context_window=entry.default_context_window,
+                max_context_window=entry.max_context_window,
                 input_price=entry.input_price,
                 output_price=entry.output_price,
                 connected=entry.connected,

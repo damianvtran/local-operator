@@ -1407,6 +1407,9 @@ class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
     # denominators truthful without re-resolving the model themselves. Zero
     # means the emitter did not know, and readers keep their previous value.
     context_window: int = 0
+    default_context_window: int | None = None
+    max_context_window: int | None = None
+    context_metadata: bool = False
 
 
 class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
@@ -1619,6 +1622,9 @@ class ModelSpec(BaseModel):
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
     context_window: int = 128_000
+    # context_window remains the active budget; these retain provider provenance.
+    default_context_window: int | None = None
+    max_context_window: int | None = None
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
@@ -1891,6 +1897,22 @@ class StreamEndEvent(BaseModel):
     error: str | None = None
 
 
+class StreamModelEvent(BaseModel):
+    """Request-local serving metadata, emitted before dispatch, including rotation.
+
+    Unlike a shared stream callback, this follows the parent or child request
+    that selected the credential and cannot overwrite another session's spec.
+    """
+
+    type: Literal["model"] = "model"
+    model: ModelSpec
+
+
 StreamEvent = (
-    StreamStartEvent | StreamTextDelta | StreamToolCallDelta | StreamUsageEvent | StreamEndEvent
+    StreamStartEvent
+    | StreamTextDelta
+    | StreamToolCallDelta
+    | StreamUsageEvent
+    | StreamEndEvent
+    | StreamModelEvent
 )

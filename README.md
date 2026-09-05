@@ -152,6 +152,10 @@ is about to run before anything touches your system:
 Switching models is a picker, not a config file — `/model` lists every model
 your signed-in providers offer, with fuzzy filtering:
 
+ChatGPT OAuth uses the account's supported maximum context by default, while
+keeping the provider default visible. [Context limits and the opt-out](docs/openai-context.md)
+explain how this works without changing your compaction settings.
+
 <p align="center">
   <img src="./static/tui-model-picker.png" alt="The /model picker with a fuzzy filter applied, showing context length and pricing per model" width="720">
 </p>
