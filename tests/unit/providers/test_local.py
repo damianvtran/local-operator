@@ -770,7 +770,7 @@ async def test_malformed_setup_list_has_safe_actionable_error(local_server):
     controller = ProviderController(
         auth, login_callbacks=lambda _: LoginCallbacks(on_setup_input=lambda *_: next(answers))
     )
-    with pytest.raises(ValueError, match="invalid model list.*OpenAI-compatible API"):
+    with pytest.raises(ValueError, match="Invalid model list.*OpenAI-compatible API"):
         await controller.login("vllm")
     assert local_server["manager"].get_config().values == before
     auth.close()

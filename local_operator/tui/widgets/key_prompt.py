@@ -567,14 +567,12 @@ class KeyPromptBlock(TranscriptBlock):
                     ("paste not usable ", muted),
                     (f"{self.provider_label} — still waiting for the browser", dim),
                 )
+            field = self.field_label or (
+                "value" if self.credential else "code" if not self.secret else "key"
+            )
             return row(
                 ("✓ ", success),
-                (
-                    f"{self.provider_label} "
-                    f"{self.field_label or ('value' if self.credential else ('key' if self.secret else 'code'))} "
-                    "received ",
-                    muted,
-                ),
+                (f"{self.provider_label} {field} received ", muted),
                 (f"({self._submitted_length} chars)", dim),
             )
 
@@ -595,7 +593,9 @@ class KeyPromptBlock(TranscriptBlock):
             # The empty state says what to do rather than leaving a bare caret,
             # because this prompt appears right after the browser opened and the
             # user's attention was somewhere else entirely.
-            hint_noun = self.field_label or ("value" if self.credential else ("key" if self.secret else "code"))
+            hint_noun = self.field_label or (
+                "value" if self.credential else ("key" if self.secret else "code")
+            )
             lines.append(
                 row(("  ", dim), (f"paste or type the {hint_noun}, then press enter", dim))
             )

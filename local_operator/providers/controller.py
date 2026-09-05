@@ -394,8 +394,8 @@ class ProviderController:
                 ) from None
         except ValueError:
             raise ValueError(
-                "The server returned an invalid model list. Check that the URL "
-                "serves an OpenAI-compatible API, then retry /login; nothing changed."
+                "Invalid model list. Check that this URL serves an "
+                "OpenAI-compatible API, then retry /login; nothing changed."
             ) from None
         except httpx.HTTPError:
             raise ValueError(
