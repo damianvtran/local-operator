@@ -323,6 +323,9 @@ _FRONTEND_LOCAL_SLASHES = {
     "skills",
     "login",
     "logout",
+    # Remote access is enrolled using this frontend computer's OAuth store and
+    # service manager; routing to the session owner would expose another host.
+    "mobile",
     "credential",
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on RemoteSession.

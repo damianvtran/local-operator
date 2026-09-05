@@ -1527,9 +1527,31 @@ def build_app(daemon: MobileDaemon):
             return False
         return verify_cookie(request.cookies.get(COOKIE_NAME), daemon.password)
 
+    def cross_origin_mutation(request: Request) -> Response | None:
+        """SameSite cookies do not separate sibling personal-tunnel subdomains.
+
+        A page on another owner's hostname can send a simple text/plain POST
+        carrying this host's cookies. Compare the exact authority before any
+        mutation; the authenticated tunnel gateway independently verifies the
+        public HTTPS Origin before forwarding to this loopback HTTP server.
+        Non-browser local API callers legitimately have no Origin header.
+        """
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return None
+        origin = request.headers.get("origin")
+        host = request.headers.get("host", "")
+        if (
+            origin is not None and origin not in {f"http://{host}", f"https://{host}"}
+        ) or request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"error": "same-origin request required"}, status_code=403)
+        return None
+
     def gate(request: Request) -> Response | None:
         """None = allowed. Browsers get the login redirect, API calls a 401 —
         the split contract the health check asserts."""
+        origin_denied = cross_origin_mutation(request)
+        if origin_denied is not None:
+            return origin_denied
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
@@ -1562,6 +1584,9 @@ def build_app(daemon: MobileDaemon):
         return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
 
     async def login_submit(request: Request) -> Response:
+        denied = cross_origin_mutation(request)
+        if denied is not None:
+            return denied
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
@@ -1997,6 +2022,8 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         cwd_raw = str(body.get("cwd") or Path.home())
         # Resolve to a real directory the picker is allowed to open: anywhere
         # under the owner's home, OR the system temp dir. The spawn runs with
@@ -2040,6 +2067,8 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         session_id = str(body.get("session_id") or "").strip()
         if not session_id:
             return JSONResponse({"error": "session_id is required"}, status_code=400)

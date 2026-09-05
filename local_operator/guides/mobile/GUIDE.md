@@ -9,9 +9,11 @@ Read this guide before installing, rotating, or troubleshooting `lop mobile`.
 The design contract lives in `docs/mobile.md`; this file is the operational
 playbook an agent follows when the user asks to set phone access up.
 
-The daemon binds **loopback only** (`127.0.0.1:4098`). Remote access is
-something the user puts in front (a tunnel plus an identity proxy). Never
-widen the bind.
+The daemon binds **loopback only** (`127.0.0.1:4098`). For Radient-authenticated
+remote access, read `guide://tunnel` and use `lop tunnel`: it supplies cloud
+authentication and the private local relay credential without a second phone
+password prompt. The password delivery steps below apply to direct local
+password access. Never widen the bind.
 
 ## When the user asks to set it up
 

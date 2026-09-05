@@ -896,9 +896,11 @@ async def test_redundant_roster_events_skip_the_sidecar_write(tmp_path, monkeypa
 
     monkeypatch.setattr(session_module, "_write_roster_sidecar", _counting_write)
 
-    # Flush any pending writer from the launch/settle so the counter starts from
-    # a settled baseline the guard has already fingerprinted.
-    await parent._persist_subagent_roster()
+    # Drain the scheduled single writer before taking a settled baseline.
+    # Calling its coroutine directly races a second writer against that task;
+    # both can read the old fingerprint and correctly write, which makes this
+    # no-change assertion depend on thread scheduling under xdist.
+    await parent._await_subagent_roster_writer()
     baseline_writes = writes["n"]
     baseline_generation = parent._subagent_roster_written_generation
 
@@ -916,7 +918,7 @@ async def test_redundant_roster_events_skip_the_sidecar_write(tmp_path, monkeypa
     # A REAL change (a second child) must still write.
     second = parent._launch_subagent(label="y", prompt="q")
     await wait_for(lambda: _status(parent, second) == "completed")
-    await parent._persist_subagent_roster()
+    await parent._await_subagent_roster_writer()
     assert writes["n"] > baseline_writes
 
     await parent.dispose()

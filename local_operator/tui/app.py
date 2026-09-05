@@ -740,6 +740,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("login", "Authenticate a provider", arguments=ArgumentMode.REQUIRED),
     # The worker reports the removal, naming the provider.
     SlashCommand("logout", "Remove stored provider credentials", arguments=ArgumentMode.REQUIRED),
+    # Uses this computer's Radient login and user service. The final setup or
+    # status notice is its receipt, so the command has no model-facing echo.
+    SlashCommand("mobile", "Radient phone access: status, enable, stop, billing"),
     # The listing (or the masked paste prompt) is the receipt. The argument is
     # a KEY NAME, never the secret, so echoing it would only restate the
     # notice that already names what was stored or forgotten.
@@ -14215,6 +14218,8 @@ class OperatorApp(App[None]):
             self._cmd_mcp(arg, notice)
         elif command == "/login":
             self._cmd_login(arg, notice)
+        elif command == "/mobile":
+            self._cmd_mobile(arg, notice)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
         elif command == "/credential":
@@ -18532,6 +18537,40 @@ class OperatorApp(App[None]):
         if stored:
             return "logged in"
         return "env key" if providers.is_usable(provider_id) else "needs login"
+
+    def _cmd_mobile(self, arg: str, notice: NoticeFn) -> None:
+        """A convenience over the same CLI lifecycle, never an implicit login side effect.
+
+        /mobile enable <quoted-monthly-price> makes the billing acceptance
+        explicit. All network and service work runs outside the TUI loop;
+        only the sanitized final receipt returns to the conversation surface.
+        """
+        pieces = arg.split()
+        action = pieces[0] if pieces else "status"
+        if action not in {"status", "enable", "start", "stop", "billing"} or len(pieces) > 2:
+            notice("Use /mobile status, billing, enable <monthly price>, start, or stop.")
+            return
+        if getattr(self, "_tunnel_action_busy", False):
+            notice("Mobile setup is already running.")
+            return
+        self._tunnel_action_busy = True
+
+        async def run() -> None:
+            from local_operator.tunnels.cli import mobile_action
+
+            try:
+                result = await asyncio.to_thread(
+                    mobile_action, action, pieces[1] if len(pieces) > 1 else None
+                )
+            except Exception:  # noqa: BLE001 — no provider bodies or secrets in a notice
+                result = "Mobile setup failed. Check lop tunnel status and /login radient."
+            finally:
+                self._tunnel_action_busy = False
+            self._system_notice(result)
+
+        # Do not cancel an in-flight enrollment to start a second one: a thread
+        # already talking to the cloud cannot be cancelled with its awaiter.
+        self.run_worker(run(), group="mobile-setup")
 
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
