@@ -141,7 +141,7 @@ async def boot_resume_quit(config_dir: Path) -> str:
     session = await create_session(
         args(), config_manager, credentials, registry, has_ui=True, defer_mcp_wiring=True
     )
-    live_id = session.transcript.directory.name
+    live_id = getattr(getattr(session, "transcript", None), "directory", Path("?")).name
     await await_store_maintenance_for_tests()
     await session.dispose()
 
