@@ -132,7 +132,7 @@ dev = [
     # Unpinned it would drift from CI: a newer pycodestyle can flag code CI
     # accepts, or accept code CI flags, and either way the local gate stops
     # predicting the remote one. Bump this and the ci.yml pin together.
-    "flake8==7.1.0",
+    "flake8==7.3.0",
     # Same discipline as flake8: one version across the type-check job,
     # the local gate, and this extra. Unpinned, the wrapper
     # (PYRIGHT_PYTHON_FORCE_VERSION=latest used to live on the type-check
