@@ -43,7 +43,7 @@ class _Response(httpx.Response):
     """The slice of ``httpx.Response`` the transports actually touch."""
 
     def __init__(self, status_code: int, body: object) -> None:
-        self.status_code = status_code
+        super().__init__(status_code, request=httpx.Request("GET", "http://fixture.invalid/models"))
         self._body = body
 
     def json(self, **kwargs: Any) -> object:
@@ -355,13 +355,13 @@ def test_the_router_id_fallback_is_scoped_to_aggregators() -> None:
     """
     body = {"data": [{"id": "auto"}, {"id": "qwen3:8b"}]}
 
-    local = fetch_models("ollama", api_key=None, client=_StubClient([_Response(200, body)]))
+    local = fetch_models("vllm", api_key=None, client=_StubClient([_Response(200, body)]))
     assert local is not None
     assert {row.id: row.routed for row in local} == {"auto": False, "qwen3:8b": False}
     assert {row.id: row.free for row in local} == {
         # The genuine free survives, which is the regression this guards.
-        "auto": False,
-        "qwen3:8b": False,
+        "auto": True,
+        "qwen3:8b": True,
     }
 
     # The SAME id on an aggregator is a router, which is the whole point of the
@@ -430,7 +430,7 @@ def test_openai_compat_reads_the_legacy_modality_string() -> None:
 
 def test_openai_compat_accepts_a_models_envelope() -> None:
     body = {"models": [{"id": "local-model", "context_window": 32_768}]}
-    rows = fetch_models("ollama", api_key=None, client=_StubClient([_Response(200, body)]))
+    rows = fetch_models("vllm", api_key=None, client=_StubClient([_Response(200, body)]))
 
     assert rows is not None
     assert [(row.id, row.context_window) for row in rows] == [("local-model", 32_768)]
@@ -450,11 +450,11 @@ def test_openai_compat_sends_a_bearer_key_and_omits_it_when_keyless() -> None:
     assert keyed.calls[0][1]["Authorization"] == "Bearer sk-abc"
 
     keyless = _StubClient([_Response(200, {"data": []})])
-    fetch_models("ollama", api_key=None, client=keyless)
+    fetch_models("vllm", api_key=None, client=keyless)
     # A local Ollama rejects a bearer header it never issued, so a keyless
     # provider must send no Authorization at all rather than "Bearer None".
     assert "Authorization" not in keyless.calls[0][1]
-    assert keyless.calls[0][0] == "http://localhost:11434/v1/models"
+    assert keyless.calls[0][0] == "http://localhost:8000/v1/models"
 
 
 def test_openai_oauth_uses_the_account_scoped_codex_catalogue() -> None:
@@ -1827,7 +1827,7 @@ def test_available_models_reports_unauthenticated_without_a_key(tmp_path) -> Non
 def test_available_models_lists_a_keyless_local_provider(tmp_path) -> None:
     body = {"data": [{"id": "qwen3:8b"}]}
     client = _StubClient([_Response(200, body)])
-    models, status = available_models("ollama", api_key=None, client=client, cache_dir=tmp_path)
+    models, status = available_models("vllm", api_key=None, client=client, cache_dir=tmp_path)
 
     # Ollama declares allows_missing_api_key, so a missing key is normal rather
     # than unauthenticated; treating it as unauthenticated makes every locally
@@ -1966,11 +1966,13 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     assert discovery.listing_capture_version("openrouter") == 6
     assert discovery.listing_capture_version("radient") == 6
     assert discovery.listing_capture_version("radient-key") == 6
-    # Ollama's reader never changed: an OpenAI-compatible document with no
-    # pricing object has nothing new to capture, so its stamp stays at 1.
-    assert discovery.listing_capture_version("ollama") == discovery.LISTING_CAPTURE_DEFAULT
+    # A generic local listing's capture stamp remains unchanged; endpoint
+    # identity is carried by its cache key independently of payload version.
+    assert discovery.listing_capture_version("vllm") == discovery.LISTING_CAPTURE_DEFAULT
 
-    cached = tmp_path / "ollama.listing.json"
+    from local_operator.providers.local import endpoint_cache_key, resolve_base_url
+
+    cached = tmp_path / f"{endpoint_cache_key('vllm', resolve_base_url('vllm'))}.json"
     cached.write_text(
         json.dumps(
             {
@@ -1985,7 +1987,7 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     )
     client = _StubClient([])
 
-    models, status = available_models("ollama", api_key=None, client=client, cache_dir=tmp_path)
+    models, status = available_models("vllm", api_key=None, client=client, cache_dir=tmp_path)
     # Served from the cache, no fetch, rows intact — the upgrade did not touch it.
     assert status == "cached"
     assert not client.calls
@@ -2000,9 +2002,11 @@ def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -
     per-transport map exists to spare, whose registry has no static rows to answer
     with. Measured before the fix: `static` with 0 models on any failed fetch.
     """
-    # Ollama is a transport whose stamp is still version 1, so an unstamped
-    # document is exactly its current shape.
-    cached = tmp_path / "ollama.listing.json"
+    # vLLM's basic listing stamp is still version 1; an unstamped document
+    # remains readable inside the current endpoint's scope.
+    from local_operator.providers.local import endpoint_cache_key, resolve_base_url
+
+    cached = tmp_path / f"{endpoint_cache_key('vllm', resolve_base_url('vllm'))}.json"
     cached.write_text(
         json.dumps(
             {
@@ -2015,7 +2019,7 @@ def test_an_unstamped_document_is_the_original_shape_not_a_stale_one(tmp_path) -
     )
     client = _StubClient([])
 
-    models, status = available_models("ollama", api_key=None, client=client, cache_dir=tmp_path)
+    models, status = available_models("vllm", api_key=None, client=client, cache_dir=tmp_path)
 
     assert status == "cached"
     assert not client.calls

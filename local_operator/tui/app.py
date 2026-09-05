@@ -1677,6 +1677,9 @@ COMPOSER_COPY = object()
 #: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
+# A fast local setup can finish before the old setup toast times out. Retire
+# only that session's notice on reload, never an unrelated actionable card.
+SPLASH_NOTICE = object()
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
 #: :data:`COMPOSER_PASTE_NOTICE`.
@@ -5281,6 +5284,8 @@ class OperatorApp(App[None]):
         # The splash notice describes the session being replaced. Left
         # standing, a `/new` would open on the dead session's quota warning.
         self._splash_notice = None
+        for toast in self.query(Toast):
+            toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -18998,6 +19003,14 @@ class OperatorApp(App[None]):
         """
         providers = self._providers
         assert providers is not None
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, provider_settings
+
+        if provider_id in LOCAL_PROVIDER_IDS:
+            return (
+                "configured server"
+                if provider_settings(provider_id).get("base_url")
+                else "configure server"
+            )
         if stored:
             return "logged in"
         return "env key" if providers.is_usable(provider_id) else "needs login"
@@ -19029,10 +19042,16 @@ class OperatorApp(App[None]):
             self._system_notice(f"unknown provider: {provider}", "warning")
             return
         definition = self._providers.provider(provider)
-        if getattr(definition, "login", None) is None:
+        if getattr(definition, "login", None) is None and not getattr(
+            definition, "local_setup", False
+        ):
             self._system_notice(f"provider '{provider}' has no interactive login.", "warning")
             return
-        notice(f"logging in to {provider}…")
+        notice(
+            f"configuring {provider}…"
+            if getattr(definition, "local_setup", False)
+            else f"logging in to {provider}…"
+        )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
@@ -19199,6 +19218,19 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "local_setup", False):
+
+            async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+                return await self._request_login_key(
+                    str(getattr(definition, "name", "Server")),
+                    secret=secret,
+                    field_label=field,
+                    default=default,
+                )
+
+            return LoginCallbacks(
+                on_progress=on_progress, on_warning=on_warning, on_setup_input=on_setup_input
+            )
         if not getattr(definition, "accepts_paste_prompt", False):
             return LoginCallbacks(
                 on_auth_url=on_auth_url, on_progress=on_progress, on_warning=on_warning
@@ -19230,7 +19262,13 @@ class OperatorApp(App[None]):
         )
 
     async def _request_login_key(
-        self, provider_label: str, *, secret: bool = True, sole_path: bool = True
+        self,
+        provider_label: str,
+        *,
+        secret: bool = True,
+        sole_path: bool = True,
+        field_label: str | None = None,
+        default: str | None = None,
     ) -> str | None:
         """Put a paste prompt in the transcript and await the key.
 
@@ -19254,7 +19292,23 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_aside()
-        block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
+        instructions = None
+        if field_label:
+            instructions = (
+                f"Enter keeps {default}"
+                if default and not secret
+                else "Enter continues without a new value; Esc cancels setup."
+            )
+        if field_label and secret:
+            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+        block = KeyPromptBlock(
+            provider_label,
+            secret=secret,
+            sole_path=sole_path,
+            field_label=field_label,
+            default=default,
+            instructions=instructions,
+        )
         self._key_prompt = block
         # Kept BEYOND the `finally` that clears `_key_prompt`, because the flow
         # only learns a paste was unusable after this method has returned the
@@ -19403,6 +19457,10 @@ class OperatorApp(App[None]):
                     self._on_config_changed()
                 await notice("starting session…", "info")
                 await self._reload_session()
+            elif getattr(self._providers.provider(provider), "local_setup", False):
+                if self._on_config_changed is not None:
+                    self._on_config_changed()
+                self._cmd_model_saved(self._notice)
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -19411,9 +19469,14 @@ class OperatorApp(App[None]):
             # painted its own "cancelled" receipt, so this stays quiet about the
             # detail and only closes the sentence the "logging in to …" notice
             # opened.
-            await notice("login cancelled.", "info")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(
+                "setup cancelled; previous configuration kept." if local else "login cancelled.",
+                "info",
+            )
         except Exception as error:
-            await notice(f"login failed: {error}", "error")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
         finally:
             self._login_lock.release()
 
@@ -22078,7 +22141,9 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(_splash_toast_headline(text, headline), duration_ms=duration)
+        toast.show(
+            _splash_toast_headline(text, headline), duration_ms=duration, owner=SPLASH_NOTICE
+        )
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.

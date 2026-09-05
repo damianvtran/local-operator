@@ -327,6 +327,122 @@ class ProviderController:
 
         return _callbacks_interactive(definition)
 
+    async def _configure_local(self, definition: ProviderDefinition) -> str:
+        import httpx
+
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.providers.local import normalize_base_url, resolve_base_url
+        from local_operator.providers.local_discovery import discover_local
+        from local_operator.providers.oauth.callback_server import LoginCancelledError
+
+        callbacks = (self._login_callbacks or self._default_callbacks)(definition)
+        setup_input = callbacks.on_setup_input
+        if setup_input is None:
+            raise ValueError("Configure this server in the app with /login, or use /settings.")
+
+        async def prompt(label: str, default: str, secret: bool) -> str | None:
+            import inspect
+
+            value = setup_input(label, default, secret)
+            return await value if inspect.isawaitable(value) else value
+
+        manager = ConfigManager(config_dir())
+        previous = resolve_base_url(definition.id)
+        endpoint_input = await prompt(
+            "Server URL", previous if definition.id != "openai-compatible" else "", False
+        )
+        if endpoint_input is None:
+            raise LoginCancelledError("Setup cancelled; previous configuration kept.")
+        endpoint = normalize_base_url(endpoint_input)
+        token = await prompt("API token (optional)", "", True)
+        if token is None:
+            raise LoginCancelledError("Setup cancelled; previous configuration kept.")
+        clear_token = token == "-"
+        if not token and endpoint == previous:
+            token = await self.auth_store.get_api_key(definition.id) or ""
+        elif token == "-":
+            token = ""
+        if callbacks.on_progress:
+            callbacks.on_progress(f"Checking {endpoint} and model list…")
+
+        def probe():
+            with httpx.Client() as client:
+                return discover_local(definition.id, endpoint, token or None, client, 5.0)
+
+        manual = False
+        try:
+            models = await asyncio.to_thread(probe)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403}:
+                raise ValueError(
+                    "Server rejected the token. Check its authentication settings "
+                    "and try /login again; nothing changed."
+                ) from None
+            if error.response.status_code in {404, 405}:
+                models, manual = [], True
+            else:
+                raise ValueError(
+                    f"Server returned HTTP {error.response.status_code}. "
+                    "Check the API root and server logs; nothing changed."
+                ) from None
+        except httpx.HTTPError:
+            raise ValueError(
+                "Cannot reach the server. Start it in its own app, check the URL "
+                "and port, then retry /login; nothing changed."
+            ) from None
+        if not models and not manual:
+            raise ValueError(
+                "Server is reachable but lists no chat models. Load a chat model "
+                "in the server, then retry /login; nothing changed."
+            )
+        if callbacks.on_progress:
+            callbacks.on_progress(
+                "Model listing unavailable; enter an exact served model ID."
+                if manual
+                else "Available models: " + ", ".join(model.id for model in models[:30])
+            )
+        current = (
+            manager.get_config_value("model_name", "")
+            if manager.get_config_value("hosting") == definition.id
+            else ""
+        )
+        model_id = await prompt("Model ID", current or (models[0].id if models else ""), False)
+        if model_id is None:
+            raise LoginCancelledError("Setup cancelled; previous configuration kept.")
+        model_id = model_id.strip()
+        if not model_id:
+            raise ValueError("Enter the exact model ID served by this endpoint; nothing changed.")
+        if models and model_id not in {model.id for model in models}:
+            raise ValueError(
+                "That model is not in the server's list. Refresh /login or choose "
+                "one of the listed IDs; nothing changed."
+            )
+        confirm = await prompt("Activate and save as default? (yes/no)", "yes", False)
+        if confirm is None or confirm.strip().lower() != "yes":
+            raise LoginCancelledError("Setup cancelled; previous configuration kept.")
+        # All prompts and network reads finish before either durable write. A
+        # cancelled or failed probe must never displace a working connection.
+        providers = dict(manager.get_config_value("providers", {}) or {})
+        settings = dict(providers.get(definition.id, {}) or {})
+        settings["base_url"] = endpoint
+        providers[definition.id] = settings
+        if token:
+            self.auth_store.upsert_credential(
+                definition.id,
+                {"key": token, "source": "login", "type": "api_key", "endpoint": endpoint},
+            )
+        elif clear_token:
+            self.auth_store.delete_credentials_for_provider(definition.id)
+        manager.update_config(
+            {"providers": providers, "hosting": definition.id, "model_name": model_id}
+        )
+        _invalidate_cached_listing(definition.id)
+        return (
+            f"Configured {definition.name}: {model_id}. Saved as the default. "
+            "Use /model to switch models or /settings for model overrides."
+        )
+
     async def login(self, provider_id: str) -> str:
         """Run the provider's login flow and report a human summary.
 
@@ -338,6 +454,8 @@ class ProviderController:
         definition = get_provider_definition(provider_id)
         if definition is None:
             raise ValueError(f"Unknown provider: {provider_id}")
+        if definition.local_setup:
+            return await self._configure_local(definition)
         if definition.login is None:
             raise ValueError(f"Provider '{provider_id}' has no interactive login.")
 
@@ -1357,6 +1475,11 @@ class ProviderController:
                 # Price enrichment may know the API model, but not this route's
                 # limits. Preserve even an unknown OAuth window through it.
                 oauth_context[definition.id] = {row.id: row.context_window for row in models}
+            if definition.local_setup:
+                # Keyless readiness is not evidence a server is running. A
+                # stale fallback remains selectable but must not claim a live
+                # connection that the refresh just failed to establish.
+                connected = status in {"ok", "cached"}
             return definition, connected, models, status
 
         results = await asyncio.gather(*[_fetch_provider(defn) for defn in PROVIDER_REGISTRY])
@@ -1556,7 +1679,11 @@ def _enrich_prices(
     )
     result: dict[str, list[DiscoveredModel]] = {}
     for definition, rows in listed:
-        if definition.id in AGGREGATOR_PROVIDERS or (models_dev is None and not openrouter):
+        if (
+            definition.local_setup
+            or definition.id in AGGREGATOR_PROVIDERS
+            or (models_dev is None and not openrouter)
+        ):
             result[definition.id] = rows
             continue
         # The chain is keyed on the canonical provider, the same translation the
@@ -1636,4 +1763,6 @@ def _price(value: float | None, definition: ProviderDefinition, *, free: bool = 
     """
     if value is not None and value > 0:
         return float(value)
-    return 0.0 if (free or definition.allows_missing_api_key) else -1.0
+    return (
+        0.0 if (free or (definition.local_setup and definition.id != "openai-compatible")) else -1.0
+    )

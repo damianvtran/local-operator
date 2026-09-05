@@ -169,6 +169,16 @@ def bind_native_context(
     for index, message in enumerate(request.messages):
         native = replay_items(message, request.model, endpoint, protocol, scope)
         validity.append(native is not None)
+        if protocol == "openai-chat" and native is not None:
+            # Compatible servers replay literal reasoning, including before the
+            # latest user turn. Count those bytes rather than assuming the
+            # Responses API's encrypted-state accounting applies here too.
+            reasoning += sum(
+                max(1, len(value) // 4)
+                for item in native
+                for key in ("reasoning_content", "reasoning")
+                if isinstance((value := item.get(key)), str) and value
+            )
         if (
             protocol == "openai-responses"
             and native is not None

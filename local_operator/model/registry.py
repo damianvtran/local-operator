@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from local_operator.providers.local import LOCAL_PRESETS, LOCAL_PROVIDER_IDS
+
 
 class ProviderDetail(BaseModel):
     """Model for provider details.
@@ -74,14 +76,16 @@ SupportedHostingProviders = [
         requiredCredentials=["MISTRAL_API_KEY"],
         recommended=True,
     ),
-    ProviderDetail(
-        id="ollama",
-        name="Ollama",
-        description="Run open-source large language models locally",
-        url="https://ollama.ai/",
-        requiredCredentials=[],
-        recommended=False,
-    ),
+    *[
+        ProviderDetail(
+            id=provider,
+            name=name,
+            description="Connect a user-operated OpenAI-compatible model server",
+            url=url,
+            requiredCredentials=[],
+        )
+        for provider, (name, _endpoint, url) in LOCAL_PRESETS.items()
+    ],
     ProviderDetail(
         id="openrouter",
         name="OpenRouter",
@@ -302,8 +306,10 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "anthropic":
         if model in anthropic_models:
             model_info = anthropic_models[model]
-    elif hosting == "ollama":
-        return ollama_default_model_info
+    elif hosting in LOCAL_PROVIDER_IDS:
+        return ollama_default_model_info.model_copy(
+            update={"id": hosting, "name": LOCAL_PRESETS[hosting][0]}
+        )
     elif hosting == "deepseek":
         if model in deepseek_models:
             return deepseek_models[model]

@@ -105,6 +105,11 @@ def _consumer_defaults() -> dict[str, object]:
     for key, value in DEFAULT_CONFIG.values.items():
         if not isinstance(value, dict):
             consumers.setdefault(key, value)
+    from local_operator.providers.local import DEFAULT_MODEL_OVERRIDES, LOCAL_PRESETS
+
+    for provider, (_name, endpoint, _url) in LOCAL_PRESETS.items():
+        consumers[f"providers.{provider}.base_url"] = endpoint
+        consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     return consumers
 
 

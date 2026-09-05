@@ -1342,6 +1342,13 @@ class AuthStore:
         ]
         if source is not None:
             rows = [r for r in rows if r.data.get("source") == source]
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
+        if provider in LOCAL_PROVIDER_IDS:
+            endpoint = resolve_base_url(provider)
+            # A settings edit must not turn a saved bearer into a credential
+            # for an unrelated server. Reconfigure explicitly to bind it anew.
+            rows = [r for r in rows if r.data.get("endpoint") == endpoint]
         # Drop demoted rows from the TIER, not merely sort them last, when some
         # other credential is still reachable.
         #

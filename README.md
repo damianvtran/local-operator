@@ -129,8 +129,14 @@ commands, `/exit` quits.
   <img src="./static/tui-welcome.png" alt="The Local Operator welcome screen with rotating tips and the composer ready for a first prompt" width="720">
 </p>
 
-Prefer a fully local model? Install [Ollama](https://ollama.com/download),
-pull a model, and point the agent at it:
+Prefer a local model? Start [LM Studio](https://lmstudio.ai), load a chat model,
+and enable its server in the Developer tab. Inside Local Operator, enter
+`/login lmstudio` to choose the endpoint and model without command-line setup.
+`/login` also offers Ollama, vLLM, llama.cpp, and a generic compatible server.
+See the [local-provider guide](docs/LOCAL_PROVIDERS.md).
+
+Existing CLI configuration still works for a model installed in
+[Ollama](https://ollama.com/download):
 
 ```bash
 lop --hosting ollama --model qwen2.5:14b
@@ -229,7 +235,10 @@ current session's cost live).
 
 One agent, your choice of brain. OAuth providers sign in through the browser
 and use your existing subscription; API-key providers prompt once and store
-the key locally; Ollama runs models on your own hardware.
+the key locally. Local servers use the same model picker and can be configured
+in the app with `/login`, including endpoints and optional masked API tokens.
+See [Local and self-hosted providers](docs/LOCAL_PROVIDERS.md) for setup,
+metadata overrides, desktop-app support, and server-specific limitations.
 
 | Provider | Access |
 | --- | --- |
@@ -244,7 +253,8 @@ the key locally; Ollama runs models on your own hardware.
 | Mistral | `MISTRAL_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` — one key, many models |
 | Radient | `RADIENT_API_KEY` — automatic per-step model selection |
-| Ollama | Local, no key, no network |
+| LM Studio, Ollama, vLLM, llama.cpp | User-operated server; optional token |
+| OpenAI-compatible | Explicit server URL; optional token; MLX/LocalAI/proxy escape hatch |
 
 ```bash
 lop login              # list login-capable providers

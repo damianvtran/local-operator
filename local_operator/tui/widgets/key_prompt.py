@@ -156,6 +156,8 @@ class KeyPromptBlock(TranscriptBlock):
         *,
         secret: bool = True,
         sole_path: bool = True,
+        field_label: str | None = None,
+        default: str | None = None,
     ) -> None:
         """``secret`` says WHICH kind of value this prompt is reading.
 
@@ -183,6 +185,10 @@ class KeyPromptBlock(TranscriptBlock):
         self.add_class("key-prompt-card")
         self.secret = secret
         self.sole_path = sole_path
+        self.field_label = strip_control_sequences(field_label or "")
+        # An explicit default (including an empty optional token) distinguishes
+        # Enter from Escape without changing OAuth's empty-means-cancel contract.
+        self.default = default
         # Both strings come from the provider registry rather than from a model,
         # but they are stripped on the same principle the approval prompt
         # applies to tool arguments: anything reaching a real terminal is
@@ -267,6 +273,7 @@ class KeyPromptBlock(TranscriptBlock):
         # settled block sitting in the transcript is not still holding the
         # user's key in memory for the rest of the session.
         self._typed = []
+        self.default = None
         if not self._future.done():
             self._future.set_result(value)
         self.remove_class("key-prompt-pending")
@@ -312,7 +319,7 @@ class KeyPromptBlock(TranscriptBlock):
         no visible cause.
         """
         typed = "".join(self._typed).strip()
-        self.resolve(typed or None)
+        self.resolve(typed or self.default if self.default is not None else typed or None)
 
     def action_cancel(self) -> None:
         self.resolve(None)
@@ -546,12 +553,21 @@ class KeyPromptBlock(TranscriptBlock):
                 )
             return row(
                 ("✓ ", success),
-                (f"{self.provider_label} {'key' if self.secret else 'code'} received ", muted),
+                (
+                    f"{self.provider_label} "
+                    f"{self.field_label or ('key' if self.secret else 'code')} received ",
+                    muted,
+                ),
                 (f"({self._submitted_length} chars)", dim),
             )
 
         noun = "API key" if self.secret else "authorization code"
-        lines = [row(("? ", accent), (f"Paste your {self.provider_label} {noun}", fg))]
+        title = (
+            f"{self.provider_label}: {self.field_label}"
+            if self.field_label
+            else f"Paste your {self.provider_label} {noun}"
+        )
+        lines = [row(("? ", accent), (title, fg))]
         if self.instructions:
             lines.append(row(("  ", dim), (self.instructions, dim)))
         mask = self._mask()
@@ -561,7 +577,7 @@ class KeyPromptBlock(TranscriptBlock):
             # The empty state says what to do rather than leaving a bare caret,
             # because this prompt appears right after the browser opened and the
             # user's attention was somewhere else entirely.
-            hint_noun = "key" if self.secret else "code"
+            hint_noun = self.field_label or ("key" if self.secret else "code")
             lines.append(
                 row(("  ", dim), (f"paste or type the {hint_noun}, then press enter", dim))
             )
