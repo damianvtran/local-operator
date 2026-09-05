@@ -1,0 +1,214 @@
+"""A delayed runtime attachment updates data, never the user's interaction."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import pytest
+from textual import events
+
+from local_operator.session.frontend_state import FrontendModelSpec
+from local_operator.session.remote import RemoteSession
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.tui.app import OperatorApp
+from tests.unit.tui.test_cold_slash_binds import _never, _RoutingHandle
+from tests.unit.tui.test_settings_view import _select
+
+
+class _SelectionHandle(_RoutingHandle):
+    """Record ordered commands and project their state over the real socket."""
+
+    async def run_slash_authoritative(self, command, args, images):
+        result = await super().run_slash_authoritative(command, args, images)
+        if command == "model":
+            provider, _, model_id = args.partition("/")
+            spec = FrontendModelSpec(provider=provider, model_id=model_id)
+            self._frontend.mutate(selected_model=spec, effective_model=spec)
+        elif command == "team":
+            self._frontend.mutate(active_team=args)
+        elif command == "agent":
+            self._frontend.mutate(active_agent=args)
+        return result
+
+
+async def _until(pilot, predicate):
+    async with asyncio.timeout(30):
+        while not predicate():
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+
+
+@asynccontextmanager
+async def _held_startup(tmp_path, monkeypatch):
+    for key in tuple(os.environ):
+        if key.startswith("CMUX_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: initial\n"
+    )
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+    handle = _SelectionHandle("startup-test")
+    handle._frontend.mutate(
+        model_catalogue=[
+            {"provider": "test", "model_id": name, "connected": True} for name in ("model", "other")
+        ]
+    )
+    server = RuntimeServer(handle, kind="tui")
+    reached = asyncio.Event()
+    release = asyncio.Event()
+
+    async def engage(*args, **kwargs):
+        server.start()
+        marker = config / "sessions/startup-test/.session.pid"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getpid()))
+        async with asyncio.timeout(30):
+            while not any(status == "live" for _, status in registry.scan(config)):
+                await asyncio.sleep(0.01)
+
+    viewer = await RemoteSession.cold(
+        "startup-test", config_dir=config, cwd=str(tmp_path), takeover_factory=_never
+    )
+    original = viewer._await_frontend
+
+    async def held_sync():
+        sync = await original()
+        reached.set()
+        await release.wait()
+        return sync
+
+    async def factory():
+        return viewer
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    monkeypatch.setattr(viewer, "_await_frontend", held_sync)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+    app = OperatorApp(factory, warm_session_imports=False)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _until(pilot, reached.is_set)
+            yield app, pilot, viewer, handle, release
+    finally:
+        release.set()
+        await viewer.dispose()
+        server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["draft", "model", "team", "agent", "settings"])
+async def test_sync_preserves_active_interaction(surface, tmp_path, monkeypatch):
+    async with _held_startup(tmp_path, monkeypatch) as (app, pilot, viewer, handle, release):
+        editor = app._editor()
+        if surface == "draft":
+            await pilot.press(*"hello world", "left", "left", "shift+left", "shift+left")
+        elif surface == "settings":
+            app._run_slash_command("/settings")
+            await pilot.pause()
+            await pilot.press("enter", *"open")
+        else:
+            await pilot.press(*f"/{surface} ", "down")
+        await pilot.pause()
+        before = (editor.text, editor.selection, app.focused)
+        picker = editor.model_picker
+        settings = app._settings_view
+        settings_state = (
+            (settings._selected, settings._editing, settings._buffer) if settings else None
+        )
+        assert viewer.is_cold
+        release.set()
+        await _until(pilot, lambda: not viewer.is_cold and not app._starting_runtime)
+        assert app._editor() is editor
+        assert (editor.text, editor.selection, app.focused) == before
+        assert app._settings_view is settings
+        if settings is not None:
+            assert (settings._selected, settings._editing, settings._buffer) == settings_state
+        if surface == "model":
+            assert editor.model_picker is picker
+            assert {row.selector for row in picker.rows()} == {"test/model", "test/other"}
+            assert app._welcome is not None
+            assert app._welcome._info.model_label == viewer.effective_model_label
+            await pilot.press("down")
+            held = picker.highlighted_selector()
+            # A subsequent catalogue expansion retains an intentional highlight.
+            handle._frontend.mutate(
+                model_catalogue=handle._frontend.state.model_catalogue
+                + [{"provider": "test", "model_id": "new", "connected": True}]
+            )
+            await _until(pilot, lambda: len(picker.rows()) == 3)
+            assert picker.highlighted_selector() == held
+            await pilot.press("escape")
+            handle._frontend.mutate(model_catalogue=[])
+            await _until(pilot, lambda: viewer.owner_model_catalogue() == [])
+            assert not picker.is_open(), "late data must not reopen an Esc-dismissed picker"
+        await pilot.press("escape", "escape", "Z")
+        assert "Z" in editor.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["model", "team", "agent"])
+async def test_latest_committed_selection_survives_sync(command, tmp_path, monkeypatch):
+    async with _held_startup(tmp_path, monkeypatch) as (app, pilot, viewer, handle, release):
+        for choice in ("first", "latest"):
+            target = f"test/{choice}" if command == "model" else choice
+            app.post_message(events.Paste(f"/{command} {target}"))
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+        await pilot.press(*"next draft", "left", "left")
+        editor = app._editor()
+        before = (editor.text, editor.selection, app.focused)
+        assert handle.calls == [], "the old sync must precede every committed selection"
+        release.set()
+        await _until(
+            pilot,
+            lambda: len([call for call in handle.calls if call[0] == "run_slash_authoritative"])
+            == 2,
+        )
+        await _until(
+            pilot,
+            lambda: (
+                viewer.model.model_id == "latest"
+                if command == "model"
+                else getattr(viewer.frontend_state, f"active_{command}") == "latest"
+            ),
+        )
+        calls = [call[1][:2] for call in handle.calls if call[0] == "run_slash_authoritative"]
+        assert calls == [
+            (command, "test/first" if command == "model" else "first"),
+            (command, "test/latest" if command == "model" else "latest"),
+        ]
+        assert (editor.text, editor.selection, app.focused) == before
+
+
+@pytest.mark.asyncio
+async def test_committed_setting_and_new_edit_survive_sync(tmp_path: Path, monkeypatch):
+    from local_operator.tui.settings import settings_get
+
+    async with _held_startup(tmp_path, monkeypatch) as (app, pilot, viewer, handle, release):
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        settings = app._settings_view
+        assert settings is not None
+        _select(settings, "display.comfortable_rows")
+        previous = settings_get("display.comfortable_rows")
+        await pilot.press("enter")
+        await pilot.pause()
+        saved = settings_get("display.comfortable_rows")
+        assert saved is not previous, "Enter must commit the changed setting"
+        _select(settings, "hosting")
+        await pilot.press("enter", *"new")
+        before = (settings._selected, settings._editing, settings._buffer, app.focused)
+        release.set()
+        await _until(pilot, lambda: not viewer.is_cold and not app._starting_runtime)
+        assert settings_get("display.comfortable_rows") == saved
+        assert (settings._selected, settings._editing, settings._buffer, app.focused) == before

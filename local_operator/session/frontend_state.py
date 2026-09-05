@@ -2263,7 +2263,7 @@ def format_window(window: int) -> str:
 def _slash_capabilities() -> list[SlashCapability]:
     # Imported lazily so module import remains headless-safe; a full frontend
     # store needs the authoritative registry rather than a duplicated name list.
-    from local_operator.tui.app import SLASH_COMMANDS
+    from local_operator.slash_commands import SLASH_COMMANDS
 
     values = []
     for command in SLASH_COMMANDS:
