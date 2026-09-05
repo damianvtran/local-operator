@@ -329,9 +329,12 @@ next window; nothing is lost, and nobody holds a merge to make a window.
 that both run `lop sessions` and both announce themselves in the same minute
 each see "nobody owns it" and both proceed — which is precisely how two
 out-of-queue releases happened. A `send` is not observable to a session that
-was not listening, so it cannot be the lock. An open PR titled
-`chore(release): bump version to X.Y.Z` is observable to everyone through the
-forge, so it is.
+was not listening, so it cannot be the lock. An open PR whose title starts
+`chore(release):` — first `claim release window`, later
+`bump version to X.Y.Z` — is observable to everyone through the forge, so it
+is; the search below keys on the prefix, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
+is decided from the window's contents, which do not exist yet when the lock
+is taken — so it starts life as a claim and becomes the bump once decided.
 
 Before starting a release, every agent does the same things, in this order:
 
@@ -342,18 +345,26 @@ Before starting a release, every agent does the same things, in this order:
    number, merge SHA and `Release:` line, and let it aggregate. Do not start a
    second release. (Quote the phrase — `gh`'s search passes it to GitHub,
    which treats bare parentheses as syntax and returns nothing.)
-2. **Take the lock by opening the bump PR.** If nothing is open, the release
-   owner's *first* act — before collecting anything — is pushing branch
-   `release-X.Y.Z` and opening `chore(release): bump version to X.Y.Z` (a
-   draft is fine); its body names the owner's session pid from `lop sessions`.
-   Only then announce it with `send` to the other live sessions.
+2. **Take the lock by opening the claim PR.** If nothing is open, the
+   release owner's *first* act — before collecting anything — is pushing
+   branch `release-next` with one empty commit and opening a draft PR titled
+   `chore(release): claim release window`; its body names the owner's session
+   pid from `lop sessions` and an empty checklist of the PRs in the window.
+   Only then announce it with `send` to the other live sessions. Once the
+   window's bump is decided, the same single commit is amended into the
+   version change and retitled `chore(release): bump version to X.Y.Z`
+   (mechanics below) — the PR number, and so the lock, never changes.
 3. **Tie-break by `createdAt`.** If two bump PRs are open, the earlier one
    owns the window; the author of the later one closes it, deletes its
    branch, and hands its window contents to the earlier PR's owner.
-4. **Adopt a dead owner.** If the bump PR's author pid has been absent from
-   `lop sessions` for more than 15 minutes, any agent may adopt the window:
-   comment on the bump PR that it is taking over, put its own pid in the
-   body, and continue from wherever the checklist stopped. Nothing is reset.
+4. **Adopt a dead owner.** An agent arriving cold cannot know how long a
+   pid has been gone, so the clock is anchored on what the forge shows: if
+   the owner pid is absent from `lop sessions` *now* **and** the lock PR's
+   `updatedAt` and its last owner comment are both more than 15 minutes old,
+   any agent may adopt the window: comment on the PR that it is taking over,
+   put its own pid in the body, and continue from wherever the checklist
+   stopped. Nothing is reset. (An owner still working therefore keeps the
+   PR's checklist current; silence is what makes a window adoptable.)
 
 The owner is a role for one window, not a standing job. Whoever cuts the
 release is also responsible for telling every contributor in the window where
@@ -379,7 +390,7 @@ it landed.
    on its own; otherwise a patch. Several patches in a window are still one
    patch. The chosen version is `<last tag> + that bump`, never a number
    someone was "promised" earlier.
-3. **Land the bump PR** (the one opened as the lock): one commit,
+3. **Land the bump PR** (the claim PR, now carrying the bump): one commit,
    `chore(release): bump version to X.Y.Z`, touching `pyproject.toml` only.
    This is a C0 change, but it is still an agent-authored PR, so the standing
    review gate applies: an **independent reviewer subagent** — not the owner,
@@ -409,25 +420,38 @@ gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
 found` (reproduced). The owner fetches and advances the root checkout's `main`
 ref, then runs `lop-update` there. The order matters: the bump PR is opened
 first as the lock, merged only after every PR in the window has merged, and
-nothing is installed until the tag exists.
+nothing is installed until the tag exists. The claim and the bump are ONE
+commit on ONE branch: the owner amends and force-pushes with
+`--force-with-lease` rather than stacking a second commit, so the scope check
+stays "one line in one file".
 
 ```sh
 # 1. Confirm the window: everything on origin/main since the last tag.
 git -C ~/local-operator fetch origin
 git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags --abbrev=0 origin/main)..origin/main"
 
-# 2. Take the lock: bump in a throwaway worktree and open the bump PR.
-#    (No open bump PR was found in step 1 of "One release owner per window".)
-git -C ~/local-operator worktree add /tmp/lop-release-X.Y.Z origin/main
-sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' /tmp/lop-release-X.Y.Z/pyproject.toml
-git -C /tmp/lop-release-X.Y.Z checkout -b release-X.Y.Z
-git -C /tmp/lop-release-X.Y.Z commit -am 'chore(release): bump version to X.Y.Z'
-git -C /tmp/lop-release-X.Y.Z push -u origin release-X.Y.Z
-gh pr create --draft --base main --head release-X.Y.Z \
-  --title 'chore(release): bump version to X.Y.Z' --assignee damianvtran \
-  --body 'Combined release X.Y.Z. Owner session pid: <pid from lop sessions>. Scope check: pyproject.toml only.'
+# 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
+#    a draft PR. (No open chore(release) PR was found in step 1 of "One
+#    release owner per window".) The number is not known yet.
+git -C ~/local-operator worktree add /tmp/lop-release-next origin/main
+git -C /tmp/lop-release-next checkout -b release-next
+git -C /tmp/lop-release-next commit --allow-empty -m 'chore(release): claim release window'
+git -C /tmp/lop-release-next push -u origin release-next
+gh pr create --draft --base main --head release-next \
+  --title 'chore(release): claim release window' --assignee damianvtran \
+  --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
+Window (tick as each merges):
+- [ ] #<n> — <Release: line>'
 # ... collect the window, write notes, wait for the last PR in the window to
-#     merge, mark ready, independent scope-check round, merge; then:
+#     merge; then, with the bump decided:
+
+# 2b. Turn the claim into the bump: amend the SAME commit, retitle the SAME PR.
+sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' /tmp/lop-release-next/pyproject.toml
+git -C /tmp/lop-release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
+git -C /tmp/lop-release-next push --force-with-lease origin release-next
+gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
+gh pr ready <claim-pr-number>
+# ... independent scope-check round, merge; then:
 
 # 3. Advance the local main ref to the merged bump WITHOUT checking it out.
 git -C ~/local-operator fetch origin
@@ -448,7 +472,7 @@ cat ~/.local/share/uv/tools/local-operator/.lop-source
 cd /tmp && lop --version
 
 # 6. Reclaim the worktree.
-git -C ~/local-operator worktree remove /tmp/lop-release-X.Y.Z
+git -C ~/local-operator worktree remove /tmp/lop-release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
