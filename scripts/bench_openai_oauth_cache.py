@@ -286,6 +286,36 @@ def _redact_body(body: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _validated_usage(raw: Any) -> TurnUsage:
+    """Unknown billing buckets must not turn into measured zeroes.
+
+    JSON booleans inherit from Python integers but are never token counts.
+    Require all four cost-critical fields explicitly; a future wire schema
+    needs a deliberate benchmark update rather than fabricated savings.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("Raw provider usage is missing or malformed.")
+    details = raw.get("input_tokens_details")
+    if not isinstance(details, dict):
+        raise ValueError("Raw input_tokens_details is missing or malformed.")
+    counts = (
+        raw.get("input_tokens"),
+        details.get("cached_tokens"),
+        details.get("cache_write_tokens"),
+        raw.get("output_tokens"),
+    )
+    names = ("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens")
+    validated: list[int] = []
+    for name, value in zip(names, counts):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"Raw {name} must be a reported nonnegative integer.")
+        validated.append(value)
+    turn = TurnUsage(*validated)
+    if turn.cache_read_tokens + turn.cache_write_tokens > turn.input_tokens:
+        raise ValueError("Raw provider cache buckets do not fit inside input tokens.")
+    return turn
+
+
 async def _stream_turn(
     client: OpenAICompatClient, request: ChatRequest, access: OAuthAccess, record: dict[str, Any]
 ) -> tuple[TurnUsage, Message]:
@@ -320,38 +350,21 @@ async def _stream_turn(
         record["stop_reason"] = terminal.stop_reason
         if usage is None:
             raise ValueError("Provider completed without usage; cache rate is unknown.")
-        record["normalized_usage"] = usage.model_dump()
-        raw = record.get("raw_usage") or {}
-        if not raw or "input_tokens" not in raw:
-            raise ValueError("Raw provider usage is missing; cache rate is unknown.")
+        turn = _validated_usage(record.get("raw_usage"))
         if record.get("returned_model") != request.model.model_id:
             raise ValueError("Provider returned a different or unidentified model.")
-        details = raw.get("input_tokens_details") or {}
-        counters = [
-            raw.get("input_tokens", 0),
-            raw.get("output_tokens", 0),
-            details.get("cached_tokens", 0),
-            details.get("cache_write_tokens", 0),
-        ]
-        if any(not isinstance(value, int) or value < 0 for value in counters):
-            raise ValueError("Provider reported invalid raw token counters.")
-        if (
-            min(
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_tokens,
-                usage.cache_write_tokens,
-            )
-            < 0
-            or usage.cache_read_tokens + usage.cache_write_tokens > usage.input_tokens
-        ):
-            raise ValueError("Provider cache buckets do not fit inside input tokens.")
-        turn = TurnUsage(
+        normalized = TurnUsage(
             usage.input_tokens,
             usage.cache_read_tokens,
             usage.cache_write_tokens,
             usage.output_tokens,
         )
+        if normalized != turn:
+            raise ValueError("Raw and normalized provider token counts disagree.")
+        # Publish normalized counters only after validating their raw source, so
+        # a rejected record cannot present adapter defaults as measurements.
+        record["normalized_usage"] = usage.model_dump()
+        record["raw_usage_validated"] = True
         tool_calls = [
             ToolCall(id=c["id"], name=c["name"], arguments=json.loads(c["arguments"] or "{}"))
             for c in calls.values()
@@ -459,10 +472,11 @@ async def _run_scenario(
 def _print_scenario_table(results: list[ScenarioResult]) -> None:
     print("scenario         calls      input     cached     writes   hit rate", file=sys.stderr)
     for result in results:
+        rate_label = f"{result.cache_rate:.1%}" if result.denom else "unknown"
         print(
             f"{result.name:<16} {len(result.turns):>5} {result.total_input:>10} "
             f"{result.total_cache_read:>10} {result.total_cache_write:>10} "
-            f"{result.cache_rate:>9.1%}",
+            f"{rate_label:>9}",
             file=sys.stderr,
         )
         if result.error:

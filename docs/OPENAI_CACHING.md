@@ -128,12 +128,38 @@ continuations. The input-equivalent reduction was approximately 58% across these
 three-call cohorts, including the cold first call. It is **not an OAuth bill
 reduction claim**, a universal cache-hit guarantee, or a latency SLA. Latency was
 recorded but noisy; no general speedup percentage is asserted. The exploratory
-header values were stable UUID4 strings; independent post-implementation QA must
-exercise the actual deterministic UUIDv5 helper before release.
+header values were stable UUID4 strings; the independent follow-up below
+exercised the actual deterministic UUIDv5 implementation.
 
-Through these experiments plus the independent four-call control: **94 POSTs**,
-88 completed and six expected validation rejections; 902,174 reported input,
-533 output (19 reasoning), 74,240 cached, zero writes. One additional authenticated
+### Independent implemented-path verification, including misses
+
+Independent QA ran **12 more POSTs** through the actual implementation, removing
+only the pair for the control arm and checking that body bytes were unchanged.
+Each arm executed a real synthetic file lookup, read back its artifact and
+replayed actual function/native results before a new user follow-up. All twelve
+requests completed on the exact requested model; no retries or write tokens.
+
+| Model | Arm | Input sequence | Cached sequence | Cold-inclusive | Warm-only |
+|---|---|---|---|---:|---:|
+| `gpt-5.6-sol` | Pair omitted | 5612,5652,5681 | 0,0,0 | 0% | 0% |
+| `gpt-5.6-sol` | Implemented UUIDv5 pair | 5614,5654,5683 | 0,5504,0 | 32.47% | 48.55% |
+| `gpt-6-astra` | Pair omitted | 5614,5654,5683 | 0,0,5504 | 32.47% | 48.55% |
+| `gpt-6-astra` | Implemented UUIDv5 pair | 5612,5652,5681 | 0,5504,5504 | 64.96% | 97.13% |
+
+The Sol candidate miss and Astra control hit are retained: affinity improves
+routing but does not guarantee reuse. Public input-equivalent units were
+16945 → 11997.4 for Sol and 11997.4 → 7037.8 for Astra. These remain estimates,
+not subscription charges. No latency improvement was established: Sol's cold
+candidate took9.702s versus1.695s for the control, and warm times were not
+consistently faster. Four artifacts read back `VERIFIED approved_color=blue`,
+SHA256 `c1df5e9466e00bdf2c14e326a66a1f02378589175b7b60c8239abd4a04f6f9ad`;
+continuations answered `VERIFIED BLUE` and the new-user follow-ups `BLUE`.
+All live reasoning counts in these twelve calls were zero; reasoning
+compatibility evidence comes from native/context tests, not a live-thinking claim.
+
+Through all experiments and independent controls: **106 POSTs**, 100 completed
+and six expected validation rejections; 969,966 reported input, 637 output
+(19 reasoning), 96,256 cached, zero writes. One additional authenticated
 catalogue GET confirmed model availability. Historical usage aggregates were
 reviewed separately, but heterogeneous historical workloads are not an A/B control.
 Per-attempt JSONL, commands and independent QA results belong on the PR rather
@@ -182,6 +208,10 @@ than publishing raw provider payloads in this repository.
 Use the existing script on the checkout under test. Live calls are opt-in, targets
 are the two audited exact model IDs, each scenario is capped at 1–8 POSTs, and
 failed/incomplete/unknown-usage responses stop the run with a nonzero exit status.
+All four cost-critical raw counters (input, output, cached and cache-write) must
+be explicitly reported nonnegative integers, excluding booleans. Missing fields
+are not measured zeroes. Invalid raw responses remain in the error record, but
+no normalized measurement or price-equivalent estimate is published for them.
 No automatic auth refresh, provider retries or alternative model substitution is
 performed. An active turn has a 90-second wall deadline. Codex omits output caps,
 so the requested terse answer is not a provider-enforced token ceiling.

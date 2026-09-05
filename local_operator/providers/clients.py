@@ -2001,9 +2001,9 @@ class OpenAICompatClient:
         """Keep a transcript's cache routing stable on the built-in OAuth route.
 
         Codex emits both headers (codex-api/src/requests/headers.rs at
-        459a79eb). Matched live Sol/Astra tool loops reused ~97% of warm input
-        with this pair and none without it; the body cache key alone was not
-        sufficient. This is an affinity GROUP, not stored remote history:
+        459a79eb). Matched live Sol/Astra tool loops favored this pair over the
+        body key alone. Independent QA confirmed improvement but also misses:
+        affinity is not a cache-hit guarantee. This is a GROUP, not stored history:
         forks intentionally inherit the cache lineage and still replay full
         input with store:false. Stateful transport would need a separate id.
         """

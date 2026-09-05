@@ -1,6 +1,7 @@
 """Cache diagnostics must measure the real wire without touching live state."""
 
 import argparse
+import copy
 import io
 import json
 import os
@@ -193,6 +194,73 @@ async def test_missing_or_invalid_usage_is_not_a_successful_zero(usage):
             await bench._stream_turn(
                 client, request, OAuthAccess("synthetic", 1, org_id="account"), capture.record
             )
+
+
+@pytest.mark.parametrize(
+    "field", ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"]
+)
+@pytest.mark.parametrize("value", [None, True, False, -1, 0.0, "0", [], {}])
+def test_cost_critical_raw_fields_require_exact_nonnegative_integers(field, value):
+    raw = {
+        "input_tokens": 1000,
+        "output_tokens": 5,
+        "input_tokens_details": {"cached_tokens": 700, "cache_write_tokens": 100},
+    }
+    target = (
+        raw["input_tokens_details"] if field in ("cached_tokens", "cache_write_tokens") else raw
+    )
+    target[field] = value
+    with pytest.raises(ValueError, match=field):
+        bench._validated_usage(raw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    [
+        "input_tokens_details",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+    ],
+)
+async def test_missing_raw_fields_preserve_error_not_fabricated_measurements(field):
+    raw = {
+        "input_tokens": 1000,
+        "output_tokens": 5,
+        "input_tokens_details": {"cached_tokens": 700, "cache_write_tokens": 100},
+    }
+    target = (
+        raw["input_tokens_details"] if field in ("cached_tokens", "cache_write_tokens") else raw
+    )
+    target.pop(field)
+    expected = copy.deepcopy(raw)
+    capture = bench._CaptureTransport(
+        httpx.MockTransport(lambda _: httpx.Response(200, stream=httpx.ByteStream(_sse(raw))))
+    )
+    async with httpx.AsyncClient(transport=capture) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        request = ChatRequest(
+            model=ModelSpec(provider="openai", model_id="gpt-6-astra"),
+            messages=[Message.user("synthetic")],
+        )
+        with pytest.raises(ValueError):
+            await bench._stream_turn(
+                client, request, OAuthAccess("synthetic", 1, org_id="account"), capture.record
+            )
+    assert capture.record["raw_usage"] == expected
+    assert "normalized_usage" not in capture.record
+    assert "raw_usage_validated" not in capture.record
+    assert "public_list_input_equivalent_tokens_estimate" not in capture.record
+
+
+@pytest.mark.parametrize("details", [None, True, [], "malformed"])
+def test_malformed_raw_details_are_not_an_empty_known_bucket(details):
+    with pytest.raises(ValueError):
+        bench._validated_usage(
+            {"input_tokens": 1000, "output_tokens": 5, "input_tokens_details": details}
+        )
 
 
 def test_dry_run_uses_real_builder_without_auth_or_network(tmp_path):
