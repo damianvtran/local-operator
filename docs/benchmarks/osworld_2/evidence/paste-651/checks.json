@@ -1,0 +1,109 @@
+{
+  "source_commit": "0aa8960cc95c5058ab61031b299e5dd7b5d5c00f",
+  "episode": "ep-b259835facb1",
+  "synthetic": true,
+  "model_inference_calls": 0,
+  "benchmark_score_claim": false,
+  "checks": [
+    {
+      "label": "editor-small",
+      "expected_codepoints": 32,
+      "actual_bytes": 47,
+      "sha256": "39abda44f81fa3cf7e806d35a620ba79367e9602883fa44cc4b8d78eefd3c55b",
+      "exact": true,
+      "xclip_process_count": 1
+    },
+    {
+      "label": "editor-1000",
+      "expected_codepoints": 1000,
+      "actual_bytes": 1471,
+      "sha256": "8ffb42c2c2b3a43d9fd9ff740d5bfffea09229d07a6213624863f11b4eb951a5",
+      "exact": true,
+      "xclip_process_count": 1
+    },
+    {
+      "label": "editor-100000",
+      "expected_codepoints": 100000,
+      "actual_bytes": 220000,
+      "sha256": "237b7edba31d142479054c616e48ae1a374f36b4ad33972e5e67232fb7719edd",
+      "exact": true,
+      "xclip_process_count": 1
+    },
+    {
+      "label": "terminal",
+      "expected_codepoints": 24,
+      "actual_bytes": 35,
+      "sha256": "5772e8fb23cb82a1b8403bd6ea0de9a593931eeb324e860da7e7ed268a0f3977",
+      "exact": true,
+      "xclip_process_count": 1
+    }
+  ],
+  "editor_before": {
+    "version": "gedit - Version 41.0",
+    "version_rc": 0,
+    "setting": "true",
+    "setting_rc": 0
+  },
+  "editor_setting_for_fixture": {
+    "rc": 0,
+    "value": "false"
+  },
+  "vm": {
+    "instance_type": "t3.xlarge",
+    "image_id": "ami-01017272139e01feb",
+    "region": "us-east-1",
+    "terminated": true
+  },
+  "images": {
+    "editor-before.png": {
+      "source_frame_sha256": "1d486cbad162b904e3e2e3b79cd30d85e70f14e0a57eeda9ba3b6642f905c80b",
+      "crop": [
+        160,
+        120,
+        1090,
+        885
+      ],
+      "sha256": "c40cd570033b63cd4c5818a6533ab7bfdf4bb01fecd8c02a18839a449ac6a627"
+    },
+    "editor-after.png": {
+      "source_frame_sha256": "72b76a124cde1d671b9ad19c2245e9873ddc1341895f8777053b3f7c560f9ac3",
+      "crop": [
+        160,
+        120,
+        1090,
+        885
+      ],
+      "sha256": "1f3ed1695de57428d73bac6ce39079b64c81efefe5171eba0d56bd5b439c11f4"
+    },
+    "editor-100000.png": {
+      "source_frame_sha256": "7c35e205f30b68dfb335b9edcefbf488269ecc17165117f97c2aa4844caa67ef",
+      "crop": [
+        160,
+        120,
+        1090,
+        885
+      ],
+      "sha256": "610a4bbefa0294cd1901b18a1d056072c309259502af653384ed564a1e17c843"
+    },
+    "terminal-before.png": {
+      "source_frame_sha256": "693b81409e5d3744f6f9a44038c289eff80b82a291190743e88e5f36f633fa6a",
+      "crop": [
+        210,
+        170,
+        970,
+        680
+      ],
+      "sha256": "c8c1686fbba99d9d940ec2783afb42eb6090ceae1dedd3135234f53baeb7b3dc"
+    },
+    "terminal-after.png": {
+      "source_frame_sha256": "84739c093c3102ea4e561125c8ce40a08be9a81a84b75c843c660c917201e268",
+      "crop": [
+        210,
+        170,
+        970,
+        680
+      ],
+      "sha256": "bd9e368421cf70aa36e5345a68e670addfebca536b965eb2ee555b169b030a62"
+    }
+  }
+}
