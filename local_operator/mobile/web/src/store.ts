@@ -1,7 +1,7 @@
 /**
  * The client store: plain React hooks over module state, fed by the two SSE
  * channels (session list, per-session projection). No library — the shape is
- * a list plus a map keyed by pid.
+ * a list plus a map keyed by durable session identity.
  *
  * SSE discipline: each stream is wrapped with manual backoff (1s doubling to
  * 15s). EventSource's built-in retry is immediate on some server-close
@@ -60,6 +60,9 @@ export interface ProjectionSlot {
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;
 const projections = new Map<string, ProjectionSlot>();
+// useSyncExternalStore requires referentially stable snapshots, including the
+// first render before the route's effect has subscribed its SSE stream.
+const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
 const listeners = new Set<() => void>();
 
@@ -90,7 +93,7 @@ export function useProjection(sessionId: string): ProjectionSlot {
 	return useSyncExternalStore(
 		subscribe,
 		() =>
-			projections.get(sessionId) ?? { projection: null, connected: false },
+			projections.get(sessionId) ?? EMPTY_PROJECTION_SLOT,
 	);
 }
 

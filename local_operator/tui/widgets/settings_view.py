@@ -39,6 +39,7 @@ out of a click handler.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from rich.cells import cell_len
@@ -131,11 +132,13 @@ class _Suggestion(NamedTuple):
     is what an Enter/Tab writes into the buffer, and it matches what each key
     STORES: a bare provider id for ``hosting`` and a bare MODEL ID for
     ``model_name`` — NOT the ``provider/id`` selector. This is load-bearing:
-    ``_persist_default_from_picker`` in app.py writes ``model_name =
-    row.model_id`` (bare) beside ``hosting = row.provider``, and `bootstrap`
-    reads the two keys independently, so storing a selector here would leave
-    ``model_name`` holding ``anthropic/claude-opus-5`` under an ``anthropic``
-    hosting and boot a model id no provider owns.
+    ``/model default`` in app.py's ``_cmd_model`` splits its selector on the
+    FIRST ``/`` and writes ``model_name`` from the right-hand side (bare) beside
+    ``hosting`` from the left, and `bootstrap` reads the two keys
+    independently — so storing a selector here would leave ``model_name``
+    holding ``anthropic/claude-opus-5`` under an ``anthropic`` hosting and boot
+    a model id no provider owns. This page is the OTHER route to the same pair,
+    so the two writers have to agree on the shape.
 
     ``label`` is display-only and carries the ``provider/id`` SELECTOR for a
     model row, so the dropdown disambiguates the two catalogue entries that can
@@ -385,6 +388,9 @@ class SettingsView(Vertical):
         #: (review round 1, B1). Do not add a write path that bypasses
         #: ``settings_io``.
         self._manager = manager
+        #: ``(policy, would-remove count)`` for the cleanup master row's detail
+        #: clause; see ``_cleanup_preview_count``.
+        self._cleanup_preview_cache: tuple[Any, int] | None = None
         #: Rows are rebuilt from the registry on every repaint (cheap: it is a
         #: tuple walk) so a write is reflected without a second bookkeeping
         #: path that could disagree with the config.
@@ -2739,7 +2745,10 @@ class SettingsView(Vertical):
         # dim, so the config's actual shape is visible at a glance — which is
         # the state a user needs before they can decide what to reset.
         value_style = fg if changed else dim
-        if setting.kind is Kind.READONLY:
+        if setting.kind is Kind.READONLY or self._gated_off(setting):
+            # A value under a switched-off master is INERT and reads as such:
+            # the READONLY ink, whatever the value (design round 1, D1). The
+            # master row itself keeps the ordinary changed/default ink (N3).
             value_style = dim
         if setting.kind is Kind.CASCADE and self._cascade_is_malformed(setting):
             # NOT `_render_value`, which would fall through to `str(value)` and
@@ -3191,31 +3200,74 @@ class SettingsView(Vertical):
             clause = self._detail_clause(row)
             key_suffix = f"   {row.setting.key}"
             key_style = Style(color=theme_mod.semantic_color("dim"))
-            # `default: N` is the one new fact the gating adds; faint (#4a4539)
-            # was 1.97:1 on the page ground. `dim` is already the key-path
-            # ink (4.55:1) and does not invent a colour (design round 1, D3).
+            # A STATE clause (`default: N`, `would remove N…`, `inert: …`,
+            # `on, but no limits…`) is a fact about the config, not help
+            # noise: it takes the `dim` rung (4.55:1, the key-path ink),
+            # never faint (1.97:1) — often it is the only text on the line
+            # (design round 1 D3, round 2 D9). CHOOSING's "not saved until
+            # enter" keeps faint: it is an instruction, and the expansion
+            # above it is already the loud thing.
             clause_style = (
-                Style(color=theme_mod.semantic_color("dim"))
-                if clause.startswith("default:")
-                else faint
+                faint
+                if clause == "not saved until enter"
+                else Style(color=theme_mod.semantic_color("dim"))
             )
             width = self._detail_width()
             help_text = row.setting.help
-            if clause:
-                both = cell_len(help_text) + cell_len(f" · {clause}") + cell_len(key_suffix)
-                clause_only = cell_len(clause) + cell_len(key_suffix)
-                if both <= width:
-                    text.append(help_text, style=faint)
-                    text.append(f" · {clause}", style=clause_style)
-                elif clause_only <= width:
-                    text.append(clause, style=clause_style)
-                else:
-                    text.append(help_text, style=faint)
-            else:
-                text.append(help_text, style=faint)
-            text.append(key_suffix, style=key_style)
+            # THE SHED LADDER, one rule for every row (design round 3, D12):
+            # the key path sheds first; the state clause is never shed while
+            # anything else remains; help sheds after the key. Walked top to
+            # bottom, first rung that fits wins:
+            #
+            #   help · clause · key → help · clause → clause · key → clause
+            #   → help · key → help
+            #
+            # The clause is the safety-relevant fact ("would remove 9 at
+            # next launch", "default: 0") and was once the FIRST thing
+            # dropped at 80 cols because the key path was kept ahead of it
+            # (design round 2, D7); dropping the key BEFORE the help is what
+            # lets a child row keep "Keep N newest…" beside "default: 0"
+            # at 110 cols (UX round 2, U12). `default: N` is present at
+            # every clause rung, so an unconfirmed `r` still names what it
+            # restores (review round 1, U2/U3) — the ladder reverses nothing.
+            help_part = (help_text, faint, False)
+            clause_part = (clause, clause_style, False)
+            key_part = (key_suffix.strip(), key_style, True)
+            rungs: list[list[tuple[str, Style, bool]]] = (
+                [
+                    [help_part, clause_part, key_part],
+                    [help_part, clause_part],
+                    [clause_part, key_part],
+                    [clause_part],
+                    [help_part, key_part],
+                    [help_part],
+                ]
+                if clause
+                else [[help_part, key_part], [help_part]]
+            )
+            for rung in rungs:
+                rendered = self._join_detail(rung)
+                if cell_len(rendered.plain) <= width or rung is rungs[-1]:
+                    text.append_text(rendered)
+                    break
         self._detail_text = text
         self._detail.update(text)
+
+    @staticmethod
+    def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
+        """Assemble one rung of the shed ladder with its separators.
+
+        ``parts`` are ``(text, style, is_key)``. Help and clause are joined
+        by `` · ``; the key path is set off by three spaces, the same gutter
+        the collapsed row uses. The separators live here, once, so a rung
+        that drops a part cannot leave a dangling dot behind.
+        """
+        out = Text()
+        for index, (body, style, is_key) in enumerate(parts):
+            if index:
+                out.append("   " if is_key else " · ", style=style)
+            out.append(body, style=style)
+        return out
 
     def _detail_clause(self, row: "_Row") -> str:
         """The state-dependent clause appended to a setting row's help.
@@ -3243,9 +3295,70 @@ class SettingsView(Vertical):
             # fitted at 160 columns, which is not a size this page measures
             # (review round 1, U2).
             return "not saved until enter"
+        gated = self._gate_clause(setting)
+        if gated:
+            return gated
         if not settings_io.is_default(self._manager, setting):
             return f"default: {_render_value(setting.default)}"
         return ""
+
+    def _gated_off(self, setting: Setting) -> bool:
+        """Is ``setting`` a child of a master switch that is currently OFF?"""
+        if setting.gated_by is None:
+            return False
+        master = settings_io.BY_KEY.get(setting.gated_by)
+        return master is not None and not bool(settings_io.read_setting(self._manager, master))
+
+    def _gate_clause(self, setting: Setting) -> str:
+        """The state clause for a master switch and for its children.
+
+        The page's one state-dependent sentence about the cleanup policy,
+        from the SAME dry-run path the CLI uses, so the number here and the
+        number ``lop sessions cleanup --dry-run`` prints cannot disagree
+        (UX round 1, U1; design D6):
+
+        * child with master OFF → ``inert: <master label> is off``;
+        * master ON with no limits → ``on, but no limits set below``;
+        * master ON with limits → ``would remove N at next launch · preview:
+          lop sessions cleanup --dry-run``.
+
+        The count is computed lazily and cached against the cleanup values,
+        never on every repaint: a store walk per keystroke would make the
+        page feel slow on a large store, and the values are what change it.
+        """
+        if setting.gated_by is not None:
+            if self._gated_off(setting):
+                master = settings_io.BY_KEY.get(setting.gated_by)
+                return f"inert: {master.label if master else setting.gated_by} is off"
+            return ""
+        if setting.key != "session.cleanup.enabled":
+            return ""
+        if not bool(settings_io.read_setting(self._manager, setting)):
+            return ""
+        count = self._cleanup_preview_count()
+        if count is None:
+            return "on, but no limits set below"
+        return f"would remove {count} at next launch · preview: lop sessions cleanup --dry-run"
+
+    def _cleanup_preview_count(self) -> int | None:
+        """How many sessions the configured policy would remove at next
+        launch, or ``None`` when no limit is set. Cached per policy value."""
+        from local_operator.session.cleanup import policy_from_config, run_cleanup
+
+        policy = policy_from_config(self._manager)
+        if not policy.has_any_limit:
+            return None
+        cached = self._cleanup_preview_cache
+        if cached is not None and cached[0] == policy:
+            return cached[1]
+        try:
+            root = Path(self._manager.config_dir)
+            result = run_cleanup(root, policy, dry_run=True)
+            count = len(result.removed)
+        except Exception:  # noqa: BLE001 — a preview must never take the page down
+            count = 0
+        self._cleanup_preview_cache = (policy, count)
+        return count
 
     #: Narrowest page that still shows BOTH columns. Below it the pane is
     #: hidden and the settings list takes the whole body: the pane is context,
@@ -4327,6 +4440,20 @@ def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
     expand into an empty group.
     """
     if setting.kind is Kind.BOOL:
+        # A bool that DECLARES its two members carries a description per
+        # side ("apply the limits below…" / "never remove…") that the bare
+        # on/off cannot; those strings were dead text on this page until
+        # design round 1 (D2) noticed the cleanup master leaned on them.
+        # Undeclared bools keep the synthesised pair.
+        declared = setting.choices
+        if len(declared) == 2 and {c.value for c in declared} == {True, False}:
+            ordered = sorted(declared, key=lambda c: not bool(c.value))
+            return tuple(
+                settings_io.Choice(
+                    value=c.value, label=_render_value(c.value), description=c.description
+                )
+                for c in ordered
+            )
         return _BOOL_CHOICES
     return setting.resolved_choices
 

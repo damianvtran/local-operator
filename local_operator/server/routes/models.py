@@ -4,16 +4,17 @@ Model endpoints for the Local Operator API.
 This module contains the FastAPI route handlers for model-related endpoints.
 """
 
+import asyncio
 import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from local_operator.clients.ollama import OllamaClient
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.model.discovery import available_models
 from local_operator.model.registry import (
     ProviderDetail,
     RecommendedOpenRouterModelIds,
@@ -25,12 +26,17 @@ from local_operator.model.registry import (
     google_models,
     kimi_models,
     mistral_models,
-    ollama_default_model_info,
     openai_models,
     qwen_models,
     xai_models,
 )
 from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.local import (
+    LOCAL_PROVIDER_IDS,
+    local_api_key,
+    local_model_info,
+    resolve_base_url,
+)
 from local_operator.server.dependencies import (
     get_credential_manager,
     get_env_config,
@@ -99,16 +105,9 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
         CRUDResponse: A response containing the list of provider objects with their details.
     """
     try:
-        # Check if Ollama is available
-        ollama_client = OllamaClient()
-        ollama_available = ollama_client.is_healthy()
-
-        # Filter out Ollama if it's not available
-        provider_details = [
-            provider
-            for provider in SupportedHostingProviders
-            if provider.id != "ollama" or ollama_available
-        ]
+        # Discovery belongs to the model request. Hiding stopped servers here
+        # made them impossible to select in the desktop application's setup UI.
+        provider_details = SupportedHostingProviders
 
         return CRUDResponse(
             status=200,
@@ -274,46 +273,38 @@ async def list_models(
                             info=model_info,
                         )
                     )
-            elif provider_detail.id == "ollama":
-                # Check if Ollama server is healthy
-                ollama_client = OllamaClient()
-                if ollama_client.is_healthy():
+            elif provider_detail.id in LOCAL_PROVIDER_IDS:
+
+                def local_entries(provider: str) -> list[ModelEntry]:
                     try:
-                        # Get the list of Ollama models
-                        ollama_models = ollama_client.list_models()
-
-                        # Add each Ollama model
-                        for model in ollama_models:
-                            # Create model info based on default but with specific model name
-                            model_info = ModelInfo(
-                                id=model.name,
-                                name=model.name,
-                                max_tokens=ollama_default_model_info.max_tokens,
-                                context_window=ollama_default_model_info.context_window,
-                                supports_images=ollama_default_model_info.supports_images,
-                                supports_prompt_cache=(
-                                    ollama_default_model_info.supports_prompt_cache
-                                ),
-                                input_price=0.0,
-                                output_price=0.0,
-                                description=(f"Local Ollama model: {model.name}"),
-                                recommended=False,
+                        endpoint = resolve_base_url(provider)
+                    except ValueError:
+                        logger.warning(
+                            "Invalid endpoint configuration for local provider %s", provider
+                        )
+                        return []
+                    if not endpoint:
+                        return []
+                    rows, _ = available_models(
+                        provider,
+                        api_key=local_api_key(provider, endpoint=endpoint),
+                        base_url=endpoint,
+                    )
+                    result = []
+                    for row in rows:
+                        info = local_model_info(provider, row.id, base_url=endpoint).model_copy(
+                            update={"name": row.name or row.id}
+                        )
+                        result.append(
+                            ModelEntry(
+                                id=row.id, name=row.name or row.id, provider=provider, info=info
                             )
+                        )
+                    return result
 
-                            models.append(
-                                ModelEntry(
-                                    id=model.name,
-                                    name=model.name,
-                                    provider=provider_detail.id,
-                                    info=model_info,
-                                )
-                            )
-                    except Exception as e:
-                        # If there's an error fetching Ollama models, fall back to the default
-                        logger.warning(f"Failed to fetch Ollama models: {str(e)}")
-                else:
-                    # Skip Ollama models if the server is not healthy
-                    pass
+                # Native metadata reads share discovery's deadline and cache;
+                # no synchronous HTTP may block the FastAPI event loop.
+                models.extend(await asyncio.to_thread(local_entries, provider_detail.id))
             elif provider_detail.id == "openai":
                 for model_name, model_info in openai_models.items():
                     models.append(

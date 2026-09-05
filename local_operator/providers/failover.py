@@ -250,6 +250,84 @@ _FAST_MODE_REFUSAL_MARKERS = (
 )
 
 
+#: Bodies a gateway sends when its model ROUTING table momentarily lacks an
+#: id it serves — observed as OpenRouter answering ``400: qwen/qwen3.8-max is
+#: not a valid model ID`` on the 97th request of a session whose previous 96
+#: it had served on that exact id, and serving it again seconds later. By
+#: status alone this is ``kind="request"``: deterministic, abort the turn, do
+#: not walk the chain — and ``_relayed_upstream_failure`` deliberately leaves
+#: the aggregator's own FLAT refusals there, on the reasoning that a body
+#: naming the problem is actionable. That reasoning holds for an id that has
+#: never worked; it does not hold for an id that served a moment ago, which
+#: is the evidence the driver has and the aggregator's wording lacks. So the
+#: words select the CANDIDATE and :data:`_SERVED_SELECTORS` supplies the
+#: proof; neither alone reclassifies anything. Anchored on unknown-model
+#: phrasing, never on a bare "invalid"/"not found" (a 400 about an invalid
+#: PARAMETER must stay a request defect). omp carries the same reroll for the
+#: same reason (``isCopilotTransientModelError``).
+_MODEL_ROUTING_FLAP_MARKERS = (
+    "is not a valid model id",
+    "is not a valid model",
+    "model not found",
+    # OpenRouter's routing 404. Anchored with "for" so the deterministic
+    # per-request variants ("No endpoints found that support tool use",
+    # "...matching your data policy") — which describe OUR request and will
+    # 404 identically on every re-ask — stay request defects (review R3).
+    "no endpoints found for",
+    "model is not available",
+    "the model does not exist",
+)
+
+#: In-place re-asks a model-routing flap earns on the SAME credential before
+#: the turn takes the ordinary request-defect path. A flap clears in seconds
+#: (it did live: three probes 200'd within a minute of the 400), and a
+#: catalogue that has genuinely dropped the id fails identically on every
+#: retry, so the budget is small and flat: the cost of being wrong is
+#: ``MAX_MODEL_FLAP_RETRIES`` cheap 400s, the cost of not trying was a
+#: 75-minute sentinel pass dying with its root cause established and nothing
+#: written.
+MAX_MODEL_FLAP_RETRIES = 3
+MODEL_FLAP_RETRY_DELAY_MS = 2_000
+
+#: ``provider/model-id`` selectors that have served at least one request in
+#: THIS process. The evidence that turns an unknown-model 4xx from "your id
+#: is wrong" into "the catalogue blinked": an id that answered 200 earlier
+#: cannot have been invalid, so a later refusal of the same id is the
+#: gateway's state, not our bytes. Process-wide rather than per session on
+#: purpose — a child session's success is as much proof as the parent's, and
+#: the naming/compaction errands ride the same clients. Never cleared: an id
+#: that once existed and was truly retired earns at most
+#: ``MAX_MODEL_FLAP_RETRIES`` cheap re-asks before the ordinary path
+#: surfaces the provider's words, which is the accepted cost.
+_SERVED_SELECTORS: set[str] = set()
+
+
+def note_selector_served(spec: "ModelSpec") -> None:
+    """Record that ``spec`` answered a request; see :data:`_SERVED_SELECTORS`."""
+    _SERVED_SELECTORS.add(f"{spec.provider}/{spec.model_id}")
+
+
+def is_model_routing_flap(exc: "ProviderError", spec: "ModelSpec") -> bool:
+    """Whether a 4xx is the gateway momentarily not knowing a model it HAS served.
+
+    Two conditions, both required: a 400/404 whose body carries the
+    unknown-model wording, AND a selector this process has already seen
+    answer a request. A never-served id with the same body is the actionable
+    refusal the aggregator means it to be and must still abort at once (the
+    "flat unknown model" contract in ``_relayed_upstream_failure``); a 5xx
+    already takes the transient path; 401/403/429 have their own kinds; any
+    other 4xx text is a request the provider read and refused. Narrow on
+    purpose: a false negative costs one more marker, a false positive costs
+    three cheap 400s on a request that was going to fail anyway.
+    """
+    if exc.status not in (400, 404):
+        return False
+    if f"{spec.provider}/{spec.model_id}" not in _SERVED_SELECTORS:
+        return False
+    lowered = (exc.message or "").lower()
+    return any(marker in lowered for marker in _MODEL_ROUTING_FLAP_MARKERS)
+
+
 def is_fast_mode_refusal(status: int | None, message: str) -> bool:
     """Whether this failure is the provider refusing FAST MODE specifically.
 
@@ -2416,6 +2494,10 @@ async def stream_with_failover(
         # back (or the patient budget is spent), never rotating on the strength
         # of a failure the credential did not cause.
         connectivity_retries = 0
+        # Per-target, like the connectivity budget: a flap is a fact about
+        # this gateway's catalogue, so the allowance belongs to the target, not
+        # the credential (rotation does not reset it) and not the turn.
+        model_flap_retries = 0
         retry_same_key = False
         # Requests aimed at THIS target's provider that came back a server-side
         # fault, counted across every credential it rotates through.
@@ -2644,6 +2726,11 @@ async def stream_with_failover(
                     if not isinstance(event, StreamStartEvent):
                         forwarded_any = True
                     yield stamped
+                # This selector just answered: from here on an unknown-model
+                # 4xx on it is a catalogue flap, not a bad id (see
+                # ``is_model_routing_flap``). Recorded for isolated errands too;
+                # a naming call's 200 is exactly as much proof the id exists.
+                note_selector_served(spec)
                 if route_state is not None and target == primary_target:
                     # Settled, not silent: while a fallback was pinned the front
                     # end has been displaying THAT model, so the primary serving
@@ -2722,6 +2809,42 @@ async def stream_with_failover(
                         # are the turn's to record. An errand that hits the
                         # refusal simply retries at standard speed silently.
                         await route_state.record_fast_refusal(refused_selector, exc.message)
+                    retry_same_key = True
+                    continue
+                if (
+                    retry.enabled
+                    # Only the request KIND: a relayed 404 that clients.py has
+                    # already reclassified transient owns the transport retry
+                    # ladder below, and letting it through here as well would
+                    # spend both budgets on one failure (review R2).
+                    and exc.kind == "request"
+                    and is_model_routing_flap(exc, spec)
+                    and model_flap_retries < MAX_MODEL_FLAP_RETRIES
+                ):
+                    # The gateway's routing table blinked on an id it serves.
+                    # Re-ask the SAME credential after a short flat delay
+                    # rather than (a) aborting the turn as a request defect,
+                    # which is what a bare 400 earns below, or (b) rotating,
+                    # which buys nothing — the catalogue is per gateway, not
+                    # per bearer. BEFORE `record()`, like the fast-mode
+                    # refusal above: a flap being recovered from must not
+                    # occupy the reported-error slot. Flat delay on purpose: a
+                    # ramp only adds dead time to a coin flip the next attempt
+                    # is equally likely to win. Budget spent, the error falls
+                    # through to the ordinary request-kind handling and is
+                    # surfaced with the provider's own words.
+                    model_flap_retries += 1
+                    logger.warning(
+                        "model routing flap from %s/%s (%s: %s); re-asking in %dms (%d/%d)",
+                        spec.provider,
+                        spec.model_id,
+                        exc.status,
+                        exc.message,
+                        MODEL_FLAP_RETRY_DELAY_MS,
+                        model_flap_retries,
+                        MAX_MODEL_FLAP_RETRIES,
+                    )
+                    await _abortable_sleep(MODEL_FLAP_RETRY_DELAY_MS, signal)
                     retry_same_key = True
                     continue
                 record(exc, primary=is_primary)

@@ -245,6 +245,10 @@ async def main() -> None:
             # are only visible activated — which is the state a user picking
             # `switch` actually sees.
             _select(view, "fork.mode")
+            # Selection scrolls after refresh. Let that navigation settle before
+            # opening, as separate user gestures do; otherwise its stale scroll
+            # can hide the just-expanded non-first choice in the captured frame.
+            await pilot.pause()
             view.action_activate()
             await pilot.pause()
             save_capture(app, out)

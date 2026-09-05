@@ -88,7 +88,7 @@ from local_operator.evaluation.adapters.discovery import (
 
 _DISTRIBUTION = "lop-osworld-v2-adapter"
 _ADAPTER_ID = "osworld-v2"
-_VERSION = "0.1.1"
+_VERSION = "0.1.2"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 
 
@@ -287,8 +287,10 @@ class OSWorldV2Adapter:
             schema_version=ADAPTER_SCHEMA_VERSION,
             capabilities=AdapterCapabilities(
                 routes=("computer",),
-                ask_user=True,  # honest ONLY because V2 has user_simulator
+                ask_user=actions.ACTION_SURFACE.ask_user,  # V2 has user_simulator
                 scoring=True,
+                paste_text=actions.ACTION_SURFACE.paste_text,
+                type_text_mode=actions.ACTION_SURFACE.type_text_mode,
             ),
         )
         # Per-episode state. None until the corresponding method runs.
@@ -303,6 +305,7 @@ class OSWorldV2Adapter:
         self._secrets: dict[str, str] = {}
         self._provider: EnvironmentProvider | None = None
         self._observation_builder: ObservationBuilder | None = None
+        self._artifact_root: Path | None = None
         self._current_observation: Any = None
         self._sequence = 0
 
@@ -461,6 +464,15 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+        if self._provider_factory is None and self._read_provider_config().get("provider") in (
+            None,
+            "aws",
+        ):
+            # Tasks are first named here. Check packaging before constructing a
+            # cloud provider; importing the task itself could run arbitrary code.
+            from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
+
+            validate_task_dependencies(self._load_task_source(params.task_id))
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
@@ -489,7 +501,8 @@ class OSWorldV2Adapter:
         # ambient carries it. The parent creates the directory and refuses a
         # reset whose root differs from the one its verifier reads, so writing
         # exactly here is what makes a frame verifiable rather than a guess.
-        self._observation_builder = ObservationBuilder(Path(params.artifact_root))
+        self._artifact_root = Path(params.artifact_root)
+        self._observation_builder = ObservationBuilder(self._artifact_root)
         raw = await provider.observe()
         self._sequence = 0
         self._current_observation = self._observation_builder.build(
@@ -707,14 +720,14 @@ class OSWorldV2Adapter:
     # ------------------------------------------------------------------
 
     async def score(self, params: ScoreParams) -> ScoreResult:
-        if self._provider is None or self._task is None:
+        if self._provider is None or self._task is None or self._artifact_root is None:
             raise scoring.ScoringUnavailable("score before reset_start")
         if not self._task.has_evaluator():
             # NOT 0.0: a task with no evaluator scored as failed would record
             # a failure the agent did not commit.
             raise scoring.ScoringUnavailable("task declares no evaluator")
         raw = await self._provider.evaluate()
-        return ScoreResult(score=scoring.score_to_artifact(raw))
+        return ScoreResult(score=scoring.score_to_artifact(raw, artifact_root=self._artifact_root))
 
     # ------------------------------------------------------------------
     # cleanup / close / begin_rescue

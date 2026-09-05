@@ -20,7 +20,7 @@ What local-operator DOES fetch, grouped by the credential it needs:
 - With an OAuth access token, when the user logged in via OAuth:
   ``anthropic`` (`/api/oauth/usage`), ``openai``/``openai-device`` (ChatGPT
   backend `/wham/usage`), ``kimi`` (`/coding/v1/usages`), ``xai``/
-  ``xai-oauth`` (billing).
+  ``xai-oauth`` (billing), ``radient`` (authenticated tenant credit balance).
 
 ``kimi`` is the only provider with both, and its two routes are different
 endpoints on different hosts rather than two ways of authenticating one.
@@ -119,6 +119,10 @@ MOONSHOT_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 #: DeepSeek account balance — plain Bearer with the key already in the registry.
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
+# The first-party account endpoint resolves the token's tenant. A model proxy
+# or an unverified JWT claim must never select a different billing account.
+RADIENT_API_URL = "https://api.radienthq.com/v1"
+
 #: xAI Grok subscription usage (OAuth).
 XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 
@@ -153,6 +157,7 @@ FetcherKind = Literal[
     "xai-oauth",
     "qwencloud-token-plan",
     "zai-quota",
+    "radient-balance",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -177,6 +182,7 @@ FetcherKind = Literal[
 #: entry, the credential path and this fetcher landed together; the pairing is
 #: the point, and re-adding one without the others would recreate the defect.
 _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
+    "radient": ("radient-balance", None),
     "openrouter": (None, "openrouter"),
     "anthropic": ("anthropic-oauth", None),
     "openai": ("openai-oauth", None),
@@ -673,6 +679,58 @@ async def fetch_moonshot_balance(
             )
         ],
         notes=notes,
+    )
+
+
+async def fetch_radient_balance(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
+    """Read real credit without activating or reconciling tunnel subscriptions.
+
+    Resolve the current account with /me before using its tenant-scoped billing
+    endpoint. These two existing read endpoints work even when tunnels are off.
+    The usage cache is informational; enrollment rechecks its exact login with
+    ``lop tunnel billing --json`` immediately before any setup mutation.
+    """
+
+    async def read(path: str) -> dict[str, Any] | None:
+        try:
+            response = await client.get(
+                RADIENT_API_URL + path,
+                headers=_bearer(access_token),
+                timeout=10,
+                follow_redirects=False,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        result = payload.get("result") if isinstance(payload, dict) else None
+        return result if isinstance(result, dict) else None
+
+    me = await read("/me")
+    account = me.get("account") if me else None
+    if not isinstance(account, dict):
+        return None
+    tenant = account.get("tenant_id")
+    if not isinstance(tenant, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tenant):
+        return None
+    credits = await read(f"/tenants/{tenant}/billing/credits")
+    raw = credits.get("balance") if credits else None
+    balance = None if isinstance(raw, bool) else _num(raw)
+    if balance is None:
+        return None
+    return UsageReport(
+        provider="radient",
+        limits=[
+            UsageLimit(
+                id="radient:balance",
+                label="Credit balance (USD)",
+                amount=UsageAmount(remaining=balance),
+                window="lifetime",
+                status="ok" if balance > 0 else "exhausted",
+                shared=True,
+            )
+        ],
     )
 
 
@@ -2053,6 +2111,8 @@ async def _run_fetcher(
         return await fetch_moonshot_balance(client, secret)
     if kind == "deepseek-balance":
         return await fetch_deepseek_balance(client, secret)
+    if kind == "radient-balance":
+        return await fetch_radient_balance(client, secret)
     if kind == "zai-quota":
         return await fetch_zai_quota(client, secret)
     if kind == "xai-oauth":

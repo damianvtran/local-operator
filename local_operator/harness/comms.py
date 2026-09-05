@@ -46,7 +46,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, cast
 
 from local_operator.harness.types import (
     AgentEvent,
@@ -342,6 +342,11 @@ class SubagentNode:
     #: superseded attempts here it could only reconcile the newest launch and
     #: would leak every earlier attempt's full role/team/system preamble.
     launch_prompts: dict[str, str] = field(default_factory=dict)
+    attempt_aliases: tuple[str, ...] = ()
+    live: bool = False
+    status: str = "gone"
+    result_text: str = ""
+    error_text: str = ""
 
 
 class ChildSession(Protocol):
@@ -398,6 +403,11 @@ class _ChildRecord:
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
     child: ChildSession | None = None
+    # A nested manager's ledger dies with its session. Keep only the job row,
+    # bounded by this registry's retention, so its completed children remain
+    # inspectable without retaining the disposed session or reading disk.
+    job_ref: Any | None = None
+    unsubscribe_jobs: Callable[[], None] | None = None
     unsubscribe: Callable[[], None] | None = None
     #: Notes addressed to this child before its session existed.
     pending: list[CustomMessage] = field(default_factory=list)
@@ -482,7 +492,20 @@ class SubagentComms:
         self._session = session
         self._records: dict[str, _ChildRecord] = {}
         self._detail_listeners: set[Callable[[str], None]] = set()
+        self._change_listeners: set[Callable[[], None]] = set()
         self._aliases: dict[str, str] = {}
+
+    def subscribe_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Observe graph/state changes without triggering durable history reads."""
+        self._change_listeners.add(listener)
+        return lambda: self._change_listeners.discard(listener)
+
+    def _notify_change(self) -> None:
+        for listener in tuple(self._change_listeners):
+            try:
+                listener()
+            except Exception:
+                logger.debug("subagent state listener failed", exc_info=True)
 
     def subscribe_detail_changes(self, listener: Callable[[str], None]) -> Callable[[], None]:
         """Observe child transcript mutations through the shared root registry."""
@@ -498,6 +521,7 @@ class SubagentComms:
         self._notify_detail_change(job_id)
 
     def _notify_detail_change(self, job_id: str) -> None:
+        self._notify_change()
         for listener in tuple(self._detail_listeners):
             try:
                 listener(job_id)
@@ -554,6 +578,8 @@ class SubagentComms:
             existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
+            existing.job_ref = self.job(job_id)
+            self._notify_change()
             return
         self._records[job_id] = _ChildRecord(
             job_id=job_id,
@@ -565,7 +591,9 @@ class SubagentComms:
             agent_role=agent_role,
             effort=effort,
         )
+        self._records[job_id].job_ref = self.job(job_id)
         self._evict_overflow()
+        self._notify_change()
 
     def attach(self, job_id: str, child: ChildSession, session_dir: Path) -> None:
         """Bind the live child session to its record and flush buffered notes."""
@@ -619,6 +647,15 @@ class SubagentComms:
             self._aliases[alias] = job_id
         record.child = child
         record.session_dir = session_dir
+        record.job_ref = self.job(job_id)
+        if record.unsubscribe_jobs is not None:
+            record.unsubscribe_jobs()
+        subscribe_jobs = getattr(getattr(child, "jobs", None), "subscribe_changes", None)
+        if callable(subscribe_jobs):
+            # Nested jobs need their final status as well as streamed events.
+            # These notifications feed only the root's existing coalescer.
+            record.unsubscribe_jobs = cast(Callable[[], None], subscribe_jobs(self._notify_change))
+        self._notify_change()
         # Imported here, not at module scope: ``subagent`` imports this module
         # for its comms types, so a top-level import closes the cycle. Same
         # reason ``resume`` imports ``run_subagent`` locally.
@@ -667,6 +704,10 @@ class SubagentComms:
         record.settled = True
         record.settled_at = time.time()
         record.child = None
+        if record.unsubscribe_jobs is not None:
+            record.unsubscribe_jobs()
+            record.unsubscribe_jobs = None
+        self._notify_change()
         record.armed = False
         # Wake anyone parked in ``_await_child``: the child is gone, so the
         # attach they are waiting for is never coming. They re-check
@@ -718,10 +759,11 @@ class SubagentComms:
         launch_prompts = dict(record.prior_launch_prompts)
         if record.launch_message_id and record.prompt:
             launch_prompts[record.launch_message_id] = record.prompt
+        parent = self._record(record.parent_job_id) if record.parent_job_id else None
         return SubagentNode(
             job_id=record.job_id,
             label=record.label,
-            parent_job_id=record.parent_job_id,
+            parent_job_id=parent.job_id if parent is not None else record.parent_job_id,
             session_id=session_id,
             session_dir=record.session_dir,
             prompt=record.prompt,
@@ -730,10 +772,40 @@ class SubagentComms:
             agent_role=record.agent_role,
             effort=record.effort,
             launch_prompts=launch_prompts,
+            attempt_aliases=tuple(record.attempt_aliases),
+            live=record.child is not None,
+            status=(
+                "paused"
+                if record.paused
+                else record.outcome or ("cancelled" if record.settled else "gone")
+            ),
+            result_text=record.result_text or "",
+            error_text=record.error_text or "",
         )
+
+    def job_rows(self) -> list[Any]:
+        """Snapshot the shared graph's ledgers once, without moving execution."""
+        sessions: list[Any] = [self._session]
+        sessions.extend(
+            record.child for record in self._records.values() if record.child is not None
+        )
+        rows: dict[str, Any] = {}
+        for session in sessions:
+            manager = getattr(session, "jobs", None)
+            if manager is not None:
+                rows.update((job.id, job) for job in manager.list())
+        for record in self._records.values():
+            if record.job_ref is not None:
+                rows.setdefault(record.job_id, record.job_ref)
+        # Resumed attempts have one current identity, even while a predecessor
+        # row has not yet aged out of its original execution ledger.
+        return [job for key, job in rows.items() if key not in self._aliases]
 
     def job(self, job_id: str) -> Any | None:
         """Find a node's job without centralizing its execution manager."""
+        record = self._record(job_id)
+        if record is not None:
+            job_id = record.job_id
         sessions: list[Any] = [self._session]
         sessions.extend(
             record.child for record in self._records.values() if record.child is not None
@@ -746,21 +818,16 @@ class SubagentComms:
                 job = None
             if job is not None:
                 return job
-        return None
+        return record.job_ref if record is not None else None
 
     def parent(self, job_id: str) -> SubagentNode | None:
         node = self.node(job_id)
         return self.node(node.parent_job_id) if node is not None and node.parent_job_id else None
 
     def children(self, job_id: str | None) -> list[SubagentNode]:
-        rows: list[SubagentNode] = []
-        for record in self._records.values():
-            if record.parent_job_id != job_id:
-                continue
-            node = self.node(record.job_id)
-            if node is not None:
-                rows.append(node)
-        return rows
+        selected = self._record(job_id) if job_id else None
+        parent_id = selected.job_id if selected is not None else job_id
+        return [node for node in self.nodes() if node.parent_job_id == parent_id]
 
     def peers(self, job_id: str) -> list[SubagentNode]:
         node = self.node(job_id)

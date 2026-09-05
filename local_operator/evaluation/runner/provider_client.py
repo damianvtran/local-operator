@@ -31,20 +31,28 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
+from local_operator.evaluation.action_surface import (
+    LEGACY_ACTION_SURFACE,
+    ActionSurface,
+)
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import (
-    NAMED_KEYS,
-    ActionBatch,
-    ComputerAction,
-    Observation,
-)
+from local_operator.evaluation.protocol import ActionBatch, Observation
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
     DecisionRejected,
     EpisodeTurn,
     ModelDecision,
     ModelUsage,
+)
+from local_operator.evaluation.runner.public_reply import (
+    MAX_PUBLIC_OBSERVATIONS_CHARS,
+    REJECTED_PUBLIC_REPLY,
+    REPLY_VERSION,
+    decode_public_reply,
+    is_public_reply,
+    looks_like_public_reply,
+    public_reply_contract,
 )
 from local_operator.logger import get_logger
 
@@ -127,7 +135,7 @@ _FUNCTION_KEY = re.compile(r"F\d+")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
 
 
-def _action_schema_lines() -> list[str]:
+def _action_schema_lines(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> list[str]:
     """Describe every action kind by reading the protocol models themselves.
 
     A parse failure costs a billed corrective re-prompt at best and the
@@ -139,7 +147,7 @@ def _action_schema_lines() -> list[str]:
     """
 
     lines: list[str] = []
-    for action in get_args(get_args(ComputerAction)[0]):
+    for action in surface.models:
         fields: list[str] = []
         for name, field in action.model_fields.items():
             if name in ("kind", "observation_id"):
@@ -161,7 +169,7 @@ def _action_schema_lines() -> list[str]:
     return lines
 
 
-def _named_keys_line() -> str:
+def _named_keys_line(surface: ActionSurface) -> str:
     """The key vocabulary, wrapped, derived from the set the validator enforces.
 
     Stated rather than implied. ``KeyAction`` accepts a closed set and rejects
@@ -172,7 +180,7 @@ def _named_keys_line() -> str:
     spends prompt budget on a pattern one phrase conveys.
     """
 
-    named = sorted(key.lower() for key in NAMED_KEYS if not _FUNCTION_KEY.fullmatch(key))
+    named = sorted(key.lower() for key in surface.named_keys if not _FUNCTION_KEY.fullmatch(key))
     wrapped = textwrap.wrap(", ".join(named) + ", and f1 through f24", width=68)
     return textwrap.indent("\n".join(wrapped), "  ")
 
@@ -200,14 +208,45 @@ def _type_name(annotation: Any) -> str:
     return "value"
 
 
-def build_system_prompt() -> str:
+def _paste_instructions(surface: ActionSurface) -> str:
+    if not surface.paste_text:
+        return ""
+    return """* "paste_text" is the supported Unicode path: replace CLIPBOARD with text,
+  then send exactly the REQUIRED "keys" chord. Choose the chord for the focused
+  application (for example ["ctrl", "v"] or ["ctrl", "shift", "v"]); there is
+  NO default chord, focus change, automatic Enter, retry, or keyboard fallback.
+  REQUIRED "clipboard_policy" must be "overwrite". The new text remains on
+  CLIPBOARD; the old clipboard is not restored and PRIMARY is untouched.
+  Text must be valid Unicode, 1 to 100000 characters; whitespace-only text is
+  allowed. Tabs, CR and newlines are data; other control characters are refused.
+  The receiving application may normalize text or submit on a newline. A wrong
+  chord can do something else or nothing: inspect the next observation; success
+  of the action does NOT prove insertion or task completion.
+"""
+
+
+def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
     """Compose the episode system prompt around the live protocol schema."""
 
+    native_text = (
+        "Only ASCII text is supported by this adapter; "
+        "non-ASCII is rejected before any batch action."
+        if surface.type_text_mode == "ascii"
+        else "This adapter supports Unicode native text input."
+    )
+    ask_text = (
+        '* "ask_user" -- you need a human answer. '
+        "THE EPISODE PAUSES until the answer is delivered. "
+        "Do not ask a question you can resolve by acting."
+        if surface.ask_user
+        else ""
+    )
     return f"""You are operating a computer to complete one task.
 
 Each user message is one observation of the screen: its text, and a screenshot
-when one is attached. Your own earlier replies are the actions you already
-took. "{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+when one is attached. Your own earlier replies contain the actions you already
+took and any public factual observations you recorded.
+"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
 previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
 this step, which is normal for a screenshot-only benchmark and means the
 screenshot is the whole state; "[screenshot omitted ...]" marks an older
@@ -238,13 +277,25 @@ observation with a corrected batch; nothing was executed.
 Reply with a single JSON object and nothing else, with no prose and no code
 fence:
 
-  {{"actions": [ ... ]}}
+  {{"reply_version": "{REPLY_VERSION}", "action_batch": {{"actions": [ ... ]}},
+   "public_observations": ""}}
+
+This is a MODEL-REPLY envelope, not the adapter protocol. Use exactly these
+three keys; action_batch contains only actions. public_observations is a string
+of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters; empty is valid.
+Record only concise NEW factual data
+or visible progress observed on the CURRENT screen that may be needed later,
+because old screenshots are removed before text summarization. Do not repeat
+prior notes, invent facts, record credentials/secrets, or provide deliberation,
+plans, explanations of your decision, or private reasoning. Do not claim the
+chosen actions succeeded until a later observation shows their result.
+Legacy replies containing only {{"actions": [ ... ]}} are also accepted.
 
 Every action is an object whose type is given by the key "kind" (NOT "type"),
 and every action must carry the "observation_id" of the observation you are
 looking at right now. These are the only permitted shapes:
 
-{chr(10).join(_action_schema_lines())}
+{chr(10).join(_action_schema_lines(surface))}
 
 Field names are JSON keys spelled exactly as quoted above -- "keys" is not
 "key", "text" is not "value". Where a field lists alternatives separated by
@@ -256,8 +307,10 @@ name all require typing.
 
 * "type" enters literal text wherever the keyboard focus already is. It does
   NOT click first, so focus the field with a click (or Tab) in an earlier
-  action, then type. It sends exactly the characters given and does not press
-  Enter for you.
+  action, then type. It uses native keyboard input, not the clipboard.
+  {native_text}
+  It does not press Enter for you.
+{_paste_instructions(surface)}
 * "key" presses named keys, and presses the ones in a single action TOGETHER
   as one chord: ["ctrl", "s"] is Ctrl+S, ["enter"] commits a field or dialog,
   ["tab"] moves focus, ["esc"] dismisses, and ["ctrl", "a"] followed by a
@@ -267,7 +320,7 @@ name all require typing.
   synonym is rejected -- "ctrl" not "control", "esc" not "escape", "enter"
   not "return":
 
-{_named_keys_line()}
+{_named_keys_line(surface)}
 
 A batch may contain SEVERAL actions and they execute in order against the
 screen you are looking at, with one new observation at the end. That is how a
@@ -275,14 +328,12 @@ click-then-type-then-Enter sequence is done in one step rather than three.
 Batch only what you can predict without seeing the screen in between; when the
 result of an action decides the next one, end the batch and look.
 
-Two actions end your turn in a special way, and each must be the ONLY action in
+Terminal actions end your turn in a special way, and each must be the ONLY action in
 its batch. Their fields are listed above; what the list cannot tell you is what
 they MEAN:
 
 * "finish" -- you believe the task is done. The episode is then scored.
-* "ask_user" -- you need a human answer. THE EPISODE PAUSES: a person answers
-  your question, and the next observation you see is the state after that
-  answer was delivered. Do not ask a question you can resolve by acting.
+{ask_text}
 """
 
 
@@ -422,6 +473,10 @@ def _batch_observation_ids(value: Any) -> set[str]:
 
     if not isinstance(value, Mapping):
         return set()
+    if is_public_reply(value):
+        value = value.get("action_batch")
+        if not isinstance(value, Mapping):
+            return set()
     actions = value.get("actions")
     if not isinstance(actions, list) or not actions:
         return set()
@@ -445,6 +500,7 @@ def parse_decision(
     prompt_cache_key: str | None = None,
     context_tokens: int | None = None,
     compaction: CompactionRecord | None = None,
+    action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
 ) -> ModelDecision:
     """Parse one strict JSON decision and bind it to the current observation.
 
@@ -465,6 +521,16 @@ def parse_decision(
     decoded, trailing = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
+    public_reply = None
+    if is_public_reply(decoded):
+        try:
+            envelope = decode_public_reply(payload)
+        except ValueError as error:
+            raise DecisionParseError(str(error)) from error
+        decoded = envelope["action_batch"]
+        # Keep the visible response, not a reconstruction from its actions. It
+        # is redacted at the runner's resolved-secret boundary before replay.
+        public_reply = payload.strip()
     if trailing:
         # Tolerated, but never silent. A model that reliably appends junk is a
         # signal worth seeing -- it may point at a prompt or provider problem
@@ -500,10 +566,12 @@ def parse_decision(
         raise DecisionParseError(f"decision is not a valid action batch: {error}") from error
     try:
         batch.validate_for(observation)
+        action_surface.validate_batch(batch)
     except Exception as error:
         raise DecisionParseError(f"decision does not match this observation: {error}") from error
     return ModelDecision(
         action_batch=batch,
+        public_reply=public_reply,
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
@@ -588,7 +656,15 @@ class _ContextBuilder:
                 self._messages.append(
                     Message(
                         role="assistant",
-                        content=[TextContent(text=turn.batch.to_canonical_json().decode("utf-8"))],
+                        content=[
+                            TextContent(
+                                text=(
+                                    turn.public_reply
+                                    if turn.public_reply is not None
+                                    else turn.batch.to_canonical_json().decode("utf-8")
+                                )
+                            )
+                        ],
                     )
                 )
                 self._closed_turns.add(index)
@@ -751,10 +827,18 @@ class ProviderModelClient:
         self._last_provider_context_tokens: int | None = None
         self._last_request_ms = _now_ms()
 
+    @property
+    def model_reply_metadata(self) -> dict[str, Any]:
+        # Optional client capability: scripted/historic clients must not claim
+        # a prompt contract they never used. The runner stays provider-free.
+        return public_reply_contract()
+
     async def decide(
         self,
         observation: Observation,
         history: Sequence[EpisodeTurn],
+        *,
+        action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
     ) -> ModelDecision:
         from local_operator.harness.types import ChatRequest
 
@@ -767,7 +851,13 @@ class ProviderModelClient:
         messages = self._context.messages
         request = ChatRequest(
             model=self._model_spec,
-            system_blocks=[self._system_prompt],
+            system_blocks=[
+                (
+                    build_system_prompt(action_surface)
+                    if self._system_prompt == _SYSTEM_PROMPT
+                    else self._system_prompt + "\n\n" + build_system_prompt(action_surface)
+                )
+            ],
             messages=list(messages),
             tool_choice="none",
             prompt_cache_key=self._prompt_cache_key,
@@ -800,6 +890,7 @@ class ProviderModelClient:
                 prompt_cache_key=self._prompt_cache_key,
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
+                action_surface=action_surface,
             )
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.
@@ -808,12 +899,26 @@ class ProviderModelClient:
             # is corrective by construction. The billing provenance rides on
             # the exception so the runner can write this attempt's triple.
             diagnostic = _rejection_prompt(str(error), observation)
-            self._context.append_rejection(text, diagnostic)
+            # Invalid notes are not factual memory. For envelope failures do
+            # not quote their unvalidated (possibly secret) text on retries or
+            # in evidence. Classification cannot rely on successful decoding
+            # (a truncated reply fails) or literal keys (JSON Unicode escapes
+            # bypass the substring test), so the reserved-key scan is
+            # escape-aware and fails closed (F1, review round 1). Raw legacy
+            # rejection text is retained only where no reserved key appears.
+            shown = text
+            try:
+                rejected_value, _ = json.JSONDecoder().raw_decode(text.lstrip())
+            except (ValueError, RecursionError):
+                rejected_value = None
+            if is_public_reply(rejected_value) or looks_like_public_reply(text):
+                shown = REJECTED_PUBLIC_REPLY
+            self._context.append_rejection(shown, diagnostic)
             raise DecisionRejected(
                 diagnostic,
                 # Truncated with the same bound the context replay uses: a
                 # runaway reply must not be able to inflate the bundle either.
-                reply=text[:MAX_REJECTED_REPLY_CHARS],
+                reply=shown[:MAX_REJECTED_REPLY_CHARS],
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,

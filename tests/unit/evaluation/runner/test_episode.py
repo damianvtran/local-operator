@@ -717,7 +717,7 @@ async def test_context_unrecoverable_seals_as_a_harness_error_not_a_provider_one
     )
 
     class RefusingModel:
-        async def decide(self, observation: Any, history: Any) -> Any:
+        async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
             raise ContextUnrecoverableError("context cannot fit the window")
 
     adapter = FakeAdapter(tmp_path, episode_id)
@@ -964,11 +964,11 @@ async def test_provider_failure_after_a_step_still_seals(tmp_path: Path, episode
     original = model.decide
     calls = {"n": 0}
 
-    async def decide(observation: Any, history: Any) -> Any:
+    async def decide(observation: Any, history: Any, **kwargs: Any) -> Any:
         calls["n"] += 1
         if calls["n"] > 1:
             raise RuntimeError("provider exhausted retries")
-        return await original(observation, history)
+        return await original(observation, history, **kwargs)
 
     model.decide = decide  # type: ignore[method-assign]
     runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)

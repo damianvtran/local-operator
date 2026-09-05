@@ -385,6 +385,9 @@ class DiscoveredModel:
     #: the point of use when its own listing declines to price it.
     routed: bool = False
     supports_images: bool | None = None
+    supports_tools: bool | None = None
+    reasoning: bool | None = None
+    active_context_window: int | None = None
     supports_prompt_cache: bool = False
     #: The effort ladder the LISTING stated, ASCENDING and normalised to
     #: ``EFFORT_ORDER`` at ingest (see :func:`_effort_ladder`). Three-state —
@@ -921,6 +924,7 @@ def _row_from_openai_entry(
         context_window=_first_positive_int(
             entry.get("context_length"),
             entry.get("context_window"),
+            entry.get("max_model_len"),
             entry.get("max_context_length"),
             top_provider.get("context_length"),
         ),
@@ -1328,15 +1332,16 @@ _WIRE_TRANSPORTS: dict[WireFormat, _Transport | None] = {
 def _build_transports() -> dict[str, _Transport | None]:
     """Provider id to transport, derived from the registry at import time.
 
-    A provider with no ``base_url`` maps to ``None``: no host means no listing
-    endpoint. That is the shape the credential-brokered providers take (Vertex,
+    A provider with no ``base_url`` maps to ``None`` unless local setup supplies
+    its endpoint at runtime: an unconfigured generic server is not permanently
+    unlistable. That is the shape the credential-brokered providers take (Vertex,
     Bedrock and Azure, none of which exist in this tree today), so adding one
     later gets the correct "registry only" behaviour instead of a request to the
     empty string.
     """
     transports: dict[str, _Transport | None] = {}
     for definition in PROVIDER_REGISTRY:
-        if not definition.base_url:
+        if not definition.base_url and not definition.local_setup:
             transports[definition.id] = None
             continue
         transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
@@ -1406,7 +1411,9 @@ def fetch_models(
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
         return None
-    resolved_base = (base_url or definition.base_url or "").rstrip("/")
+    from local_operator.providers.local import resolve_base_url
+
+    resolved_base = resolve_base_url(provider_id, override=base_url).rstrip("/")
     if not resolved_base:
         return None
 
@@ -1416,6 +1423,10 @@ def fetch_models(
         if active is None:
             owned = httpx.Client(timeout=timeout)
             active = owned
+        if definition.local_setup:
+            from local_operator.providers.local_discovery import discover_local
+
+            return discover_local(definition.id, resolved_base, api_key, active, timeout)
         return transport(
             _FetchContext(
                 provider_id=definition.id,
@@ -1740,6 +1751,9 @@ def _rows_from_payload(
                 # a cache round-trip turn "unstated" into a denial, so the same
                 # model would resolve differently live than from disk.
                 supports_images=_stated_bool(entry.get("supports_images")),
+                supports_tools=_stated_bool(entry.get("supports_tools")),
+                reasoning=_stated_bool(entry.get("reasoning")),
+                active_context_window=_positive_int(entry.get("active_context_window")) or None,
                 supports_prompt_cache=bool(entry.get("supports_prompt_cache")),
                 # The SAME coercers the parser used, which is what makes the
                 # round-trip faithful rather than merely plausible: a stored
@@ -1785,6 +1799,7 @@ def cached_available_models(
     provider_id: str,
     *,
     cache_dir: Path | None = None,
+    base_url: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
@@ -1805,6 +1820,10 @@ def cached_available_models(
 
     storage_id = credential_provider_id(definition.id)
     key = _cache_key(storage_id)
+    if definition.local_setup:
+        from local_operator.providers.local import endpoint_cache_key, resolve_base_url
+
+        key = endpoint_cache_key(key, resolve_base_url(definition.id, override=base_url))
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)
@@ -1920,8 +1939,11 @@ def _available_models(
     # An OAuth credential may be served by a different host than the provider's
     # API-key base (Kimi's coding plan; see ``oauth_base_url``). An explicit
     # caller-supplied base still wins, because that is a deliberate override.
-    resolved_base = base_url or (
-        (definition.oauth_base_url if is_oauth else None) or definition.base_url
+    from local_operator.providers.local import resolve_base_url
+
+    resolved_base = resolve_base_url(
+        definition.id,
+        override=base_url or (definition.oauth_base_url if is_oauth else None),
     )
     if not resolved_base:
         return merge_models(rows, None), "static"
@@ -1981,6 +2003,10 @@ def _available_models(
         account_id=account_id,
         host_scoped=bool(is_oauth and definition.oauth_base_url),
     )
+    if definition.local_setup:
+        from local_operator.providers.local import endpoint_cache_key
+
+        key = endpoint_cache_key(key, resolved_base)
     # The soft TTL never exceeds the hard one: a picker asking for a 15-minute
     # document wants it fetched NOW, not served-and-refreshed-later.
     soft_ttl_s = min(SOFT_TTL_S, ttl_s)

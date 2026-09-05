@@ -27,6 +27,12 @@ Three things are deliberate.
   ASCII ``>``. It is the mark this UI already uses to point at what follows,
   and "the user's turn" is exactly a prompt pointing at the user.
 
+Forks use this same title channel. cmux follows it unless a user explicitly
+named the workspace or surface; socket renames would pin that override and
+freeze the sidebar while this title continues updating. A forked transcript is
+not proof of native workspace ownership: it can be resumed in any surface,
+including a headless test inheriting the developer's cmux environment.
+
 Everything here is either a pure function or a small state holder with an
 injected sink, because the alternative — writing to ``sys.stdout`` — is a
 correctness bug and not a style choice: Textual serialises terminal output
@@ -64,6 +70,22 @@ SEP_IDLE = "›"
 #: auto-approve indicator and the transcript's ``warning`` notices both use
 #: ``!``, so a user who has learned it in one place has learned it here.
 SEP_ATTENTION = "!"
+
+#: Failed separator, for a session whose last turn ended in an ERROR.
+#:
+#: Without it a died-with-an-error session was indistinguishable from one that
+#: finished cleanly — both rendered ``lo › name`` — in the exact surface a user
+#: scans to find what needs them. That is not hypothetical: it is how the
+#: incident behind this change was found, by opening sessions one at a time to
+#: see which had failed.
+#:
+#: ``✗`` rather than another ``!`` because the two states differ in what they
+#: ask of the user: ``!`` means "come and answer something" (a turn is alive and
+#: parked on you), while this means "this one is over and it did not work".
+#: Sharing a glyph would spend the attention mark on a session that no longer
+#: needs any. It matches the transcript's own ``error`` notice mark, so the
+#: vocabulary is one the user has already learned one surface in.
+SEP_FAILED = "✗"
 
 #: The working animation, and the SINGLE definition of it in the TUI:
 #: ``status_line`` imports this rather than declaring its own copy. Both
@@ -109,7 +131,12 @@ MAX_LABEL_CHARS = 80
 PUSH_TITLE = "\x1b[22;0t"
 POP_TITLE = "\x1b[23;0t"
 
-TitleState = Literal["idle", "working", "attention"]
+#: ``failed`` is TERMINAL and turn-scoped, exactly like the other three: it is
+#: entered when a turn retires with an error and left the moment the next turn
+#: starts (which moves the band to ``working``). It is deliberately NOT sticky
+#: beyond that — a title is a statement about the session's CURRENT state, and a
+#: cross that outlived the failure it described would be worse than no mark.
+TitleState = Literal["idle", "working", "attention", "failed"]
 
 
 def terminal_title_enabled() -> bool:
@@ -182,6 +209,7 @@ def build_title(label: str, state: TitleState, frame: int = 0) -> str:
     * ``working`` → ``lo ⣻ label`` (the frame steps through
       :data:`SPINNER_FRAMES`)
     * ``attention`` → ``lo ! label``
+    * ``failed`` → ``lo ✗ label``
 
     Without a label the separator still trails the brand (``lo ›``): the state
     is the half of this that a switcher can always show, and dropping it would
@@ -191,6 +219,8 @@ def build_title(label: str, state: TitleState, frame: int = 0) -> str:
         separator = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
     elif state == "attention":
         separator = SEP_ATTENTION
+    elif state == "failed":
+        separator = SEP_FAILED
     else:
         separator = SEP_IDLE
     clean = sanitize_label(label)

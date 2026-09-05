@@ -78,6 +78,20 @@ def _working(app: OperatorApp) -> WorkingBlock | None:
     return lines[0] if lines else None
 
 
+def _transcript_rows(app: OperatorApp) -> list[str]:
+    """The painted rows of the TRANSCRIPT only, excluding the chrome.
+
+    Painted rather than the blocks' own text, because what is under test is
+    what the terminal was SENT — a block can be unmounted while its row is
+    still on the frame. Bounded to the transcript's laid-out region so the
+    status band, which renders the working directory, cannot answer a question
+    asked about the transcript (see the note at the call site).
+    """
+    region = app.query_one(TranscriptView).region
+    strips = list(app.screen._compositor.render_strips())
+    return [strip.text for strip in strips[region.y : region.y + region.height]]
+
+
 def _activity(app: OperatorApp) -> str:
     line = _working(app)
     assert line is not None, "no working line is mounted"
@@ -451,10 +465,23 @@ async def test_the_line_is_lifted_when_the_turn_ends() -> None:
         assert _working(app) is not None
 
         app.post_message(_ended("c0", "read"))
+        await pilot.pause()
+        # The line falls back to "thinking" once its tool settles, which is what
+        # makes the assertion below MEANINGFUL: without pinning that the row is
+        # painted first, "no thinking row after the turn" would also hold for a
+        # line that never rendered one at all.
+        assert any("thinking" in text for text in _transcript_rows(app))
+
         app.post_message(TurnEnded(aborted=False, error=None))
         await pilot.pause()
         assert _working(app) is None
-        assert not any("thinking" in strip.text for strip in app.screen._compositor.render_strips())
+        # Scoped to the TRANSCRIPT's rows, not the whole frame. Scanning every
+        # strip made this assertion depend on the checkout's PATH: the status
+        # band renders the cwd, so any clone under a directory whose name
+        # contains "thinking" — `/tmp/lop-thinking`, the worktree this very PR
+        # was developed in — matched the band and failed a passing app. The
+        # claim is about the transcript, so the region under test is too.
+        assert not any("thinking" in text for text in _transcript_rows(app))
 
 
 @pytest.mark.asyncio

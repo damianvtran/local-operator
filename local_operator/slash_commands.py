@@ -7,7 +7,15 @@ and presentation differ. Importing this module never loads the Textual app.
 
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 
-PERSIST_HINT = "d in /model saves this for new sessions"
+#: ONE route named here, not both. The second route (the `/settings` model rows)
+#: does not fit: this string is sized by the picker footer, whose budget is 43
+#: cells at 50 columns (card width minus `_GUTTER_CELLS` + `_EDGE_MARGIN`), and
+#: this clause is 42. Any "; /settings too" tail measures 57 and truncates
+#: mid-word at the one width where the instruction most needs to survive whole.
+#: So the footer gets the command and the roomier surfaces get the pair: the
+#: bare-`/model` notice names `/settings` in `_persist_hint_notice`, which wraps
+#: instead of truncating, and the `/help` row is reachable at any width.
+PERSIST_HINT = "/model default saves this for new sessions"
 
 SLASH_COMMANDS: list[SlashCommand] = [
     # The help table is the receipt.
@@ -111,11 +119,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # typed selector, which may have been elided to `default`.
     SlashCommand(
         "model",
-        # Terse by necessity — the description column wraps past ~55 cells — but
-        # it still carries PERSIST_HINT verbatim rather than a fifth paraphrase.
-        # The `<provider>/<id>` shape it used to show moved to the tip pool, which
-        # has the room for it (`welcome.TIPS`).
-        f"Switch model; {PERSIST_HINT}",
+        # Terse by necessity — the description column wraps past ~55 cells at 80
+        # columns, and `Switch model; ` + the 42-cell hint measured 56 and
+        # orphaned "sessions" on its own line (design review D2). "Switch" alone
+        # keeps the row whole at 80 (49 cells) and still carries PERSIST_HINT
+        # verbatim rather than a fifth paraphrase; the command name beside it
+        # already says what is being switched. The `<provider>/<id>` shape it
+        # used to show moved to the tip pool, which has the room (`welcome.TIPS`).
+        # `/model saved` is not here for the same reason: the notice a bare
+        # `/model` prints is the surface with room for the third command.
+        f"Switch; {PERSIST_HINT}",
         aliases=("models",),
         desktop_destination="session.model",
     ),
@@ -333,6 +346,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Remove stored provider credentials",
         arguments=ArgumentMode.REQUIRED,
         desktop_destination="auth.logout",
+    ),
+    # Uses this computer's Radient login and user service. The final setup or
+    # status notice is its receipt, so the command has no model-facing echo.
+    # The desktop hosts it in the same Radient account surface the proxies
+    # serve, rather than shelling the terminal-only setup flow.
+    SlashCommand(
+        "mobile",
+        "Radient phone access: status, enable, stop, billing",
+        desktop_destination="radient.mobile",
     ),
     # The listing (or the masked paste prompt) is the receipt. The argument is
     # a KEY NAME, never the secret, so echoing it would only restate the

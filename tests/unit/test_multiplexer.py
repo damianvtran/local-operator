@@ -41,11 +41,7 @@ from local_operator.multiplexer.broadcast import (
     resume_executable,
     retire_session,
 )
-from local_operator.multiplexer.cmux import (
-    REASSERT_INTERVAL_S,
-    CmuxBackend,
-    rename_fork_target,
-)
+from local_operator.multiplexer.cmux import REASSERT_INTERVAL_S, CmuxBackend
 from local_operator.multiplexer.markers import (
     COMMAND_OPTION,
     SESSION_OPTION,
@@ -1041,51 +1037,6 @@ class TestCmuxPayload:
         monkeypatch.setattr("local_operator.multiplexer.cmux._cmux_binary", lambda: "/bin/cmux")
         assert CmuxBackend().detect(env) is False
         assert CmuxBackend().publish(_binding(), env) is False
-
-
-class TestForkTargetRename:
-    @pytest.mark.parametrize(
-        ("placement", "expected"),
-        [
-            (
-                "workspace",
-                ["/bin/cmux", "workspace", "rename", WORKSPACE, "--title", "Divergent work"],
-            ),
-            (
-                "surface",
-                ["/bin/cmux", "rename-tab", "--surface", SURFACE, "Divergent work"],
-            ),
-        ],
-    )
-    def test_renames_the_owned_target_for_each_placement(
-        self, monkeypatch, placement: str, expected: list[str]
-    ) -> None:
-        calls: list[list[str]] = []
-        monkeypatch.setattr("local_operator.multiplexer.cmux._cmux_binary", lambda: "/bin/cmux")
-
-        class Completed:
-            returncode = 0
-            stderr = ""
-
-        monkeypatch.setattr(
-            "local_operator.multiplexer.cmux.subprocess.run",
-            lambda argv, **kwargs: calls.append(list(argv)) or Completed(),
-        )
-        env = {"CMUX_WORKSPACE_ID": WORKSPACE, "CMUX_SURFACE_ID": SURFACE}
-
-        assert rename_fork_target(env, "  Divergent   work ", placement=placement) is True
-        assert calls == [expected]
-        if placement == "surface":
-            assert "workspace" not in calls[0]
-
-    def test_failure_is_nonfatal(self, monkeypatch) -> None:
-        monkeypatch.setattr("local_operator.multiplexer.cmux._cmux_binary", lambda: "/bin/cmux")
-        monkeypatch.setattr(
-            "local_operator.multiplexer.cmux.subprocess.run",
-            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("gone")),
-        )
-        env = {"CMUX_WORKSPACE_ID": WORKSPACE, "CMUX_SURFACE_ID": SURFACE}
-        assert rename_fork_target(env, "name", placement="workspace") is False
 
 
 class TestMarkerBackends:

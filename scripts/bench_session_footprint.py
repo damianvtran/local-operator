@@ -52,7 +52,7 @@ from local_operator.compaction.tokens import (  # noqa: E402
 )
 from local_operator.harness.types import Message  # noqa: E402
 from local_operator.paths import config_dir  # noqa: E402
-from local_operator.session.retention import sweep_sessions  # noqa: E402
+from local_operator.session.cleanup import CleanupPolicy, run_cleanup  # noqa: E402
 from local_operator.session.transcript import (  # noqa: E402
     CUSTOM_KIND_MESSAGE,
     ENTRY_MESSAGE,
@@ -285,9 +285,10 @@ class RetentionReport:
 
 
 def measure_retention(generated: int, session_bytes: int) -> RetentionReport:
-    """Generate sessions, sweep after each, and prove no transcript is ever
-    deleted — because under the current policy nothing but an EMPTY directory
-    can be reaped, however many sessions arrive."""
+    """Generate sessions, run the DEFAULT (disabled) cleanup policy after
+    each, and prove nothing is ever deleted — not a transcript, not even the
+    empty ``hollow`` directory — because with cleanup off no directory can be
+    removed, however many sessions arrive."""
     root = Path(tempfile.mkdtemp(prefix="lo-retention-"))
     try:
         sessions = root / "sessions"
@@ -299,8 +300,10 @@ def measure_retention(generated: int, session_bytes: int) -> RetentionReport:
             directory = sessions / f"s{i:04d}"
             directory.mkdir()
             (directory / "transcript.jsonl").write_text("x" * session_bytes)
-            result = sweep_sessions(sessions)
-            empties_reaped += result.evicted
+            result = run_cleanup(root, CleanupPolicy())
+            empties_reaped += len(result.removed)
+        check(empties_reaped == 0, "the disabled policy removed a directory")
+        check((sessions / "hollow").is_dir(), "the disabled policy removed the empty directory")
 
         transcripts_intact = all(
             (sessions / f"s{i:04d}" / "transcript.jsonl").read_text() == "x" * session_bytes

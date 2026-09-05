@@ -421,6 +421,7 @@ class TodoPanel(Container):
                 int,
                 bool,
                 frozenset[str],
+                str,
             ]
             | None
         ) = None
@@ -452,6 +453,7 @@ class TodoPanel(Container):
         self._expanded_body_lines: int = 0
         self._restored_todos: dict[str, list[dict[str, Any]]] = {}
         self._todo_loads: dict[str, asyncio.Task[None]] = {}
+        self._selection: tuple[str, str | None] | None = None
         # Hidden until the first todo exists: an empty panel is not content.
         self.display = False
 
@@ -542,11 +544,14 @@ class TodoPanel(Container):
         try:
             phases = await asyncio.to_thread(_read_restored_todos, transcript_directory)
             self._restored_todos[transcript_directory] = phases
-            self.sync(
-                session,
-                session_id=session_id,
-                transcript_directory=transcript_directory,
-            )
+            # A read may finish after navigation. Cache it without ever
+            # retargeting the visible panel to the child that started it.
+            if self._selection == (session_id, transcript_directory):
+                self.sync(
+                    session,
+                    session_id=session_id,
+                    transcript_directory=transcript_directory,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -560,6 +565,7 @@ class TodoPanel(Container):
         *,
         session_id: str | None = None,
         transcript_directory: str | None = None,
+        loading: bool = False,
     ) -> None:
         """Re-read the selected session's store and repaint only on change.
 
@@ -573,11 +579,40 @@ class TodoPanel(Container):
             selected_id = (
                 session_id if session_id is not None else getattr(session, "session_id", "")
             )
-            if frontend is not None and selected_id == getattr(session, "session_id", ""):
-                # The live owner/follower session reads canonical state;
-                # historical child pages fall through to their own durable
-                # transcript below.
-                phases = [phase.model_dump(mode="json") for phase in frontend.todos]
+            selection = (selected_id, transcript_directory)
+            if selection != self._selection:
+                self._selection = selection
+                self._settled_since.clear()
+                if self._scroll.is_mounted:
+                    self._scroll.scroll_home(animate=False)
+            empty_state = ""
+            if frontend is not None:
+                if selected_id == getattr(session, "session_id", ""):
+                    phases = [phase.model_dump(mode="json") for phase in frontend.todos]
+                else:
+                    job = next(
+                        (row for row in frontend.jobs if row.session_id == selected_id), None
+                    )
+                    # A selected detail snapshot owns this list. Never borrow
+                    # root/process-local todos while an attached child's plan
+                    # is loading or unavailable; [] is an authoritative clear.
+                    canonical = getattr(job, "todos", None)
+                    phases = (
+                        [
+                            {
+                                "name": phase.get("name", _IMPLICIT_PHASE),
+                                "items": [dict(item) for item in phase.get("items", [])],
+                            }
+                            for phase in canonical
+                        ]
+                        if canonical is not None
+                        else []
+                    )
+                    empty_state = (
+                        ("Loading todos" if loading else "Todos unavailable")
+                        if canonical is None
+                        else "No todos"
+                    )
             else:
                 restored = None
                 if transcript_directory is not None:
@@ -644,12 +679,22 @@ class TodoPanel(Container):
                 cells,
                 self._expanded,
                 hidden,
+                empty_state,
             )
             if state == self._shown:
                 return  # equality guard — nothing that affects the paint moved
             self._shown = state
             if not fingerprint:
-                self.display = False
+                self.display = bool(empty_state)
+                self._painted_rows = 1 if empty_state else 0
+                self._affordance.display = False
+                self._expanded_item_rows = []
+                self._expanded_body_lines = 0
+                if empty_state:
+                    self._body.update(
+                        Text(empty_state, style=Style(color=theme_mod.semantic_color("muted")))
+                    )
+                    self._scroll.styles.max_height = 1
                 return
             self.display = True
             body, affordance = self._build(phases, hidden)
@@ -1562,11 +1607,26 @@ class TodoPanel(Container):
         # expanded-floor rule above): expanded may only ever GROW the panel.
         # Only charged when a sibling is actually docked — see the constant.
         shared_floor = _COLLAPSED_SHARED_TRANSCRIPT_FLOOR if sibling_rows else 0
+        detail_view = self.screen.has_class("subagent")
+        if detail_view:
+            # A child page spends six rows on title/breadcrumb/footer chrome
+            # before its transcript gets a single row. The root's six-row floor
+            # alone was consumed by that chrome, leaving one or two body rows.
+            # Keep the same useful body floor, even with no roster beside us.
+            shared_floor = _COLLAPSED_SHARED_TRANSCRIPT_FLOOR + 6
         collapsed_budget = max(
             _MIN_BODY_ROWS, min(collapsed_ceiling, screen_height - dock - shared_floor)
         )
+        if detail_view:
+            # Phase/header, one scrollable item and the disclosure need four
+            # rows. Below that the normal root-page fitting ladder sacrifices
+            # the hint, which made a compact child's full plan undiscoverable.
+            # Still degrade on genuinely tiny terminals rather than overflow.
+            control_floor = max(_MIN_BODY_ROWS, min(4, screen_height - dock - 6))
+            collapsed_budget = max(control_floor, collapsed_budget)
         if self._expanded:
-            grown = screen_height - dock - _EXPANDED_TRANSCRIPT_FLOOR
+            floor = shared_floor if detail_view else _EXPANDED_TRANSCRIPT_FLOOR
+            grown = screen_height - dock - floor
             grown = max(_MIN_BODY_ROWS, min(_MAX_EXPANDED_ROWS, grown))
             return max(collapsed_budget, grown)
         return collapsed_budget
@@ -1599,6 +1659,8 @@ class TodoPanel(Container):
         if parent is None:
             return 0
         try:
+            if self.screen.has_class("subagent-compact"):
+                return 0
             return 1 if parent.has_class("has-slot") else 0
         except Exception:  # not a band (reduced test hosts); charge nothing
             return 0

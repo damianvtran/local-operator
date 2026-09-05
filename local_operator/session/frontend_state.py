@@ -333,6 +333,9 @@ _FRONTEND_LOCAL_SLASHES = {
     "skills",
     "login",
     "logout",
+    # Remote access is enrolled using this frontend computer's OAuth store and
+    # service manager; routing to the session owner would expose another host.
+    "mobile",
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the owner's screen, which nobody is looking at. This is
@@ -642,7 +645,9 @@ def _wire_value(value: Any) -> Any:
 def _job_summary(job: "JobState") -> dict[str, Any]:
     """Serialize one roster row without visiting its retained trajectory."""
     values = {
-        name: _wire_value(value) for name, value in job.__dict__.items() if name != "trajectory"
+        name: _wire_value(value)
+        for name, value in job.__dict__.items()
+        if name not in {"trajectory", "todos"}
     }
     values.update({name: _wire_value(value) for name, value in (job.model_extra or {}).items()})
     return to_jsonable_python(values)
@@ -729,6 +734,10 @@ class JobState(BaseModel):
     # than silently doing nothing.
     parent_job_id: str | None = None
     session_id: str | None = None
+    attempt_aliases: list[str] = Field(default_factory=list)
+    # Child plans are detail payloads, not roster metadata. None is unavailable;
+    # an empty list is an authoritative clear and must never restore a stale plan.
+    todos: list[dict[str, Any]] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1062,6 +1071,22 @@ class FrontendUpdate(BaseModel):
     # without this marker a follower would extend forever (500 → 1000 → 1500…)
     # while duplicating rows in its click-through view.
     job_trajectory_replacements: list[str] = Field(default_factory=list)
+    job_todo_updates: dict[str, list[dict[str, Any]] | None] = Field(default_factory=dict)
+
+
+# One watched plan must not take down the 1 MiB control stream. Larger plans
+# remain authoritative on the owner and are explicitly unavailable on a follower,
+# never silently truncated into what looks like a complete task list.
+JOB_TODOS_WIRE_BYTES = 128 * 1024
+
+
+def job_todos_wire_value(todos: Any) -> list[dict[str, Any]] | None:
+    if todos is None:
+        return None
+    value = _wire_value(todos)
+    if len(json.dumps(value).encode("utf-8")) > JOB_TODOS_WIRE_BYTES:
+        return None
+    return value
 
 
 def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
@@ -1120,6 +1145,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
                     # construction, see JobState), so dropping the rows here
                     # loses nothing the viewer needs to describe the job.
                     job["trajectory"] = []
+                job["todos"] = None
                 _fold_job_usage_in_place(job)
                 _bound_job_text_in_place(job, share=text_share)
     return payload
@@ -1232,9 +1258,11 @@ def filter_update_trajectories(
     """
     appends = payload.get("job_trajectory_appends")
     replacements = payload.get("job_trajectory_replacements")
+    todos = payload.get("job_todo_updates")
+    has_todos = isinstance(todos, dict) and todos
     has_appends = isinstance(appends, dict) and appends
     has_replacements = isinstance(replacements, list) and replacements
-    if not has_appends and not has_replacements:
+    if not has_appends and not has_replacements and not has_todos:
         return payload
     kept_appends = (
         {job_id: rows for job_id, rows in appends.items() if watched(str(job_id))}
@@ -1246,13 +1274,21 @@ def filter_update_trajectories(
         if isinstance(replacements, list)
         else []
     )
-    if len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0) and len(
-        kept_replacements
-    ) == (len(replacements) if isinstance(replacements, list) else 0):
+    kept_todos = (
+        {job_id: rows for job_id, rows in todos.items() if watched(str(job_id))}
+        if isinstance(todos, dict)
+        else {}
+    )
+    if (
+        len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0)
+        and len(kept_replacements) == (len(replacements) if isinstance(replacements, list) else 0)
+        and len(kept_todos) == (len(todos) if isinstance(todos, dict) else 0)
+    ):
         return payload
     filtered = dict(payload)
     filtered["job_trajectory_appends"] = kept_appends
     filtered["job_trajectory_replacements"] = kept_replacements
+    filtered["job_todo_updates"] = kept_todos
     return filtered
 
 
@@ -1306,7 +1342,9 @@ class SnapshotSubagentComms:
         self.replace(jobs)
 
     def replace(self, jobs: Iterable[JobState]) -> None:
-        self._nodes = {job.id: self._node_for(job) for job in jobs}
+        rows = list(jobs)
+        self._nodes = {job.id: self._node_for(job) for job in rows}
+        self._aliases = {alias: job.id for job in rows for alias in job.attempt_aliases}
 
     @staticmethod
     def _node_for(job: JobState) -> Any:
@@ -1322,7 +1360,7 @@ class SnapshotSubagentComms:
         )
 
     def node(self, job_id: str) -> Any | None:
-        return self._nodes.get(job_id)
+        return self._nodes.get(self._aliases.get(job_id, job_id))
 
     def job(self, job_id: str) -> Any | None:
         # The page reads live job fields from the jobs facade, not here; the
@@ -1331,13 +1369,14 @@ class SnapshotSubagentComms:
         return None
 
     def parent(self, job_id: str) -> Any | None:
-        node = self._nodes.get(job_id)
+        node = self.node(job_id)
         if node is None or not node.parent_job_id:
             return None
-        return self._nodes.get(node.parent_job_id)
+        return self.node(node.parent_job_id)
 
     def children(self, job_id: str | None) -> list[Any]:
-        return [node for node in self._nodes.values() if node.parent_job_id == job_id]
+        parent_id = self._aliases.get(job_id, job_id) if job_id else None
+        return [node for node in self._nodes.values() if node.parent_job_id == parent_id]
 
     def peers(self, job_id: str) -> list[Any]:
         node = self._nodes.get(job_id)
@@ -1399,6 +1438,8 @@ class FrontendStateStore:
     def __init__(self, state: FrontendSessionState) -> None:
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
+        self._todo_sequences: dict[str, int] = {}
+        self._todo_seed_floor = state.sequence
 
     @property
     def state(self) -> FrontendSessionState:
@@ -1415,10 +1456,12 @@ class FrontendStateStore:
 
     def replace(self, state: FrontendSessionState) -> None:
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        self._todo_sequences.clear()
+        self._todo_seed_floor = state.sequence
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
         """Install a proven wire snapshot without reaching into subscribers."""
-        self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        self.replace(state)
         update = FrontendUpdate(
             epoch=state.epoch,
             sequence=state.sequence,
@@ -1449,8 +1492,19 @@ class FrontendStateStore:
                 if len(trajectory) > _TRAJECTORY_CAP:
                     del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
                 raw["trajectory"] = trajectory
+                raw["todos"] = _wire_value(prior.todos) if prior is not None else None
+                if (
+                    job_id in update.job_todo_updates
+                    and update.sequence > self._todo_sequences.get(job_id, -1)
+                ):
+                    raw["todos"] = update.job_todo_updates[job_id]
+                    self._todo_sequences[job_id] = update.sequence
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
+            retained = {str(row["id"]) for row in rebuilt}
+            self._todo_sequences = {
+                key: seq for key, seq in self._todo_sequences.items() if key in retained
+            }
         payload = self._state.model_dump()
         payload.update(changes)
         payload["epoch"] = update.epoch
@@ -1492,11 +1546,41 @@ class FrontendStateStore:
             return True
         return False
 
+    def seed_job_todos(
+        self,
+        job_id: str,
+        todos: list[dict[str, Any]] | None,
+        *,
+        epoch: str,
+        sequence: int,
+        session_id: str | None,
+    ) -> bool:
+        """Join an on-demand snapshot with deltas without rolling a plan back.
+
+        The request reply and the ordered stream race in both directions. Keep a
+        per-job watermark: a newer fetched snapshot also fences older deltas
+        still queued on the wire, without consuming their global sequence.
+        """
+        if epoch != self._state.epoch or sequence < max(
+            self._todo_seed_floor, self._todo_sequences.get(job_id, -1)
+        ):
+            return False
+        jobs = list(self._state.jobs)
+        for index, job in enumerate(jobs):
+            if job.id != job_id or job.session_id != session_id:
+                continue
+            jobs[index] = _freeze_job(job.model_copy(update={"todos": todos}))
+            self._state = self._state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+            self._todo_sequences[job_id] = sequence
+            return True
+        return False
+
     def mutate(self, **changes: Any) -> FrontendUpdate | None:
         normalized: dict[str, Any] = {}
         wire_changes: dict[str, Any] = {}
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
         trajectory_replacements: list[str] = []
+        todo_updates: dict[str, list[dict[str, Any]] | None] = {}
         for key, value in changes.items():
             if key == "jobs":
                 # JobState equality walks the bounded trajectories without first
@@ -1527,6 +1611,8 @@ class FrontendStateStore:
                 job_id = job.id
                 trajectory = job.trajectory
                 prior = previous.get(job_id)
+                if prior is None or prior.todos != job.todos:
+                    todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
@@ -1537,7 +1623,13 @@ class FrontendStateStore:
                     appended = trajectory
                     trajectory_replacements.append(job_id)
                 if appended:
-                    trajectory_appends[job_id] = appended
+                    # Unlike the job snapshot, this delta does not pass through
+                    # JobState's serializer. Pydantic validates the outer event
+                    # dict but leaves its Any-valued args/message/result frozen;
+                    # JSON then turns their tuple-backed mappings into arrays of
+                    # pairs. The viewer loses tool details until a fresh history
+                    # fetch. Thaw at this wire boundary, just as snapshots do.
+                    trajectory_appends[job_id] = [_wire_value(event) for event in appended]
                 summaries.append(_job_summary(job))
             wire_changes["jobs"] = summaries
         if not normalized:
@@ -1556,6 +1648,7 @@ class FrontendStateStore:
             changes=wire_changes,
             job_trajectory_appends=trajectory_appends,
             job_trajectory_replacements=trajectory_replacements,
+            job_todo_updates=todo_updates,
         )
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
@@ -1646,14 +1739,6 @@ class FrontendStateStore:
             except Exception:
                 last_usage = None
         jobs = self._jobs(session)
-        if initial:
-            # The atomic join snapshot folds canonical lineage in once so a
-            # follower's job graph is complete from its first frame; steady-
-            # state updates re-fold on the 50 ms jobs coalesce (see
-            # ``refresh_jobs``), never on the per-event session-loop refresh.
-            comms = getattr(session, "_subagent_comms", None)
-            if comms is not None:
-                jobs = [_with_lineage(job, comms) for job in jobs]
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
@@ -1847,9 +1932,6 @@ class FrontendStateStore:
         the cost.
         """
         jobs = self._jobs(session)
-        comms = getattr(session, "_subagent_comms", None)
-        if comms is not None:
-            jobs = [_with_lineage(job, comms) for job in jobs]
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -2073,6 +2155,7 @@ class FrontendStateStore:
                     job.model_copy(
                         update={
                             "trajectory": [],
+                            "todos": None,
                             "usage": (
                                 job.usage.model_copy(
                                     update={
@@ -2103,13 +2186,45 @@ class FrontendStateStore:
             rows = manager.list() if manager else []
         except Exception:
             return []
+        # Execution stays local to each manager; presentation follows the shared
+        # graph. Snapshot its ledgers once, without per-node scans or disk reads.
+        comms = getattr(session, "_subagent_comms", None)
+        graph_jobs = getattr(comms, "job_rows", None)
+        if callable(graph_jobs):
+            graph_rows = graph_jobs()
+            if isinstance(graph_rows, Sequence):
+                rows = graph_rows
         values: list[JobState] = []
         for job in rows:
             try:
-                values.append(JobState.from_job(job))
+                value = JobState.from_job(job)
+                values.append(_with_lineage(value, comms) if comms is not None else value)
             except Exception:
                 # One malformed extension row cannot erase unrelated jobs.
                 continue
+        nodes = getattr(comms, "nodes", None)
+        if callable(nodes):
+            known = {job.id for job in values}
+            graph_nodes = nodes()
+            for node in graph_nodes if isinstance(graph_nodes, Sequence) else []:
+                if node.job_id in known:
+                    continue
+                # After a cold restart nested execution ledgers no longer exist,
+                # but the shared durable graph still does. These are reader rows
+                # only: never register a fake runnable job or invent a trajectory.
+                row = JobState(
+                    id=node.job_id,
+                    type="task",
+                    label=node.label,
+                    status=getattr(node, "status", "gone"),
+                    restored=True,
+                    prompt=getattr(node, "prompt", ""),
+                    agent_role=getattr(node, "agent_role", ""),
+                    effort=getattr(node, "effort", ""),
+                    result_text=getattr(node, "result_text", ""),
+                    error_text=getattr(node, "error_text", ""),
+                )
+                values.append(_with_lineage(row, comms))
         return values
 
 
@@ -2191,10 +2306,20 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
         node = None
     if node is None:
         return job
+    from local_operator.tools.builtin import TODO_STORE
+
+    child_id = getattr(node, "session_id", None)
+    has_plan = bool(child_id) and (bool(getattr(node, "live", False)) or child_id in TODO_STORE)
     return job.model_copy(
         update={
             "parent_job_id": getattr(node, "parent_job_id", None),
             "session_id": getattr(node, "session_id", None),
+            "attempt_aliases": list(getattr(node, "attempt_aliases", ())),
+            "todos": (
+                [phase.model_dump(mode="json") for phase in _todo_state(node.session_id)]
+                if has_plan
+                else None
+            ),
         }
     )
 

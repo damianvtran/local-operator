@@ -290,23 +290,247 @@ Development and the global launcher deliberately use different installations:
   `~/.local/share/uv/tools/local-operator`. It must remain independent of the
   checkout so branch switches and uncommitted work cannot break the global TUI.
 
-After a change is tested and committed to `main`, make it live with:
+A release here is a **combined release**: one version bump, one tag and one
+GitHub Release covering every PR merged since the previous tag, cut by one
+release owner. PRs do not carry their own bump, and merging is decoupled from
+releasing. The sections below say why, then how.
+
+### PRs do not bump the version; merging is not releasing
+
+`pyproject.toml` stays at the **last released version** on every feature and
+fix branch. A PR never touches it, and the reviewer round treats a version
+change inside a feature PR as a finding.
+
+This replaces the earlier practice of each PR bumping its own patch, which
+failed in a measurable way on 2026-09-05: with ten sessions each holding a
+reserved patch number, `0.47.1` → `0.48.0` took close to five hours of agents
+serialising behind one another (the tags land at 05:24, 05:58, 06:16, 06:50,
+07:38, 08:27, 10:08 UTC — each one a PR that could not merge until its
+predecessor had released). Every rebase across another session's bump was a
+`pyproject.toml` conflict, and several were resolved into **dirty merge
+states**. Two out-of-queue releases consumed numbers that other sessions had
+already been told were theirs, so their PR bodies and reviews referred to a
+version that no longer existed. None of that work needed a distinct version;
+it needed to land.
+
+So: **the owner of a PR merges it the moment its review rounds are clean and
+fresh and CI is green** — no release queue, no waiting for a predecessor, no
+handing the "next number" to whoever is behind you. A merged PR that has not
+been released yet is the normal state of `main`, not a problem to fix.
+
+### One release owner per window
+
+Releases are cut by a single **release owner** for a **window**: the set of
+PRs merged since the last tag that are ready around the same time (about an
+hour). A PR that merges after the owner has started cutting simply rides the
+next window; nothing is lost, and nobody holds a merge to make a window.
+
+**The lock on a window is the open bump PR, not a message.** Two sessions
+that both run `lop sessions` and both announce themselves in the same minute
+each see "nobody owns it" and both proceed — which is precisely how two
+out-of-queue releases happened. A `send` is not observable to a session that
+was not listening, so it cannot be the lock. An open PR whose title starts
+`chore(release):` — first `claim release window`, later
+`bump version to X.Y.Z` — is observable to everyone through the forge, so it
+is; the search below keys on the prefix, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
+is decided from the window's contents, which do not exist yet when the lock
+is taken — so it starts life as a claim and becomes the bump once decided.
+
+Before starting a release, every agent does the same things, in this order:
+
+1. **Look for the lock.**
+   `gh pr list --search '"chore(release)" in:title' --state open`.
+   An open bump PR means the window is owned: its body names
+   the owning session's pid, so `send` that session (by `pid`) your PR's
+   number, merge SHA and `Release:` line, and let it aggregate. Do not start a
+   second release. (Quote the phrase — `gh`'s search passes it to GitHub,
+   which treats bare parentheses as syntax and returns nothing.)
+2. **Take the lock by opening the claim PR.** If nothing is open, the
+   release owner's *first* act — before collecting anything — is pushing
+   branch `release-next` with one empty commit and opening a draft PR titled
+   `chore(release): claim release window`; its body names the owner's session
+   pid from `lop sessions` and an empty checklist of the PRs in the window.
+   Only then announce it with `send` to the other live sessions. Once the
+   window's bump is decided, the same single commit is amended into the
+   version change and retitled `chore(release): bump version to X.Y.Z`
+   (mechanics below) — the PR number, and so the lock, never changes.
+3. **Tie-break by `createdAt`.** If two bump PRs are open, the earlier one
+   owns the window; the author of the later one closes it, deletes its
+   branch, and hands its window contents to the earlier PR's owner.
+4. **Adopt a dead owner.** An agent arriving cold cannot know how long a
+   pid has been gone, so the clock is anchored on what the forge shows: if
+   the owner pid is absent from `lop sessions` *now* **and** the lock PR's
+   `updatedAt` and its last owner comment are both more than 15 minutes old,
+   any agent may adopt the window: comment on the PR that it is taking over,
+   put its own pid in the body, and continue from wherever the checklist
+   stopped. Nothing is reset. (An owner still working therefore keeps the
+   PR's checklist current; silence is what makes a window adoptable.)
+
+The owner is a role for one window, not a standing job. Whoever cuts the
+release is also responsible for telling every contributor in the window where
+it landed.
+
+### What the release owner does
+
+1. **Collect** from each merger in the window: PR number, merge SHA, and
+   the PR body's `Release:` line. Every PR carries one, in this exact shape,
+   under its summary:
+
+   ```
+   Release: <patch|minor> — <one-line user impact>
+   ```
+
+   The bump is the merger's argument, the impact is the sentence the release
+   notes will use, and it lives in the body precisely so a merger who is no
+   longer running still contributes both. If a merged PR is missing the line,
+   the manager coordinating that PR adds it to the body before the window
+   closes; the release owner does not guess an impact from commit subjects.
+2. **Pick ONE bump for the whole window** by the materiality rule below: a
+   minor only if some *single* PR in the window clears the step-function bar
+   on its own; otherwise a patch. Several patches in a window are still one
+   patch. The chosen version is `<last tag> + that bump`, never a number
+   someone was "promised" earlier.
+3. **Land the bump PR** (the claim PR, now carrying the bump): one commit,
+   `chore(release): bump version to X.Y.Z`, touching `pyproject.toml` only.
+   This is a C0 change, but it is still an agent-authored PR, so the standing
+   review gate applies: an **independent reviewer subagent** — not the owner,
+   who is the author — posts `### Agent review — round 1` confirming the
+   diff is exactly one line in one file, the version is `<last tag> + the
+   chosen bump`, and no other PR in the window touched `pyproject.toml`.
+   The owner replies with the remediation comment and merges. A bump commit
+   that also carries code is a defect — the code belongs in a reviewed PR
+   of its own.
+4. **Tag and publish** from the merge commit of that bump, then install and
+   smoke (mechanics below). The release notes cover **every PR in the
+   window**, grouped in the house style of the existing releases (a headline
+   sentence naming the version's theme, then `## Major` / `## Minor` /
+   `## Fixes` as applicable, then `## Install` and the full-changelog compare
+   link). A window's notes are written from the collected impact lines, not
+   from commit subjects.
+5. **Post the refs** (tag, release URL, installed `.lop-source` revision) as a
+   comment on every PR in the window, and `send` them to each contributor
+   still running.
+
+### Mechanics, in order
+
+The bump branch lives in a throwaway worktree so the root checkout's branch
+is untouched, but `lop-update` itself runs against `~/local-operator`: it
+gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
+`LOCAL_OPERATOR_REPO` at a worktree fails with `local-operator repository not
+found` (reproduced). The owner fetches and advances the root checkout's `main`
+ref, then runs `lop-update` there. The order matters: the bump PR is opened
+first as the lock, merged only after every PR in the window has merged, and
+nothing is installed until the tag exists. The claim and the bump are ONE
+commit on ONE branch: the owner amends and force-pushes with
+`--force-with-lease` rather than stacking a second commit, so the scope check
+stays "one line in one file".
 
 ```sh
+# 1. Confirm the window: everything on origin/main since the last tag.
+git -C ~/local-operator fetch origin
+git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags --abbrev=0 origin/main)..origin/main"
+
+# 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
+#    a draft PR. (No open chore(release) PR was found in step 1 of "One
+#    release owner per window".) The number is not known yet.
+git -C ~/local-operator worktree add /tmp/lop-release-next origin/main
+git -C /tmp/lop-release-next checkout -b release-next
+git -C /tmp/lop-release-next commit --allow-empty -m 'chore(release): claim release window'
+git -C /tmp/lop-release-next push -u origin release-next
+gh pr create --draft --base main --head release-next \
+  --title 'chore(release): claim release window' --assignee damianvtran \
+  --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
+Window (tick as each merges):
+- [ ] #<n> — <Release: line>'
+# ... collect the window, write notes, wait for the last PR in the window to
+#     merge; then, with the bump decided:
+
+# 2b. Turn the claim into the bump: amend the SAME commit, retitle the SAME PR.
+sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' /tmp/lop-release-next/pyproject.toml
+git -C /tmp/lop-release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
+git -C /tmp/lop-release-next push --force-with-lease origin release-next
+gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
+gh pr ready <claim-pr-number>
+# ... independent scope-check round, merge; then:
+
+# 3. Advance the local main ref to the merged bump WITHOUT checking it out.
+git -C ~/local-operator fetch origin
+git -C ~/local-operator update-ref refs/heads/main origin/main
+# If main IS the checked-out branch, use lop-update's own remedy instead:
+#   git -C ~/local-operator merge --ff-only origin/main
+
+# 4. Write the notes from the collected `Release:` lines, then tag + GitHub
+#    Release on the bump's merge commit. --target creates the tag on that
+#    exact SHA; the publish workflow triggers on the release.
+$EDITOR /tmp/lop-release-X.Y.Z-notes.md   # headline, ## Major/Minor/Fixes, ## Install, compare link
+gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
+  --title 'X.Y.Z: <theme>' --notes-file /tmp/lop-release-X.Y.Z-notes.md
+
+# 5. Install and verify.
 lop-update
+cat ~/.local/share/uv/tools/local-operator/.lop-source
+cd /tmp && lop --version
+
+# 6. Reclaim the worktree.
+git -C ~/local-operator worktree remove /tmp/lop-release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
 snapshot, and records the exact source revision in
 `~/.local/share/uv/tools/local-operator/.lop-source`. It never packages the
 currently checked-out branch or uncommitted files. A specific committed ref can
-be installed deliberately with `lop-update <git-ref>`.
+be installed deliberately with `lop-update <git-ref>`. Before building it
+compares the ref against its remote counterpart and **refuses** a local `main`
+that is behind or diverged — that is why step 3 exists, and why it uses
+`update-ref` rather than a checkout: the root checkout is usually on another
+branch with uncommitted work, and `update-ref` moves the branch pointer without
+touching the working tree. The script's own refusal message says which form to
+use: `update-ref refs/heads/main origin/main` is "safe while another branch is
+checked out", and "if `main` is the checked-out branch, use
+`git -C ~/local-operator merge --ff-only origin/main` instead" — `update-ref`
+under a checked-out `main` moves the branch without touching the index, so
+`git status` would then show every merged change as a local modification.
+
+Warnings that still hold, each of which has already cost a release:
+
+- **Never pre-create a bare tag** (`git tag vX.Y.Z && git push --tags`) and
+  then make a release from it. The publish workflow triggers on the *release*
+  being published, so a bare tag publishes nothing, and `gh release create`
+  against an existing tag will happily attach notes to whatever SHA that tag
+  already points at — which is how a release once shipped the previous
+  version's code under the new number. Let `gh release create --target`
+  create the tag.
+- **Never pass `--skip-remote-check` to `lop-update` for a release.** The
+  gate exists because a stale local `main` was once installed and reported as
+  a successful release while `lop` silently downgraded from 0.18.1 to 0.17.5.
+  The flag is for deliberate offline or pre-push installs of a branch you are
+  developing, and its use is printed in the summary so it cannot be mistaken
+  for a release.
+- **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
+  command back to in-progress work. Publication is always the separate final
+  step: merge, bump, tag, `lop-update`, verify `.lop-source`, then smoke test
+  `lop` from outside the repository.
 
 Every agent asked to "update local-operator" or make a change available through
-`lop` must treat runtime publication as a separate final step: merge the tested
-change to `main`, run `lop-update`, verify the `.lop-source` marker, then smoke
-test `lop` from outside the repository. Never repoint `lop` at the editable
-`.venv`; doing so couples the stable command back to in-progress work.
+`lop` follows this protocol: merge the tested change when its rounds are clean,
+then either hand it to the window's release owner or become that owner. It
+does not bump the version on its own branch, and it does not release
+one PR alone while other merged work is sitting on `main` unreleased.
+
+## Security advisories
+
+Any agent handling a reported vulnerability or a GHSA for this repository
+**must read [`docs/security-advisory-runbook.md`](docs/security-advisory-runbook.md)
+first** and follow its phases in order — in particular, the fix rides a normal
+release window under "One release owner per window" above (the handler never
+bumps `pyproject.toml`), the advisory is published only once that window's
+version is on PyPI, and a CVE is requested immediately after publishing. A
+published advisory is **not** the end of the task: GitHub's review for the
+Advisory Database is asynchronous and unannounced, so the advisory is done only
+when the runbook's propagation checks (GitHub Advisory Database, OSV, PyPI,
+`pip-audit`) pass, or when the +3d/+14d follow-up wake and the escalation path
+(PYSEC PR, Snyk disclosure) are recorded. `SECURITY.md` carries the public
+commitment and the "Past advisories" table; update it in the fix's close-out.
 
 ## Versioning: choose the bump by materiality, not commit type
 
@@ -317,6 +541,11 @@ the version signal is how a run of bug-fix and reliability releases inflates the
 minor number and drains its meaning — a minor should mark a step-function
 improvement a user would notice and adopt, so that going from `0.N.x` to
 `0.(N+1).0` still tells them something.
+
+The bump is chosen **once per release window** by the release owner, for the
+window as a whole (see "Releasing the stable `lop` runtime"). A PR argues for a
+bump through its body's `Release: <patch|minor> — <impact>` line; it does not
+apply one.
 
 - **Patch (`0.N.x` → `0.N.(x+1)`) — the default; most releases are patches.**
   Bug fixes, performance and reliability improvements (backoff, retries,
@@ -330,7 +559,8 @@ improvement a user would notice and adopt, so that going from `0.N.x` to
   is simple — if you cannot name the step-function capability in the release
   title (`X.Y.0: <the new thing>`), it is a patch, not a minor. Several small
   features bundled together are still patches unless one of them clears this
-  bar on its own.
+  bar on its own — and that holds for a whole window: ten patches merged in
+  the same hour are one patch release, not a minor.
 
 - **Major (`X.y.z` → `(X+1).0.0`) — only on explicit request.** Bump the
   major version *only* when the developer explicitly asks for it, in the rare

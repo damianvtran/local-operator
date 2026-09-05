@@ -1012,6 +1012,10 @@ class StatusLine:
         # the tool-approval prompt). Only the terminal title reads it; see
         # :meth:`set_attention` for why it is not inferred from `_streaming`.
         self._attention: bool = False
+        #: Whether the last SETTLED turn ended in an error. Turn-scoped: set by
+        #: `_finalize_turn` on the error branch and cleared when the next turn
+        #: opens, so the title never carries a cross into work that is running.
+        self._failed: bool = False
         # And whether that mode is the SAVED default rather than this session's
         # choice. Two different promises — "until I close this window" and
         # "every window from now on" — and the alarm is the only place a user
@@ -1060,15 +1064,25 @@ class StatusLine:
     def _title_state(self) -> TitleState:
         """The run state the title should show.
 
-        Only two of the three states are derivable here: ``attention`` is the
-        app's to declare (it owns the approval prompt), and it is applied by
-        :meth:`set_attention` rather than inferred, because the band has no
-        way to distinguish "streaming, working" from "streaming, parked on a
-        question" — the session is streaming in both.
+        Only ``working``/``idle`` are derivable here. ``attention`` is the app's
+        to declare (it owns the approval prompt) and is applied by
+        :meth:`set_attention` rather than inferred, because the band has no way
+        to distinguish "streaming, working" from "streaming, parked on a
+        question" — the session is streaming in both. ``failed`` is the app's for
+        the same reason: only the turn's outcome says so, and the band sees only
+        that streaming stopped.
+
+        ORDER IS PRECEDENCE. A live turn outranks a previous failure, so
+        ``streaming`` is tested before ``failed``: the mark describes the last
+        SETTLED outcome and must not sit on a session that is working again.
+        ``attention`` outranks both — a turn parked on the user is the only
+        state that asks for something.
         """
         if self._attention:
             return "attention"
-        return "working" if self._streaming else "idle"
+        if self._streaming:
+            return "working"
+        return "failed" if self._failed else "idle"
 
     def set_starting(self, starting: bool) -> None:
         """Show "starting…" while a runtime is being brought up for this viewer.
@@ -1105,6 +1119,29 @@ class StatusLine:
         if attention == self._attention:
             return
         self._attention = attention
+        self._sync_terminal_title()
+
+    def set_failed(self, failed: bool) -> None:
+        """Whether the last settled turn ended in an ERROR.
+
+        Only the title changes, exactly as :meth:`set_attention` only changes
+        the title: a user looking AT this session already has the error notice
+        in the transcript, and the surface this is for is the one where they are
+        looking at five session labels at once and cannot tell which finished
+        badly. Cleared by the next turn opening \u2014 see :meth:`_title_state` for
+        why a live turn outranks the mark.
+
+        USE ``update(failed=..., streaming=...)`` INSTEAD when the band's run
+        state is changing in the same breath. This setter emits its own title
+        write, so pairing it with a separate ``update`` leaves a window in which
+        the title carries one fact without the other \u2014 a turn that FAILED
+        rendering as ``lo \u203a`` (\"finished cleanly\") before ``lo \u2717`` (review
+        D6/U8). This method is for the cases where nothing else moves: clearing
+        the mark on a new turn, and on a teardown that throws a turn away.
+        """
+        if failed == self._failed:
+            return
+        self._failed = failed
         self._sync_terminal_title()
 
     def _sync_terminal_title(self) -> None:
@@ -1201,6 +1238,7 @@ class StatusLine:
         subagents: int | None = None,
         jobs: int | None = None,
         streaming: bool | None = None,
+        failed: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
         forked: bool | None = None,
@@ -1252,6 +1290,28 @@ class StatusLine:
             self._forked = forked
         if fork_pending is not None:
             self._fork_pending = fork_pending
+        # ASSIGNED BEFORE the streaming flag, and that is what makes the pair
+        # ATOMIC rather than merely ordered. Both facts land in the object
+        # first, and the single `refresh()` below performs the ONE title write
+        # that reads them — so there is no interleaving in which the title can
+        # be seen carrying one without the other.
+        #
+        # This exists because sequencing two SETTER calls was not enough. The
+        # turn worker's `finally` writes the band idle directly, a separate and
+        # earlier write than `_finalize_turn`'s, so a failed turn emitted
+        # `lo › name` ("finished cleanly") and only then `lo ✗ name`. It was
+        # won by a race rather than structurally ordered: measured at ~0.5-1ms
+        # on an idle app but 43.5ms with 300 queued messages and 781ms at 1500
+        # queued blocks — well inside a rendered frame (review D6/U8). Passing
+        # both to one `update` is what removes the window instead of narrowing
+        # it.
+        #
+        # `None` means LEAVE ALONE, the same contract every other segment here
+        # keeps — which is how a caller that does not KNOW the outcome (a
+        # follower's worker, whose `prompt()` returned mid-turn) says so,
+        # rather than asserting a clean finish it cannot vouch for.
+        if failed is not None:
+            self._failed = failed
         if streaming is not None and streaming != self._streaming:
             self._streaming = streaming
             self._mark_turn_boundary(streaming)

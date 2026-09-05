@@ -99,10 +99,6 @@ CALL_TIMEOUT_S = 5.0
 SURFACE_ENV = "CMUX_SURFACE_ID"
 WORKSPACE_ENV = "CMUX_WORKSPACE_ID"
 
-#: Placement vocabulary shared with ``spawn.cmux`` without importing that
-#: package back into the multiplexer layer.
-_FORK_SURFACE_PLACEMENT = "surface"
-
 #: cmux mints these as UUIDs. Validated before use because they are
 #: interpolated into a JSON payload handed to a socket that acts on them, and
 #: an inherited-but-stale value (a container, an ssh hop) should read as "no
@@ -264,47 +260,6 @@ def _rpc(binary: str, method: str, params: dict[str, object]) -> dict[str, objec
 # They DELEGATE to the underscore functions rather than replacing them: those
 # are the definitions the existing tests monkeypatch, and a promotion that moved
 # the body would silently make every one of those patches a no-op.
-
-
-def rename_fork_target(env: EnvMap, title: str, *, placement: str) -> bool:
-    """Best-effort rename of the cmux target owned by this fork process.
-
-    cmux 0.64.22+ exposes ``workspace rename <id> --title`` and
-    ``rename-tab --surface <id> <title>``. Target explicit ids from THIS
-    process's environment: defaults could rename whichever workspace the user
-    selected meanwhile. Callers additionally gate on fork provenance, which is
-    what prevents an ordinary/parent session from ever reaching this mutation.
-    """
-    target = _surface_target(env)
-    binary = _cmux_binary()
-    clean = " ".join(str(title).split()).strip()
-    if target is None or binary is None or not clean:
-        return False
-    if placement == _FORK_SURFACE_PLACEMENT:
-        argv = [binary, "rename-tab", "--surface", target["surface_id"], clean]
-    else:
-        argv = [
-            binary,
-            "workspace",
-            "rename",
-            target["workspace_id"],
-            "--title",
-            clean,
-        ]
-    try:
-        completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=CALL_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
-        logger.debug("cmux fork rename failed to spawn", exc_info=True)
-        return False
-    if completed.returncode != 0:
-        logger.debug("cmux fork rename exited %s: %s", completed.returncode, completed.stderr[:200])
-        return False
-    return True
 
 
 def cmux_binary() -> str | None:

@@ -1339,12 +1339,31 @@ Screen.subagent SubagentRow.current {
     background: $lo-tint-select;
 }
 
-/* A 24-row terminal cannot carry the selected transcript plus an unbounded
- * live roster and selected todos without reducing the conversation to a
- * single row. In compact detail mode the conversation is the primary surface;
- * the hidden parent-session context returns unchanged when the reader leaves. */
-Screen.subagent-compact #band {
+/* The detail dock now contains only this owner's bounded child preview and
+ * plan, not the root's whole roster. Hiding it at 24 rows made nested children
+ * unclickable and hid the selected plan. Keep those controls, reclaiming only
+ * the decorative inset; each panel still owns its compact/expanded row budget. */
+Screen.subagent-compact #band.has-slot {
+    padding-top: 0;
+}
+
+/* This mode cannot accept a draft: its footer already explains read-only/Esc.
+ * Keep the owner's status row but reclaim the disabled input and vertical
+ * padding, so exposing its own controls does not reduce the transcript to a
+ * single row. Removing the mode restores the parent's untouched draft. */
+Screen.subagent-compact #input-row {
     display: none;
+}
+
+Screen.subagent-compact #input-shell {
+    /* The docked status row does not contribute to an auto-height shell. */
+    min-height: 1;
+    padding: 0 1;
+}
+
+Screen.subagent-compact #status-band {
+    height: 1;
+    padding: 0;
 }
 
 /* ── full-page subagent view ───────────────────────────────────────────── *

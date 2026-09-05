@@ -55,7 +55,7 @@ class FakeAuthStore:
             if provider is None
             else [r for r in self.rows if r["provider"] == provider]
         )
-        return [types.SimpleNamespace(**r) for r in rows]
+        return [types.SimpleNamespace(**r) for r in rows if not r.get("disabled_cause")]
 
     def upsert_credential(self, provider, credential):
         declared = credential.get("type")
@@ -74,6 +74,17 @@ class FakeAuthStore:
         self._next_id += 1
         self.rows.append(row)
         return row
+
+    def active_local_credential(self, provider, endpoint):
+        for row in reversed(self.rows):
+            if row["provider"] == provider and row["data"].get("endpoint") == endpoint:
+                return None if row.get("disabled_cause") else types.SimpleNamespace(**row)
+        return None
+
+    def disable_credential(self, credential_id, cause):
+        for row in self.rows:
+            if row["id"] == credential_id:
+                row["disabled_cause"] = cause
 
     def delete_credentials_for_provider(self, provider, disabled_cause="logged-out"):
         before = len(self.rows)

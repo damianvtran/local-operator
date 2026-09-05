@@ -18,6 +18,7 @@ from typing import Protocol, Sequence, runtime_checkable
 
 from pydantic import Field
 
+from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
 from local_operator.evaluation.receipts import SafeCount, StrictIdentifier
@@ -73,6 +74,9 @@ class ModelDecision(ProtocolModel):
     """
 
     action_batch: ActionBatch
+    # Only validated visible model output, never provider reasoning. None keeps
+    # old clients/history on their byte-identical canonical-action replay path.
+    public_reply: str | None = None
     route: RouteIdentity
     usage: ModelUsage = Field(default_factory=ModelUsage)
     cost_micros: SafeCount = 0
@@ -98,6 +102,9 @@ class EpisodeTurn(ProtocolModel):
 
     observation: Observation
     batch: ActionBatch | None = None
+    # The runner attaches the evidence-redacted reply to this same observation;
+    # the context builder must not reconstruct it as actions and lose its facts.
+    public_reply: str | None = None
     ask_answer: str | None = None
 
 
@@ -194,4 +201,6 @@ class EpisodeModelClient(Protocol):
         self,
         observation: Observation,
         history: Sequence[EpisodeTurn],
+        *,
+        action_surface: ActionSurface,
     ) -> ModelDecision: ...

@@ -235,8 +235,9 @@ async def test_bare_effort_lists_the_ladder_and_marks_the_current_level() -> Non
         assert name in listing
     assert "shift+tab" in listing
     # The scope statement is this command's answer to `PERSIST_HINT`, which a
-    # bare `/model` prints in the same slot: /model volunteers that a pick
-    # persists, so /effort has to volunteer that a level does not.
+    # bare `/model` prints in the same slot: /model volunteers that a pick CAN
+    # be persisted (`/model default`, or the settings page), so /effort has to
+    # volunteer that a level cannot.
     assert "this session only" in listing
 
 

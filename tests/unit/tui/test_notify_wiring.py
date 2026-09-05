@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.events import TurnEnded
+from local_operator.tui.events import TurnEnded, TurnStarted
 
 # `ApprovalPrompt`, not `ApprovalBlock`: the live question is the docked card
 # that `_approval` holds, and the block is now only the transcript receipt
@@ -160,6 +160,27 @@ async def _app_with_notifier(
     return app, RecordingNotifier()
 
 
+def _end_turn(app: OperatorApp, message: TurnEnded) -> None:
+    """End a turn that was actually STARTED, the way production ends one.
+
+    These tests used to call ``on_turn_ended`` on an app that had never seen a
+    ``TurnStarted``, which cannot happen in the product: ``agent_start`` opens
+    every turn that ``agent_end`` closes. That was harmless while the handler
+    ignored the turn latch, and it stopped being harmless when retirement
+    became at-most-once PER TURN — a turn nobody opened is one already retired,
+    so the notification is correctly suppressed and every assertion here failed
+    for a state the app can never be in.
+
+    Opening the turn first is therefore the fix to the HARNESS, not a
+    concession by the code: it makes these tests exercise the lifecycle they
+    claim to be about. The one test that deliberately asserts the
+    no-turn-was-open case pins it explicitly rather than relying on this.
+    """
+    if not app._turn_open:
+        app.on_turn_started(TurnStarted())
+    app.on_turn_ended(message)
+
+
 @pytest.mark.asyncio
 async def test_a_completed_turn_notifies_with_no_children_running() -> None:
     session = JobsSession(running_tasks=0)
@@ -167,7 +188,7 @@ async def test_a_completed_turn_notifies_with_no_children_running() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.kinds == ["complete"]
     assert ("complete", 0) in notifier.calls
@@ -182,7 +203,7 @@ async def test_a_turn_that_ends_while_children_run_passes_the_live_count() -> No
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.calls[-1] == ("complete", 3)
 
@@ -196,7 +217,7 @@ async def test_an_aborted_turn_notifies_nothing() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=True, error=None))
+        _end_turn(app, TurnEnded(aborted=True, error=None))
         await pilot.pause()
     assert notifier.kinds == []
 
@@ -209,7 +230,7 @@ async def test_a_failed_turn_notifies_the_error() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error="provider refused"))
+        _end_turn(app, TurnEnded(aborted=False, error="provider refused"))
         await pilot.pause()
     assert notifier.kinds == ["error"]
 
@@ -287,7 +308,7 @@ async def test_the_toast_is_titled_with_the_conversation_name() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.labels[-1] == "Fix quota reporting"
 
@@ -304,7 +325,7 @@ async def test_the_toast_uses_the_current_provisional_session_title() -> None:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
         app._provisional_name = "Improve notification context"
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert session.conversation_name == ""
     assert notifier.labels[-1] == "Improve notification context"
@@ -336,7 +357,7 @@ async def test_an_app_without_a_notifier_still_ends_turns() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         assert app._notifier is None  # no terminal under the test driver
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         app._refresh_working_activity()
         await pilot.pause()
 
@@ -382,7 +403,7 @@ async def test_a_child_parked_at_the_capacity_gate_still_blocks_completion() -> 
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.calls[-1] == ("complete", 1)
 
@@ -404,7 +425,7 @@ async def test_a_backgrounded_bash_job_does_not_hold_the_completion() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.calls[-1] == ("complete", 0)
 
@@ -426,7 +447,7 @@ async def test_a_suppressed_completion_is_delivered_when_the_last_child_settles(
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert notifier.kinds == ["complete"]  # suppressed (returned False)
         # The child is CANCELLED, which produces no re-entering turn at all.
         session.running_tasks = 0
@@ -445,7 +466,7 @@ async def test_siblings_still_working_keep_the_deferred_completion_waiting() -> 
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         before = len(notifier.calls)
         # `j2` settles; `j1` is still listed and still running. The exclusion
         # must drop only the job whose end this is.
@@ -501,7 +522,7 @@ async def test_a_new_turn_drops_a_deferred_completion() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._completion_deferred is True
         app.on_turn_started(TurnStarted())
         assert app._completion_deferred is False
@@ -570,7 +591,7 @@ async def test_a_question_after_an_aborted_turn_is_still_announced() -> None:
         app._approval = ApprovalPrompt("bash", "first", on_answer=lambda _: None)
         app._refresh_working_activity()
         # An abort ends the turn without the answered-transition that clears it.
-        app.on_turn_ended(TurnEnded(aborted=True, error=None))
+        _end_turn(app, TurnEnded(aborted=True, error=None))
         await pilot.pause()
         app.on_turn_started(TurnStarted())
         app._approval = ApprovalPrompt("write", "second", on_answer=lambda _: None)
@@ -600,7 +621,7 @@ async def test_a_long_lived_background_job_does_not_disable_notifications() -> N
         for _ in range(3):
             app.on_turn_started(TurnStarted())
             await pilot.pause()
-            app.on_turn_ended(TurnEnded(aborted=False, error=None))
+            _end_turn(app, TurnEnded(aborted=False, error=None))
             await pilot.pause()
     delivered = [call for call in notifier.calls if call == ("complete", 0)]
     assert len(delivered) == 3
@@ -617,7 +638,7 @@ async def test_a_background_job_cannot_strand_a_deferred_completion() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert app._completion_deferred is False
     assert notifier.calls[-1] == ("complete", 0)
@@ -646,7 +667,7 @@ async def test_a_completion_watched_by_the_user_is_not_replayed_on_the_blur() ->
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         # The child settles while the user is watching: nothing to announce.
         notifier.focused = True
         session.running_tasks = 0
@@ -675,7 +696,7 @@ async def test_a_deferred_completion_is_not_announced_over_live_children() -> No
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         before = len(notifier.calls)
         # `j2` settles while `j1` is still running: excluding the settling job
         # must NOT hide the sibling that is genuinely still working.
@@ -708,7 +729,7 @@ async def test_the_last_child_still_counts_itself_when_its_end_arrives() -> None
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._completion_deferred is True
         # NOT cleared: the manager has not settled it yet, exactly as in
         # production when the event is drained inside that window.
@@ -741,7 +762,7 @@ async def test_a_batch_of_children_settling_together_still_notifies_once() -> No
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._completion_deferred is True
         for job_id in ("j1", "j2", "j3"):
             app.on_subagent_ended(SubagentEnded(job_id=job_id, label=job_id, status="completed"))
@@ -765,13 +786,13 @@ async def test_a_later_batch_is_not_masked_by_the_previous_ones_ids() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
         await pilot.pause()
         assert app._settled_child_ids == set()
         # A new turn delegates again, and `j1` is a DIFFERENT live child now.
         app.on_turn_started(TurnStarted())
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         before = len(notifier.calls)
         session.running_tasks = 2
         app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
@@ -805,7 +826,7 @@ async def test_the_handled_set_is_empty_whenever_a_deferral_arms() -> None:
         app._notifier = notifier  # type: ignore[assignment]
 
         # Route 1: deferral armed by a turn ending with children live.
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._completion_deferred is True
         assert app._settled_child_ids == set()
 
@@ -815,7 +836,7 @@ async def test_the_handled_set_is_empty_whenever_a_deferral_arms() -> None:
         await pilot.pause()
         app.on_turn_started(TurnStarted())
         assert app._settled_child_ids == set()
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._completion_deferred is True
         assert app._settled_child_ids == set()
 
@@ -827,7 +848,7 @@ async def test_the_handled_set_is_empty_whenever_a_deferral_arms() -> None:
         assert app._completion_deferred is False
         assert app._settled_child_ids == set()
         app.on_turn_started(TurnStarted())
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._settled_child_ids == set()
 
 
@@ -849,7 +870,7 @@ async def test_a_deferral_armed_without_a_turn_boundary_starts_empty() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         # `j1` is handled; its id is now in the set and the manager has not
         # settled it, so the row is still listed.
         app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
@@ -859,7 +880,7 @@ async def test_a_deferral_armed_without_a_turn_boundary_starts_empty() -> None:
         # between. If `j1` survived into this deferral, the guard would count
         # only `j2`, and `j2`'s end would then announce a finish over a child
         # that is still running.
-        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        _end_turn(app, TurnEnded(aborted=False, error=None))
         assert app._settled_child_ids == set()
         before = len(notifier.calls)
         app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
