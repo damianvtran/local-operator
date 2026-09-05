@@ -742,9 +742,14 @@ SETTINGS: tuple[Setting, ...] = (
         default="full",
         help="How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
         choices=(
+            # Parallel descriptions: each names WHAT IS SHOWN and nothing
+            # else. `hidden` used to append "; ctrl+g brings it back", which
+            # made it the only choice explaining its own exit and left the
+            # list reading unevenly — and the help line above already names
+            # `ctrl+g` for all three (round 1, D5).
             Choice("full", "full", "one row per child, newest first"),
             Choice("summary", "summary", "a one-line count"),
-            Choice("hidden", "hidden", "not shown; ctrl+g brings it back"),
+            Choice("hidden", "hidden", "not shown"),
         ),
     ),
     # -- session ------------------------------------------------------------

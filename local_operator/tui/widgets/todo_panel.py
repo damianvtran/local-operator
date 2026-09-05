@@ -144,6 +144,20 @@ _EXPANDED_TRANSCRIPT_FLOOR = 3
 #:   shared floor 6   3   5   5   5   5   6   6   8  12  22
 _COLLAPSED_SHARED_TRANSCRIPT_FLOOR = 6
 
+#: Rows this panel keeps reserved for a sibling that is DOCKED BUT HIDDEN.
+#:
+#: A subagent roster in ``Density.HIDDEN`` paints nothing, so measuring it
+#: gives zero and this panel would grow into rows the user just freed for the
+#: TRANSCRIPT — the dock ending taller than before the keypress (round 1,
+#: F1/D1/Q1). Valued at what the roster costs the instant it comes back —
+#: `Density.SUMMARY`'s one caption row plus the slot's own rhythm row, i.e.
+#: exactly what ``app.slot_rows`` reports for a summarised sibling — which is
+#: also the state a hidden roster is promoted into when a child fails, so the
+#: reservation is already correct when that happens. Charging the roster's
+#: full FULL height instead would leave the band visibly short for the whole
+#: time it is hidden, which is the opposite complaint.
+_HIDDEN_SIBLING_RESERVED_ROWS = 2
+
 #: Hard ceiling on the expanded body's own painted rows, above which the body
 #: SCROLLS instead of growing further (``#todo-body`` gains ``overflow-y: auto``
 #: in expanded mode — see :meth:`TodoPanel._body_rows`). A list longer than the
@@ -1605,7 +1619,10 @@ class TodoPanel(Container):
         dock = _DOCK_ROWS + self._band_inset_rows() + sibling_rows
         # The collapsed budget is the floor for BOTH states (see the
         # expanded-floor rule above): expanded may only ever GROW the panel.
-        # Only charged when a sibling is actually docked — see the constant.
+        # Only charged when a sibling SHARES THE BAND — see the constant. That
+        # is now `sibling_rows > 0` again by construction, because the helper
+        # counts a docked-but-unpainted roster's reserved claim rather than its
+        # painted height (round 1, F1/D1/Q1).
         shared_floor = _COLLAPSED_SHARED_TRANSCRIPT_FLOOR if sibling_rows else 0
         detail_view = self.screen.has_class("subagent")
         if detail_view:
@@ -1690,7 +1707,31 @@ class TodoPanel(Container):
             return 0
         from local_operator.tui.app import slot_rows
 
-        return sum(slot_rows(slot) for slot in parent.children if slot is not self and slot.display)
+        rows = 0
+        for slot in parent.children:
+            if slot is self:
+                continue
+            if slot.display:
+                rows += slot_rows(slot)
+            elif getattr(slot, "has_children", False):
+                # DOCKED BUT NOT PAINTING — a roster the user has hidden with
+                # `ctrl+g` (`Density.HIDDEN`). It measures zero rows this
+                # frame, but the rows it gave up belong to the CONVERSATION,
+                # not to this panel: the gesture's whole promise is handing
+                # them back, and one keypress restores the roster, so growing
+                # into them means paying them straight back the moment it
+                # returns. Counting its reserved claim keeps this budget
+                # steady across the hide, which is what makes the transcript
+                # non-decreasing across full → summary → hidden (round 1,
+                # F1/D1/Q1; before: transcript 8 → 11 → 5 at 100x24).
+                #
+                # A roster with NO children is not counted: the panel is
+                # mounted for the session's whole life and empty for most of
+                # it, so charging for it would shrink every solo todo list and
+                # break the single-panel contract the shared floor's sweep
+                # pins.
+                rows += _HIDDEN_SIBLING_RESERVED_ROWS
+        return rows
 
     def _item_row(self, text: str, status: str, reason: str = "") -> Text:
         """One ``- [ ]``/``- [x]``/``- [~]``/``- [-]`` row — the tool's own

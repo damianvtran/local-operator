@@ -3453,7 +3453,10 @@ class OperatorApp(App[None]):
             # is the answer that leaves such a host exactly as it was.
             forked=bool(getattr(state, "conversation_title_forked", False)),
             streaming=bool(getattr(state, "streaming", False)),
-            subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
+            # Queued children counted, matching `_job_count("task")`: the band
+            # is the hidden dock's only liveness cue, so a follower's band must
+            # not go silent where the owner's would not (round 1, U2).
+            subagents=sum(1 for j in task_jobs if j.status == "running"),
             jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
             mcp=McpStatus(
                 configured=len(mcp_servers),
@@ -14233,31 +14236,39 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
 
         The two are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
         a tool card. Summing them would hide which kind is running.
 
-        ``queued`` is excluded to match ``AsyncJobManager``'s own running count
-        (``harness/jobs.py``): a job admitted to the ledger but held behind the
-        capacity gate carries ``status == "running"`` and has not started, so
-        counting it would report work that is not yet happening — and disagree
-        with the number the harness itself reports.
+        ``task`` INCLUDES children still queued behind the capacity gate;
+        ``bash`` does not. The asymmetry is the point. This counter is the
+        stated fallback for a dock the user has hidden with `ctrl+g` — the
+        justification for letting a live panel disappear is that the band
+        still says children exist — and excluding queued children made that
+        fallback empty for exactly the state the panel had been showing: a
+        hidden dock whose children were all queued reported nothing anywhere
+        (round 1, U2). A queued child is delegated work the user is waiting
+        on, which is the question this segment answers, whereas a queued
+        shell command still has its tool card on screen and the ``bash``
+        count stays aligned with ``AsyncJobManager``'s own running total
+        (``harness/jobs.py``).
 
         Never raises: a status segment must not be able to take the app down.
         """
         manager = getattr(self._session, "jobs", None)
         if manager is None:
             return 0
+        counts_queued = kind == "task"
         try:
             return sum(
                 1
                 for job in manager.list()
                 if job.status == "running"
                 and job.type == kind
-                and not getattr(job, "queued", False)
+                and (counts_queued or not getattr(job, "queued", False))
             )
         except Exception:
             return 0
@@ -16859,8 +16870,14 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _panel_holds_children(panel: SubagentPanel) -> bool:
-        """Whether a hidden panel would show rows if brought back."""
-        return panel.density is Density.HIDDEN and bool(panel._rows)
+        """Whether a hidden panel would show rows if brought back.
+
+        Through the panel's own ``has_children`` rather than its private
+        ``_rows``: every other app→panel call here goes through a public
+        member, and the accessor is what the todo panel's band budget needs
+        anyway (round 1, F5).
+        """
+        return panel.density is Density.HIDDEN and panel.has_children
 
     def _apply_dock_density(self) -> None:
         """Live-apply a changed ``display.dock`` to the mounted panel.
