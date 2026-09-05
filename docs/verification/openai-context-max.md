@@ -7,6 +7,23 @@ window, preserving its provider default separately. Keep API-key limits and all
 compaction settings independent. Publish account-rotation metadata through the
 request's own stream so parent and child usage do not share a mutable callback.
 
+## Reproduction
+
+Run from the repository root with its own editable environment:
+
+```sh
+.venv/bin/python docs/verification/openai-context-http.py.txt
+env -u NO_COLOR HOME=<isolated-home> LOCAL_OPERATOR_CONFIG_DIR=<isolated-home>/.local-operator \
+  TERM=xterm-256color .venv/bin/python docs/verification/openai-context-shot.py.txt \
+  <output-dir> 100 872000
+rsvg-convert <output-dir>/picker.svg -o <output-dir>/picker.png
+```
+
+The HTTP script creates its own isolated home. For the visual pair, run again
+at width 50, and with `CONTEXT_BASELINE=1`/window 272000 for the original picker;
+window 272000 without baseline mode captures the opt-out state. All screenshots
+are fixtures on the real application, not actual paid provider conversations.
+
 ## Executed local HTTP path
 
 A task-owned `ThreadingHTTPServer` served `/models` and Codex-shaped `/responses`.
@@ -39,6 +56,12 @@ remained 400,000 for the 872,000-window models.
 
 ## Rendered evidence
 
+| Surface | Before | After |
+| --- | --- | --- |
+| Composer and child | ![Before composer](../assets/openai-context-max/before-composer.png) | ![After composer](../assets/openai-context-max/after-composer.png) |
+| Picker | ![Before picker](../assets/openai-context-max/before-picker.png) | ![After picker](../assets/openai-context-max/after-picker.png) |
+| Narrow picker | ![Maximum active](../assets/openai-context-max/after-picker-narrow.png) | ![Provider-default opt-out](../assets/openai-context-max/optout-picker.png) |
+
 Real `OperatorApp.run_test`, loading the application's stylesheet, at 100x34 and
 50x34. SVG exports were rendered with the installed `rsvg-convert` and the PNGs
 were viewed. Populated transcript, composer, child-job usage, model picker,
@@ -62,6 +85,24 @@ Original pre-edit captures are retained. Matched seeded baseline frames use the
 original picker row methods from the base commit in the same app host; no user
 work was stashed or overwritten. Fixture prices are representative, not billing
 verification. Long-context pricing and surcharges are outside this change.
+
+## Initial review gate results
+
+On the integrated `5a4079bc` source (feature plus main `619ec60a`): full-tree
+flake8, Black 26.1.0, isort 5.13.2 and pyright passed (zero type errors).
+The full unit suite reported **12,987 passed, 15 skipped, one failure** in
+902 seconds. The failure was the recently merged, unchanged
+`test_subagent_view::test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment`:
+landing offset 28 versus owner top 25. An isolated rerun passed (8.20 seconds);
+the coordinator independently reran it successfully. This is not represented as
+a fully green unit gate; final CI/remediation gates must settle it.
+
+Earlier full-suite failures exposed two ambient runtime flags inherited when
+tests run inside a detached operator. The existing fixture now clears
+`LOP_RUNTIME_ADOPT_SESSION` and `LOP_RUNTIME_DEFER_MATERIALISE`; all 18 strict
+resume tests passed with the fix. No application resume contract was changed to
+make those tests pass. The effort fixture also isolates cwd so the checkout name
+`context-max` cannot masquerade as an effort label in the status-band assertion.
 
 ## Regression coverage
 
