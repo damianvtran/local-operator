@@ -458,6 +458,19 @@ class OwnedSessionHandle(SessionHandle):
             directory = Path(getattr(transcript, "directory", "") or "")
             if (directory / TRANSCRIPT_FILENAME).exists():
                 return False
+            # The attachment sidecar is durable state the user asked for with
+            # no transcript row to show for it: a routed `/team <name>` or
+            # `/agent <name>` (a cold viewer can do that since #624) journals
+            # the roster onto `attachment.json` and prints "team X is ready" —
+            # then `ctrl+d`. Retiring here discarded the attachment the
+            # receipt had just confirmed and stranded a sidecar-only
+            # directory nothing lists (review round 2, R7). The sidecar is
+            # what a resume restores the team from, so it is exactly as
+            # durable as a transcript row for this question.
+            from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+            if (directory / ATTACHMENT_SIDECAR_NAME).exists():
+                return False
         except Exception:  # noqa: BLE001 — an unreadable transcript is not pristine
             logger.debug("pristine probe: transcript unreadable", exc_info=True)
             return False
@@ -1446,6 +1459,73 @@ class OwnedSessionHandle(SessionHandle):
         text = getattr(result, "text", "") or f"ran /{command}"
         return str(text)
 
+    def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
+        """Run one ``/credential`` verb against the OWNER's variable store.
+
+        The store is session state and its whole purpose is to be injected into
+        the environment of the bash commands the agent runs — which run in this
+        process. A follower holding its own copy would advertise a key to the
+        model that no executing tool could read, so every verb lands here and
+        the follower only paints the receipt.
+
+        Returns plain data rather than a ``SlashResult`` because the caller
+        needs the FACTS (did it replace, what was removed) to build its own
+        notice, and because the store verb's receipt has to name the key that
+        was actually normalized and stored, not the one that was typed.
+
+        The value is never logged, never journalled, and never returned — only
+        the key name and the outcome cross back.
+        """
+        store = getattr(self._session, "variables", None)
+        if store is None or not hasattr(store, "store_credential"):
+            return {"ok": False, "reason": "unavailable"}
+        if action == "list":
+            return {
+                "ok": True,
+                "credentials": [
+                    {"key": item.key, "source": item.source} for item in store.list_credentials()
+                ],
+            }
+        if action == "names":
+            return {"ok": True, "names": list(store.credential_names())}
+        if action == "forget":
+            removed = bool(store.forget_credential(key))
+            if removed:
+                self._journal_credential(key, action="forgot")
+            return {"ok": True, "removed": removed, "key": key}
+        if action == "forget-all":
+            # Names BEFORE the clear: the store is empty afterwards, so reading
+            # them after would announce nothing to the model.
+            names = list(store.credential_names())
+            count = int(store.clear_credentials())
+            for name in names:
+                self._journal_credential(name, action="forgot")
+            return {"ok": True, "count": count, "names": names}
+        if action == "store":
+            result = store.store_credential(key, value, "command")
+            credential = getattr(result, "credential", None)
+            if not getattr(result, "ok", False) or credential is None:
+                return {"ok": False, "reason": getattr(result, "reason", "") or "empty-value"}
+            replaced = bool(getattr(result, "replaced", False))
+            # The announcement is what makes the key findable on LATER turns,
+            # so it belongs on the side that owns the context — same reason
+            # `_cmd_credential` journals rather than writing a transcript row.
+            self._journal_credential(credential.key, replaced=replaced)
+            return {"ok": True, "key": credential.key, "replaced": replaced}
+        return {"ok": False, "reason": "unknown-action"}
+
+    def _journal_credential(
+        self, key: str, *, action: str = "stored", replaced: bool = False
+    ) -> None:
+        """Best-effort announcement; a failed one must not fail the store."""
+        journal = getattr(self._session, "journal_credential_change", None)
+        if not callable(journal):
+            return
+        try:
+            journal(key, action=action, replaced=replaced)
+        except Exception:  # noqa: BLE001 — the credential is already stored
+            logger.warning("could not announce credential change", exc_info=True)
+
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent and return the REAL count.
 
@@ -1523,7 +1603,7 @@ class OwnedSessionHandle(SessionHandle):
         if command == "team":
             return self._team_slash(session, args, SlashResult)
         if command == "agent":
-            return self._agent_slash(args, SlashResult)
+            return self._agent_slash(session, args, SlashResult)
         if command == "mcp":
             return await self._mcp_slash(session, args, SlashResult, locality)
         if command == "model":
@@ -1670,12 +1750,35 @@ class OwnedSessionHandle(SessionHandle):
         )
 
     def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/team``: list from the SESSION's registry.
+        """The routed ``/team``: list, and ATTACH, from the SESSION's registry.
 
         `Session.team_registry` is session state, so the listing is answered
-        here and the mutating forms return ``noop`` for the invoking terminal
-        to open its own picker — the same split `app.py::_team_slash_result`
-        makes, so a viewer renders one shape regardless of who ran it.
+        here. The ATTACH is answered here too, and that is the whole point:
+        attaching stamps the roster and both briefs onto the manager
+        (``Session.attach_team``), so it must run where the session state that
+        builds the next turn actually lives. A viewer has no such state.
+
+        This used to return ``noop {"type": "team_mutate"}`` for every
+        argument-carrying form, on the theory that the invoking terminal would
+        host the interaction itself the way bare ``/model`` hosts its picker.
+        Nothing ever consumed it: ``_render_authoritative_slash`` returns
+        without printing on a ``noop``, so on a viewer — which since 0.46.0 is
+        EVERY fresh `lop` — `/team <name> <request>` sent no prompt, wrote no
+        transcript row and printed no notice. Total silence, which is what the
+        operator reported. (`tests/unit/tui/test_slash_echo.py` measured that
+        silence accurately and asserted only that the refusal copy promised no
+        false retry, so the behaviour was known and pinned as wording.)
+
+        ``chart`` is deliberately still ``noop``: it opens an org-chart VIEW in
+        the invoking terminal, which is local UI the owner cannot paint — the
+        same argument bare ``/model`` makes for hosting its own picker. The
+        viewer handles that token before it ever routes.
+
+        The turn itself is NOT started here. This returns an ``attached``
+        receipt and the viewer submits the request through its ordinary prompt
+        path, so the request reaches the model as a real user turn with the
+        invoker's own images and paste expansion — the one authority for "what
+        did the user actually send" stays in one place.
         """
         registry = getattr(session, "team_registry", None)
         if registry is None or not hasattr(registry, "list_teams"):
@@ -1685,7 +1788,7 @@ class OwnedSessionHandle(SessionHandle):
                 style="warning",
             )
         if arg:
-            return SlashResult(kind="noop", data={"type": "team_mutate", "args": arg})
+            return self._team_attach_slash(session, arg, SlashResult)
         try:
             teams = list(registry.list_teams())
         except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
@@ -1711,18 +1814,137 @@ class OwnedSessionHandle(SessionHandle):
         ]
         return SlashResult(kind="block", data={"type": "team_list", "items": items})
 
-    def _agent_slash(self, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/agent``: the invoker renders it.
+    def _team_attach_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """``/team <name> [<request>]`` on the owner: resolve, then attach.
 
-        Both shapes return ``noop`` so the terminal builds the listing from
-        its own registry. That is deliberate rather than a gap: the rows carry
-        role/specialist facts assembled by the frontend's own profile
-        resolver, and a second assembly here would be a second source of
-        truth for the same list. The mutating form already worked this way.
+        The name grammar MUST match ``app.py::_cmd_team`` token for token, or
+        the same command means different things depending on which process ran
+        it. That includes the single leading ``=`` escape, which exists so a
+        team legitimately named ``chart`` is still reachable — ``=`` cannot
+        occur in a validated team name, so stripping one can never shadow a
+        real team.
+
+        ``chart`` never arrives here (the viewer keeps it local, see
+        ``_team_slash``), so this does not re-implement the reserved word.
+
+        A refusal is a NOTICE and an attach is a ``team_attached`` receipt
+        carrying the request; the viewer prints the receipt and submits the
+        request. The two are distinguishable by kind so a failed lookup can
+        never be rendered as a successful attach.
         """
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        if name.startswith("="):
+            name = name[1:]
+        request = request.strip()
+        try:
+            team = registry_team = session.team_registry.get_team_by_name(name)
+        except Exception as exc:  # noqa: BLE001 — a bad registry read is a notice
+            return SlashResult(
+                kind="notice", text=f"could not load team {name!r}: {exc}", style="warning"
+            )
+        if registry_team is None:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"no team named {name!r}. Run /team to list teams, "
+                    "or ask the agent to create one."
+                ),
+                style="warning",
+            )
+        attach = getattr(session, "attach_team", None)
+        if not callable(attach):
+            # An owner that cannot attach must REFUSE rather than let the
+            # viewer send the request anyway: a turn that runs with no roster
+            # and no briefs while the receipt says "<manager> is coordinating"
+            # is a wrong persona answering confidently, which is worse than a
+            # refusal because nothing on screen says which one you got.
+            return SlashResult(
+                kind="notice",
+                text="this session cannot run a team. /team chart <name> shows a roster",
+                style="warning",
+            )
+        try:
+            attach(team)
+        except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
+            return SlashResult(
+                kind="notice", text=f"could not attach team {team.name!r}: {exc}", style="warning"
+            )
+        # The band and the discovery record both name the attached team, so the
+        # projection has to refresh before the viewer paints its receipt.
+        self._notify()
         return SlashResult(
-            kind="noop",
-            data={"type": "agent_mutate" if arg else "agent_list", "args": arg},
+            kind="notice",
+            text=(
+                f"team {team.name} is ready. {team.manager} leads it. "
+                f"Send a request with /team {team.name} <message>."
+                if not request
+                else f"sending to {team.name}. {team.manager} is coordinating."
+            ),
+            style="info",
+            data={
+                "type": "team_attached",
+                "team": team.name,
+                "manager": team.manager,
+                "request": request,
+            },
+        )
+
+    def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/agent``: list in the invoker, ATTACH here.
+
+        The listing stays ``noop`` on purpose: its rows carry role/specialist
+        facts assembled by the frontend's own profile resolver, and a second
+        assembly here would be a second source of truth for the same list.
+
+        The mutating forms do NOT stay ``noop``, for the reason spelled out in
+        ``_team_slash``: attaching a profile mutates session state (the
+        instructions ride the volatile tail) and nothing consumed the
+        ``agent_mutate`` receipt, so `/agent <name>` on a viewer was silent.
+        """
+        if not arg:
+            return SlashResult(kind="noop", data={"type": "agent_list", "args": arg})
+        name, _, request = arg.partition(" ")
+        name = name.strip()
+        request = request.strip()
+        # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
+        # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
+        # attach and reports the unknown name rather than silently detaching.
+        if name.lower() in ("clear", "none") and not request:
+            detach = getattr(session, "clear_agent_profile", None)
+            if not callable(detach):
+                return SlashResult(kind="notice", text="nothing to detach", style="info")
+            detach()
+            self._notify()
+            return SlashResult(
+                kind="notice",
+                text="this session uses its base instructions",
+                style="info",
+                data={"type": "agent_attached", "agent": "", "request": ""},
+            )
+        attach = getattr(session, "attach_agent_profile", None)
+        if not callable(attach):
+            return SlashResult(
+                kind="notice", text="this session cannot adopt an agent profile", style="warning"
+            )
+        try:
+            resolved = attach(name)
+        except Exception as exc:  # noqa: BLE001 — a failed attach must not kill the turn
+            return SlashResult(
+                kind="notice", text=f"could not attach agent {name!r}: {exc}", style="warning"
+            )
+        if not resolved:
+            return SlashResult(
+                kind="notice",
+                text=f"no agent named {name!r}. Run /agent to list agents.",
+                style="warning",
+            )
+        self._notify()
+        return SlashResult(
+            kind="notice",
+            text=f"{resolved} is answering in this session.",
+            style="info",
+            data={"type": "agent_attached", "agent": resolved, "request": request},
         )
 
     async def _mcp_slash(

@@ -2268,6 +2268,27 @@ class RemoteSession:
             self._deliberate_stop = False
             raise
 
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """Run one ``/credential`` verb on the owner's store.
+
+        The viewer hosts the masked paste (the user is sitting HERE) and the
+        owner holds the value (the agent's bash commands run THERE), so this is
+        the seam between the two halves. A disconnected viewer answers
+        ``unavailable`` rather than raising: the caller turns that into a
+        notice naming what happened, which is the whole point of the fix — a
+        capability that cannot run must SAY so instead of reporting a boot
+        state that will never resolve.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            return {"ok": False, "reason": "disconnected"}
+        try:
+            answer = await client.credential(action, key, value)
+        except Exception:  # noqa: BLE001 — a lost owner is a notice, not a crash
+            logger.debug("credential op failed", exc_info=True)
+            return {"ok": False, "reason": "disconnected"}
+        return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
+
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Optimistic cancel: returns the running count the offer promised.
 

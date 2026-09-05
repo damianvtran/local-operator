@@ -761,7 +761,13 @@ class AsidePanel(Static):
             head_start = len(flat.lines) + len(rows)
             rows.extend(question)
             flat.heads.append((head_start, head_start + len(question)))
-            rows.extend(self._answer_rows(turn, width, dim, danger))
+            # Status/error rows are answer-side too. Keep the separator in the
+            # measured body so it consumes scroll budget instead of extra height.
+            # Markdown lists/code may already supply that breathing row.
+            answer = self._answer_rows(turn, width, dim, danger)
+            if not answer or answer[0].plain.strip():
+                rows.append(Text())
+            rows.extend(answer)
             flat.lines.extend(rows)
             flat.owners.extend([index] * len(rows))
         self._flat_memo = (key, flat)
@@ -818,6 +824,11 @@ class AsidePanel(Static):
         back = min(offset, max(0, total - budget))
         end = total - back
         first = max(0, end - budget)
+        # A separator alone is not a readable one-row window. Show its owning
+        # question instead; the next scroll step still reaches the answer.
+        if budget == 1 and first == flat.heads[flat.owners[first]][1]:
+            first -= 1
+            end = first + 1
 
         owner = flat.owners[first]
         head_start, head_end = flat.heads[owner]
@@ -878,6 +889,20 @@ class AsidePanel(Static):
         if len(marker) >= budget:
             marker = []
         pinned = pinned[: max(0, budget - len(marker) - 1)]
+        # A pinned question needs the same breathing row as an uncut turn. It
+        # costs overlay budget, never height: shorten a wrapped pin first, but
+        # at tiny budgets retain the existing question/content priority. Do not
+        # insert a second gap when the window still shows the question or its
+        # original separator (head_end), or cover the next turn's question.
+        if pinned and budget - len(marker) >= 3:
+            pinned = pinned[: budget - len(marker) - 2]
+            content_start = first + len(marker) + len(pinned)
+            if (
+                content_start > head_end
+                and flat.owners[content_start] == owner
+                and flat.lines[content_start].plain.strip()
+            ):
+                pinned.append(Text())
         # Pinned UNCONDITIONALLY while the window opens inside a turn, even at
         # the offsets where the overlay then covers the last of that turn's own
         # rows and the question is left with nothing under it. That frame is
@@ -961,10 +986,12 @@ class AsidePanel(Static):
         wrapped = _wrap(question, body) or [""]
         gutter = QUESTION_MARK + " " * (len(ANSWER_INDENT) - cell_len(QUESTION_MARK))
         rows: list[Text] = []
-        head = Text(gutter, style=mark_style)
-        head.append(wrapped[0], style=text_style)
-        rows.append(head)
-        rows.extend(Text(f"{ANSWER_INDENT}{line}", style=text_style) for line in wrapped[1:])
+        # Extent, not colour, makes this the same sent-question spine as
+        # UserBlock; continuation rows must keep the mark and prose styles apart.
+        for line in wrapped:
+            row = Text(gutter, style=mark_style)
+            row.append(line, style=text_style)
+            rows.append(row)
         return rows
 
     def _answer_rows(self, turn: AsideTurn, width: int, dim: Style, danger: Style) -> list[Text]:
