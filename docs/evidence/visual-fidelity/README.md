@@ -111,8 +111,24 @@ c455fe1b566acef44a228a20633182764685a2c2c5f4a4f251e72f2c570a16d6 scripts/pages_s
   Unsetting only those two flags produced111passed. The suite's new file-local
   autouse fixture scrubs them; explicitly setting both flags again now produces
   **111passed in5.37s**. This is test isolation, no product change.
-- Whole unit summary and the final integration/version result are recorded in
-  the PR, not guessed here while a long run is in progress.
+- Initial whole unit run:23failed,12954passed,15skipped in2600.47s. Besides
+  the18runtime-flag failures above,5capture assertions used the helper imported
+  at collection before the grapheme double-projection fix landed. They expected
+  native8/16px origins but saw5.2459/10.4918px. Final focused22tests pass against
+  the corrected helper. This long in-progress-code run is **not a green final
+  suite**; final CI must validate the integrated PR head.
+
+## Final integration
+
+The branch was rebased once onto `a517f229` (0.46.17), incorporating the
+performance and session-naming changes, then bumped to0.46.20 (0.46.18/19 reserved by parallel reviewed releases). Full static,
+focused session-factory/capture/naming tests, assembled e2e and9representative
+native capture invocations were rerun on that integration. Final results: whole-tree flake8/Black896files/isort/pyright0errors all pass;
+155focused tests pass in10.48s;9assembled e2e pass in15.67s;9capture invocations
+pass. Seven PNGs are byte-identical to the earlier replay; reference welcomes
+only change the version label, retaining identical widget/screen geometry.
+The capture source hashes above are unchanged after integration. No assumption
+that old-base passing evidence proves a moved-base integration.
 
 All app captures used isolated HOME/config. No live sessions, browser engines,
 provider credentials, or user settings were touched.
