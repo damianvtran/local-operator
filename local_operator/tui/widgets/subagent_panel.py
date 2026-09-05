@@ -467,7 +467,9 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
     elif running:
         # The relay's progress string, which is the child's ACTIVITY in the
         # working line's own vocabulary — the model's intent while a tool
-        # runs, `running N tools` for a batch, `responding`, `thinking`.
+        # runs, `running N tools` for a batch, `responding` once prose is
+        # actually streaming, `thinking` for a model call in flight with
+        # nothing streamed yet (see `harness.intent`).
         # `clean_intent` is the same boundary re-check the tool ledger runs on
         # model-written text before painting it, so `Auditing merged MRs.`
         # reads as `auditing merged MRs` here and in the card above.

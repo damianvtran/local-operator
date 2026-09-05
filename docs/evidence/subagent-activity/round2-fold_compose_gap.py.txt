@@ -1,0 +1,55 @@
+"""Feed the mobile ProjectionFold the loop's real order for a write-tier tool
+call and print the working-line activity after each event.
+
+    message_start -> ToolCallCompose(intent) -> message_end -> [approval wait]
+      -> tool_execution_start -> tool_execution_end -> turn_end
+
+Run with the cwd on sys.path so the fold under test is the tree you stand in.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.getcwd())
+
+from local_operator.harness.types import (  # noqa: E402
+    AgentStartEvent,
+    Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    TextContent,
+    ToolCallComposeEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolResult,
+    TurnEndEvent,
+)
+from tests.unit.mobile.test_projection import make_fold  # noqa: E402
+
+fold = make_fold()
+first = Message.assistant()
+steps = [
+    ("agent_start", AgentStartEvent(generation=1)),
+    ("message_start (assistant placeholder)", MessageStartEvent(message=first)),
+    (
+        "tool_call_compose intent='probing'",
+        ToolCallComposeEvent(tool_call_id="c1", tool_name="bash", intent="probing"),
+    ),
+    ("message_end (model call closed; approval gate waits here)", MessageEndEvent(message=first)),
+    (
+        "tool_execution_start",
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing"),
+    ),
+    (
+        "tool_execution_end",
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
+        ),
+    ),
+    ("turn_end", TurnEndEvent(message=first, tool_results=[])),
+]
+for name, event in steps:
+    fold.fold_event(event)
+    print(f"{name:<60} activity={fold.projection.activity!r}")

@@ -1,0 +1,29 @@
+# Mobile ProjectionFold — compose -> message_end -> [approval wait] -> tool_start
+# Round-2 remediation of F1. Script: round2-fold_compose_gap.py.txt
+
+## Round-2 head (F1 fixed): the composed intent survives message_end
+agent_start                                                  activity='thinking'
+message_start (assistant placeholder)                        activity='thinking'
+tool_call_compose intent='probing'                           activity='probing'
+message_end (model call closed; approval gate waits here)    activity='probing'
+tool_execution_start                                         activity='probing'
+tool_execution_end                                           activity='thinking'
+turn_end                                                     activity='thinking'
+
+## Round-1 head c83c46c5 (F1 reproduced): message_end clobbered the intent
+agent_start                                                  activity='thinking'
+message_start (assistant placeholder)                        activity='thinking'
+tool_call_compose intent='probing'                           activity='probing'
+message_end (model call closed; approval gate waits here)    activity='thinking'
+tool_execution_start                                         activity='probing'
+tool_execution_end                                           activity='thinking'
+turn_end                                                     activity='thinking'
+
+## origin/main e0c27ea9 (base): intent survived, but message_start said responding
+agent_start                                                  activity='thinking'
+message_start (assistant placeholder)                        activity='responding'
+tool_call_compose intent='probing'                           activity='probing'
+message_end (model call closed; approval gate waits here)    activity='probing'
+tool_execution_start                                         activity='probing'
+tool_execution_end                                           activity='thinking'
+turn_end                                                     activity='thinking'
