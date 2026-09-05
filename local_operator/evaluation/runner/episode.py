@@ -87,6 +87,7 @@ from local_operator.evaluation.evidence.models import (
     ScoringResultPayload,
     UsageCostPayload,
     UserSimulatorExchangePayload,
+    canonical_bytes,
     canonical_digest,
 )
 from local_operator.evaluation.evidence.store import EvidenceError, EvidenceWriter
@@ -457,6 +458,7 @@ class EpisodeRunner:
         supervisor = self._launch(self._selector)
         self._supervisor = supervisor
         handshake = await supervisor.handshake(timeout=self._config.handshake_timeout)
+        self._action_surface = handshake.metadata.capabilities.action_surface()
         verifier = HostVerifier(
             self._spec.task_id,
             self._spec.episode_id,
@@ -791,7 +793,9 @@ class EpisodeRunner:
         # so recording it eagerly would make the failure path unsealable.
         rejected: DecisionRejected | None = None
         try:
-            decision = await self._model.decide(observation, tuple(self._turns))
+            decision = await self._model.decide(
+                observation, tuple(self._turns), action_surface=self._action_surface
+            )
         except _EvidenceFailure:
             raise
         except DecisionRejected as error:
@@ -860,7 +864,7 @@ class EpisodeRunner:
                 request_id=request_id,
                 requested_route=self._spec.requested_route,
                 tool_schema_digest=canonical_digest(
-                    "runner-tool-schema-v1", {"episode_id": self._spec.episode_id}
+                    "runner-tool-schema-v1", self._action_surface.schema()
                 ),
                 input_tokens=decision.usage.input_tokens,
                 message_count=message_count,
@@ -1607,7 +1611,13 @@ class EpisodeRunner:
             cleanup_plan_id=plan.cleanup_plan_id,
             config_digest=spec.config_digest,
             created_wall_time_ms=self._started_ms,
-            metadata=dict(spec.metadata),
+            # The same negotiated schema builds the prompt and gates admission.
+            # Publish it, not merely a digest with no reproducible preimage; old
+            # sealed bundles retain their original metadata and canonical bytes.
+            metadata={
+                **dict(spec.metadata),
+                "action_surface": canonical_bytes(self._action_surface.schema()).decode("utf-8"),
+            },
         )
 
     def _append(self, kind: Any, payload: Any) -> None:

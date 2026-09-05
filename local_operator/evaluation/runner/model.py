@@ -18,6 +18,7 @@ from typing import Protocol, Sequence, runtime_checkable
 
 from pydantic import Field
 
+from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
 from local_operator.evaluation.receipts import SafeCount, StrictIdentifier
@@ -194,4 +195,6 @@ class EpisodeModelClient(Protocol):
         self,
         observation: Observation,
         history: Sequence[EpisodeTurn],
+        *,
+        action_surface: ActionSurface,
     ) -> ModelDecision: ...

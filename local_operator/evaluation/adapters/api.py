@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal, Protocol, TypeAlias, runtime_checkab
 
 from pydantic import AfterValidator, Field, field_validator, model_validator
 
+from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
 from local_operator.evaluation.lifecycle import CleanupPlan
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
@@ -78,10 +79,13 @@ from local_operator.evaluation.receipts import (
 # canonicality check, and a 1.4 worker's ``"phase":"unknown"`` fails a 1.3
 # parent's ``extra="forbid"``. ``resume_observation`` is the same story on the
 # request side.
-ADAPTER_SCHEMA_VERSION = "1.4"
+# 1.5 advertises clipboard paste and the native text execution restriction.
+# Exact negotiation rejects old workers before prepare/reset can allocate, rather
+# than discovering an unknown action after a preceding click has already applied.
+ADAPTER_SCHEMA_VERSION = "1.5"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.4"]
+SchemaVersion: TypeAlias = Literal["1.5"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -189,6 +193,15 @@ class AdapterCapabilities(ProtocolModel):
     routes: tuple[RouteCapability, ...] = Field(min_length=1, max_length=3)
     ask_user: bool
     scoring: bool
+    paste_text: bool = False
+    type_text_mode: Literal["unicode", "ascii"] = "unicode"
+
+    def action_surface(self) -> "ActionSurface":
+        return ActionSurface(
+            paste_text=self.paste_text,
+            type_text_mode=self.type_text_mode,
+            ask_user=self.ask_user,
+        )
 
     @field_validator("routes", mode="before")
     @classmethod

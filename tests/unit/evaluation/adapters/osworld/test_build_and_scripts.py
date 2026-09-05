@@ -91,7 +91,7 @@ def runner_descriptor(tmp_path: Path, episode_id: str, *, secret_refs: Any = ())
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     return RescueDescriptor(
-        schema_version="1.4",
+        schema_version="1.5",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id=episode_id,
@@ -443,17 +443,13 @@ def test_a_version_that_cannot_be_determined_refuses_to_build(
 
 
 def test_the_staged_pilot_release_digest_is_reproduced_from_committed_values() -> None:
-    """The pinned attestation of the staged pilot, through the REAL resolution.
+    """The frozen pilot attestation remains reproducible after adapter upgrades.
 
-    This is the regression test the original defect needed: it fails outright
-    on the bug (the stale ``0.1.0`` version yields ``a15961b1...``) rather than
-    only on a guard's error message.
-
-    It routes through ``resolve_attested_version`` -- the same call ``main``
-    makes -- rather than recomputing the rule. Calling ``_adapter_version()``
-    and passing the result straight to ``_release_digest`` would re-implement
-    the resolution, and a mutation to it would leave this test green: exactly
-    the bypass the original defect exploited, one level up.
+    The historical declaration still routes through ``resolve_attested_version``
+    and the real digest function. Current-source version selection is exercised
+    separately by ``test_main_takes_its_attested_version_from_the_resolver``:
+    passing today's adapter version beside an old wheel digest would relabel
+    the pilot rather than test its original attestation.
 
     Hermetic because every input is committed or supplied here -- the release
     name and task-hash manifest sha from ``config/release-v2026.08.08.json``,
@@ -466,11 +462,13 @@ def test_the_staged_pilot_release_digest_is_reproduced_from_committed_values() -
     """
 
     pin = json.loads(build._DEFAULT_PIN.read_text())
-    # Exactly what main does: nothing requested, so the tree's own declaration
-    # is what gets attested.
+    # This attestation belongs to the frozen 0.1.1 wheel, not the current
+    # source's declaration. Keep that historical preimage intact when a new
+    # adapter is published; the current-version resolver path has its own
+    # regression below and must not relabel this old package digest.
     version, advisory = build.resolve_attested_version(
         requested=None,
-        declared=build._adapter_version(),
+        declared="0.1.1",
         allow_mismatch=False,
     )
     assert advisory is None

@@ -1,6 +1,7 @@
 """AwsProvider against botocore's Stubber: the boto3 call shapes, in order.
 
-Nothing here touches the network. Every EC2 / Scheduler call is answered by a
+No cloud calls are made; one control-boundary test uses loopback HTTP.
+Every EC2 / Scheduler call is answered by a
 ``Stubber`` that ALSO asserts the request parameters, so these tests pin the
 exact ``run_instances`` shape (ClientToken, both TagSpecifications, the
 adapter tag the TTL role's condition requires), the schedule shape, and the
@@ -30,6 +31,7 @@ from lop_osworld_v2_adapter.providers.aws import (
     AllocationError,
     AwsCredentials,
     AwsProvider,
+    GuestExecutionError,
     ReadinessTimeout,
     _Clients,
     ttl_seconds_for,
@@ -341,6 +343,7 @@ class _FakeEnv:
         self.reset_calls: list[Any] = []
         self.user_simulator = None
         self.controller = self
+        self.pkgs_prefix = "import pyautogui; {command}"
         self.provider = _UpstreamProviderShape()
         self.manager = self.provider
         self.is_environment_used = False
@@ -1170,6 +1173,121 @@ async def test_evaluate_returns_raw_when_the_judge_is_quiet() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_over_real_http_reports_partial_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the control boundary, not X11: no guest display exists on CI."""
+    import subprocess
+    import sys
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from lop_osworld_v2_adapter.providers import aws
+
+    marker = tmp_path / "committed.txt"
+    requests_seen: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests_seen.append(payload)
+            assert self.path == "/execute"
+            assert payload["shell"] is False
+            # The guest resolves `python` in its own environment. Use this test
+            # environment's interpreter, but execute the received source intact.
+            completed = subprocess.run(
+                [sys.executable, *payload["command"][1:]], capture_output=True, text=True
+            )
+            body = json.dumps(
+                {
+                    "returncode": completed.returncode,
+                    "output": completed.stdout,
+                    "error": completed.stderr,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(aws, "GUEST_PORT", server.server_port)
+    try:
+        with _Stubs() as stubs:
+            # The real HTTP closure makes requests; boto clients are constructed
+            # with fixture credentials and are never invoked by execute().
+            stubs.clients.http_post_json = aws.build_clients(CREDS, REGION).http_post_json
+            provider = AwsProvider(
+                CREDS,
+                region=REGION,
+                lease_ref="lop-ttl-x",
+                clients=stubs.clients,
+                sleep=stubs.sleep,
+            )
+            env = _FakeEnv()
+            env.pkgs_prefix = "{command}"
+            provider._env = env
+            provider._public_ip = "127.0.0.1"
+            write = f"from pathlib import Path; Path({str(marker)!r}).open('a').write('once\\n')"
+            await provider.execute([write])
+            with pytest.raises(GuestExecutionError, match=r"exit 7"):
+                await provider.execute([write + "; raise SystemExit(7)", write])
+            assert marker.read_text() == "once\nonce\n"
+            assert len(requests_seen) == 2
+            assert stubs.slept == [3.0]
+            # Exercise the actual HTTP -> subprocess path, not just a source
+            # string assertion: 100k Unicode cannot fit Linux's single-arg cap.
+            large_marker = tmp_path / "large-text"
+            text = "🙂" * 100_000
+            large = f"from pathlib import Path; Path({str(large_marker)!r}).write_text({text!r})"
+            await provider.execute([large])
+            assert large_marker.read_text() == text
+            assert len(requests_seen) == 3
+            assert all(len(arg.encode("utf-8")) <= 64_000 for arg in requests_seen[-1]["command"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"returncode": 7, "error": "PRIVATE_PAYLOAD"},
+        {"error": "PRIVATE_PAYLOAD"},
+        {"returncode": False},
+        {"returncode": "0"},
+        RuntimeError("PRIVATE_PAYLOAD"),
+        TimeoutError("PRIVATE_PAYLOAD"),
+    ],
+)
+async def test_execute_failure_stops_batch_without_retry_or_payload_leak(
+    response: dict[str, Any] | Exception,
+) -> None:
+    with _Stubs() as stubs:
+        provider = AwsProvider(
+            CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients, sleep=stubs.sleep
+        )
+        env = _FakeEnv()
+        provider._env = env
+        provider._public_ip = "127.0.0.1"
+        stubs.guest_default = response
+        with pytest.raises(GuestExecutionError) as raised:
+            await provider.execute(["first()", "must_not_run()"])
+        assert "PRIVATE_PAYLOAD" not in str(raised.value)
+        assert "batch not retried" in str(raised.value)
+        assert len(stubs.guest_posts) == 1
+        assert stubs.slept == []
+        assert "executed" not in env.kwargs
+
+
+@pytest.mark.asyncio
 async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_none() -> None:
     with _Stubs() as stubs:
         provider = AwsProvider(
@@ -1177,9 +1295,16 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         )
         env = _FakeEnv()
         provider._env = env
+        provider._public_ip = "127.0.0.1"
         await provider.execute(["pyautogui.click(1, 2)"])
         await provider.execute([])
-        assert env.kwargs["executed"] == ["pyautogui.click(1, 2)"]
+        assert stubs.guest_posts == [
+            {
+                "command": ["python", "-c", "import pyautogui; pyautogui.click(1, 2)"],
+                "shell": False,
+            }
+        ]
+        assert "executed" not in env.kwargs
         assert stubs.slept == [3.0, 3.0]
         assert await provider.respond("?") is None
         assert (await provider.observe())["screenshot"] == b"png"

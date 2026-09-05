@@ -88,7 +88,7 @@ from local_operator.evaluation.adapters.discovery import (
 
 _DISTRIBUTION = "lop-osworld-v2-adapter"
 _ADAPTER_ID = "osworld-v2"
-_VERSION = "0.1.1"
+_VERSION = "0.1.2"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 
 
@@ -287,8 +287,10 @@ class OSWorldV2Adapter:
             schema_version=ADAPTER_SCHEMA_VERSION,
             capabilities=AdapterCapabilities(
                 routes=("computer",),
-                ask_user=True,  # honest ONLY because V2 has user_simulator
+                ask_user=actions.ACTION_SURFACE.ask_user,  # V2 has user_simulator
                 scoring=True,
+                paste_text=actions.ACTION_SURFACE.paste_text,
+                type_text_mode=actions.ACTION_SURFACE.type_text_mode,
             ),
         )
         # Per-episode state. None until the corresponding method runs.

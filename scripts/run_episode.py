@@ -566,7 +566,7 @@ class _ScriptedFinish:
     def __init__(self, route: RouteIdentity) -> None:
         self._route = route
 
-    async def decide(self, observation: Any, history: Sequence[Any]) -> Any:
+    async def decide(self, observation: Any, history: Sequence[Any], *, action_surface: Any) -> Any:
         from local_operator.evaluation.protocol import ActionBatch
         from local_operator.evaluation.runner.model import ModelDecision
 

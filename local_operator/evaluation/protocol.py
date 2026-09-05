@@ -447,8 +447,7 @@ NAMED_KEYS = frozenset(
 _PRINTABLE_KEYS = frozenset(string.ascii_letters + string.digits + string.punctuation)
 
 
-class KeyAction(_Action):
-    kind: Literal["key"] = "key"
+class _KeyChordAction(_Action):
     keys: tuple[str, ...] = Field(min_length=1, max_length=8)
 
     @field_validator("keys", mode="before")
@@ -468,6 +467,31 @@ class KeyAction(_Action):
         if len(normalized) != len(set(normalized)):
             raise ValueError("a key chord cannot contain duplicate keys")
         return tuple(normalized)
+
+
+class KeyAction(_KeyChordAction):
+    kind: Literal["key"] = "key"
+
+
+class PasteTextAction(_KeyChordAction):
+    """Replace CLIPBOARD and send an explicit chord, without claiming insertion.
+
+    Inheriting the key validation prevents paste from growing a second key
+    vocabulary. Tabs/newlines remain data; the receiving application may still
+    normalize them or submit a field. No focus inference or restoration is implied.
+    """
+
+    kind: Literal["paste_text"] = "paste_text"
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+    clipboard_policy: Literal["overwrite"]
+
+    @field_validator("text")
+    @classmethod
+    def _clipboard_text(cls, text: str) -> str:
+        from local_operator.computer_input import validate_paste_text
+
+        validate_paste_text(text)
+        return text
 
 
 class ScrollAction(_FrameAction):
@@ -510,6 +534,7 @@ ComputerAction: TypeAlias = Annotated[
     | DoubleClickAction
     | TypeAction
     | KeyAction
+    | PasteTextAction
     | ScrollAction
     | WaitAction
     | FinishAction
