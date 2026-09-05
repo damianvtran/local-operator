@@ -4,13 +4,14 @@ import {
   selectEntry,
   type AccessQueueEntry,
 } from "../access-queue";
-import { isLoopbackHost } from "../origin-policy";
+import type { BroadGrant } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
   noticeForRejectedDecision,
   originPromptView,
+  scopeOptions,
   type DecidedOrigin,
   type OriginDecision,
 } from "./origin-flow";
@@ -64,6 +65,20 @@ let shownPromptId = "";
 // Popup-local selection follows an immutable generation, not an index. Storage
 // changes retain it while alive; when it disappears FIFO becomes current.
 let selectedEntryId: string | undefined;
+// The broad scope the visible prompt's domain option would write, captured at
+// render like the origin and generation, so the ack names what was granted.
+let shownBroadScope: BroadGrant["scope"] | undefined;
+// The broad key (registrable domain or loopback host) the domain option would
+// grant, captured alongside the scope so the ack can PRINT the value it just
+// granted instead of saying "this domain" with the prompt gone (D2).
+let shownBroadKey: string | undefined;
+// The entry the scope select's option list was last built for. A re-render
+// must not reassign `select.value`: `render()` runs on every accessQueue
+// storage change, so a sibling request enqueued while the user is reading
+// would snap a deliberately-narrowed scope back to the `domain` default and
+// the next click would grant the whole registrable domain (A1/U1). Options
+// are rebuilt only when the entry they describe actually changes.
+let scopeBuiltForEntryId: string | undefined;
 
 interface Health {
   extension_connected: boolean;
@@ -128,7 +143,15 @@ async function render(): Promise<void> {
     shownPromptOrigin = undefined;
     shownPromptId = "";
     decidedOrigin = null;
+    scopeBuiltForEntryId = undefined;
   }
+  // Hold the acknowledgement while session storage and /health still echo the
+  // prompt the user just decided. Without this the echo redraws the full
+  // prompt with live buttons ~1.5s after the click, which reads as "it did not
+  // work" and invites a second click — and that second click lands on a select
+  // reset to the `domain` default, silently widening a "Just this once" choice
+  // to the whole domain (U1). originPromptView owns that decision.
+  if (originPromptView(pendingOriginValue, decidedOrigin) === "ack") return;
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
     // before granting a standing browsing grant — goes in the monospace trough
@@ -137,20 +160,34 @@ async function render(): Promise<void> {
     const host = document.getElementById("origin-host");
     if (host) host.textContent = pendingHost;
     shownPromptOrigin = pendingOriginValue;
-    shownPromptId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
+    const nextPromptId = selected?.entryId ?? session.pendingOrigin?.promptId ?? "";
+    // A prompt is "fresh" when this render is the first to show this
+    // generation; only then may it move focus (U5).
+    const freshPrompt = scopeBuiltForEntryId !== nextPromptId;
+    shownPromptId = nextPromptId;
     renderQueueControls(queue, selected);
-    const allPorts = document.getElementById("origin-all-ports");
-    let loopbackEligible = false;
-    try {
-      loopbackEligible = !!pendingOriginValue && isLoopbackHost(new URL(pendingOriginValue));
-    } catch {
-      // Health fallback from an older peer can be malformed; broad scope stays hidden.
-    }
-    allPorts?.classList.toggle("hidden", !loopbackEligible);
+    // The option list comes from the ENTRY (worker-stamped `broad`), never
+    // from a hostname computed here: a /health-only render has no entry and
+    // therefore no domain option, which is the fail-closed shape.
+    renderScopeSelect(
+      selected ?? (pendingOriginValue ? { origin: pendingOriginValue } : undefined),
+      shownPromptId,
+    );
+    shownBroadScope = selected?.broad?.scope;
+    shownBroadKey = selected?.broad?.key;
     // A fresh prompt must arrive with live buttons even if a previous
-    // decision's lock is still set.
+    // decision's lock is still set. Prev/Next are restored from the queue
+    // length rather than forced enabled, or a single-request prompt would
+    // offer two inert stops ahead of the first real control (U4).
     setOriginBusy(false);
+    renderQueueControls(queue, selected);
     show("origin");
+    // The prompt is an alertdialog demanding a decision, so give the keyboard
+    // a landing point on the first meaningful control. Deliberately NOT Allow:
+    // a focused primary on a consent dialog invites an accidental Space/Enter
+    // approval (U5). Only on a newly-shown prompt, so a re-render cannot steal
+    // focus back from a user who has tabbed onward.
+    if (freshPrompt) document.getElementById("origin-scope")?.focus();
     return;
   }
 
@@ -181,6 +218,10 @@ async function render(): Promise<void> {
     // hides and the trough carries a plain note.
     const label = document.getElementById("connected-label");
     const detail = document.getElementById("connected-detail");
+    // The all-sites switch means no prompt will ever appear; say so here so
+    // the popup does not merely look idle while the agent roams.
+    const { allowAllSites } = await getLocal();
+    document.getElementById("connected-all-sites")?.classList.toggle("hidden", allowAllSites !== true);
     if (detail && label) {
       const url = health.current_url;
       // Parallel sessions can each drive their own tab now; the card stays a
@@ -326,10 +367,21 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
-document.getElementById("origin-allow")?.addEventListener("click", () => void decide("once"));
-document.getElementById("origin-always")?.addEventListener("click", () => void decide("always"));
-document.getElementById("origin-all-ports")?.addEventListener("click", () => void decide("all_ports"));
+// Allow sends whatever scope the select holds; the select's value set is
+// exactly scopeOptions' values, so no other decision can be minted here.
+document.getElementById("origin-allow")?.addEventListener("click", () => {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  const value = select?.value;
+  if (value === "domain" || value === "site" || value === "once") void decide(value);
+});
 document.getElementById("origin-deny")?.addEventListener("click", () => void decide("deny"));
+document.getElementById("origin-scope")?.addEventListener("change", () => renderScopeDetail());
+// The recovery path for someone who enabled the all-sites bypass and wants
+// out. The popup cannot write the setting (that is options-page-only, by
+// design), so it opens the page where the switch and its banner live (U2).
+document.getElementById("connected-all-sites-off")?.addEventListener("click", () => {
+  void chrome.runtime.openOptionsPage();
+});
 document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
 document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
 
@@ -337,17 +389,69 @@ document.getElementById("origin-next")?.addEventListener("click", () => void mov
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
 function setOriginBusy(busy: boolean): void {
-  for (const id of [
-    "origin-allow",
-    "origin-always",
-    "origin-all-ports",
-    "origin-deny",
-    "origin-previous",
-    "origin-next",
-  ]) {
-    const button = document.getElementById(id) as HTMLButtonElement | null;
-    if (button) button.disabled = busy;
+  for (const id of ["origin-scope", "origin-allow", "origin-deny", "origin-previous", "origin-next"]) {
+    const control = document.getElementById(id) as HTMLButtonElement | HTMLSelectElement | null;
+    if (control) control.disabled = busy;
   }
+}
+
+/** Fill the Allow select from the entry and preselect its default.
+ *
+ * Rebuilding is keyed on the entry the options describe, NOT done on every
+ * render: `render()` fires on every `accessQueue` storage change, so an
+ * unconditional `select.value = defaultValue` would reset a scope the user
+ * deliberately narrowed whenever a sibling request was enqueued, and the next
+ * click would grant the whole registrable domain (A1/U1). Previous/Next still
+ * rebuild, because they change which entry — and so which option set — is on
+ * screen. */
+function renderScopeSelect(
+  entry: Pick<AccessQueueEntry, "origin" | "broad"> | undefined,
+  entryId: string,
+): void {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  if (!select) return;
+  if (scopeBuiltForEntryId === entryId && select.options.length > 0) {
+    // Same prompt, already built: preserve whatever the user chose.
+    renderScopeDetail();
+    return;
+  }
+  const { options, defaultValue } = scopeOptions(entry);
+  select.replaceChildren(
+    ...options.map((option) => {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      element.dataset.detail = option.detail;
+      return element;
+    }),
+  );
+  select.value = defaultValue;
+  scopeBuiltForEntryId = entryId;
+  renderScopeDetail();
+}
+
+/** The value a decision actually granted, for the acknowledgement trough.
+ * `once` returns null: it grants no standing record, so printing an authority
+ * beside it would overstate what was kept. */
+function grantedValueFor(
+  decision: OriginDecision,
+  broadScope: BroadGrant["scope"] | undefined,
+  broadKey: string | undefined,
+  origin: string | undefined,
+): string | undefined {
+  if (decision === "domain") return broadKey;
+  if (decision === "site") return origin;
+  return undefined;
+}
+
+/** The trough under the select names what the CURRENT option grants, as
+ * data (domain, origin, or the once window), so the user verifies the exact
+ * scope before clicking Allow. */
+function renderScopeDetail(): void {
+  const select = document.getElementById("origin-scope") as HTMLSelectElement | null;
+  const detail = document.getElementById("origin-scope-detail");
+  if (!select || !detail) return;
+  detail.textContent = select.selectedOptions[0]?.dataset.detail ?? "";
 }
 
 function renderQueueControls(queue: AccessQueueEntry[], selected: AccessQueueEntry | undefined): void {
@@ -378,11 +482,20 @@ async function moveQueue(delta: -1 | 1): Promise<void> {
 }
 
 function showOriginAck(decision: OriginDecision): void {
-  const ack = ackForDecision(decision);
+  const ack = ackForDecision(decision, shownBroadScope);
   const title = document.getElementById("origin-ack-title");
   const sub = document.getElementById("origin-ack-sub");
   if (title) title.textContent = ack.title;
   if (sub) sub.textContent = ack.sub;
+  // Print the value that was granted, in the prompt's own monospace trough.
+  // The prompt pane is gone by now, so "this domain" would have no referent on
+  // screen — and the broader the grant, the vaguer that reading gets (D2).
+  const granted = document.getElementById("origin-ack-granted");
+  if (granted) {
+    const value = grantedValueFor(decision, shownBroadScope, shownBroadKey, shownPromptOrigin);
+    granted.textContent = value ?? "";
+    granted.classList.toggle("hidden", !value);
+  }
   document.getElementById("origin-ack-check")?.classList.toggle("hidden", !ack.check);
   show("origin-ack");
   // Per-decision tone override: allow is a real success (the agent proceeds),

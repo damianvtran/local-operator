@@ -289,4 +289,8 @@ class Unpair(WireModel):
 class OriginDecision(WireModel):
     event: Literal["origin_decision"] = "origin_decision"
     origin: str
-    decision: Literal["once", "always", "deny"]
+    # "site" is the exact-origin grant (the old "always"), "domain" the
+    # registrable-domain or loopback-host grant. The daemon never carries this
+    # frame (dropped at daemon.py:730); it is documentation for the wire
+    # contract and stays in sync with the extension via protocol.gen.ts.
+    decision: Literal["once", "site", "domain", "deny"]

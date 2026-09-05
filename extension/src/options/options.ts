@@ -1,10 +1,17 @@
 import { DEFAULT_PORT, getLocal } from "../state";
-import { grantRows, removeGrantAccessibleName } from "./grant-list";
+import { allowAllView, nextAllowAllView, type AllowAllAction, type AllowAllView } from "./allow-all-flow";
+import { grantRows, removeGrantAccessibleName, revokeMessageFor } from "./grant-list";
 import { runWorkerMutation } from "./mutation-flow";
 
 const port = document.getElementById("port") as HTMLInputElement;
+const allowAll = document.getElementById("allow-all") as HTMLInputElement;
+const allowAllDialog = document.getElementById("allow-all-dialog") as HTMLDialogElement;
+const allowAllAck = document.getElementById("allow-all-ack") as HTMLInputElement;
+const allowAllEnable = document.getElementById("allow-all-enable") as HTMLButtonElement;
+const allowAllBanner = document.getElementById("allow-all-banner") as HTMLDivElement;
 const sites = document.getElementById("sites") as HTMLUListElement;
 const sitesEmpty = document.getElementById("sites-empty") as HTMLParagraphElement;
+const sitesSuperseded = document.getElementById("sites-superseded") as HTMLParagraphElement;
 const pairStatus = document.getElementById("pair-status") as HTMLParagraphElement;
 const confirm = document.getElementById("confirm") as HTMLParagraphElement;
 
@@ -45,14 +52,50 @@ async function renderStatus(): Promise<void> {
   }
 }
 
+// The all-sites switch's view state. Kept here rather than re-read from
+// storage per event because the dialog-open state (switch shown on, nothing
+// written) exists only in this page.
+let allowAllState: AllowAllView = allowAllView(false);
+let allowAllStored = false;
+
+function paintAllowAll(view: AllowAllView): void {
+  allowAllState = view;
+  allowAll.checked = view.switchOn;
+  allowAllAck.checked = view.acked;
+  allowAllEnable.disabled = !view.acked;
+  allowAllBanner.classList.toggle("hidden", !view.banner);
+  if (view.dialogOpen && !allowAllDialog.open) allowAllDialog.showModal();
+  if (!view.dialogOpen && allowAllDialog.open) allowAllDialog.close();
+}
+
+/** Run one action through the state machine and persist its write, if any.
+ * This is the ONLY writer of `allowAllSites`: a plain storage write from the
+ * options page, with no worker message or daemon RPC equivalent, so nothing
+ * an agent can call is able to flip it. */
+async function applyAllowAll(action: AllowAllAction): Promise<void> {
+  const view = nextAllowAllView(allowAllStored, action, allowAllState);
+  if (view.write !== undefined) {
+    await chrome.storage.local.set({ allowAllSites: view.write });
+    allowAllStored = view.write;
+    flash(view.write ? "All websites are now allowed." : "Site prompts are back on.");
+  }
+  paintAllowAll(view);
+}
+
 async function render(): Promise<void> {
   const local = await getLocal();
   const { port: saved = DEFAULT_PORT, origins = {} } = local;
   port.value = String(saved);
+  allowAllStored = local.allowAllSites === true;
+  paintAllowAll(allowAllView(allowAllStored));
   await renderStatus();
   sites.replaceChildren();
-  const entries = grantRows(origins, local.hostGrants);
-  sitesEmpty.classList.toggle("hidden", entries.length > 0);
+  const entries = grantRows(origins, local.hostGrants, local.siteGrants);
+  // While every website is allowed these rows grant nothing extra, so the
+  // empty note would tell a user hunting for the off-switch that nothing is
+  // granted while the agent in fact has every site (U2).
+  sitesSuperseded.classList.toggle("hidden", !allowAllStored);
+  sitesEmpty.classList.toggle("hidden", entries.length > 0 || allowAllStored);
   for (const entry of entries) {
     const row = document.createElement("li");
     const name = document.createElement("span");
@@ -62,10 +105,7 @@ async function render(): Promise<void> {
     remove.textContent = "Remove";
     remove.setAttribute("aria-label", removeGrantAccessibleName(entry));
     remove.addEventListener("click", async () => {
-      const message = entry.scope === "host"
-        ? { event: "host_grant_revoke", canonicalKey: entry.key }
-        : { event: "origin_grant_revoke", origin: entry.key };
-      const result = await runWorkerMutation(message, `Removed ${entry.label}.`);
+      const result = await runWorkerMutation(revokeMessageFor(entry), `Removed ${entry.label}.`);
       flash(result.message);
       if (result.ok) await render();
     });
@@ -83,6 +123,24 @@ port.addEventListener("change", async () => {
     flash("Port must be a number between 1024 and 65535.");
     await render();
   }
+});
+
+allowAll.addEventListener("change", () => void applyAllowAll({ type: "toggle", checked: allowAll.checked }));
+allowAllAck.addEventListener("change", () => void applyAllowAll({ type: "ack", checked: allowAllAck.checked }));
+allowAllEnable.addEventListener("click", () => void applyAllowAll({ type: "enable" }));
+document.getElementById("allow-all-cancel")?.addEventListener("click", () => void applyAllowAll({ type: "cancel" }));
+// Escape fires `cancel` on a modal dialog; route it through the same revert
+// so the switch never stays on without a write behind it.
+allowAllDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  void applyAllowAll({ type: "cancel" });
+});
+document.getElementById("allow-all-banner-off")?.addEventListener("click", () => void applyAllowAll({ type: "turn_off" }));
+// The same exit from inside the Allowed sites card, where a user looking for
+// what to revoke actually lands (U2).
+document.getElementById("sites-superseded-off")?.addEventListener("click", async () => {
+  await applyAllowAll({ type: "turn_off" });
+  await render();
 });
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
