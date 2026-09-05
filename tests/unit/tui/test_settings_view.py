@@ -4827,7 +4827,7 @@ async def test_master_on_detail_says_no_limits_or_the_would_remove_count(
         _select(view, "session.cleanup.enabled")
         detail = view.render_lines_for_test()[-1]
         # 15 sessions all 40 d idle; the 10 most recent are spared -> 5.
-        assert "would remove 5 now" in detail and "--dry-run" in detail, detail
+        assert "would remove 5 at next launch" in detail and "--dry-run" in detail, detail
 
 
 @pytest.mark.asyncio

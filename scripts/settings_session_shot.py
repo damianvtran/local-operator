@@ -45,11 +45,29 @@ async def main() -> None:
         )
         toggle = False
     if mode == "armed":
+        # SEEDED, never empty: an empty-store frame showed `would remove 0`
+        # and proved nothing (design round 2, D7). 15 real 40-day transcripts
+        # + 3 empties, `max_inactive_days: 7` -> the 10 most recent are
+        # spared, so the honest number is 5.
+        import os
+        import time
+
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
+        from local_operator.session.cleanup import mark_store
 
+        sessions = config_dir() / "sessions"
+        mark_store(sessions)
+        old = time.time() - 40 * 86400
+        for index in range(15):
+            directory = sessions / f"s{index:02d}"
+            directory.mkdir(exist_ok=True)
+            (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+            os.utime(directory / "transcript.jsonl", (old + index, old + index))
+        for index in range(3):
+            (sessions / f"e{index:02d}").mkdir(exist_ok=True)
         ConfigManager(config_dir()).update_config(
-            {"session": {"cleanup": {"enabled": True, "max_sessions": 5}}}
+            {"session": {"cleanup": {"enabled": True, "max_inactive_days": 7}}}
         )
         toggle = False
     if mode == "expand":

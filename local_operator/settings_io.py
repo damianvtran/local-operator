@@ -778,7 +778,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Session cleanup",
         kind=Kind.BOOL,
         default=False,
-        help="Off: nothing is ever removed. On: limits below run at launch, sparing recent/live.",
+        help=(
+            "Off: nothing is ever removed. "
+            "On: limits below run at launch, sparing the newest 10 + live."
+        ),
         choices=_bool_choices(
             "limits run at launch; newest 10 + live kept",
             "nothing is ever removed",

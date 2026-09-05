@@ -3200,29 +3200,43 @@ class SettingsView(Vertical):
             clause = self._detail_clause(row)
             key_suffix = f"   {row.setting.key}"
             key_style = Style(color=theme_mod.semantic_color("dim"))
-            # `default: N` is the one new fact the gating adds; faint (#4a4539)
-            # was 1.97:1 on the page ground. `dim` is already the key-path
-            # ink (4.55:1) and does not invent a colour (design round 1, D3).
+            # A STATE clause (`default: N`, `would remove N…`, `inert: …`,
+            # `on, but no limits…`) is a fact about the config, not help
+            # noise: it takes the `dim` rung (4.55:1, the key-path ink),
+            # never faint (1.97:1) — often it is the only text on the line
+            # (design round 1 D3, round 2 D9). CHOOSING's "not saved until
+            # enter" keeps faint: it is an instruction, and the expansion
+            # above it is already the loud thing.
             clause_style = (
-                Style(color=theme_mod.semantic_color("dim"))
-                if clause.startswith("default:")
-                else faint
+                faint
+                if clause == "not saved until enter"
+                else Style(color=theme_mod.semantic_color("dim"))
             )
             width = self._detail_width()
             help_text = row.setting.help
+            # Shed order: help, then the key path, then the clause. The
+            # clause is the safety-relevant fact ("would remove 9 at next
+            # launch") and at 80 cols it was the FIRST thing dropped because
+            # the key path was kept ahead of it — for a row whose key the
+            # user is looking at (design round 2, D7).
             if clause:
                 both = cell_len(help_text) + cell_len(f" · {clause}") + cell_len(key_suffix)
-                clause_only = cell_len(clause) + cell_len(key_suffix)
+                clause_and_key = cell_len(clause) + cell_len(key_suffix)
                 if both <= width:
                     text.append(help_text, style=faint)
                     text.append(f" · {clause}", style=clause_style)
-                elif clause_only <= width:
+                    text.append(key_suffix, style=key_style)
+                elif clause_and_key <= width:
+                    text.append(clause, style=clause_style)
+                    text.append(key_suffix, style=key_style)
+                elif cell_len(clause) <= width:
                     text.append(clause, style=clause_style)
                 else:
                     text.append(help_text, style=faint)
+                    text.append(key_suffix, style=key_style)
             else:
                 text.append(help_text, style=faint)
-            text.append(key_suffix, style=key_style)
+                text.append(key_suffix, style=key_style)
         self._detail_text = text
         self._detail.update(text)
 
@@ -3276,8 +3290,8 @@ class SettingsView(Vertical):
 
         * child with master OFF → ``inert: <master label> is off``;
         * master ON with no limits → ``on, but no limits set below``;
-        * master ON with limits → ``would remove N now · preview: lop
-          sessions cleanup --dry-run``.
+        * master ON with limits → ``would remove N at next launch · preview:
+          lop sessions cleanup --dry-run``.
 
         The count is computed lazily and cached against the cleanup values,
         never on every repaint: a store walk per keystroke would make the
@@ -3295,7 +3309,7 @@ class SettingsView(Vertical):
         count = self._cleanup_preview_count()
         if count is None:
             return "on, but no limits set below"
-        return f"would remove {count} now · preview: lop sessions cleanup --dry-run"
+        return f"would remove {count} at next launch · preview: lop sessions cleanup --dry-run"
 
     def _cleanup_preview_count(self) -> int | None:
         """How many sessions the configured policy would remove at next

@@ -578,3 +578,59 @@ def test_module_has_exactly_one_rmtree() -> None:
 
     source = inspect.getsource(cleanup)
     assert source.count("shutil.rmtree(") == 1
+
+
+# ---------------------------------------------------------------------------
+# The launch notice (UX round 1, U1 second half)
+# ---------------------------------------------------------------------------
+
+
+def test_a_removing_startup_pass_leaves_a_last_cleanup_record(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import (
+        LAST_CLEANUP_NAME,
+        cleanup_from_config,
+        take_unannounced_cleanup,
+    )
+
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    _session(tmp_path, "doomed", transcript=False, age_days=400)
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"session": {"cleanup": {"enabled": True, "remove_empty": True}}})
+    result = cleanup_from_config(ConfigManager(tmp_path), tmp_path)
+    assert [c.session for c in result.removed] == ["doomed"]
+    record = json.loads((tmp_path / "sessions" / LAST_CLEANUP_NAME).read_text())
+    assert record["removed"] == 1 and record["policies"] == {"remove_empty": 1}
+    assert record["actor"] == "startup" and record["acknowledged"] is False
+    # First reader takes it; second reader gets nothing — one announcement.
+    taken = take_unannounced_cleanup(tmp_path / "sessions")
+    assert taken is not None and taken["removed"] == 1
+    assert take_unannounced_cleanup(tmp_path / "sessions") is None
+    assert json.loads((tmp_path / "sessions" / LAST_CLEANUP_NAME).read_text())["acknowledged"]
+
+
+def test_a_pass_that_removed_nothing_writes_no_record(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import LAST_CLEANUP_NAME, cleanup_from_config
+
+    _store(tmp_path, 12, transcript=True, age_days=1)
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": True, "remove_empty": True}}}
+    )
+    result = cleanup_from_config(ConfigManager(tmp_path), tmp_path)
+    assert result.removed == []
+    assert not (tmp_path / "sessions" / LAST_CLEANUP_NAME).exists()
+
+
+def test_the_notice_names_count_policy_record_and_preview() -> None:
+    from local_operator.session.cleanup import format_cleanup_notice
+
+    text = format_cleanup_notice(
+        {
+            "removed": 9,
+            "policies": {"max_inactive_days": 7, "remove_empty": 2},
+            "record": os.path.expanduser("~/.local-operator/sessions/.cleanup-log.jsonl"),
+        }
+    )
+    assert text.startswith("session cleanup removed 9 sessions at launch")
+    assert "7 by max_inactive_days" in text and "2 by remove_empty" in text
+    assert "~/.local-operator/sessions/.cleanup-log.jsonl" in text
+    assert "lop sessions cleanup --dry-run" in text and "/settings" in text

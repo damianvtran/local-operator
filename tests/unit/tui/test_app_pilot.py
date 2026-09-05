@@ -11048,3 +11048,50 @@ async def test_a_bang_command_carries_the_conversation_title_to_its_tools() -> N
     session.set_conversation_name("Renamed mid-command")
     assert context.session_name_provider is not None
     assert context.session_name_provider() == "Renamed mid-command"
+
+
+@pytest.mark.asyncio
+async def test_a_boot_that_removed_sessions_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1, U1 (second half): a launch whose cleanup pass removed
+    sessions must not paint an identical splash — the incident's shape. The
+    pass runs in the runtime, in the background, after the first frame, and
+    the TUI may be a viewer, so the fact travels via
+    ``sessions/last-cleanup.json``: written by the removing pass, announced
+    by the first viewer to adopt, then acknowledged so a second boot (or a
+    ``/resume`` in another terminal) does not repeat it."""
+    from local_operator.session.cleanup import (
+        Candidate,
+        CleanupResult,
+        mark_store,
+        write_last_cleanup,
+    )
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    result = CleanupResult(scanned=19)
+    result.removed = [Candidate("e00", "remove_empty", "no transcript")] * 3
+    write_last_cleanup(sessions, result, actor="startup")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        notices: list[str] = []
+        for _ in range(10):
+            await pilot.pause()
+            notices = [b.text() or "" for b in app.query(NoticeBlock)]
+            if any("session cleanup removed 3 sessions at launch" in t for t in notices):
+                break
+        else:
+            raise AssertionError(f"no launch notice: {notices}")
+        assert any("3 by remove_empty" in t and "--dry-run" in t for t in notices)
+        # The notice is a system notice: the empty state is intact.
+        assert app._welcome_visible is True
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(5):
+            await pilot.pause()
+        assert not [b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")]

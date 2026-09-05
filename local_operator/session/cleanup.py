@@ -119,6 +119,21 @@ STORE_MARKER_NAME = ".local-operator-store"
 #: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
 
+#: The LAST startup removal, as one JSON object beside the log: ``{"at",
+#: "actor", "pid", "removed": N, "scanned": N, "policies": {name: count},
+#: "record": path, "acknowledged": bool}``. Written only by a pass that
+#: removed ≥1 session; overwritten by the next such pass. This is how a boot
+#: that removed sessions gets to SAY SO on screen: the maintenance pass runs
+#: in the runtime process, after the first frame, and the TUI may be a
+#: viewer attached over a socket — so the fact is put on disk where every
+#: viewer of that store can read it, and the first one to report it flips
+#: ``acknowledged`` so the same removal is announced once, not on every
+#: ``/resume``. Deliberately a file, not a notification bus: one fact, one
+#: reader shape, durable across the process that produced it (UX round 1,
+#: U1; the incident's launches painted an identical splash after 225
+#: removals).
+LAST_CLEANUP_NAME = "last-cleanup.json"
+
 #: The N most recently active sessions are never candidates, whatever the
 #: policy says. 10 matches the resume picker's first page: a session the user
 #: can see at the top of ``/resume`` must not vanish between two launches.
@@ -703,4 +718,71 @@ def cleanup_from_config(
             result.scanned,
             config_dir / SESSIONS_DIRNAME / CLEANUP_LOG_NAME,
         )
+        write_last_cleanup(config_dir / SESSIONS_DIRNAME, result, actor="startup")
     return result
+
+
+def write_last_cleanup(sessions_dir: Path, result: CleanupResult, *, actor: str) -> None:
+    """Record a removing pass in :data:`LAST_CLEANUP_NAME` for the TUI to announce."""
+    policies: dict[str, int] = {}
+    for candidate in result.removed:
+        policies[candidate.policy] = policies.get(candidate.policy, 0) + 1
+    payload = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "actor": actor,
+        "pid": os.getpid(),
+        "removed": len(result.removed),
+        "scanned": result.scanned,
+        "policies": policies,
+        "record": str(sessions_dir / CLEANUP_LOG_NAME),
+        "acknowledged": False,
+    }
+    try:
+        (sessions_dir / LAST_CLEANUP_NAME).write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("session cleanup: cannot write %s: %s", LAST_CLEANUP_NAME, exc)
+
+
+def take_unannounced_cleanup(sessions_dir: Path) -> dict[str, Any] | None:
+    """The last removing pass if no viewer has announced it yet, marking it
+    announced; ``None`` otherwise.
+
+    Read-then-rewrite without a lock: two viewers adopting the same store in
+    the same instant could both announce, which is the harmless direction.
+    A malformed or unreadable file is treated as "nothing to announce" — the
+    jsonl and the WARNING still hold the facts.
+    """
+    path = sessions_dir / LAST_CLEANUP_NAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("acknowledged") or not payload.get("removed"):
+        return None
+    payload["acknowledged"] = True
+    try:
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+    return payload
+
+
+def format_cleanup_notice(payload: dict[str, Any]) -> str:
+    """The one-line transcript notice for a removing pass."""
+    removed = int(payload.get("removed") or 0)
+    policies = payload.get("policies") or {}
+    by = ", ".join(f"{count} by {name}" for name, count in sorted(policies.items()))
+    noun = "session" if removed == 1 else "sessions"
+    record = str(payload.get("record") or CLEANUP_LOG_NAME)
+    home = os.path.expanduser("~")
+    if record.startswith(home + os.sep):
+        record = "~" + record[len(home) :]
+    return (
+        f"session cleanup removed {removed} {noun} at launch"
+        + (f" ({by})" if by else "")
+        + f" — record: {record}"
+        + " · preview next time: lop sessions cleanup --dry-run"
+        + " · turn off: /settings › Session cleanup"
+    )

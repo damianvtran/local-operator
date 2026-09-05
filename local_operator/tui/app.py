@@ -1564,6 +1564,15 @@ class _HeldAnswerKey:
 
 RESIZE_REFIT_DELAY_S = 0.05
 
+#: How long after adoption to re-check ``sessions/last-cleanup.json``. The
+#: startup cleanup pass is dispatched at session construction and waits
+#: ``session_factory._STORE_MAINTENANCE_IDLE_DELAY_SECONDS`` (0.75 s) before
+#: touching the disk, then walks the store; the recheck must land after that
+#: on a large store yet soon enough that the notice is still "at launch".
+#: Generous rather than tight: a late notice is still a notice, a missed one
+#: is the incident's silent splash.
+STARTUP_CLEANUP_RECHECK_S = 5.0
+
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
 #: is wide enough for the boot input to read as a CARD rather than as a bar. It
 #: is a measurement, not a mode — see ``OperatorApp._sync_boot_card``.
@@ -3290,6 +3299,13 @@ class OperatorApp(App[None]):
         # `_render_resumed_history` no-ops there, so the boot splash is
         # untouched and the notice still lands under it.
         self._report_attachment_restore(session)
+        # A launch that removed sessions must SAY SO on this screen. Checked
+        # now (a viewer attaching to a runtime that already ran its pass) and
+        # again after the pass's idle window (this process's own pass runs in
+        # the background AFTER the first frame). Both read one file; the
+        # first to find it unacknowledged announces it.
+        self._report_startup_cleanup()
+        self.set_timer(STARTUP_CLEANUP_RECHECK_S, self._report_startup_cleanup)
         # AFTER the history is on screen, because that is where the fallback
         # label comes from: a session resumed from a transcript written before
         # titles were journalled has no stored name to restore, and the band
@@ -7746,6 +7762,34 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    def _report_startup_cleanup(self) -> None:
+        """Announce a startup cleanup pass that removed sessions, once.
+
+        The pass runs in the runtime process, in the background, after the
+        first frame — so neither "the session object" nor "this process" is a
+        place the fact reliably lives when the TUI paints. It lives on disk:
+        ``sessions/last-cleanup.json``, written by the removing pass and
+        flipped to acknowledged by the first viewer that reports it (see
+        ``session.cleanup.take_unannounced_cleanup``). Routed through
+        :meth:`_system_notice` so it lands under the splash without ending the
+        empty state, the same channel an MCP startup failure uses; WARNING
+        kind because sessions are gone, whatever the policy said.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import (
+            SESSIONS_DIRNAME,
+            format_cleanup_notice,
+            take_unannounced_cleanup,
+        )
+
+        try:
+            payload = take_unannounced_cleanup(config_dir() / SESSIONS_DIRNAME)
+        except Exception:  # noqa: BLE001 — a notice must never take the app down
+            return
+        if payload is None:
+            return
+        self._system_notice(format_cleanup_notice(payload), "warning")
 
     def _report_attachment_restore(self, session: SessionProtocol) -> None:
         """Say so when a resumed session's team/agent could not be re-attached.
