@@ -368,6 +368,24 @@ upstream's supported system-disabled mode. Only the exact lowercase strings
 `prepare`, before provider construction or allocation, even before a task is
 loaded. This is apparatus policy, not a task edit or a task-ID exception.
 
+For episodes that also need simulator configuration, the generic CLI accepts
+an optional per-value purpose prefix, without changing the global default:
+
+```sh
+--infra-purpose benchmark_compute \
+  --infra AWS_REGION=us-east-1 \
+  --infra benchmark_compute:OSWORLD_ENABLE_PROXY=false \
+  --infra benchmark_user_simulator:OSWORLD_USER_SIM_MODEL=<simulator-model>
+```
+
+Legacy `NAME=VALUE` entries still use `--infra-purpose` (default
+`benchmark_compute`). A prefix applies only to that entry. Unknown purposes,
+empty names/values, and conflicting entries for the same name (including across
+scopes) fail cleanly before selector loading/allocation without printing their
+values; identical duplicates coalesce. Purpose-prefixed policy and hardware
+inputs receive the same manifest disclosures as unprefixed inputs. Values stay
+non-secret; simulator API keys still travel through the existing secret path.
+
 Omitting the value preserves the adapter's existing behavior:
 `enable_proxy=bool(task.proxy)`. Explicit `true` sets the upstream system switch
 on; upstream still combines it with the task's proxy hint. Explicit `false`

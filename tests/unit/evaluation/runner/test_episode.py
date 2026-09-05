@@ -1506,7 +1506,8 @@ def test_an_undisclosed_infra_value_is_never_stamped() -> None:
     import scripts.run_episode as run_episode
 
     assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {}
-    assert run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"]) == {}
+    with pytest.raises(ValueError, match="--infra expects"):
+        run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"])
     assert run_episode._infra_disclosure_metadata([]) == {}
     # Both at once, each under its own key.
     assert run_episode._infra_disclosure_metadata(

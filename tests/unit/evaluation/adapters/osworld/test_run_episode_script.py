@@ -485,7 +485,9 @@ def test_a_root_volume_override_is_disclosed_in_the_sealed_manifest(
             "--infra",
             "AWS_INSTANCE_TYPE=m5.xlarge",
             "--infra",
-            "OSWORLD_ENABLE_PROXY=false",
+            "benchmark_compute:OSWORLD_ENABLE_PROXY=false",
+            "--infra",
+            "benchmark_user_simulator:OSWORLD_USER_SIM_MODEL=synthetic-simulator",
         ],
         {"AWS_ACCESS_KEY_ID": CANARY_KEY, "AWS_SECRET_ACCESS_KEY": CANARY_SECRET},
     )
