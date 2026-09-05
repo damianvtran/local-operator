@@ -41,7 +41,8 @@ relay; macOS Keychain passwords need no extra copy. On other platforms, run
 `lop tunnel serve` in the foreground. User services run while that user is
 logged in; the OS's own user-service policy controls availability after logout.
 
-If you created a tunnel in the Radient console, use `lop tunnel connect <id>`
+If you created a tunnel in the [Radient console](https://console.radienthq.com/dashboard/tunnels),
+use `lop tunnel connect <id>`
 on the computer that will host it. This prepares the relay and starts the
 connector service. Use `--no-start` to save its configuration only. A local connector
 is pinned to the selected Radient OAuth credential. With several Radient
@@ -89,8 +90,9 @@ cookie nor an OpenCode password is sent to the browser.
   configuration; it is not a billing cancellation or cloud revocation.
 
 The balance hard floor is USD -1. Billing suspension blocks remote access and
-preserves tunnel configuration. Add credit and reactivate through the Radient
-console; the installed service retries every 10 seconds and reconnects once
+preserves tunnel configuration. Add credit and reactivate through the
+[Radient console](https://console.radienthq.com/dashboard/tunnels); the installed service
+retries every 10 seconds and reconnects once
 eligible. `lop tunnel billing` reports the amount due and current quote. A
 stopped or suspended tunnel does not stop work already running locally.
 

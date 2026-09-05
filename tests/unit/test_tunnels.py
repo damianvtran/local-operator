@@ -22,7 +22,12 @@ from local_operator.mobile.auth import COOKIE_NAME, verify_cookie
 from local_operator.providers.auth_store import AuthStore
 from local_operator.tunnels import config
 from local_operator.tunnels.arguments import add_parser
-from local_operator.tunnels.cli import _ensure_billing, dispatch
+from local_operator.tunnels.cli import (
+    _billing_summary,
+    _ensure_billing,
+    _summary,
+    dispatch,
+)
 from local_operator.tunnels.gateway import MAX_BODY_BYTES, PROOF_HEADER, Gateway
 from local_operator.tunnels.service import active
 
@@ -358,6 +363,21 @@ async def test_billing_requires_current_exact_price_and_no_silent_activation():
     assert (await _ensure_billing(api, "3.25"))["eligible"] is True
     assert api.request.call_args.args == ("POST", "/billing/activate")
     assert api.request.call_args.kwargs["body"] == {"accepted_monthly_price_usd": 3.25}
+
+
+def test_billing_and_suspension_receipts_link_to_console_management_route():
+    quote = {
+        "monthly_price_usd": 1,
+        "monthly_cost_usd": 0.2,
+        "balance_usd": -1,
+        "amount_due_usd": 1,
+    }
+    for receipt in (
+        _billing_summary(quote),
+        _summary({"id": "fixture", "status": "suspended"}),
+    ):
+        assert "https://console.radienthq.com/dashboard/tunnels" in receipt
+        assert "https://console.radienthq.com/tunnels" not in receipt
 
 
 @pytest.mark.asyncio

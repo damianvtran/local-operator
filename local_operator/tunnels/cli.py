@@ -64,7 +64,8 @@ def _summary(record: dict[str, Any]) -> str:
     ):
         lines.append("Tunnel billing is suspended.")
         lines.append(
-            "Add Radient credit and reactivate from https://console.radienthq.com/tunnels."
+            "Add Radient credit and reactivate from "
+            "https://console.radienthq.com/dashboard/tunnels."
         )
     return "\n".join(lines)
 
@@ -75,7 +76,7 @@ def _billing_summary(quote: dict[str, Any]) -> str:
         f"Monthly tunnel price: USD {quote['monthly_price_usd']}\n"
         f"Radient balance: USD {quote['balance_usd']}\n"
         f"Amount due: USD {quote['amount_due_usd']}\n"
-        "Billing and credit: https://console.radienthq.com/tunnels"
+        "Billing and credit: https://console.radienthq.com/dashboard/tunnels"
     )
 
 
