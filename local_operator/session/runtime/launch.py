@@ -184,7 +184,7 @@ def _lease_holder(config_dir: Path, session_id: str) -> int | None:
 
 def _spawn_runtime(
     session_id: str, cwd: str, *, defer_materialise: bool
-) -> tuple["subprocess.Popen[bytes]", Path]:
+) -> "subprocess.Popen[bytes]":
     """Start one detached runtime candidate for ``session_id``.
 
     Returns the ``Popen`` so the engage loop can tell a candidate that is
@@ -193,7 +193,8 @@ def _spawn_runtime(
     (no lease) is true of a perfectly healthy candidate — so liveness of the
     process we spawned is the only sound death signal (round 2, Q8).
 
-    Also returns the path its stdio was captured to. Both streams USED to go
+    Its stdio is CAPTURED to a file, recorded on the returned object as
+    ``lop_capture_path``. Both streams used to go
     to ``DEVNULL``, which made a candidate that died before
     ``logging.basicConfig`` ran completely silent — the failure had no
     traceback, no message and no exit reason anywhere on the system, so a
@@ -201,6 +202,8 @@ def _spawn_runtime(
     silence is what turned a clear "hosting is not configured" into a
     30-second wait and an unexplained 503 (QA Q1).
 
+    The path rides on the Popen rather than widening the return type, so every
+    existing caller and test double keeps working with a plain process object.
     The file is small, per-candidate, and unlinked as soon as it is read.
 
     Only routing data enters the environment — prompt text, images and command
@@ -233,7 +236,8 @@ def _spawn_runtime(
         # The child holds its own duplicated descriptor; this one is ours to
         # drop so the file is not kept open for the life of the server.
         handle.close()
-    return process, capture
+    setattr(process, "lop_capture_path", capture)
+    return process
 
 
 #: Upper bound on captured child output quoted back to a caller. Enough for a
@@ -416,9 +420,10 @@ async def engage_runtime(
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
             elif not spawned:
                 logger.debug("engage: spawning a runtime for %s", session_id)
-                candidate, capture = await asyncio.to_thread(
+                candidate = await asyncio.to_thread(
                     _spawn_runtime, session_id, cwd, defer_materialise=defer
                 )
+                capture = getattr(candidate, "lop_capture_path", None)
                 spawned = True
                 spawns += 1
             elif candidate is not None and candidate.poll() is not None:
@@ -456,9 +461,10 @@ async def engage_runtime(
                     candidate.returncode,
                     spawn_reason or "no output captured",
                 )
-                candidate, capture = await asyncio.to_thread(
+                candidate = await asyncio.to_thread(
                     _spawn_runtime, session_id, cwd, defer_materialise=defer
                 )
+                capture = getattr(candidate, "lop_capture_path", None)
                 spawns += 1
 
         if (
