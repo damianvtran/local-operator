@@ -34,6 +34,7 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    desktop_sessions,
     health,
     jobs,
     models,
@@ -125,6 +126,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if desktop_auth is not None:
         await desktop_auth.close()
         app.state.desktop_auth = None
+    desktop_sessions_host = getattr(app.state, "desktop_sessions", None)
+    if desktop_sessions_host is not None:
+        await desktop_sessions_host.close()
+        app.state.desktop_sessions = None
+    app.state.desktop_receipts = None
     await app.state.scheduler_service.shutdown()
 
     app.state.credential_manager = None
@@ -195,6 +201,7 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
 app.include_router(capabilities.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
+app.include_router(desktop_sessions.router)
 
 # Add CORS middleware
 app.add_middleware(

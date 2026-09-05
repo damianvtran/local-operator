@@ -111,7 +111,9 @@ class ContinuationCommand:
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session_id must be a non-empty string")
         text = data.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str) or (
+            not text.strip() and not _has_image_data(data.get("images"))
+        ):
             raise ValueError("text must be a non-empty string")
         images = data.get("images", [])
         if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
@@ -128,6 +130,21 @@ class ContinuationCommand:
         )
 
 
+def _has_image_data(images: Any) -> bool:
+    """An image-only user turn is real input, not an empty command.
+
+    Match the existing decoder's two data spellings without fabricating user
+    text. A malformed/empty image placeholder must not turn an empty prompt into
+    an admission; text-bearing legacy prompts keep their tolerant image decoder.
+    """
+    return isinstance(images, list) and any(
+        isinstance(image, dict)
+        and isinstance(data := image.get("data_b64") or image.get("data"), str)
+        and bool(data.strip())
+        for image in images
+    )
+
+
 def validate_control_frame(frame: dict[str, Any]) -> None:
     """Reject malformed authenticated mutations before dispatch side effects."""
     if not isinstance(frame, dict):
@@ -137,7 +154,9 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         raise ValueError("op must be a non-empty string")
     if op in ("prompt", "steer"):
         text = frame.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str) or (
+            not text.strip() and not _has_image_data(frame.get("images"))
+        ):
             raise ValueError("text must be a non-empty string")
         images = frame.get("images", [])
         if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
