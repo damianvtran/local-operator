@@ -78,8 +78,11 @@ run setup/evaluate, or scan anything on normal CLI/TUI startup. Stdlib imports
 are admitted; `TYPE_CHECKING` bodies are skipped; imports guarded by an import
 error handler are optional by upstream's contract. Third-party dynamic aliases
 (such as `requests.packages`) are checked by distribution import root, not as
-on-disk submodules. This cheap static presence check is not a general Python
-execution or evaluator-correctness proof.
+on-disk submodules. For pinned upstream package `from` imports, initializer
+source declarations distinguish required child modules from ordinary exported
+values; explicit re-exports also require their providing module. Initializers
+are parsed, never executed. This cheap static presence check is not a general
+Python execution or evaluator-correctness proof.
 
 The release census has 94 mandatory module paths with no missing dependency in
 the locked environment. Task 057 alone names absent `lpips`/`torch`, inside an

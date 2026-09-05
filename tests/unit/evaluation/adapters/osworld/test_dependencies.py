@@ -100,6 +100,44 @@ def test_preflight_traverses_packaged_helpers(monkeypatch: pytest.MonkeyPatch) -
     assert "typing" in checked
 
 
+def _runtime_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    package = tmp_path / "desktop_env" / "evaluators"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("raise RuntimeError('parent executed')")
+    (package / "__init__.py").write_text("raise RuntimeError('evaluators executed')")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return package
+
+
+def test_runtime_from_imports_preserve_exports_and_reexports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _runtime_package(tmp_path, monkeypatch)
+    (package / "__init__.py").write_text(
+        "CONSTANT = 1\ndef function(): pass\nclass Class: pass\n"
+        "from .existing import exported\nfrom . import missing_module\n"
+        "raise RuntimeError('initializer executed')\n"
+    )
+    (package / "existing.py").write_text("exported = 1\n")
+    dependencies.validate_task_dependencies(
+        "from desktop_env.evaluators import CONSTANT, function, Class, exported"
+    )
+    with pytest.raises(dependencies.MissingTaskDependencies, match="evaluators.missing_module"):
+        dependencies.validate_task_dependencies("from desktop_env.evaluators import missing_module")
+
+
+def test_runtime_from_imports_keep_type_only_and_guarded_leaves_optional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _runtime_package(tmp_path, monkeypatch)
+    dependencies.validate_task_dependencies(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n from desktop_env.evaluators import absent_type\n"
+        "try:\n from desktop_env.evaluators import absent_optional\n"
+        "except ImportError:\n pass\n"
+    )
+
+
 @pytest.mark.asyncio
 async def test_missing_helper_stops_before_provider_construction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, episode_id: str
@@ -114,9 +152,15 @@ async def test_missing_helper_stops_before_provider_construction(
         _workspace,
     )
 
+    package = _runtime_package(tmp_path, monkeypatch)
+    (package / "getters").mkdir()
+    (package / "getters/__init__.py").write_text("raise RuntimeError('getters executed')")
     workspace = _workspace(
         tmp_path,
-        {"task_plain": fixtures.PLAIN + "\nimport absent_runtime_dependency\n"},
+        {
+            "task_plain": fixtures.PLAIN
+            + "\nfrom evaluation_examples.task_class.generated_task_utils import call_metric\n"
+        },
         provider={"provider": "aws"},
     )
     adapter = OSWorldV2Adapter(workspace_root=workspace)
@@ -126,7 +170,9 @@ async def test_missing_helper_stops_before_provider_construction(
         pytest.fail("provider construction reached before packaging preflight")
 
     monkeypatch.setattr(adapter, "_build_provider", forbidden)
-    with pytest.raises(dependencies.MissingTaskDependencies, match="absent_runtime_dependency"):
+    with pytest.raises(
+        dependencies.MissingTaskDependencies, match="desktop_env.evaluators.metrics"
+    ):
         await adapter.reset_start(_reset(episode_id, "task_plain", tmp_path, _AWS_SECRETS))
 
 
