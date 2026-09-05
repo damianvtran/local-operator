@@ -38,6 +38,7 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
+from local_operator.session.goal_loop import LOOP_REASON_CHARS, MAX_LOOP_ITERATIONS
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
@@ -308,6 +309,13 @@ _BOUNDED_COLLECTION_FIELDS = {
     # REPLACED on each wiring round rather than appended to, and its size is a
     # function of how many servers are configured.
     "mcp_startup": "one MCP wiring report; replaced, never appended",
+    # A FIXED set of five scalar keys (status/completed/goal/iterations/reason),
+    # REPLACED on each publish rather than appended to, so it does not grow with
+    # iteration count: a 100-iteration loop and a 1-iteration loop serialize the
+    # same shape, only `completed` differs. Its one free-text value, the judge's
+    # `reason`, is clipped at LOOP_REASON_CHARS where it is parsed, and `goal` is
+    # the user's own typed slash argument.
+    "loop": "five scalar keys, replaced per publish; judge reason clipped at parse",
 }
 
 #: Fields that grow with use and are therefore bounded HERE, by this module.
@@ -406,6 +414,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],
         "mcp_startup": {f"server-{index}": {"error": "e" * 200} for index in range(200)},
+        # A loop at the iteration ceiling with its judge reason at the clip.
+        # Filled at the BOUND rather than past it, because that is the largest
+        # value the producer can actually publish: the key set is fixed and
+        # `_parse_loop_verdict` clips the one free-text value, so a bigger
+        # fixture here would assert against a state the runtime cannot reach.
+        "loop": {
+            "status": "running",
+            "completed": MAX_LOOP_ITERATIONS,
+            "iterations": MAX_LOOP_ITERATIONS,
+            "goal": "g" * 2_000,
+            "reason": "r" * LOOP_REASON_CHARS,
+        },
         "slash_capabilities": [],
         "model_catalogue": [
             {"provider": "p", "model_id": f"model-{index}", "context_window": 200_000}
