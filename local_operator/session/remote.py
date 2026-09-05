@@ -318,6 +318,10 @@ class RemoteSession:
         # preserving adoption callback completes. Keystrokes remain editable in
         # the standard composer throughout — no attach/recovery UI state.
         self._owner_ready = asyncio.Event()
+        # Socket delivery can outrun the coroutine installing its initial sync.
+        # Buffer that suffix until its epoch, rather than the cold disk epoch,
+        # is authoritative. None means the canonical boundary is installed.
+        self._pending_frontend_updates: list[FrontendUpdate] | None = None
         self._takeover_target: Any | None = None
         self._streaming = False
         self._generation = 0
@@ -961,8 +965,8 @@ class RemoteSession:
 
     @property
     def is_cold(self) -> bool:
-        """No runtime is attached (nor being attached) for this viewer."""
-        return self._client is None or not self._client.connected
+        """No fully synchronized runtime is attached to this viewer."""
+        return self._client is None or not self._client.connected or not self._ready_for_events
 
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
@@ -979,10 +983,13 @@ class RemoteSession:
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
         """
-        if not self._can_go_cold or not self.is_cold or self._disposed:
+        # Recovery already owns its dial/sync and signals _owner_ready. A
+        # prompt or steer must wait on that promise, not start a competing
+        # initial attachment merely because its connected socket is not ready.
+        if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
             return
         async with self._bind_lock:
-            if not self.is_cold or self._disposed:
+            if not self.is_cold or self._disposed or self._recovering:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -1021,18 +1028,26 @@ class RemoteSession:
         boundary, which is what stops the rows already on screen from painting
         a second time.
         """
-        await self._dial(record)
         try:
+            await self._dial(record)
             frontend = await self._await_frontend()
+            if self._disposed:
+                raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
             await self._load_history(frontend.live_cursor)
+            if self._disposed:
+                raise ConnectionError("viewer disposed while synchronizing")
+            self._finish_sync()
+            self._deliberate_stop = False
+            self._stopped_announced = False
+            self._owner_ready.set()
         except BaseException:
+            # A failed/cancelled sync is not an attached viewer. Retrying must
+            # not leak the half-open socket or inherit its queued epoch suffix.
             self._discard_rejected_client()
+            if not self._recovering:
+                self._owner_ready.set()
             raise
-        self._finish_sync()
-        self._deliberate_stop = False
-        self._stopped_announced = False
-        self._owner_ready.set()
 
     def _discard_rejected_client(self) -> None:
         """Drop a client whose runtime dialled fine but whose state was refused.
@@ -1064,6 +1079,9 @@ class RemoteSession:
         client, self._client = self._client, None
         self._frontend_future = None
         self._runtime_pid = None
+        # The rejected dial's buffered suffix belongs to its refused epoch.
+        # connect, initial binding and recovery all share this discard boundary.
+        self._pending_frontend_updates = None
         if client is None:
             return
         # ``abandon`` rather than ``close``: this closure is ours, not the
@@ -1079,9 +1097,12 @@ class RemoteSession:
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
+        self._owner_ready.clear()
+        self._pending_frontend_updates = []
         self._runtime_pid = record.pid
         loop = asyncio.get_running_loop()
         self._frontend_future = loop.create_future()
+        pending_sync = self._frontend_future
 
         def on_disconnected(reason: str) -> None:
             # A connection that dies while we are still waiting for the sync
@@ -1093,19 +1114,25 @@ class RemoteSession:
             # round 1, D5 is the same finding from the other side). The
             # reason string is carried into the error so the copy the pump
             # produced actually reaches a surface instead of only a log line.
-            future = self._frontend_future
-            if future is not None and not future.done():
-                future.set_exception(ConnectionError(reason))
-            self._on_disconnected(reason)
+            if not pending_sync.done():
+                pending_sync.set_exception(ConnectionError(reason))
+            # Closing a failed binding schedules the old pump's final callback.
+            # It must not mark a retried/newer binding as recovering.
+            if self._client is client:
+                self._on_disconnected(reason)
 
         client = AttachClient(
             lambda _projection: None,
             on_disconnected,
             events=True,
-            on_event=self._on_wire_event,
+            on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
-            on_frontend_sync=self._on_frontend_sync,
-            on_frontend_update=self._on_frontend_update,
+            on_frontend_sync=lambda data: (
+                self._on_frontend_sync(data) if self._client is client else None
+            ),
+            on_frontend_update=lambda data: (
+                self._on_frontend_update(data) if self._client is client else None
+            ),
         )
         try:
             await client.connect(record, self._session_id)
@@ -1424,6 +1451,9 @@ class RemoteSession:
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
         update = FrontendUpdate.model_validate(data)
+        if self._pending_frontend_updates is not None:
+            self._pending_frontend_updates.append(update)
+            return
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
@@ -1439,6 +1469,9 @@ class RemoteSession:
         else:
             self._frontend_store.replace(state)
         self._apply_frontend_facades(state)
+        pending, self._pending_frontend_updates = self._pending_frontend_updates, None
+        for update in pending or ():
+            self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
         """Refresh compatibility facades after one canonical install."""
@@ -2231,6 +2264,17 @@ class RemoteSession:
         (review round 3, MINOR-1/U8): the disconnect can also land mid-request,
         so the raced ``ConnectionError`` is rewritten below too.
         """
+        # An initial attachment is a bounded startup wait, not owner recovery.
+        # Join its lock before mutating so a newer selection cannot be painted
+        # and then overwritten by the older initial snapshot. Recovery keeps
+        # its existing explicit refusal instead of queueing commands indefinitely.
+        if (
+            self._can_go_cold
+            and self._bind_lock.locked()
+            and not self._recovering
+            and not self._deliberate_stop
+        ):
+            await self._ensure_bound()
         client = self._client
         if client is None or self._recovering or not client.connected:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))

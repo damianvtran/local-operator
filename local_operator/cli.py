@@ -4438,6 +4438,7 @@ def main() -> int:
                     run_tui,
                     provider_controller=tui_controller,
                     on_config_changed=config_manager.reload,
+                    warm_session_imports=False,
                 )
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an
