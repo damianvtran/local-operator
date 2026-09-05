@@ -1,5 +1,5 @@
 /**
- * Session view (`#/s/:pid`) — the core screen. Layout contract:
+ * Session view (`#/s/:sessionId`) — the core screen. Layout contract:
  *
  *   header / transcript (flex-1, scrolls) / todos / subagents /
  *   pending card / banners / composer

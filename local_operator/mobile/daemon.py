@@ -28,15 +28,20 @@ phone starting a session never stalls the SSE streams of the others.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
 import os
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from local_operator.mobile.attach_client import AttachClient
 
 from local_operator.mobile.auth import (
     COOKIE_NAME,
@@ -66,6 +71,12 @@ REDIAL_BACKOFF_S = 5.0
 
 #: SSE keepalive cadence — under the 60 s idle cutoff of common proxies.
 SSE_KEEPALIVE_S = 25.0
+
+# Startup is acknowledged only after the authenticated welcome and control
+# connection. The separate handoff lease bounds an abandoned HTTP response;
+# it is NOT a session deadline. A real SSE subscriber holds its own viewer.
+SESSION_START_TIMEOUT_S = 30.0
+PHONE_HANDOFF_S = 60.0
 
 #: Default daemon port. Loopback only; remote access is a tunnel's job.
 DEFAULT_PORT = 4098
@@ -176,6 +187,7 @@ class SessionEntry:
         self.record = record
         self.projection: SessionProjection | None = None
         self.writer: asyncio.StreamWriter | None = None
+        self.ready = asyncio.Event()
         self.next_dial_at: float = 0.0
         self.degraded = False
         self.ended = False
@@ -637,6 +649,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         entry.degraded = True
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         return
+    entry.ready.clear()
     entry.writer = writer
     entry.degraded = False
     try:
@@ -703,6 +716,11 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     # was evicted. Its identity remains fenced by the epoch ledger.
                     continue
                 entry.projection = captured
+                entry.ready.set()
+                if op == "welcome" and daemon.table.session_subscribers.get(record.session_id):
+                    # A route can subscribe before registration. Replay only
+                    # after the writer can actually accept the control op.
+                    daemon.notify_watch_transition(record.pid, watching=True)
                 # Only the FIRST push after a wake changes the durable picture:
                 # it retires the provisional-active marker, which moves the row
                 # between sections. Invalidating on EVERY push is what defeated
@@ -723,6 +741,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     finally:
         if entry.writer is writer:
             entry.writer = None
+            entry.ready.clear()
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         entry.degraded = not entry.ended
         _fan_out(entry, daemon)
@@ -1002,9 +1021,6 @@ class MobileDaemon:
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
         self._slash_commands: list[dict[str, Any]] | None = None
-        # Session id -> pid of a resume spawn already in flight, so a retried
-        # resume POST returns the same child instead of forking a second.
-        self.resumes_in_flight: dict[str, int] = {}
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
@@ -1015,6 +1031,11 @@ class MobileDaemon:
         # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+        self._phone_attaches: dict[str, AttachClient] = {}
+        self._phone_generations: dict[str, tuple[int, str]] = {}
+        self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
+        self._phone_handoffs: dict[str, asyncio.TimerHandle] = {}
+        self._session_starts: dict[str, asyncio.Task[int]] = {}
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""
@@ -1315,6 +1336,8 @@ class MobileDaemon:
                     record.pid not in self._dial_tasks or self._dial_tasks[record.pid].done()
                 ):
                     self._dial_tasks[record.pid] = asyncio.ensure_future(_dial(self, entry))
+            if not entry.ended and self.table.session_subscribers.get(record.session_id):
+                self._schedule_phone_attach(record)
         # Reap entries whose record vanished entirely.
         for pid in list(self.table.entries):
             if pid not in seen:
@@ -1424,12 +1447,189 @@ class MobileDaemon:
 
     # -- owned sessions ---------------------------------------------------------
 
+    def _phone_wanted(self, session_id: str) -> bool:
+        return bool(
+            self.table.session_subscribers.get(session_id)
+            or session_id in self._phone_handoffs
+            or session_id in self._session_starts
+        )
+
+    def _schedule_phone_attach(self, record: SessionRecord) -> asyncio.Task[None] | None:
+        """One real viewer per OPEN phone route, never per adopted runtime.
+
+        Modern runtimes count authenticated attach clients for idle residency;
+        the daemon's permanent adoption dial and notification-only ``watch``
+        ops do not. This bridge exists only while a human is opening/viewing
+        the route, so an idle phone can think before sending its first prompt.
+        """
+        session_id = record.session_id
+        if not self.dial_registrants or not self._phone_wanted(session_id):
+            return None
+        client = self._phone_attaches.get(session_id)
+        generation = (record.pid, record.control_key)
+        same_generation = self._phone_generations.get(session_id) == generation
+        if client is not None and client.connected and same_generation:
+            return self._phone_attach_tasks.get(session_id)
+        task = self._phone_attach_tasks.get(session_id)
+        if task is not None and not task.done():
+            if same_generation:
+                return task
+            task.cancel()
+        if client is not None:
+            client.close()
+        self._phone_generations[session_id] = generation
+        task = asyncio.create_task(self._connect_phone(record))
+        self._phone_attach_tasks[session_id] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if self._phone_attach_tasks.get(session_id) is done:
+                self._phone_attach_tasks.pop(session_id, None)
+            if not done.cancelled() and done.exception() is not None:
+                logger.debug("phone viewer attach failed for %s", session_id)
+
+        task.add_done_callback(finished)
+        return task
+
+    async def _connect_phone(self, record: SessionRecord) -> None:
+        from local_operator.mobile.attach_client import AttachClient
+
+        session_id = record.session_id
+
+        def repaint(projection: SessionProjection) -> None:
+            if self._phone_attaches.get(session_id) is not client:
+                return
+            if projection.session_id != session_id:
+                # A terminal may rebind an owner after the welcome. This
+                # phone is still viewing the old conversation; neither its
+                # paint nor its readiness lease may follow the new one.
+                client.close()
+                self._phone_attaches.pop(session_id, None)
+                self._phone_generations.pop(session_id, None)
+                return
+            entry = self.table.entries.get(record.pid)
+            if entry is not None and entry.record.control_key != record.control_key:
+                # This callback belongs to the current verified client (fenced
+                # above), so it can replace a cached predecessor at a reused
+                # PID. Old callbacks cannot overwrite the replacement.
+                if entry.writer is not None:
+                    entry.writer.close()
+                old_dial = self._dial_tasks.pop(record.pid, None)
+                if old_dial is not None:
+                    old_dial.cancel()
+                entry = None
+            if entry is None:
+                entry = SessionEntry(record)
+                self.table.entries[record.pid] = entry
+            # AttachClient verifies the welcome's durable identity before this
+            # callback. Retain that first paint before acknowledging creation.
+            entry.projection = self.capture_subagent_details(projection, record=record)
+            self.table.notify_list_changed()
+            _fan_out(entry, self)
+
+        client = AttachClient(repaint, lambda _reason: None, locality="remote")
+        self._phone_attaches[session_id] = client
+        try:
+            await client.connect(record, session_id)
+            if not self._phone_wanted(session_id):
+                self.release_phone_view(session_id)
+        except BaseException:
+            if self._phone_attaches.get(session_id) is client:
+                self._phone_attaches.pop(session_id, None)
+            client.close()
+            raise
+
+    def claim_phone_view(self, session_id: str) -> None:
+        """Transfer the startup lease to the already-registered SSE subscriber."""
+        timer = self._phone_handoffs.pop(session_id, None)
+        if timer is not None:
+            timer.cancel()
+        entry = _entry_for_session(self, session_id)
+        if entry is not None:
+            self._schedule_phone_attach(entry.record)
+
+    def release_phone_view(self, session_id: str) -> None:
+        """Drop readiness ownership after the LAST phone leaves; never abort work."""
+        if self.table.session_subscribers.get(session_id):
+            return
+        timer = self._phone_handoffs.pop(session_id, None)
+        if timer is not None:
+            timer.cancel()
+        task = self._phone_attach_tasks.pop(session_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        client = self._phone_attaches.pop(session_id, None)
+        self._phone_generations.pop(session_id, None)
+        if client is not None:
+            client.close()
+
+    async def close_phone_views(self) -> None:
+        """Retire only this relay's owned startup/viewer resources on shutdown."""
+        tasks: list[asyncio.Task[Any]] = [
+            *self._session_starts.values(),
+            *self._phone_attach_tasks.values(),
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for timer in self._phone_handoffs.values():
+            timer.cancel()
+        self._phone_handoffs.clear()
+        for client in self._phone_attaches.values():
+            client.close()
+        self._phone_attaches.clear()
+        self._phone_generations.clear()
+
+    async def _prepare_phone_record(self, record: SessionRecord) -> None:
+        task = self._schedule_phone_attach(record)
+        if task is not None:
+            await task
+        entry = self.table.entries[record.pid]
+        # Commands use the relay's remote-locality adoption dial. Its actual
+        # welcome is the readiness publication; the viewer holds residency
+        # while that handshake is in flight.
+        dial = self._dial_tasks.get(record.pid)
+        if dial is None or dial.done():
+            entry.ready.clear()
+            self._dial_tasks[record.pid] = asyncio.create_task(_dial(self, entry))
+        await entry.ready.wait()
+
+    def _arm_phone_handoff(self, session_id: str) -> None:
+        prior = self._phone_handoffs.pop(session_id, None)
+        if prior is not None:
+            prior.cancel()
+        if not self.table.session_subscribers.get(session_id):
+            self._phone_handoffs[session_id] = asyncio.get_running_loop().call_later(
+                PHONE_HANDOFF_S, self.release_phone_view, session_id
+            )
+
     async def spawn_session(
         self,
         cwd: str,
         provider: str | None = None,
         model_id: str | None = None,
         resume: str | None = None,
+    ) -> int:
+        session_id = resume or uuid.uuid4().hex[:12]
+        task = self._session_starts.get(session_id)
+        if task is None:
+            task = asyncio.create_task(self._spawn_session(cwd, provider, model_id, session_id))
+            self._session_starts[session_id] = task
+
+            def finished(done: asyncio.Task[int]) -> None:
+                if self._session_starts.get(session_id) is done:
+                    self._session_starts.pop(session_id, None)
+                if not done.cancelled():
+                    done.exception()  # retrieve failure even if the HTTP client left
+
+            task.add_done_callback(finished)
+        # Two resume requests share one constructor. A disconnected caller must
+        # not cancel the other caller's operation; the startup deadline and
+        # handoff lease still bound an abandoned request.
+        return await asyncio.shield(task)
+
+    async def _spawn_session(
+        self, cwd: str, provider: str | None, model_id: str | None, session_id: str
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
@@ -1449,14 +1649,37 @@ class MobileDaemon:
             raise RuntimeError("observer daemon cannot start sessions")
         import sys
 
+        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.paths import config_dir
+
+        # A durable resume can already have an owner (including one started
+        # by another surface). Acknowledge that verified owner, never the PID
+        # of a losing speculative constructor.
+        existing, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+        if existing is not None:
+            try:
+                async with asyncio.timeout(SESSION_START_TIMEOUT_S):
+                    await self._prepare_phone_record(existing)
+                self._arm_phone_handoff(session_id)
+                return existing.pid
+            except BaseException:
+                self.release_phone_view(session_id)
+                raise
+
         env = dict(os.environ)
         env["LOP_MOBILE_CHILD_CWD"] = cwd
         if provider:
             env["LOP_MOBILE_CHILD_PROVIDER"] = provider
+        else:
+            env.pop("LOP_MOBILE_CHILD_PROVIDER", None)
         if model_id:
             env["LOP_MOBILE_CHILD_MODEL"] = model_id
-        if resume:
-            env["LOP_MOBILE_CHILD_RESUME"] = resume
+        else:
+            env.pop("LOP_MOBILE_CHILD_MODEL", None)
+        env["LOP_MOBILE_CHILD_RESUME"] = session_id
+        # A deliberate Start is not speculative prewarming inherited from an
+        # enclosing process. The child's existing adopt path mints this exact ID.
+        env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -1470,7 +1693,65 @@ class MobileDaemon:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        return process.pid
+
+        async def ready() -> None:
+            while True:
+                record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                if record is not None:
+                    if record.pid != process.pid:
+                        raise RuntimeError("another runtime acquired this session; retry resume")
+                    await self._prepare_phone_record(record)
+                    return
+                # Records are filesystem publication, with no in-process
+                # notifier. Polling observes that fact; timeout only bounds a
+                # wedged constructor and is never treated as proof of readiness.
+                await asyncio.sleep(0.05)
+
+        readiness = asyncio.create_task(ready())
+        exited = asyncio.create_task(process.wait())
+        try:
+            async with asyncio.timeout(SESSION_START_TIMEOUT_S):
+                done, _ = await asyncio.wait(
+                    {readiness, exited}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if exited in done:
+                    raise RuntimeError("session exited before becoming ready; check mobile logs")
+                await readiness
+                self._arm_phone_handoff(session_id)
+                return process.pid
+        except BaseException:
+            self.release_phone_view(session_id)
+            if process.returncode is None:
+                # A known resume route can receive work from another surface
+                # before this HTTP request finishes. Even a missing welcome is
+                # not proof of an idle constructor: inbox/wake work starts
+                # before publication. Only the owner's pristine-retire op may
+                # decide to stop it. An unverifiable owner is left to its own
+                # residency predicate, never blindly signalled by the relay.
+                async def retire_if_pristine() -> None:
+                    from local_operator.mobile.attach_client import AttachClient
+
+                    record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                    if record is None or record.pid != process.pid:
+                        return
+                    client = AttachClient(
+                        lambda _projection: None, lambda _reason: None, locality="remote"
+                    )
+                    try:
+                        await client.connect(record, session_id)
+                        await client.retire_if_pristine()
+                    finally:
+                        client.close()
+
+                try:
+                    await asyncio.wait_for(retire_if_pristine(), timeout=3)
+                except (ConnectionError, RuntimeError, TimeoutError, OSError):
+                    logger.debug("failed mobile startup left its owner to retire safely")
+            raise
+        finally:
+            readiness.cancel()
+            exited.cancel()
+            await asyncio.gather(readiness, exited, return_exceptions=True)
 
     # -- slash command catalogue ----------------------------------------------------
 
@@ -1520,6 +1801,18 @@ def build_app(daemon: MobileDaemon):
     )
     from starlette.routing import BaseRoute, Mount, Route
 
+    class SessionEventResponse(StreamingResponse):
+        async def stream_response(self, send) -> None:
+            try:
+                await super().stream_response(send)
+            finally:
+                # async-for does not close its generator when sending a chunk
+                # raises. Explicit closure also covers cancelled proxy streams;
+                # otherwise their unseen subscriber can pin a viewer forever.
+                close = getattr(self.body_iterator, "aclose", None)
+                if close is not None:
+                    await close()
+
     # -- auth helpers -----------------------------------------------------------
 
     def authed(request: Request) -> bool:
@@ -1527,9 +1820,31 @@ def build_app(daemon: MobileDaemon):
             return False
         return verify_cookie(request.cookies.get(COOKIE_NAME), daemon.password)
 
+    def cross_origin_mutation(request: Request) -> Response | None:
+        """SameSite cookies do not separate sibling personal-tunnel subdomains.
+
+        A page on another owner's hostname can send a simple text/plain POST
+        carrying this host's cookies. Compare the exact authority before any
+        mutation; the authenticated tunnel gateway independently verifies the
+        public HTTPS Origin before forwarding to this loopback HTTP server.
+        Non-browser local API callers legitimately have no Origin header.
+        """
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return None
+        origin = request.headers.get("origin")
+        host = request.headers.get("host", "")
+        if (
+            origin is not None and origin not in {f"http://{host}", f"https://{host}"}
+        ) or request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"error": "same-origin request required"}, status_code=403)
+        return None
+
     def gate(request: Request) -> Response | None:
         """None = allowed. Browsers get the login redirect, API calls a 401 —
         the split contract the health check asserts."""
+        origin_denied = cross_origin_mutation(request)
+        if origin_denied is not None:
+            return origin_denied
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
@@ -1562,6 +1877,9 @@ def build_app(daemon: MobileDaemon):
         return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
 
     async def login_submit(request: Request) -> Response:
+        denied = cross_origin_mutation(request)
+        if denied is not None:
+            return denied
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
@@ -1633,22 +1951,21 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
-        entry = _entry_for_session(daemon, session_id)
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
-        subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
-        first_watcher = not subscribers
-        subscribers.add(queue)
-        if entry is not None and first_watcher:
-            daemon.notify_watch_transition(entry.record.pid, watching=True)
-        # First subscriber = a phone just started watching: tell the session so
-        # its self-reaper (if any) counts this front end and holds the session
-        # in ACTIVE. Fire-and-forget on the already-open dial writer; an OLD
-        # registrant answers `error: unknown op` and that must not 500 the SSE
-        # handshake — RuntimeError/TimeoutError are swallowed by design.
 
         async def stream():
+            # A response whose headers fail to send never began viewing. Own
+            # the queue only inside the iterator, paired with its finally.
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
+            subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
+            first_watcher = not subscribers
+            subscribers.add(queue)
             try:
+                daemon.claim_phone_view(session_id)
                 live = _entry_for_session(daemon, session_id)
+                if live is not None and first_watcher:
+                    # Notification routing is distinct from idle readiness;
+                    # mixed-version registrants may reject this optional op.
+                    daemon.notify_watch_transition(live.record.pid, watching=True)
                 projection = live.projection if live is not None else None
                 if projection is None:
                     projection = await asyncio.to_thread(_durable_projection, session_id)
@@ -1675,12 +1992,13 @@ def build_app(daemon: MobileDaemon):
                     current.discard(queue)
                     if not current:
                         daemon.table.session_subscribers.pop(session_id, None)
+                        daemon.release_phone_view(session_id)
                         live = _entry_for_session(daemon, session_id)
                         if live is not None:
                             daemon.notify_watch_transition(live.record.pid, watching=False)
                         daemon._prune_projection_generation(session_id)
 
-        return StreamingResponse(
+        return SessionEventResponse(
             stream(),
             media_type="text/event-stream",
             headers={
@@ -1997,6 +2315,8 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         cwd_raw = str(body.get("cwd") or Path.home())
         # Resolve to a real directory the picker is allowed to open: anywhere
         # under the owner's home, OR the system temp dir. The spawn runs with
@@ -2012,16 +2332,20 @@ def build_app(daemon: MobileDaemon):
         cwd = str(cwd_path)
         provider = body.get("provider")
         model_id = body.get("model_id")
+        # The route is a durable conversation identity, never a PID. Mint it
+        # before spawn so the child, response and first SSE all agree.
+        session_id = uuid.uuid4().hex[:12]
         try:
             pid = await daemon.spawn_session(
                 cwd,
                 provider=str(provider) if provider else None,
                 model_id=str(model_id) if model_id else None,
+                resume=session_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile session spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
-        return JSONResponse({"ok": True, "pid": pid})
+        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_resume_session(request: Request) -> Response:
         """Reopen a past session as a NEW live session the phone can attach to.
@@ -2031,7 +2355,7 @@ def build_app(daemon: MobileDaemon):
         child whose session resumes that transcript (the same ``--resume``
         mechanism the CLI uses), so the conversation comes back live, open,
         and able to take a command. The new session registers through
-        discovery like any other; the phone navigates to it by pid.
+        discovery like any other; the phone keeps the durable session route.
         """
         denied = gate(request)
         if denied is not None:
@@ -2040,6 +2364,8 @@ def build_app(daemon: MobileDaemon):
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         session_id = str(body.get("session_id") or "").strip()
         if not session_id:
             return JSONResponse({"error": "session_id is required"}, status_code=400)
@@ -2052,13 +2378,8 @@ def build_app(daemon: MobileDaemon):
             resume_dir(config_dir(), session_id)
         except ResumeNotFound:
             return JSONResponse({"error": f"no such past session: {session_id}"}, status_code=404)
-        # Server-side idempotency: a flapping phone on a slow tunnel can retry
-        # the POST, and only the client guarded the double-tap. One in-flight
-        # resume per session id — a retry returns the SAME spawn's pid instead
-        # of forking a second child resuming the same conversation.
-        existing = daemon.resumes_in_flight.get(session_id)
-        if existing is not None:
-            return JSONResponse({"ok": True, "pid": existing, "session_id": session_id})
+        # spawn_session coalesces concurrent resume requests until the verified
+        # owner is ready, and later retries reattach that same live owner.
         # The transcript dir does not reliably record a cwd, so resume in the
         # owner's home: always a valid directory under the spawn gate. The
         # user can steer the reopened session to a directory from there.
@@ -2067,7 +2388,6 @@ def build_app(daemon: MobileDaemon):
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
-        daemon.resumes_in_flight[session_id] = pid
         return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_search_sessions(request: Request) -> Response:
@@ -2164,7 +2484,15 @@ def build_app(daemon: MobileDaemon):
                 name="assets",
             )
         )
-    return Starlette(routes=routes)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            await daemon.close_phone_views()
+
+    return Starlette(routes=routes, lifespan=lifespan)
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -2304,44 +2632,88 @@ def _list_models() -> list[dict[str, Any]]:
     the legacy CredentialManager file, and ``/login`` writes the providers
     AuthStore (auth.db) — a picker reading only the first would hide every
     OAuth-logged-in provider, which on a current install is most of them.
-    Runs in a thread: catalogue reads are file I/O."""
+    Runs in a thread: catalogue reads, OAuth refresh, and cold live discovery
+    must never block the relay's event loop or its session event streams.
+
+    Aggregators deliberately have no bundled models. Use the same bounded,
+    cached discovery/parser as the desktop picker for those providers; reading
+    only the static registry makes a fresh Radient login appear to own none.
+    Only persisted credentials authorize discovery here: a service manager's
+    unrelated environment must not silently add accounts to a remote picker.
+    """
+    from contextlib import closing
+
     from local_operator.credentials import CredentialManager
+    from local_operator.model.discovery import available_models
     from local_operator.model.registry import SupportedHostingProviders, static_models
     from local_operator.paths import config_dir
     from local_operator.providers.auth_store import AuthStore
 
     credential_manager = CredentialManager(config_dir=config_dir())
-    store = AuthStore()
-    try:
-        authed_providers = {c.provider for c in store.list_credentials()}
-    finally:
-        store.close()
-
     rows: list[dict[str, Any]] = []
-    for provider in SupportedHostingProviders:
-        required = provider.requiredCredentials
-        has_key = bool(required) and any(
-            credential_manager.get_credential(key).get_secret_value() for key in required
-        )
-        # AuthStore login aliases: the oauth flavour of a provider logs in
-        # under its own id (e.g. ``alibaba-token-plan-oauth``); the catalogue
-        # key is the base id, so prefix matching covers both spellings.
-        has_login = provider.id in authed_providers or any(
-            p.startswith(f"{provider.id}-") for p in authed_providers
-        )
-        if required and not has_key and not has_login:
-            continue
-        if not required and not has_login:
-            continue
-        for model_id, info in static_models(provider.id).items():
-            rows.append(
+    unavailable: list[str] = []
+    persisted_keys = credential_manager.get_credentials()
+    with closing(AuthStore()) as store:
+        for provider in SupportedHostingProviders:
+            key = next(
+                (
+                    persisted_keys[name].get_secret_value()
+                    for name in provider.requiredCredentials
+                    if name in persisted_keys and persisted_keys[name].get_secret_value()
+                ),
+                None,
+            )
+            # AuthStore resolves the registry's exact storage aliases. Prefix
+            # guessing could lend an unrelated plan's credentials to a host.
+            logins = store.list_credentials(provider=provider.id)
+            if not key and not logins:
+                continue
+            models = static_models(provider.id)
+            names = [(model_id, getattr(info, "name", "")) for model_id, info in models.items()]
+            if not models:
+                is_oauth = False
+                account_id = None
+                if not key:
+                    # Refresh a specific stored row without the inference
+                    # cascade's rotation, quota blocks, or sticky-account writes.
+                    # asyncio.run is safe here because api_models offloads this
+                    # whole synchronous helper to its worker thread.
+                    for login in reversed(logins):
+                        is_oauth = login.credential_type == "oauth"
+                        data = (
+                            asyncio.run(store.ensure_oauth_fresh(login.id))
+                            if is_oauth
+                            else login.data
+                        )
+                        if data:
+                            key = data.get("access" if is_oauth else "key")
+                            account_id = data.get("account_id") or data.get("org_id")
+                        if key:
+                            break
+                if not key:
+                    unavailable.append(provider.name)
+                    continue
+                discovered, status = available_models(
+                    provider.id, api_key=key, is_oauth=is_oauth, account_id=account_id
+                )
+                names = [(model.id, model.name) for model in discovered]
+                if not names and status != "empty":
+                    unavailable.append(provider.name)
+            rows.extend(
                 {
                     "selector": f"{provider.id}/{model_id}",
                     "provider": provider.id,
                     "model_id": model_id,
-                    "name": getattr(info, "name", "") or model_id,
+                    "name": name or model_id,
                 }
+                for model_id, name in names
             )
+    if not rows and unavailable:
+        # A failed cold fetch is not an authoritative empty inventory. Keep the
+        # message credential-free while making a retry/re-login actionable.
+        raise RuntimeError(
+            f"Model catalogue unavailable for {', '.join(unavailable)}; retry or log in again"
+        )
     return rows
 
 
