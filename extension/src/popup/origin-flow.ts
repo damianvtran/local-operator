@@ -15,12 +15,22 @@ import type { BroadGrant } from "../origin-policy";
 
 export type { OriginDecision } from "../access-queue";
 
-/** The decision this popup already made, keyed by ORIGIN — finding A6's rule:
- * a redirect chain resolves each hop independently, so a DIFFERENT pending
- * origin is a new prompt even while this one's ack is still settling. */
+/** The decision this popup already made. Keyed by origin AND by the
+ * generation (entry id) it was made against.
+ *
+ * Origin alone is not enough: two live entries can share an origin (dedupe is
+ * origin+requester), and `once`/`deny` resolve only the selected entry, so a
+ * sibling survives the click and keeps the origin pending. An origin-only
+ * latch reads that survivor as its own stale echo and strands the popup on
+ * "Site allowed." over a live request the user cannot act on (A6/U7). A
+ * `once` grant is spent on one navigation, so the same origin re-prompting is
+ * the DESIGNED behaviour, not an edge case. */
 export interface DecidedOrigin {
   origin: string;
   decision: OriginDecision;
+  /** The entry id the decision answered. Empty on the /health-only fallback,
+   * which has no generation to compare and falls back to origin equality. */
+  entryId: string;
 }
 
 export interface DecisionAck {
@@ -136,17 +146,42 @@ export function scopeOptions(entry: Pick<AccessQueueEntry, "origin" | "broad"> |
   return { options, defaultValue: broad ? "domain" : "site" };
 }
 
-/** Which origin view a render shows. A pending origin equal to the one just
- * decided is the stale echo of the race above — hold the ack. A different
- * pending origin is a genuinely new prompt (A6). No pending origin means the
- * round-trip landed and the caller should clear its latch so a future prompt
- * for the SAME origin (e.g. a retry after deny) is not swallowed. */
+/** Which origin view a render shows.
+ *
+ * The ack is held only while the pending entry IS the generation that was
+ * decided. A different pending origin, or the SAME origin under a different
+ * generation, is a genuinely new prompt and must be shown: holding it strands
+ * a live request behind a confident "Site allowed." (A6/U7). No pending
+ * origin means the round-trip landed and the caller should clear its latch so
+ * a future prompt for the same origin is not swallowed.
+ *
+ * The /health-only fallback carries no entry id. There is no generation to
+ * compare there, so both sides being empty falls back to origin equality,
+ * which is exactly the U1 behaviour that path had before. */
 export function originPromptView(
   pendingOrigin: string | undefined,
   decided: DecidedOrigin | null,
+  pendingEntryId = "",
 ): "prompt" | "ack" | "none" {
   if (!pendingOrigin) return "none";
-  return decided && decided.origin === pendingOrigin ? "ack" : "prompt";
+  if (!decided || decided.origin !== pendingOrigin) return "prompt";
+  // Normalize both sides: a missing id and an empty id are the same "no
+  // generation to compare" state, and they must not read as a mismatch, or
+  // the /health-only path would prompt over its own ack and reopen U1.
+  return (decided.entryId ?? "") === (pendingEntryId ?? "") ? "ack" : "prompt";
+}
+
+/** The identity the scope select's option list is cached against.
+ *
+ * The entry id alone collides on the /health-only fallback, where it is the
+ * empty string for EVERY origin: two successive fallback renders for
+ * different sites then reuse one option list, so the trough names the
+ * previous origin while Allow grants the current one (A7). That defeats the
+ * trough's whole purpose, which is letting the user verify the authority as
+ * data before committing. Falling back to the origin keeps the key
+ * non-empty and unique per site. */
+export function scopeLatchKey(entryId: string, pendingOrigin: string | undefined): string {
+  return entryId || (pendingOrigin ? `origin:${pendingOrigin}` : "");
 }
 
 export interface OriginNotice {

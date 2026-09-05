@@ -78,6 +78,14 @@ async function applyAllowAll(action: AllowAllAction): Promise<void> {
     await chrome.storage.local.set({ allowAllSites: view.write });
     allowAllStored = view.write;
     flash(view.write ? "All websites are now allowed." : "Site prompts are back on.");
+    paintAllowAll(view);
+    // paintAllowAll owns the switch, banner and dialog; the Allowed sites card
+    // is painted by render(). Without this the superseded strip is absent at
+    // the moment of the accidental enable it exists for, and stale in the
+    // other direction: after turning the bypass off the card kept asserting
+    // "These grants are not in effect" about grants that now are (U8/Q3).
+    await render();
+    return;
   }
   paintAllowAll(view);
 }

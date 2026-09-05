@@ -122,8 +122,15 @@ permission list on every release to catch this; when they differ, upload by hand
         evaluation, or generic “execute JavaScript” bridge command exists.
 - [ ] Confirm the Python bridge and extension enforce the same protocol version.
 - [ ] Run extension gates: frozen pnpm install, TypeScript check, production
-      build, generated-protocol check, PSL refresh (`node scripts/gen-psl.mjs`),
-      and applicable tests.
+      build, generated-protocol check, and applicable tests.
+- [ ] Refresh the bundled Public Suffix List and confirm it is current:
+      `node scripts/gen-psl.mjs` then `node scripts/gen-psl.mjs --check`.
+      Its own step rather than a clause in the bullet above, because this is
+      the only place drift is actually gated: the CI step is advisory
+      (`continue-on-error`, since it fetches publicsuffix.org and an upstream
+      blip must not fail an unrelated PR). A suffix registered after
+      `PSL_GENERATED_AT` is treated as a registrable domain, so a stale list
+      lets one approval cover every name beneath it.
 - [ ] Load the exact unzipped artifact through `chrome://extensions` in a clean
       Chrome profile and complete the manual matrix from design §9.5: pairing,
       all eight actions, persistent login across app-session restart, site

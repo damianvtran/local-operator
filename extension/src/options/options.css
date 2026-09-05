@@ -354,9 +354,10 @@ li .btn {
   flex: none;
 }
 
-/* The confirmation dialog reuses .card; the backdrop is the ink at 40% so the
- * page behind stays legible but clearly inert. Native <dialog> centres itself;
- * the width cap matches main so it reads as one of the page's own cards. */
+/* The confirmation dialog reuses .card; the backdrop is --scrim (a ramp-stable
+ * dark, see the token) so the page behind stays legible but clearly inert.
+ * Native <dialog> centres itself; the width cap matches main so it reads as
+ * one of the page's own cards. */
 dialog.card {
   width: min(100% - 48px, 30rem);
   padding: 24px 28px;
@@ -425,7 +426,12 @@ dialog h2 {
  * control waiting on the acknowledgement (D4). Neutral, not washed-out
  * danger: the state is "not yet available", not "a faint dangerous action". */
 .btn:disabled {
-  border-color: var(--hairline-strong);
+  /* --hairline, not --hairline-strong: the latter is .btn's own default, so a
+   * disabled button's border was pixel-identical to an enabled neighbour's and
+   * "which of these two is inert" rested entirely on label lightness (D9). The
+   * lighter border separates them without reintroducing the opacity fade that
+   * made the disabled danger action illegible (D4). */
+  border-color: var(--hairline);
   color: var(--ink-dim);
   cursor: not-allowed;
 }

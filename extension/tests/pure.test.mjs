@@ -201,23 +201,55 @@ test("normalizedSiteGrants refuses any record this build cannot preserve", async
   } finally { await module.close(); }
 });
 
-test("a decided origin still echoing renders the ack, not a live prompt", async () => {
+test("the ack latch holds a stale echo but never a new generation of the same origin", async () => {
   const module = await load("src/popup/origin-flow.ts");
   try {
     const { originPromptView } = module.loaded;
     const origin = "https://qa-app.qa.gominerva.com";
-    // The echo window: session storage and /health keep reporting the prompt
-    // until the worker round-trip lands. Redrawing the prompt there reads as
-    // "the click did not work" and invites a second click, which under the
-    // scope model lands on a select reset to the domain default and widens a
-    // deliberate "just this once" to the whole domain (A1/U1).
-    assert.equal(originPromptView(origin, { origin, decision: "once" }), "ack");
-    assert.equal(originPromptView(origin, { origin, decision: "domain" }), "ack");
+    const decided = { origin, decision: "once", entryId: "gen-1" };
+    // The echo window: session storage and /health keep reporting the SAME
+    // generation until the worker round-trip lands. Redrawing the prompt there
+    // reads as "the click did not work" and invites a second click, which
+    // under the scope model lands on a select reset to the domain default and
+    // widens a deliberate "just this once" to the whole domain (A1/U1).
+    assert.equal(originPromptView(origin, decided, "gen-1"), "ack");
+    // A NEW generation for the same origin is a live request the user must be
+    // able to act on. `once` is spent on one navigation, so the same site
+    // re-prompting is designed behaviour; two live entries can also share an
+    // origin because dedupe is origin+requester, and once/deny resolve only
+    // the selected entry, so a sibling survives the click. Holding the ack
+    // there strands a live request behind "Site allowed." (A6/U7).
+    assert.equal(originPromptView(origin, decided, "gen-2"), "prompt");
+    assert.equal(originPromptView(origin, { ...decided, decision: "deny" }, "gen-2"), "prompt");
     // A DIFFERENT origin is a genuinely new decision and must prompt.
-    assert.equal(originPromptView(origin, { origin: "https://other.example", decision: "once" }), "prompt");
-    assert.equal(originPromptView(origin, null), "prompt");
+    assert.equal(originPromptView(origin, { origin: "https://other.example", decision: "once", entryId: "gen-1" }, "gen-1"), "prompt");
+    assert.equal(originPromptView(origin, null, "gen-1"), "prompt");
     // The echo clearing retires the popup rather than holding a stale ack.
-    assert.equal(originPromptView(undefined, { origin, decision: "once" }), "none");
+    assert.equal(originPromptView(undefined, decided, "gen-1"), "none");
+    // The /health-only fallback carries no generation on either side, so it
+    // falls back to origin equality: exactly the U1 behaviour it had before.
+    assert.equal(originPromptView(origin, { origin, decision: "once", entryId: "" }, ""), "ack");
+  } finally { await module.close(); }
+});
+
+test("the scope latch key cannot collide across origins on the health-only path", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { scopeLatchKey } = module.loaded;
+    // With a real queue entry the id IS the identity.
+    assert.equal(scopeLatchKey("gen-1", "https://alpha.example"), "gen-1");
+    assert.notEqual(scopeLatchKey("gen-1", "https://a"), scopeLatchKey("gen-2", "https://a"));
+    // On the /health-only fallback the entry id is "" for EVERY origin. Keyed
+    // on that alone, two successive fallback renders reuse one option list and
+    // the trough names the previous site while Allow grants the current one
+    // (A7) - which defeats the one thing the trough exists for.
+    const alpha = scopeLatchKey("", "https://alpha.example");
+    const beta = scopeLatchKey("", "https://beta.example");
+    assert.notEqual(alpha, beta, "two fallback origins must not share a latch key");
+    assert.ok(alpha, "a fallback key must not be empty");
+    assert.equal(scopeLatchKey("", "https://alpha.example"), alpha, "same origin is stable");
+    // Nothing pending at all has no identity to cache against.
+    assert.equal(scopeLatchKey("", undefined), "");
   } finally { await module.close(); }
 });
 
@@ -278,6 +310,46 @@ test("allow-all switch writes only after an acknowledged Enable and reverts on c
     // Re-checking an already-on switch is a no-op.
     assert.deepEqual(nextAllowAllView(true, { type: "toggle", checked: true }, on), on);
   } finally { await module.close(); }
+});
+
+// A1/U1/A6/A7 all live in popup.ts's render() control flow, which round 2
+// showed has now produced a MAJOR three rounds running precisely because no
+// test imports it for behaviour. These scan the SOURCE for the invariants the
+// pure helpers cannot express on their own: that render() feeds the generation
+// and the collision-proof key into the helpers rather than calling them with
+// the origin alone, and that the options page repaints the card when it writes.
+test("render() keys the ack latch on the generation and the scope cache on a non-empty key", async () => {
+  const popup = await readFile(new URL("../src/popup/popup.ts", import.meta.url), "utf8");
+  // A6/U7: originPromptView must receive the pending entry id. Called with two
+  // arguments it compares origins alone and strands a live same-origin request
+  // behind a stale "Site allowed.".
+  const call = popup.match(/originPromptView\(([^)]*)\)/);
+  assert.ok(call, "render() must call originPromptView");
+  assert.equal(call[1].split(",").length, 3, `originPromptView needs the generation, got: ${call[1]}`);
+  assert.match(call[1], /pendingEntryId/);
+  // The decision recorded for that comparison must carry the id it answered,
+  // or every comparison degrades to the origin-only behaviour above.
+  assert.match(popup, /decidedOrigin = \{ origin, decision, entryId: promptId \}/);
+  // A7: the scope cache key must not be the raw entry id, which is "" for
+  // every origin on the /health-only path.
+  assert.match(popup, /scopeLatchKey\(nextPromptId, pendingOriginValue\)/);
+  assert.match(popup, /renderScopeSelect\([\s\S]{0,200}?scopeKey,/);
+  assert.doesNotMatch(popup, /renderScopeSelect\([\s\S]{0,200}?shownPromptId,/,
+    "the raw prompt id collides across origins on the fallback path");
+  // D10: the live-region write is guarded so identical re-renders do not
+  // re-announce an unchanged scope.
+  assert.match(popup, /if \(detail\.textContent !== next\) detail\.textContent = next;/);
+});
+
+test("the options page repaints the Allowed sites card whenever it writes the bypass", async () => {
+  const options = await readFile(new URL("../src/options/options.ts", import.meta.url), "utf8");
+  // U8/Q3: paintAllowAll owns the switch/banner/dialog; the card is render()'s.
+  // Writing without re-rendering left the superseded strip absent at the exact
+  // moment of the accidental enable it exists for, and stale after turning off.
+  const write = options.match(/if \(view\.write !== undefined\) \{([\s\S]*?)\n  \}/);
+  assert.ok(write, "applyAllowAll must have a write branch");
+  assert.match(write[1], /await render\(\)/, "a write must repaint the card");
+  assert.match(write[1], /chrome\.storage\.local\.set\(\{ allowAllSites: view\.write \}\)/);
 });
 
 // The all-sites bypass must stay reachable ONLY from the options page: no

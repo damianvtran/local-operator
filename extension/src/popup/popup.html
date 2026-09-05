@@ -179,7 +179,13 @@
                  announces the option label but never the consequence, which is
                  the load-bearing half (D8). -->
             <select id="origin-scope" aria-describedby="origin-scope-detail"></select>
-            <p class="trough" id="origin-scope-detail" aria-live="polite"></p>
+            <!-- aria-describedby only, deliberately NOT also aria-live: the
+                 select's own announcement already includes its description, so
+                 a live region on the same element made several AT/browser
+                 pairings speak the consequence twice per scope change (D10).
+                 The description is read on every change because the select is
+                 what has focus. -->
+            <p class="trough" id="origin-scope-detail"></p>
             <div class="row">
               <button id="origin-allow" class="btn primary">Allow</button>
               <button id="origin-deny" class="btn danger">Deny</button>
