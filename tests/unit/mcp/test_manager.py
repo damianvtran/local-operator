@@ -2185,22 +2185,40 @@ class TestMcpAuthRecoveryHint:
         assert append_auth_recovery(wrapped, "anthropic") == wrapped, "the prefix gate"
         assert mcp_auth_recovery_hint(wrapped, "linear") is not None
 
-    def test_it_names_the_server_and_the_reauth_verb(self) -> None:
+    def test_it_carries_the_remedy_it_is_given_and_invents_none(self) -> None:
+        """The VERB is the manager's to decide, never this function's.
+
+        An earlier revision hard-coded ``/mcp reauth`` here, which is right for
+        exactly one of the three real auth shapes (review R5). This seam sees
+        only a rendered string, so it cannot tell a never-logged-in server from
+        an expired grant — the fix is that it no longer tries.
+        """
         from local_operator.mcp.manager import mcp_auth_recovery_hint
 
-        hint = mcp_auth_recovery_hint("MCP authorization failed", "minerva-qa")
+        hint = mcp_auth_recovery_hint(
+            "MCP authorization failed", "run /mcp login minerva-qa to authorize"
+        )
         assert hint is not None
-        assert "/mcp reauth minerva-qa" in hint
-        assert "/login" not in hint, "the model provider's credential is not the broken one"
+        assert "/mcp login minerva-qa" in hint
+        assert "reauth" not in hint, "the verb must come from the manager, not from here"
+        assert "/login " not in hint, "the model provider's credential is not the broken one"
 
     def test_an_unnamed_server_still_gets_a_reachable_remedy(self) -> None:
-        """A URL-shaped failure naming no configured server must not guess."""
+        """A failure naming no configured server must not guess a VERB either.
+
+        ``/mcp`` is the one instruction true for every shape: it lists each
+        server with the failure recorded against it. Naming ``reauth`` here
+        instead sent a never-logged-in user into a command that finds no row to
+        replace and returns without logging in (review R5).
+        """
         from local_operator.mcp.manager import mcp_auth_recovery_hint
 
         hint = mcp_auth_recovery_hint(
             "MCP server at https://x.example/mcp refused the connection (401)"
         )
-        assert hint is not None and "/mcp reauth <server>" in hint
+        assert hint is not None
+        assert "`/mcp`" in hint
+        assert "reauth" not in hint
 
     def test_non_auth_failures_get_no_hint(self) -> None:
         """A hint that fires on everything is noise, and a timeout has no remedy."""
@@ -2218,3 +2236,163 @@ class TestMcpAuthRecoveryHint:
         both = "MCP authorization failed for 'linear' and 'minerva-qa'"
         assert mcp_server_name_in(both, servers) is None
         assert mcp_server_name_in("MCP authorization failed for 'linear'", servers) == "linear"
+
+    def test_a_name_inside_a_url_path_is_not_a_match(self) -> None:
+        """R6: the loose pass matched anywhere, including inside a URL segment.
+
+        A server called ``git`` was named out of ``/git-things`` and reported as
+        the UNAMBIGUOUS answer, which is the "we named the wrong server" failure
+        this helper exists to avoid. Short generic names (``git``, ``api``,
+        ``db``) are the plausible ones.
+        """
+        from local_operator.mcp.manager import mcp_server_name_in
+
+        servers = ["linear", "minerva-qa", "notion", "git"]
+        assert (
+            mcp_server_name_in(
+                "MCP OAuth authorization required for https://example.com/git-things", servers
+            )
+            is None
+        )
+        # Still matches when the message is genuinely ABOUT it, and a hyphenated
+        # name still matches its own hyphen (a `\b` anchor would break this).
+        assert mcp_server_name_in("MCP authorization failed for 'git'", servers) == "git"
+        assert (
+            mcp_server_name_in("MCP authorization failed for minerva-qa", servers) == "minerva-qa"
+        )
+
+
+class TestTheManagerDerivesTheAuthRemedy:
+    """R5: which command fixes a server is decided from STATE, not guessed.
+
+    The round-2 review found the hint hard-coding ``/mcp reauth`` for every
+    shape, correct for exactly one of the three real ones. The five tests above
+    missed it because every one passed a bare STRING; these drive real configs
+    and a real credential store, which is where the distinction lives.
+
+    ``_auth_failure_text`` is the dispatcher that already answers this for the
+    startup toast, the transcript incident and ``/mcp``, so routing through it
+    is also what stops a fourth surface drifting from those three.
+    """
+
+    def _manager(self, tmp_path: Path) -> Any:
+        from local_operator.mcp.config import MCPHttpServerConfig, MCPStdioServerConfig
+        from local_operator.mcp.manager import McpManager
+
+        manager = McpManager.__new__(McpManager)
+        manager._configs = {
+            "linear": MCPHttpServerConfig(url="https://mcp.linear.app/mcp"),
+            "datadog": MCPHttpServerConfig(url="https://mcp.datadoghq.com/api/mcp"),
+            "filesys": MCPStdioServerConfig(command="npx"),
+        }
+        # An EMPTY store, so "has a stored grant" is answered by this test's own
+        # fixture rather than by whatever the developer happens to hold.
+        manager._effective_auth_store = lambda: None  # type: ignore[method-assign]
+        return manager
+
+    def test_a_server_never_logged_into_is_sent_to_login_not_reauth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dead end R5 named: ``reauth`` finds no row and never logs in.
+
+        ``_mcp_logout`` returns False for a server with no stored credential and
+        ``_mcp_command`` then RETURNS without starting a grant, so the user runs
+        the command, nothing happens, and the failure survives it.
+        """
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: False)
+        auth_mod.OAUTH_CHALLENGES["https://mcp.linear.app/mcp"] = True
+
+        manager = self._manager(tmp_path)
+        error = "MCP error: MCP server 'linear' refused the connection (401)"
+        hint = mcp_auth_recovery_hint(error, manager.auth_recovery_hint(error))
+        assert hint is not None
+        assert "/mcp login linear" in hint
+        assert "reauth" not in hint
+
+    def test_an_expired_grant_is_sent_to_reauth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one shape the hard-coded verb got right; it must stay right."""
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: True)
+        auth_mod.OAUTH_CHALLENGES["https://mcp.linear.app/mcp"] = True
+
+        manager = self._manager(tmp_path)
+        error = "MCP error: MCP server 'linear' refused the connection (401)"
+        hint = mcp_auth_recovery_hint(error, manager.auth_recovery_hint(error))
+        assert hint is not None and "/mcp reauth linear" in hint
+
+    def test_a_server_with_no_oauth_endpoint_is_never_promised_a_login(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Datadog shape: 401 with NO ``WWW-Authenticate`` at all.
+
+        No grant command can work here by construction, which ``auth.py`` already
+        documents; the honest remedy is the config's own headers.
+        """
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: False)
+        auth_mod.OAUTH_CHALLENGES["https://mcp.datadoghq.com/api/mcp"] = False
+
+        manager = self._manager(tmp_path)
+        error = "MCP error: MCP server 'datadog' refused the connection (401)"
+        hint = mcp_auth_recovery_hint(error, manager.auth_recovery_hint(error))
+        assert hint is not None
+        assert "login" not in hint and "reauth" not in hint
+        assert "API key or headers" in hint
+
+    def test_a_stdio_server_is_sent_to_its_config(self, tmp_path: Path) -> None:
+        """A stdio server has no transport that can carry a bearer token."""
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        manager = self._manager(tmp_path)
+        error = "MCP error: MCP server 'filesys' rejected our credentials (401)"
+        hint = mcp_auth_recovery_hint(error, manager.auth_recovery_hint(error))
+        assert hint is not None
+        assert "login" not in hint and "reauth" not in hint
+        assert "MCP config" in hint
+
+    def test_the_remedy_matches_what_every_other_surface_says(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The anti-drift claim, asserted rather than argued.
+
+        A FOURTH wording for the same fact is how the startup toast and the
+        transcript hint start disagreeing about what the user should run.
+        """
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import McpAuthChallengeError
+        from local_operator.mcp.manager import McpManager
+
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: False)
+        auth_mod.OAUTH_CHALLENGES["https://mcp.linear.app/mcp"] = True
+
+        manager = self._manager(tmp_path)
+        typed = McpAuthChallengeError(
+            "https://mcp.linear.app/mcp",
+            status_code=401,
+            oauth_available=True,
+            has_stored_grant=False,
+        )
+        toast_text = McpManager._auth_failure_text("linear", typed)
+        derived = manager.auth_recovery_hint(
+            "MCP error: MCP server 'linear' refused the connection (401)"
+        )
+        assert derived == toast_text
+
+    def test_an_unknown_server_degrades_to_the_unnamed_hint(self, tmp_path: Path) -> None:
+        """No config for it means no state to read, so no verb may be claimed."""
+        from local_operator.mcp.manager import mcp_auth_recovery_hint
+
+        manager = self._manager(tmp_path)
+        error = "MCP error: MCP server at https://who.example/mcp refused the connection (401)"
+        assert manager.auth_recovery_hint(error) is None
+        hint = mcp_auth_recovery_hint(error, None)
+        assert hint is not None and "`/mcp`" in hint

@@ -123,13 +123,30 @@ class TurnAbandoned(Message):
     ``epoch`` is the ``_turn_epoch`` the worker started under, so a fallback
     that dispatches after a NEWER turn has already opened is dropped rather
     than retiring the live turn's UI.
+
+    ``outcome_known`` separates "this turn ended cleanly" from "this worker has
+    nothing to say about how it ended", which ``error=None`` alone cannot
+    express. A FOLLOWER's ``prompt()`` returns on the owner's ACK, not at the
+    end of the turn, so its worker reaches the ``finally`` carrying
+    ``error=None`` while the owner's real outcome is still in flight — and a
+    fallback that won the gate on that then toasted "task complete" for a turn
+    that had in fact FAILED, contradicting the terminal title, which read the
+    real outcome from the end arriving behind it (review R4).
     """
 
-    def __init__(self, epoch: int, *, aborted: bool, error: str | None) -> None:
+    def __init__(
+        self,
+        epoch: int,
+        *,
+        aborted: bool,
+        error: str | None,
+        outcome_known: bool = True,
+    ) -> None:
         super().__init__()
         self.epoch = epoch
         self.aborted = aborted
         self.error = error
+        self.outcome_known = outcome_known
 
 
 class ContextUsageReported(Message):

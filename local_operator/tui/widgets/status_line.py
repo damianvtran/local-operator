@@ -1130,6 +1130,14 @@ class StatusLine:
         looking at five session labels at once and cannot tell which finished
         badly. Cleared by the next turn opening \u2014 see :meth:`_title_state` for
         why a live turn outranks the mark.
+
+        USE ``update(failed=..., streaming=...)`` INSTEAD when the band's run
+        state is changing in the same breath. This setter emits its own title
+        write, so pairing it with a separate ``update`` leaves a window in which
+        the title carries one fact without the other \u2014 a turn that FAILED
+        rendering as ``lo \u203a`` (\"finished cleanly\") before ``lo \u2717`` (review
+        D6/U8). This method is for the cases where nothing else moves: clearing
+        the mark on a new turn, and on a teardown that throws a turn away.
         """
         if failed == self._failed:
             return
@@ -1230,6 +1238,7 @@ class StatusLine:
         subagents: int | None = None,
         jobs: int | None = None,
         streaming: bool | None = None,
+        failed: bool | None = None,
         cost: str | None = None,
         conversation_name: str | None = None,
         forked: bool | None = None,
@@ -1281,6 +1290,28 @@ class StatusLine:
             self._forked = forked
         if fork_pending is not None:
             self._fork_pending = fork_pending
+        # ASSIGNED BEFORE the streaming flag, and that is what makes the pair
+        # ATOMIC rather than merely ordered. Both facts land in the object
+        # first, and the single `refresh()` below performs the ONE title write
+        # that reads them — so there is no interleaving in which the title can
+        # be seen carrying one without the other.
+        #
+        # This exists because sequencing two SETTER calls was not enough. The
+        # turn worker's `finally` writes the band idle directly, a separate and
+        # earlier write than `_finalize_turn`'s, so a failed turn emitted
+        # `lo › name` ("finished cleanly") and only then `lo ✗ name`. It was
+        # won by a race rather than structurally ordered: measured at ~0.5-1ms
+        # on an idle app but 43.5ms with 300 queued messages and 781ms at 1500
+        # queued blocks — well inside a rendered frame (review D6/U8). Passing
+        # both to one `update` is what removes the window instead of narrowing
+        # it.
+        #
+        # `None` means LEAVE ALONE, the same contract every other segment here
+        # keeps — which is how a caller that does not KNOW the outcome (a
+        # follower's worker, whose `prompt()` returned mid-turn) says so,
+        # rather than asserting a clean finish it cannot vouch for.
+        if failed is not None:
+            self._failed = failed
         if streaming is not None and streaming != self._streaming:
             self._streaming = streaming
             self._mark_turn_boundary(streaming)

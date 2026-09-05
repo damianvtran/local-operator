@@ -113,6 +113,12 @@ class HangingFollowerSession(JobsSession):
     rather than merely the one that happens to run first.
     """
 
+    #: What `RemoteSession` declares (`remote.py:203`), and the app reads it to
+    #: know this worker's `error=None` means "the owner did not tell me" rather
+    #: than "the turn succeeded". A follower fake without it models the wire
+    #: ORDER while claiming the authority of an in-process session.
+    is_remote = True
+
     async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
         self.streaming = True
         return None
@@ -136,6 +142,11 @@ class OwnerEndRacingFollowerSession(JobsSession):
     is the interleaving, and the only one that puts the two messages in the
     queue in the order the socket produces.
     """
+
+    #: See :class:`HangingFollowerSession`. Load-bearing here: it is what makes
+    #: this fallback decline to announce an outcome it was never told, so the
+    #: owner's real end behind it is what speaks.
+    is_remote = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -763,10 +774,24 @@ MCP_AUTH_ERROR = "MCP error: MCP OAuth authorization required for https://mcp.li
 
 
 class _NamedServers:
-    """The one method the hint path reads off a live manager."""
+    """The manager seam the hint path reads.
+
+    `auth_recovery_hint` is what decides the VERB, and it lives on the manager
+    precisely because the answer depends on state only the manager holds —
+    whether a grant is stored for the server, and whether the server can take
+    one at all (review R5). This stub stands in for a manager that holds a
+    stored grant for `linear`, which is the shape where `reauth` is the truthful
+    advice; `tests/unit/mcp/test_manager.py` drives the real derivation across
+    all three auth shapes against real configs.
+    """
 
     def get_all_server_names(self) -> list[str]:
         return ["linear", "minerva-qa"]
+
+    def auth_recovery_hint(self, rendered_error: str) -> str | None:
+        if "linear" not in rendered_error:
+            return None
+        return "run /mcp reauth linear — authorization expired"
 
 
 class McpAuthRaisingSession(JobsSession):
@@ -952,3 +977,382 @@ async def test_a_failing_turn_never_flashes_idle_in_the_title() -> None:
         # The LAST write before the mark must still be a working frame: an idle
         # separator in between is the flash.
         assert not titles[-2].startswith("lo ›"), f"flashed idle before failing: {titles}"
+
+
+class FailedOwnerFollowerSession(OwnerEndRacingFollowerSession):
+    """The R4 interleaving: the same wire order, on a turn that FAILED.
+
+    Identical to its base but for the owner's outcome, which is the whole point
+    — the follower's own worker sees `error=None` either way, because its
+    `prompt()` returned on the ACK long before the owner's turn ended. What
+    distinguishes a clean turn from a failed one exists only on the owner's
+    relayed end, arriving behind the fallback.
+    """
+
+    error: str | None = "MCP authorization failed for 'minerva-qa'"
+
+
+@pytest.mark.asyncio
+async def test_a_followers_failed_turn_is_never_toasted_as_complete() -> None:
+    """R4. The fallback must not assert a clean finish it was never told about.
+
+    On a follower the fallback WINS the gate — `prompt()` returns on the owner's
+    ACK, so the worker's `finally` runs mid-turn — carrying the local worker's
+    `error=None`. Read as an outcome, that announced "task complete" for a turn
+    that had failed on the owner, while the terminal title on the SAME turn read
+    `✗` because the real end behind it still reached the mark. Two new surfaces
+    contradicting each other, on the path the PR names as its riskiest, and a
+    REGRESSION: `main` has no `TurnAbandoned`, so the follower's `agent_end` is
+    the only route there and the kind is always right.
+
+    The fix is that `error=None` from a route that cannot know stops meaning
+    "it succeeded" and starts meaning "ask the route that does".
+    """
+    session = FailedOwnerFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+
+        def relay_owner_end() -> None:
+            app.post_message(TurnEnded(aborted=False, error=session.error))
+
+        session.relay = relay_owner_end
+
+        app._start_turn("do the thing")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert _working(app) is None, "the turn never retired"
+        assert app._status is not None
+        # The two new surfaces AGREE, which is the actual claim.
+        assert app._status._title_state() == "failed"
+    assert notifier.kinds == ["error"], "a failed follower turn was announced as complete"
+
+
+@pytest.mark.asyncio
+async def test_a_followers_clean_turn_is_still_announced_once() -> None:
+    """The other half: deferring the outcome must not swallow the notification.
+
+    A fix that simply dropped the fallback's announcement would trade a WRONG
+    toast for a MISSING one. The owner's real end is what speaks, and it speaks
+    exactly once.
+    """
+    session = OwnerEndRacingFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+
+        def relay_owner_end() -> None:
+            app.post_message(TurnEnded(aborted=False, error=None))
+
+        session.relay = relay_owner_end
+
+        app._start_turn("do the thing")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert _working(app) is None
+    assert notifier.kinds == ["complete"], "the follower's clean turn went unannounced"
+
+
+@pytest.mark.asyncio
+async def test_a_follower_whose_owner_never_reports_still_retires_the_turn() -> None:
+    """Deferring the ANNOUNCEMENT must not defer the RETIREMENT.
+
+    Everything above the notification gate — the working line, the band, the
+    latch, the accrual, stranded cards — is what the fallback exists to reclaim,
+    and a follower whose owner says nothing at all must still get all of it.
+    Only the toast waits for a route that knows.
+    """
+    session = HangingFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+
+        app._start_turn("do the thing")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        # `is_streaming` is still True, so guard 2 drops this fallback and the
+        # turn stays open for the owner's end — the pre-existing contract.
+        assert app._turn_open is True
+        assert _working(app) is not None
+    assert notifier.kinds == [], "a mid-turn follower ACK was read as a finish"
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_failing_turn_never_flashes_idle_in_the_title() -> None:
+    """D6/U8. The no-flash claim, on the route it did NOT hold for.
+
+    The sibling test above covers the `agent_end` route, where `_finalize_turn`
+    owns both writes. The ABANDONED route has a second, EARLIER writer: the turn
+    worker's own `finally` calls `update(streaming=False)` directly, so a failed
+    turn emitted `lo ›` ("finished cleanly") and only then `lo ✗`.
+
+    It was ~0.5-1ms on an idle app — nobody saw it — but it was won by a RACE
+    rather than structurally ordered: 43.5ms with 300 queued messages, 781ms at
+    1500 queued blocks, well inside a rendered frame. This asserts the ordering
+    is now structural, by giving the worker's write the outcome it already holds
+    so there is no interval in which the title is wrong.
+    """
+    from local_operator.tui.terminal_title import TerminalTitle
+
+    app = OperatorApp(lambda: _factory(ExplodingSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        assert app._status is not None
+
+        writes: list[str] = []
+        title = TerminalTitle(writes.append, enabled=True)
+        title.start()
+        app._status.set_terminal_title(title)
+        await pilot.pause()
+
+        # Dropped so the window under test is the TURN, not the attach: the
+        # app writes an ordinary idle title while wiring the band up, and that
+        # `lo ›` is correct — there is no turn yet.
+        writes.clear()
+
+        app._start_turn("Run the audit")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        titles = [w.split("\x07")[0].split(";", 1)[1] for w in writes if "]0;" in w]
+        assert titles, "the turn wrote no title at all"
+        assert titles[-1].startswith("lo ✗"), titles
+        # NOT MERELY "the last write is right": the claim is that no write in
+        # the whole retirement ever said the turn finished cleanly. A `[-2]`
+        # check would pass on a sequence that flashed idle and then corrected
+        # itself twice, which is the shape a race produces.
+        assert not any(
+            t.startswith("lo ›") for t in titles
+        ), f"flashed 'finished cleanly' on a failed turn: {titles}"
+
+
+@pytest.mark.asyncio
+async def test_a_dying_loop_names_the_remedy_not_just_the_failure() -> None:
+    """U6. `/loop` is the flow where a bare error costs the most.
+
+    The recovery hint reached the composer's path but NEITHER loop worker, so
+    the flow this PR just repaired retired cleanly and then told an
+    away-from-keyboard user WHAT broke without WHAT TO DO. The operator's
+    scenario is `/loop 20` overnight, a grant expiring at hour two, and a naked
+    401 waiting in the morning — the same asymmetry U2 was raised about, on the
+    UNATTENDED flow where a remedy is worth most.
+    """
+    app = OperatorApp(lambda: _factory(ExplodingLoopSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+
+        await app._loop_worker(2)
+        for _ in range(6):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        stopped = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "loop stopped" in block.text()
+        ]
+        assert stopped, "the loop's failure was never printed"
+        assert "/mcp" in stopped[0].text(), f"named no remedy: {stopped[0].text()!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_dying_goal_loop_names_the_remedy_too() -> None:
+    """The same, on the goal worker — the most unattended surface in the app."""
+    app = OperatorApp(lambda: _factory(ExplodingLoopSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+
+        await app._loop_goal_worker("ship it")
+        for _ in range(6):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        stopped = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "loop stopped" in block.text()
+        ]
+        assert stopped, "the goal loop's failure was never printed"
+        assert "/mcp" in stopped[0].text(), f"named no remedy: {stopped[0].text()!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_reload_clears_the_failure_mark_for_the_next_conversation() -> None:
+    """R7. `StatusLine` is built once and outlives the session swap.
+
+    Every other turn-scoped flag is explicitly cleared on this path with a
+    comment about cross-session leaks; `_failed` was not, so between the reload
+    and the replacement session's first turn the title carried a cross for a
+    conversation the user can no longer see. Self-correcting on the next prompt,
+    which is why it is minor — but the window is exactly the leak the
+    neighbouring resets exist to prevent.
+    """
+    app = OperatorApp(lambda: _factory(JobsSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        assert app._status is not None
+
+        app.post_message(TurnAbandoned(app._turn_epoch, aborted=False, error="boom"))
+        await pilot.pause()
+        assert app._status._title_state() == "failed"
+
+        await app._reload_session()
+        await pilot.pause()
+        assert app._status._title_state() != "failed", "the cross outlived its conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_loop_does_not_also_sign_off_as_finished() -> None:
+    """U9. Two adjacent statements about one event, and the wrong one last.
+
+    A numeric loop whose first prompt died printed `loop stopped: <error>` and
+    then, directly beneath it, `loop finished after 0 iteration(s)` — in the
+    quieter ink, so the reassuring line is the one the eye lands on last. The
+    error line already says the loop stopped and why; "finished" is a claim
+    about completion that a crashed loop cannot make.
+    """
+    app = OperatorApp(lambda: _factory(ExplodingLoopSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+
+        await app._loop_worker(3)
+        for _ in range(6):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        notices = [
+            block.text()
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        assert any("loop stopped" in text for text in notices), notices
+        assert not any("loop finished" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_a_loop_that_ran_out_of_iterations_still_signs_off() -> None:
+    """The other side of U9: a healthy loop must keep its receipt.
+
+    Suppressing the sign-off on a crash is only correct if a loop that actually
+    completed still says so — otherwise the fix trades a contradictory line for
+    a missing one.
+    """
+    app = OperatorApp(lambda: _factory(JobsSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+
+        await app._loop_worker(2)
+        for _ in range(6):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        notices = [
+            block.text()
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        assert any("loop finished after 2 iteration(s)" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_a_reloaded_turns_late_error_does_not_mark_the_new_session() -> None:
+    """R8. The late `agent_end` a `/reload` deliberately still delivers.
+
+    The reload keeps its controller subscribed precisely so the dying turn's
+    late `agent_end` can settle stranded tool cards — so that event arrives
+    AFTER the swap, and it carries the dead conversation's error. Applying its
+    outcome marked the REPLACEMENT session's title `failed`, a cross for work
+    the user can no longer see. Cosmetic and self-correcting on the next turn,
+    which is why it is a nit; it is also the reason clearing `_failed` on the
+    reload path is not sufficient on its own.
+
+    The cards must still settle: gating the whole handler is the opposite of
+    this seam's fix, so only the OUTCOME is withheld.
+    """
+    app = OperatorApp(lambda: _factory(JobsSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        assert app._status is not None
+
+        await app._reload_session()
+        await pilot.pause()
+
+        # The dead conversation's late end, arriving behind the swap.
+        app.post_message(TurnEnded(aborted=False, error="the old conversation's failure"))
+        await pilot.pause()
+
+        assert app._status._title_state() != "failed", "a dead turn marked the live session"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_kind", "expected_title"),
+    [
+        pytest.param(None, "complete", "idle", id="clean"),
+        pytest.param("MCP authorization failed for 'minerva-qa'", "error", "failed", id="failed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_toast_kind_and_the_title_agree_on_one_turn(
+    error: str | None, expected_kind: str, expected_title: str
+) -> None:
+    """R4's INVARIANT, stated directly: one turn, one outcome, two surfaces.
+
+    The R4 defect was not that either surface was wrong in isolation — it was
+    that they DISAGREED: a toast reading "task complete" beside a title reading
+    `✗` for the same turn. Each surface already has its own test, and both
+    passed while the pair contradicted each other, because neither one looks at
+    the other. This pins the relationship itself, on the follower path where the
+    fallback and the owner's real end race, which is where they came apart.
+
+    Parametrized over BOTH outcomes on purpose. A gate that suppressed the
+    fallback's announcement entirely would satisfy the failing half while
+    silently breaking the clean half into a missing toast, so the clean case is
+    what keeps the fix honest rather than merely quiet.
+    """
+    session = FailedOwnerFollowerSession()
+    session.error = error
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+
+        def relay_owner_end() -> None:
+            app.post_message(TurnEnded(aborted=False, error=session.error))
+
+        session.relay = relay_owner_end
+
+        app._start_turn("do the thing")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert _working(app) is None, "the turn never retired"
+        assert app._status is not None
+        # Read inside the app context: the two facts are asserted about the SAME
+        # turn, which is the only way the contradiction is observable at all.
+        title = app._status._title_state()
+    assert (notifier.kinds, title) == (
+        [expected_kind],
+        expected_title,
+    ), f"the toast said {notifier.kinds} while the title said {title!r}"

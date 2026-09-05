@@ -152,7 +152,15 @@ _MCP_AUTH_MARKERS = (
 )
 
 
-def mcp_auth_recovery_hint(rendered_error: str, server_name: str | None = None) -> str | None:
+def is_mcp_auth_failure(rendered_error: str) -> bool:
+    """Whether ``rendered_error`` is an MCP server refusing to authorize us."""
+    if not rendered_error:
+        return False
+    haystack = rendered_error.lower()
+    return any(marker in haystack for marker in _MCP_AUTH_MARKERS)
+
+
+def mcp_auth_recovery_hint(rendered_error: str, remedy: str | None = None) -> str | None:
     """The local remedy for an MCP server that would not authorize us, or None.
 
     The provider-side :func:`~local_operator.providers.failover.auth_recovery_hint`
@@ -163,25 +171,30 @@ def mcp_auth_recovery_hint(rendered_error: str, server_name: str | None = None) 
     provider that was never broken is worse than saying nothing: they do the
     work, the failure persists, and the real cause is now further away.
 
+    ``remedy`` is the SERVER-SPECIFIC advice, and this function deliberately
+    cannot derive it. Which verb is truthful depends on facts that live on the
+    manager — whether a grant is stored, whether the server can take an OAuth
+    grant at all — so it is derived by
+    :meth:`McpManager.auth_recovery_hint` through the ONE dispatcher that
+    already answers that question (:meth:`McpManager._auth_failure_text`) and
+    threaded in here. An earlier revision hard-coded ``/mcp reauth`` at this
+    seam; that was wrong for two of the three real auth shapes (review R5), and
+    naming a verb here again would reintroduce exactly that drift.
+
+    WITHOUT a remedy this names no verb at all. ``/mcp`` lists every configured
+    server with the failure recorded against it, so it is the one instruction
+    that is true whatever the shape turns out to be — where guessing ``reauth``
+    sends a never-logged-in user into a dead end (``_mcp_logout`` finds no row
+    and ``_mcp_command`` returns without logging in).
+
     Returns ``None`` rather than the input unchanged, so callers can tell
-    "no hint applies" from "hint applied" without comparing strings. Names the
-    specific server when it is known, because ``/mcp reauth`` is not a command
-    a user can run without one.
+    "no hint applies" from "hint applied" without comparing strings.
     """
-    if not rendered_error:
+    if not is_mcp_auth_failure(rendered_error):
         return None
-    haystack = rendered_error.lower()
-    if not any(marker in haystack for marker in _MCP_AUTH_MARKERS):
-        return None
-    if server_name:
-        return (
-            f"To fix: `/mcp reauth {server_name}` to replace that server's "
-            "expired authorization."
-        )
-    return (
-        "To fix: `/mcp` to see which server needs authorizing, then "
-        "`/mcp reauth <server>` to replace its expired authorization."
-    )
+    if remedy:
+        return f"To fix: {remedy}."
+    return "To fix: `/mcp` to see which server needs authorizing, and how."
 
 
 def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str | None:
@@ -193,6 +206,15 @@ def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str
     package emits (``MCP server 'linear' …``), so they are tried first and a
     bare substring is the fallback for the URL-shaped messages.
 
+    The loose pass is ANCHORED ON WORD BOUNDARIES, which is not cosmetic: an
+    unanchored substring matched inside a URL path, so a server named ``git``
+    was named out of ``https://example.com/git-things`` and reported as the
+    unambiguous answer (review R6). Short generic names — ``git``, ``api``,
+    ``db`` — are exactly the plausible ones. ``-`` and ``.`` are common in
+    server names and are NOT word characters, so the boundary is built from an
+    explicit non-name-character class rather than ``\\b``, which would fire
+    inside ``minerva-qa``.
+
     AMBIGUITY YIELDS None, deliberately: naming the wrong server is the exact
     failure this whole remediation is about, so two candidates means the
     caller falls back to the unnamed hint that tells the user how to look.
@@ -203,10 +225,29 @@ def mcp_server_name_in(rendered_error: str, known_servers: Sequence[str]) -> str
     quoted = [name for name in known_servers if f"'{name.lower()}'" in haystack]
     if len(quoted) == 1:
         return quoted[0]
-    loose = [name for name in known_servers if name and name.lower() in haystack]
+    loose = [name for name in known_servers if name and _names_server(haystack, name.lower())]
     if len(loose) == 1:
         return loose[0]
     return None
+
+
+#: What may NOT abut a server name for a loose match to count. Everything a
+#: name itself can contain, so a match inside a longer identifier or URL
+#: segment (``git`` in ``/git-things``) is rejected while ``minerva-qa`` still
+#: matches its own hyphen.
+_NAME_CHAR = re.compile(r"[0-9a-z_.-]")
+
+
+def _names_server(haystack: str, name: str) -> bool:
+    """Whether ``name`` appears in ``haystack`` as a whole token."""
+    start = haystack.find(name)
+    while start != -1:
+        before = haystack[start - 1] if start else ""
+        after = haystack[start + len(name) : start + len(name) + 1]
+        if not _NAME_CHAR.match(before or " ") and not _NAME_CHAR.match(after or " "):
+            return True
+        start = haystack.find(name, start + 1)
+    return False
 
 
 def _unwrap_auth_required(exc: BaseException) -> BaseException:
@@ -1978,6 +2019,70 @@ class McpManager:
         if isinstance(exc, McpAuthRequiredError):
             return cls._auth_required_text(name, exc)
         return str(exc)
+
+    def auth_recovery_hint(self, rendered_error: str) -> str | None:
+        """The truthful remedy line for an MCP auth failure in ``rendered_error``.
+
+        The DISPLAY-SIDE entry point, and the reason the hint is a manager
+        method rather than a free function: which command actually fixes a
+        server depends on facts only the manager holds — whether a grant is
+        stored for it, and whether the server can take an OAuth grant at all.
+        A free function can see the rendered string and nothing else, so an
+        earlier revision guessed ``/mcp reauth`` for every shape and was wrong
+        for two of the three real ones (review R5): a never-logged-in server
+        needs ``login`` (``reauth`` finds no row to replace and returns without
+        logging in), and a server that answers 401 with no discoverable OAuth
+        endpoint — Datadog does — cannot be fixed by any grant command and needs
+        its API key or headers set.
+
+        Answered by :meth:`_auth_failure_text`, the SAME dispatcher the startup
+        toast, the transcript incident and ``/mcp`` already read, so this
+        surface cannot drift from those three. The classification is rebuilt
+        from durable state rather than from the dead exception, because by the
+        time a turn's error reaches the transcript the exception is long gone:
+        ``server_has_stored_grant`` reads the credential store and
+        ``OAUTH_CHALLENGES`` carries the discovery result recorded when the
+        challenge was first classified.
+
+        ``None`` when no configured server can be named, when the manager has
+        no config for it, or when anything raises: the caller then prints the
+        unnamed ``/mcp`` hint, which is true regardless of shape.
+        """
+        name = mcp_server_name_in(rendered_error, self.get_all_server_names())
+        if name is None:
+            return None
+        cfg = self._configs.get(name)
+        if cfg is None:
+            return None
+        try:
+            from local_operator.mcp.auth import (
+                OAUTH_CHALLENGES,
+                server_has_stored_grant,
+                server_rejects_oauth,
+            )
+
+            url = getattr(cfg, "url", "") or ""
+            if server_rejects_oauth(cfg):
+                # A stdio server or an explicit non-OAuth `auth` block: no grant
+                # command can apply, and the config is the only place to fix it.
+                return f"check {name}'s credentials in its MCP config"
+            store = self._effective_auth_store()
+            # Rebuilt as the challenge shape because that is what a REFUSAL is,
+            # and it carries both facts `_auth_failure_text` needs. Discovery is
+            # not re-run: `OAUTH_CHALLENGES` already holds what the classifying
+            # connect learned, and defaulting a never-challenged server to
+            # "OAuth available" is the safe way round — it names a login command
+            # rather than telling the user to set headers on an OAuth server.
+            exc = McpAuthChallengeError(
+                url,
+                status_code=401,
+                oauth_available=OAUTH_CHALLENGES.get(url, True),
+                has_stored_grant=server_has_stored_grant(url, store),
+            )
+            return self._auth_failure_text(name, exc)
+        except Exception:  # noqa: BLE001 — a hint must never replace the error
+            logger.debug("MCP auth recovery hint could not be derived", exc_info=True)
+            return None
 
     def _fire_auth_required(
         self, name: str, exc: "McpAuthRequiredError | McpAuthChallengeError"

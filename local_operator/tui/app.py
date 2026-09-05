@@ -2243,6 +2243,18 @@ class OperatorApp(App[None]):
         #: ``_completion_deferred``/``_settled_child_ids`` because all three are
         #: turn-scoped and every site that resets one must reset the others.
         self._turn_open: bool = False
+        #: Whether this turn's notification ladder has already RUN. Distinct
+        #: from ``_turn_open``, which says whether the turn is still live:
+        #: retiring a turn and announcing it are two different claims, and a
+        #: fallback that cannot know the outcome (a follower's, whose
+        #: ``prompt()`` returned mid-turn on the owner's ACK) performs the first
+        #: without the second. Keeping them apart is what lets the owner's real
+        #: outcome, arriving behind that fallback, still say what happened
+        #: instead of being dropped behind a turn already marked closed —
+        #: without which a FAILED turn was toasted "task complete" while the
+        #: title on the same turn read ``✗`` (review R4). Turn-scoped, so every
+        #: site that resets ``_turn_open`` resets this too.
+        self._turn_notified: bool = False
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -5059,7 +5071,22 @@ class OperatorApp(App[None]):
         # queued by its worker must find the latch closed and drop. Left open,
         # that fallback would dispatch after the reload and announce a
         # completion for a conversation the user can no longer see.
+        #
+        # `_turn_notified` is SET, not cleared, and that asymmetry is the point:
+        # the two flags together mean "closed, and owed nothing", which is what
+        # makes a queued fallback drop. Clearing it would leave the ladder owed
+        # and let that fallback announce the dead conversation's turn — the
+        # exact leak this line exists to prevent.
         self._turn_open = False
+        self._turn_notified = True
+        # The failure mark is turn-scoped and the StatusLine outlives the swap
+        # (it is constructed once), so a cross set by the dying conversation's
+        # last turn otherwise sits in the title over the REPLACEMENT session
+        # until its first turn starts — a cross for a conversation the user can
+        # no longer see, which is the same cross-session leak as the resets
+        # above (review R7).
+        if self._status is not None:
+            self._status.set_failed(False)
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -12364,7 +12391,28 @@ class OperatorApp(App[None]):
                 # failure while building the request). `_start_turn` set
                 # `streaming=True` above and no `TurnStarted` ever arrived, so
                 # `_turn_open` is False and nothing else would clear the band.
-                self._status.update(streaming=False)
+                #
+                # CARRIES THE OUTCOME, and that is what closes the title flash
+                # structurally. This is the EARLIER of the two writes that retire
+                # a turn's band — `_finalize_turn`'s is the other — so writing
+                # only `streaming=False` here published `lo ›` ("finished
+                # cleanly") for a turn this very `except` had just caught, and
+                # `lo ✗` landed one write later (review D6/U8). The fact is
+                # already in hand; sending it with the write that needs it means
+                # there is no interval in which the title is wrong, rather than a
+                # short one. `_finalize_turn` then writes the same pair and the
+                # title dedupes on the rendered string.
+                #
+                # `None` (leave alone) when this worker cannot know the outcome —
+                # a FOLLOWER's `prompt()` returns on the owner's ACK, mid-turn,
+                # so its `error_text` is None because nothing was reported here,
+                # not because the turn succeeded. Same reasoning as
+                # `_post_turn_abandoned`'s `outcome_known`.
+                knows_outcome = not bool(getattr(session, "is_remote", False))
+                self._status.update(
+                    streaming=False,
+                    failed=(bool(error_text) and not aborted) if knows_outcome else None,
+                )
                 # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
                 # `prompt()` returns only after the pipeline's `finally` has
                 # flushed the held end, which `_emit`s `agent_end`
@@ -12397,8 +12445,30 @@ class OperatorApp(App[None]):
         message posted here dispatches strictly behind it and loses the latch,
         which is what makes this a no-op on every healthy turn. Calling
         `_finalize_turn` directly would run AHEAD of the queued real end.
+
+        WHETHER THE WORKER KNOWS THE OUTCOME is carried separately from what the
+        outcome was, because on a FOLLOWER it does not know. `RemoteSession`'s
+        `prompt()` returns on the owner's ACK ("prompt admitted"), so this
+        worker's `finally` runs MID-TURN with `error=None` — which means "I have
+        no error to report", not "the turn succeeded". Reported as a clean
+        completion it produced a "task complete" toast for a turn that had
+        failed on the owner, while the title on the SAME turn read `✗` (review
+        R4). An in-process worker awaited the whole turn, so its `error` IS the
+        outcome and stays authoritative.
+
+        Read off the session at POST time rather than passed in by the three
+        call sites: it is a property of which session the worker drove, not of
+        why it is retiring, and deriving it here keeps all three from having to
+        remember it.
         """
-        self.post_message(TurnAbandoned(self._turn_epoch, aborted=aborted, error=error))
+        self.post_message(
+            TurnAbandoned(
+                self._turn_epoch,
+                aborted=aborted,
+                error=error,
+                outcome_known=not bool(getattr(self._session, "is_remote", False)),
+            )
+        )
 
     # -- conversation naming --------------------------------------------------
     def _cancel_naming_attempt(self) -> None:
@@ -15068,7 +15138,13 @@ class OperatorApp(App[None]):
         self._settled_child_ids.clear()
         # Same reason as the reload path: a stopped turn is a turn thrown away,
         # and its worker's queued fallback must not announce it as finished.
+        # `_turn_notified` set (not cleared) for the reason given there — the
+        # pair means "closed and owed nothing", which is what makes the queued
+        # fallback drop instead of announcing a session that is going away.
         self._turn_open = False
+        self._turn_notified = True
+        if self._status is not None:
+            self._status.set_failed(False)
         if self._controller is not None:
             self._controller.dispose()
             self._controller = None
@@ -17306,6 +17382,12 @@ class OperatorApp(App[None]):
             return
         self._loop_running = True
         completed = 0
+        #: Whether the loop ended by CRASHING rather than by running out of
+        #: iterations. Without it a loop whose first prompt died signed off
+        #: "loop finished after 0 iteration(s)" directly beneath its own red
+        #: error line — two adjacent statements about the same event, one of
+        #: them wrong, and the reassuring one last (review U9).
+        crashed = False
         try:
             for index in range(iterations):
                 if self._loop_cancelled:
@@ -17341,10 +17423,18 @@ class OperatorApp(App[None]):
                     await session.prompt(LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     loop_error = str(error)
-                    notice(f"loop stopped: {error}", "error")
+                    # THROUGH the same helper the composer's turn uses. A loop
+                    # runs UNATTENDED by definition — `/loop 20` overnight — so
+                    # this is the surface where a remedy is worth most and the
+                    # one where the user is least able to ask for it: they come
+                    # back to a naked 401 with no way to tell what to run
+                    # (review U6). Same asymmetry U2 was raised about, one
+                    # surface over.
+                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
                     self._discard_user_echo(echo)
+                    crashed = True
                     break
                 finally:
                     if self._status is not None:
@@ -17367,6 +17457,13 @@ class OperatorApp(App[None]):
             # Reported as stopped, not finished: the remaining iterations never
             # ran, and "finished" on a reload reads as the loop having completed.
             notice(f"loop stopped by reload after {completed} iteration(s)", "warning")
+        elif crashed:
+            # NO second sign-off. The error line above already said the loop
+            # stopped and why, and it carries the remedy; adding "finished" under
+            # it contradicts that in the calmer of the two voices. Same reasoning
+            # as the reload branch — "finished" is a claim about completion, and
+            # a loop that died did not complete.
+            pass
         else:
             notice(f"loop finished after {completed} iteration(s)")
 
@@ -17460,7 +17557,10 @@ class OperatorApp(App[None]):
                 except Exception as error:  # surface and stop; never spin
                     if self._status is not None:
                         self._status.update(streaming=False)
-                    notice(f"loop stopped: {error}", "error")
+                    # Same helper, same reason as the numeric worker: a held
+                    # goal loop is the MOST unattended surface in the app, and
+                    # it was printing a bare `str(error)` (review U6).
+                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
                     self._discard_user_echo(echo)
@@ -21886,6 +21986,11 @@ class OperatorApp(App[None]):
         # teardown path closes it again. Set after the epoch bump so the flag
         # and the epoch a queued fallback is matched against always agree.
         self._turn_open = True
+        # A NEW turn owes a NEW announcement. Cleared alongside the flag above
+        # because the pair is turn-scoped: `_turn_open` says the turn is live,
+        # `_turn_notified` says its ladder has run, and a fresh turn is both
+        # live and unannounced.
+        self._turn_notified = False
         # A deferred completion belongs to the turn that finished, and a NEW
         # turn supersedes it: the session is working again, so "task complete"
         # would announce a finish while the agent is mid-stream — and the new
@@ -21908,15 +22013,27 @@ class OperatorApp(App[None]):
 
     def on_turn_ended(self, message: TurnEnded) -> None:
         assert self._status is not None
-        # FIRST, because this handler's own `update(streaming=False)` below is
-        # what moves the title out of `working` — and the title dedupes on the
-        # rendered string, so a mark applied after it wrote `lo › name` and then
-        # `lo ✗ name`, a one-tick flash of "finished cleanly" on a turn that
-        # failed. `_finalize_turn` sets the same flag from the same fact for the
-        # fallback route; setting it here too is idempotent (the setter
-        # early-returns on an unchanged value) and is what keeps the ONE write
-        # this handler makes already correct.
-        self._status.set_failed(bool(message.error) and not message.aborted)
+        # The failure mark is NOT set here. It rides this handler's own
+        # `update(...)` below, which is the write that moves the title out of
+        # `working` — passing both facts to one call is what makes the pair
+        # atomic instead of two ordered writes racing (review D6/U8), and
+        # `_finalize_turn` applies the identical pair for the fallback route.
+        #
+        # It is also gated on the turn still being OWED an outcome, for the same
+        # reason `context_tokens` and `cost_text` are below: a plain `/reload`
+        # keeps the controller subscribed so the dying session's `agent_end` can
+        # settle its stranded cards, and that event carries the DEAD
+        # conversation's outcome. Stamping it unconditionally marked the
+        # replacement session's title with a failure belonging to a conversation
+        # the user can no longer see (review R8).
+        #
+        # CAPTURED BEFORE any of the cleanup below, because `_finalize_turn` at
+        # the foot of this handler clears `_turn_open` — reading the predicate
+        # afterwards would see every turn as already answered and no turn would
+        # ever mark its title. Same expression `_finalize_turn` computes for the
+        # fallback route, so the two routes cannot disagree about whether this
+        # turn may still state its outcome.
+        owes_outcome = self._turn_open or not self._turn_notified
         self._dismiss_working_block()
         # Build the segments as typed locals and make ONE call: a
         # dict[str, object] splatted into update() erases every parameter type,
@@ -21992,6 +22109,11 @@ class OperatorApp(App[None]):
             cost_text = "$—"
         self._status.update(
             streaming=False,
+            # ONE write carrying both the run state and the outcome — see the
+            # note at the top of this handler, where `owes_outcome` is captured
+            # and the R8 reasoning behind it is stated. `None` means "leave the
+            # mark exactly as it is".
+            failed=((bool(message.error) and not message.aborted) if owes_outcome else None),
             context_tokens=context_tokens,
             # Ordinarily this is the provider's exact prompt_tokens. A post-turn
             # compaction replaces that now-invalid occupancy with its local
@@ -22058,7 +22180,12 @@ class OperatorApp(App[None]):
         if not self._turn_open:
             logger.debug("turn abandonment ignored: turn already closed or thrown away")
             return
-        self._finalize_turn(aborted=message.aborted, error=message.error, source="abandoned")
+        self._finalize_turn(
+            aborted=message.aborted,
+            error=message.error,
+            source="abandoned",
+            outcome_known=message.outcome_known,
+        )
 
     def _with_recovery_hint(self, error: str) -> str:
         """``error`` plus the local remedy for it, when there is one to name.
@@ -22088,22 +22215,28 @@ class OperatorApp(App[None]):
         traceback.
         """
         try:
-            from local_operator.mcp.manager import (
-                mcp_auth_recovery_hint,
-                mcp_server_name_in,
-            )
+            from local_operator.mcp.manager import mcp_auth_recovery_hint
 
             manager = getattr(self._session, "mcp_manager", None)
             # Reached through `getattr` because a session need not carry a
             # manager at all (a follower has none), so the result is statically
             # `object` and is narrowed here rather than cast.
-            names = getattr(manager, "get_all_server_names", None)
-            known: list[str] = []
-            if callable(names):
-                listed = names()
-                if isinstance(listed, list):
-                    known = [str(name) for name in listed]
-            hint = mcp_auth_recovery_hint(error, mcp_server_name_in(error, known))
+            #
+            # The REMEDY comes from the manager, never from this call site.
+            # Which command actually fixes a server depends on whether a grant
+            # is stored for it and whether it can take one at all, and only the
+            # manager knows — `McpManager.auth_recovery_hint` answers through
+            # `_auth_failure_text`, the same dispatcher the startup toast, the
+            # transcript incident and `/mcp` read, so all four surfaces agree.
+            # Hard-coding `reauth` here instead sent a never-logged-in user into
+            # a command that returns without logging in (review R5).
+            #
+            # No manager (a follower, a reduced facade) degrades to the unnamed
+            # `/mcp` hint rather than to silence: it is true whatever the shape,
+            # and a follower's user still has an `/mcp` in their own TUI.
+            derive = getattr(manager, "auth_recovery_hint", None)
+            remedy = derive(error) if callable(derive) else None
+            hint = mcp_auth_recovery_hint(error, remedy if isinstance(remedy, str) else None)
             if hint:
                 return f"{error}\n{hint}"
         except Exception:  # noqa: BLE001 — a hint must never replace the error
@@ -22121,7 +22254,14 @@ class OperatorApp(App[None]):
             logger.debug("provider recovery hint could not be derived", exc_info=True)
         return error
 
-    def _finalize_turn(self, *, aborted: bool, error: str | None, source: str) -> None:
+    def _finalize_turn(
+        self,
+        *,
+        aborted: bool,
+        error: str | None,
+        source: str,
+        outcome_known: bool = True,
+    ) -> None:
         """Retire the turn. The ONE exit, however the turn ended.
 
         Every terminal side effect a turn owes the user lives here — the
@@ -22184,24 +22324,57 @@ class OperatorApp(App[None]):
         # has to be closed before any of it and its prior value carried forward.
         was_open = self._turn_open
         self._turn_open = False
+        # WHETHER THIS CALL MAY STATE THE TURN'S OUTCOME, on either surface.
+        # The title's cross and the desktop toast are ONE claim ("this turn
+        # ended, and here is how") made on two surfaces, so they share a gate:
+        # letting them diverge is what produced a toast reading "task complete"
+        # beside a title reading `✗` for the same turn (review R4).
+        #
+        # `was_open` alone is not the condition, and the difference is R8. A
+        # `/reload` throws its turn away and marks it ANSWERED, so the dying
+        # turn's late `agent_end` — which still arrives, by design, to settle
+        # stranded cards — must not stamp the REPLACEMENT session's title with
+        # a failure belonging to a conversation the user can no longer see. But
+        # a turn retired by a fallback that could not know its outcome is still
+        # OWED a statement, so the real end behind it must be able to make one.
+        # "Still owes an outcome" covers both, where either flag alone does not.
+        owes_outcome = was_open or not self._turn_notified
         self._dismiss_working_block()
         if self._status is not None:
-            # BEFORE `update(streaming=False)`, and the order is load-bearing.
-            # Each of these setters syncs the terminal title, and the title
-            # dedupes on the RENDERED string — so setting the outcome after the
-            # band goes idle wrote `lo › name` and then `lo ✗ name`, a one-tick
-            # flash of "finished cleanly" on a turn that failed. Setting it
-            # first is a no-op write (the turn is still streaming, so the state
-            # is unchanged) and the single write that follows is already
-            # correct. Verified on the emitted OSC bytes, not inferred.
+            # ONE `update` carrying BOTH facts, which is what makes the ordering
+            # STRUCTURAL rather than race-won. An earlier revision called
+            # `set_failed` and then `update(streaming=False)` and argued the
+            # order made the first a no-op write; that was true only of THIS
+            # route. The turn worker's own `finally` also calls
+            # `update(streaming=False)` — a separate, EARLIER write — so on the
+            # abandoned route a failed turn emitted `lo › name` ("finished
+            # cleanly") and only then `lo ✗ name`.
+            #
+            # The correction matters more than the gap: the earlier comment
+            # claimed this was "verified on the emitted OSC bytes", but that
+            # verification covered the `agent_end` route ONLY. On the abandoned
+            # route the flash was real and was won by a race — ~0.5-1ms on an
+            # idle app, but 43.5ms with 300 queued messages and 781ms at 1500
+            # queued blocks, well inside a rendered frame (review D6/U8). A
+            # single write cannot be raced by construction, so the claim is now
+            # carried by the shape of the call rather than by a measurement.
             #
             # The title's one durable statement about the OUTCOME, taken from
             # the same fact the notification ladder reads so the sidebar label
             # and the toast cannot disagree — and set on EVERY retirement,
             # including a turn that died without an `agent_end`, which is the
             # case that used to read `idle`.
-            self._status.set_failed(bool(error) and not aborted)
-            self._status.update(streaming=False)
+            #
+            # `None` when the outcome is UNKNOWN (a follower's fallback, whose
+            # `prompt()` returned mid-turn): the mark is left exactly as it was
+            # for the real end behind it to set, on the same reasoning that
+            # keeps that route from announcing a completion it cannot vouch for.
+            self._status.update(
+                streaming=False,
+                failed=(
+                    (bool(error) and not aborted) if (outcome_known and owes_outcome) else None
+                ),
+            )
             # Set DIRECTLY rather than re-derived through
             # `_refresh_working_activity`. The title's attention state is
             # turn-scoped and its only other writer is that method, which a
@@ -22257,9 +22430,33 @@ class OperatorApp(App[None]):
         # cards to settle (the `/reload` case); nothing below may run twice.
         # See the docstring for why the check is on this shared path instead of
         # at the `TurnAbandoned` call site.
-        if not was_open:
+        #
+        # `_turn_notified` rather than `was_open` alone, because retiring a turn
+        # and ANNOUNCING it are now two different claims. A fallback that does
+        # not know the outcome (a follower's) retires everything above and
+        # deliberately announces nothing, leaving the ladder owed — so the real
+        # end arriving behind it still gets to say what actually happened. Only
+        # a route that ACTUALLY notified closes it.
+        if not was_open and self._turn_notified:
             logger.debug("turn already retired; %s adds no notification", source)
             return
+        # AN UNKNOWN OUTCOME ASSERTS NOTHING. A follower's worker returns on the
+        # owner's ACK, mid-turn, so its `error=None` means "I was not told", not
+        # "it succeeded" — and announcing a completion on it toasted "task
+        # complete" for a turn that had failed, contradicting the title on the
+        # same turn (review R4). The turn is fully retired by the work above;
+        # only the announcement waits for the route that knows.
+        #
+        # NOT a silence hole: a follower whose owner dies or is stopped gets a
+        # real aborted `AgentEndEvent` synthesised locally
+        # (`RemoteSession._end_turn_locally`), which reaches this method through
+        # `on_turn_ended` and settles the ladder. The abandoned route is the
+        # fallback for a turn NOBODY ends, and on a follower that is precisely
+        # the case where this app has no outcome to report.
+        if not outcome_known:
+            logger.debug("turn retired by %s with an unknown outcome; not announcing", source)
+            return
+        self._turn_notified = True
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
         #
