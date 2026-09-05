@@ -54,6 +54,12 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+from local_operator.model.speed import (
+    DIALECT_ANTHROPIC_SPEED,
+    DIALECT_SERVICE_TIER,
+    FastModeSupport,
+    fast_mode_support,
+)
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import (
@@ -1463,6 +1469,29 @@ def _reasoning_effort(request: ChatRequest) -> str | None:
     return level
 
 
+def _fast_mode_support(request: ChatRequest) -> "FastModeSupport | None":
+    """How to ask for fast service on this request, or ``None`` to send nothing.
+
+    Same omission rule as :func:`_reasoning_effort` and :func:`_sampling_params`,
+    and for a sharper version of the same reason: a route that does not sell a
+    fast tier rejects the key outright. Measured 2026-09-04, the ChatGPT/Codex
+    backend answers ``HTTP 400 {"detail":"Unsupported service_tier: fast"}`` and
+    xAI answers ``HTTP 422`` for a value outside its enum, so a body that
+    carries the key "just in case" fails every turn.
+
+    BOTH conditions are re-checked here rather than trusted, because the spec is
+    mutable at runtime: ``/fast`` writes ``fast_mode`` and a fallback can swap
+    the model underneath it. Dropping the key on a target that cannot serve it
+    costs one turn's latency rather than the whole turn.
+    """
+    spec = request.model
+    if not getattr(spec, "fast_mode", False):
+        return None
+    if not getattr(spec, "supports_fast_mode", False):
+        return None
+    return fast_mode_support(spec.provider, spec.model_id)
+
+
 def _replayable_tool_arguments(call: ToolCall) -> dict[str, Any]:
     """The argument OBJECT to replay for ``call``, never a parse failure.
 
@@ -2002,6 +2031,13 @@ class OpenAICompatClient:
             # through an aggregator, and the top rungs (`xhigh`/`max`), were not
             # exercised, so treat those as expected-to-work rather than proven.
             body["reasoning_effort"] = effort
+        fast = _fast_mode_support(request)
+        if fast is not None and fast.dialect == DIALECT_SERVICE_TIER:
+            # Top-level, the shape OpenAI defined and every OpenAI-shaped route
+            # copied (xAI's Priority Processing, OpenRouter's service tiers).
+            # `priority` rather than `fast`: see `model.speed` for the two live
+            # rejections of `fast` that settled on the one word all of them take.
+            body["service_tier"] = fast.value
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -2123,6 +2159,11 @@ class OpenAICompatClient:
             include = body.setdefault("include", [])
             if "reasoning.encrypted_content" not in include:
                 include.append("reasoning.encrypted_content")
+        fast = _fast_mode_support(request)
+        if fast is not None and fast.dialect == DIALECT_SERVICE_TIER:
+            # Same key and the same top-level placement as the chat-completions
+            # body above: the Responses API spells `service_tier` identically.
+            body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
             # The 24h policy is meaningful only with a stable key. SessionStreamFn
             # supplies one per transcript, and retries preserve it on ChatRequest.
@@ -2677,6 +2718,7 @@ class AnthropicClient:
         oauth_access: "OAuthAccess | None" = None,
         *,
         effort: str | None = None,
+        fast_beta: str | None = None,
     ) -> dict[str, str]:
         headers = {"anthropic-version": ANTHROPIC_VERSION, "Content-Type": "application/json"}
         if self._is_oauth(oauth_access):
@@ -2691,6 +2733,14 @@ class AnthropicClient:
             beta = "effort-2025-11-24"
             existing = headers.get("anthropic-beta")
             headers["anthropic-beta"] = f"{existing},{beta}" if existing else beta
+        if fast_beta:
+            # Anthropic's `speed` key is gated on its beta flag and is REFUSED
+            # without it: measured 2026-09-04, the same body minus this header
+            # answers `HTTP 400 "speed: Extra inputs are not permitted"`. The
+            # caller therefore passes the header and writes the body key from
+            # the one decision, so the two can never disagree.
+            existing = headers.get("anthropic-beta")
+            headers["anthropic-beta"] = f"{existing},{fast_beta}" if existing else fast_beta
         return headers
 
     # Anthropic caps cache_control markers per request; the harness keeps the
@@ -3101,6 +3151,18 @@ class AnthropicClient:
             # accepts. Omitting the pair costs nothing real — with thinking on,
             # the only accepted value is the provider default.
             body.update(_sampling_params(request))
+        fast = _fast_mode_support(request)
+        if fast is not None and fast.dialect == DIALECT_ANTHROPIC_SPEED:
+            # OUTSIDE the effort branch above, because the two dials are
+            # independent: fast mode is a serving SPEED (same weights, same
+            # answer, delivered sooner at a premium) while effort is thinking
+            # DEPTH. Nesting this in either arm would tie a latency choice to a
+            # reasoning choice — a model on a fast tier with no effort ladder
+            # would silently lose the tier it is being billed for.
+            #
+            # The matching beta header is attached by `stream` from this same
+            # predicate; the key alone is a 400.
+            body["speed"] = fast.value
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
@@ -3125,6 +3187,16 @@ class AnthropicClient:
                 api_key,
                 oauth_access,
                 effort=request.model.reasoning_effort,
+                # Read through the SAME predicate the body key is written from
+                # (`_build_body` -> `_fast_mode_support`), so the header and the
+                # key are switched by one decision rather than by two that could
+                # drift apart into a guaranteed 400.
+                fast_beta=(
+                    fast.beta_header
+                    if (fast := _fast_mode_support(request)) is not None
+                    and fast.dialect == DIALECT_ANTHROPIC_SPEED
+                    else None
+                ),
             ),
         ) as response:
             if response.status_code >= 400:

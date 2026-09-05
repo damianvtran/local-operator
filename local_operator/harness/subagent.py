@@ -883,16 +883,31 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     """
     if job is None or usage is None:
         return
+    from local_operator.tui.costs import turn_cost
+
+    # Price detached leaf calls while the owning runtime still has the serving
+    # model metadata. A viewer has neither that memo nor necessarily credentials;
+    # durable estimates must survive that process boundary without becoming bills.
+    components = []
+    for item in usage.cost_components or [usage]:
+        component = item.model_copy(deep=True)
+        provider, _, model_id = (getattr(job, "model_label", None) or "").partition("/")
+        component.provider = component.provider or provider or None
+        component.model_id = component.model_id or model_id or None
+        if component.usd_cost is None and component.estimated_usd_cost is None:
+            component.estimated_usd_cost = turn_cost(
+                f"{component.provider}/{component.model_id}", component
+            )
+        components.append(component)
     total = job.usage
     if total is None:
         first = usage.model_copy()
-        first.cost_components = [
-            component.model_copy() for component in usage.cost_components or [usage]
-        ]
+        first.cost_components = components
         # An aggregate receipt is meaningful only when it covers the aggregate.
         # Components retain each call's receipt, so leave the outer field unset
         # and force readers through the provenance-preserving path.
         first.usd_cost = None
+        first.estimated_usd_cost = None
         job.usage = first
         return
     total.input_tokens += usage.input_tokens
@@ -908,10 +923,9 @@ def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
     # Child failover can mix provider receipts and table-priced calls. Preserve
     # every original call so the TUI can price each one independently instead of
     # treating one receipt as authoritative for the aggregate token buckets.
-    total.cost_components.extend(
-        component.model_copy() for component in usage.cost_components or [usage]
-    )
+    total.cost_components.extend(components)
     total.usd_cost = None
+    total.estimated_usd_cost = None
     if usage.context_tokens is not None:
         total.context_tokens = usage.context_tokens
 

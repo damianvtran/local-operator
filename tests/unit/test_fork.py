@@ -1553,6 +1553,7 @@ def _band():
     band._model_label = "test/model"
     band._model_name = ""
     band._effort = ""
+    band._fast = ""
     band._agent_profile = ""
     band._team = ""
     band._cwd = "/tmp"

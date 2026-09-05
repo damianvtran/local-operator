@@ -1368,7 +1368,7 @@ def _write_roster_sidecar_if_changed(
     across writes.
     """
     fingerprint = json.dumps(
-        {key: payload[key] for key in ("version", "jobs", "records")},
+        {key: value for key, value in payload.items() if key != "generation"},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1385,7 +1385,12 @@ def _write_roster_sidecar_if_changed(
     # Gated on ``previous_fingerprint is None`` \u2014 never written \u2014 rather than
     # on emptiness alone, because a roster that goes from populated back to
     # empty MUST persist that transition to clear the stale sidecar.
-    if previous_fingerprint is None and not payload.get("jobs") and not payload.get("records"):
+    if (
+        previous_fingerprint is None
+        and not payload.get("jobs")
+        and not payload.get("records")
+        and not payload.get("accounting")
+    ):
         return fingerprint, False
     _write_roster_sidecar(path, payload)
     return fingerprint, True
@@ -1572,6 +1577,12 @@ class Session:
             # is actually serving requests, the session persists that fact and
             # emits the event a front end repaints its model display from.
             route_bridge(self._on_route_settled)
+        fast_bridge = getattr(self._stream_fn, "set_fast_refused_handler", None)
+        if callable(fast_bridge):
+            # The stream fn has already narrated the refusal; the session's
+            # job is to make the SPEC truthful — switch the dial off so the
+            # band and the next request agree with what the provider did.
+            fast_bridge(self._on_fast_refused)
         # Deliberately NO bridge for the prompt-cache TTL hint, unlike the two
         # above: the stream fn is SHARED with subagents, so a registered reader
         # is last-writer-wins — constructing a child overwrote the parent's
@@ -5332,6 +5343,19 @@ class Session:
     ) -> None:
         """Bridge provider-routing diagnostics onto the session event stream."""
         await self._emit(NoticeEvent(text=text, kind=kind))
+
+    async def _on_fast_refused(self, selector: str, message: str) -> None:
+        """A provider refused fast mode; take the session's own dial off.
+
+        Through :meth:`set_model` so every consumer sees it the way a user's
+        ``/fast off`` would be seen: the spec the next request is built from,
+        the frontend state the band repaints from, and a pinned fallback's
+        derived display spec. Not ``explicit`` — this is a knob adjustment on
+        the model that is serving, never a model choice.
+        """
+        if not getattr(self._model, "fast_mode", False):
+            return
+        self.set_model(self._model.model_copy(update={"fast_mode": False}))
 
     async def _on_route_settled(self, target: Any, reason: str) -> None:
         """The stream fn's effective route moved; record it and tell the host.
@@ -9371,6 +9395,12 @@ class Session:
                     "generation": generation,
                     "jobs": rows,
                     "records": compact_records,
+                    # Retention may erase every visible row; the ledger still
+                    # owns their spend. Restore replaces row-derived accounting
+                    # with this snapshot so retained rows never bill twice.
+                    "accounting": [
+                        item.model_dump(mode="json") for item in self.jobs.accounting_components()
+                    ],
                 }
                 # The O(roster) fingerprint computation rides the SAME worker
                 # hop as the write: #308's invariant is that everything that
@@ -9513,6 +9543,14 @@ class Session:
                 self.jobs.restore(rows)
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent job rows", exc_info=True)
+        if isinstance(details.get("accounting"), list):
+            try:
+                self.jobs.restore_accounting(
+                    [Usage.model_validate(item) for item in details["accounting"]]
+                )
+            except Exception:
+                # A malformed checkpoint must not erase valid legacy row usage.
+                logger.warning("could not restore subagent accounting", exc_info=True)
 
     # -- todo list (resume) --------------------------------------------------
 
