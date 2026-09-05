@@ -139,7 +139,7 @@ jobs:
           echo "Release tag detected: $CURRENT_TAG"
           echo "skip_build=false" >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         with:
           python-version: "3.12"
