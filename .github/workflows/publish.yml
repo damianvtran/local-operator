@@ -36,7 +36,7 @@ jobs:
     permissions:
       contents: write  # upload the zip as a release asset
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need history to diff the release tag against the previous tag and
           # decide whether extension/ changed.
@@ -127,7 +127,7 @@ jobs:
       skip_build: ${{ steps.tag-check.outputs.skip_build }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
