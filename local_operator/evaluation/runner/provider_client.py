@@ -31,14 +31,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
+from local_operator.evaluation.action_surface import (
+    LEGACY_ACTION_SURFACE,
+    ActionSurface,
+)
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import (
-    NAMED_KEYS,
-    ActionBatch,
-    ComputerAction,
-    Observation,
-)
+from local_operator.evaluation.protocol import ActionBatch, Observation
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
     DecisionRejected,
@@ -127,7 +126,7 @@ _FUNCTION_KEY = re.compile(r"F\d+")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
 
 
-def _action_schema_lines() -> list[str]:
+def _action_schema_lines(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> list[str]:
     """Describe every action kind by reading the protocol models themselves.
 
     A parse failure costs a billed corrective re-prompt at best and the
@@ -139,7 +138,7 @@ def _action_schema_lines() -> list[str]:
     """
 
     lines: list[str] = []
-    for action in get_args(get_args(ComputerAction)[0]):
+    for action in surface.models:
         fields: list[str] = []
         for name, field in action.model_fields.items():
             if name in ("kind", "observation_id"):
@@ -161,7 +160,7 @@ def _action_schema_lines() -> list[str]:
     return lines
 
 
-def _named_keys_line() -> str:
+def _named_keys_line(surface: ActionSurface) -> str:
     """The key vocabulary, wrapped, derived from the set the validator enforces.
 
     Stated rather than implied. ``KeyAction`` accepts a closed set and rejects
@@ -172,7 +171,7 @@ def _named_keys_line() -> str:
     spends prompt budget on a pattern one phrase conveys.
     """
 
-    named = sorted(key.lower() for key in NAMED_KEYS if not _FUNCTION_KEY.fullmatch(key))
+    named = sorted(key.lower() for key in surface.named_keys if not _FUNCTION_KEY.fullmatch(key))
     wrapped = textwrap.wrap(", ".join(named) + ", and f1 through f24", width=68)
     return textwrap.indent("\n".join(wrapped), "  ")
 
@@ -200,9 +199,39 @@ def _type_name(annotation: Any) -> str:
     return "value"
 
 
-def build_system_prompt() -> str:
+def _paste_instructions(surface: ActionSurface) -> str:
+    if not surface.paste_text:
+        return ""
+    return """* "paste_text" is the supported Unicode path: replace CLIPBOARD with text,
+  then send exactly the REQUIRED "keys" chord. Choose the chord for the focused
+  application (for example ["ctrl", "v"] or ["ctrl", "shift", "v"]); there is
+  NO default chord, focus change, automatic Enter, retry, or keyboard fallback.
+  REQUIRED "clipboard_policy" must be "overwrite". The new text remains on
+  CLIPBOARD; the old clipboard is not restored and PRIMARY is untouched.
+  Text must be valid Unicode, 1 to 100000 characters; whitespace-only text is
+  allowed. Tabs, CR and newlines are data; other control characters are refused.
+  The receiving application may normalize text or submit on a newline. A wrong
+  chord can do something else or nothing: inspect the next observation; success
+  of the action does NOT prove insertion or task completion.
+"""
+
+
+def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
     """Compose the episode system prompt around the live protocol schema."""
 
+    native_text = (
+        "Only ASCII text is supported by this adapter; "
+        "non-ASCII is rejected before any batch action."
+        if surface.type_text_mode == "ascii"
+        else "This adapter supports Unicode native text input."
+    )
+    ask_text = (
+        '* "ask_user" -- you need a human answer. '
+        "THE EPISODE PAUSES until the answer is delivered. "
+        "Do not ask a question you can resolve by acting."
+        if surface.ask_user
+        else ""
+    )
     return f"""You are operating a computer to complete one task.
 
 Each user message is one observation of the screen: its text, and a screenshot
@@ -244,7 +273,7 @@ Every action is an object whose type is given by the key "kind" (NOT "type"),
 and every action must carry the "observation_id" of the observation you are
 looking at right now. These are the only permitted shapes:
 
-{chr(10).join(_action_schema_lines())}
+{chr(10).join(_action_schema_lines(surface))}
 
 Field names are JSON keys spelled exactly as quoted above -- "keys" is not
 "key", "text" is not "value". Where a field lists alternatives separated by
@@ -256,8 +285,10 @@ name all require typing.
 
 * "type" enters literal text wherever the keyboard focus already is. It does
   NOT click first, so focus the field with a click (or Tab) in an earlier
-  action, then type. It sends exactly the characters given and does not press
-  Enter for you.
+  action, then type. It uses native keyboard input, not the clipboard.
+  {native_text}
+  It does not press Enter for you.
+{_paste_instructions(surface)}
 * "key" presses named keys, and presses the ones in a single action TOGETHER
   as one chord: ["ctrl", "s"] is Ctrl+S, ["enter"] commits a field or dialog,
   ["tab"] moves focus, ["esc"] dismisses, and ["ctrl", "a"] followed by a
@@ -267,7 +298,7 @@ name all require typing.
   synonym is rejected -- "ctrl" not "control", "esc" not "escape", "enter"
   not "return":
 
-{_named_keys_line()}
+{_named_keys_line(surface)}
 
 A batch may contain SEVERAL actions and they execute in order against the
 screen you are looking at, with one new observation at the end. That is how a
@@ -275,14 +306,12 @@ click-then-type-then-Enter sequence is done in one step rather than three.
 Batch only what you can predict without seeing the screen in between; when the
 result of an action decides the next one, end the batch and look.
 
-Two actions end your turn in a special way, and each must be the ONLY action in
+Terminal actions end your turn in a special way, and each must be the ONLY action in
 its batch. Their fields are listed above; what the list cannot tell you is what
 they MEAN:
 
 * "finish" -- you believe the task is done. The episode is then scored.
-* "ask_user" -- you need a human answer. THE EPISODE PAUSES: a person answers
-  your question, and the next observation you see is the state after that
-  answer was delivered. Do not ask a question you can resolve by acting.
+{ask_text}
 """
 
 
@@ -445,6 +474,7 @@ def parse_decision(
     prompt_cache_key: str | None = None,
     context_tokens: int | None = None,
     compaction: CompactionRecord | None = None,
+    action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
 ) -> ModelDecision:
     """Parse one strict JSON decision and bind it to the current observation.
 
@@ -500,6 +530,7 @@ def parse_decision(
         raise DecisionParseError(f"decision is not a valid action batch: {error}") from error
     try:
         batch.validate_for(observation)
+        action_surface.validate_batch(batch)
     except Exception as error:
         raise DecisionParseError(f"decision does not match this observation: {error}") from error
     return ModelDecision(
@@ -755,6 +786,8 @@ class ProviderModelClient:
         self,
         observation: Observation,
         history: Sequence[EpisodeTurn],
+        *,
+        action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
     ) -> ModelDecision:
         from local_operator.harness.types import ChatRequest
 
@@ -767,7 +800,13 @@ class ProviderModelClient:
         messages = self._context.messages
         request = ChatRequest(
             model=self._model_spec,
-            system_blocks=[self._system_prompt],
+            system_blocks=[
+                (
+                    build_system_prompt(action_surface)
+                    if self._system_prompt == _SYSTEM_PROMPT
+                    else self._system_prompt + "\n\n" + build_system_prompt(action_surface)
+                )
+            ],
             messages=list(messages),
             tool_choice="none",
             prompt_cache_key=self._prompt_cache_key,
@@ -800,6 +839,7 @@ class ProviderModelClient:
                 prompt_cache_key=self._prompt_cache_key,
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
+                action_surface=action_surface,
             )
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.

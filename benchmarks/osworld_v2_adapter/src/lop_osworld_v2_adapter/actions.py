@@ -20,6 +20,8 @@ not be silently repaired.
 
 from __future__ import annotations
 
+from local_operator.computer_input import paste_text_source
+from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.protocol import (
     ActionBatch,
     AskUserAction,
@@ -29,10 +31,16 @@ from local_operator.evaluation.protocol import (
     FinishAction,
     FrameGeometry,
     KeyAction,
+    PasteTextAction,
     ScrollAction,
     TypeAction,
     WaitAction,
 )
+
+# Admission is independent of neutral data parsing and runs for the ENTIRE
+# batch before a provider sees any statement, so a click cannot precede a
+# silently lossy Unicode TypeAction. The adapter metadata uses this same surface.
+ACTION_SURFACE = ActionSurface(paste_text=True, type_text_mode="ascii", ask_user=True)
 
 # Our named keys (protocol._NAMED_KEYS) -> pyautogui key names. pyautogui
 # uses lowercase single words; the two that differ structurally are META
@@ -112,7 +120,14 @@ def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None
         # needed, and emitting it explicitly documents the closure.
         return f"pyautogui.click(x={nx}, y={ny}, clicks=2, interval=0.1, button='left')"
 
+    if isinstance(action, PasteTextAction):
+        return paste_text_source(action.text, [_key_name(key) for key in action.keys])
+
     if isinstance(action, TypeAction):
+        if not action.text.isascii():
+            raise CompilationError(
+                "type supports only ASCII; use paste_text with an explicit chord"
+            )
         # repr(), NEVER f-string interpolation: the text is model output and
         # may contain quotes, backslashes, or newlines. repr() produces a
         # Python literal that re-parses to exactly the same string.
@@ -160,6 +175,7 @@ def compile_batch(batch: ActionBatch, geometry: FrameGeometry) -> list[str]:
     observation at the end.
     """
 
+    ACTION_SURFACE.validate_batch(batch)
     statements: list[str] = []
     for action in batch.actions:
         statement = compile_action(action, geometry)

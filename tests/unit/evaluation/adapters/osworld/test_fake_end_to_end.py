@@ -131,7 +131,7 @@ def _selector(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter) -> Ada
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.1",
+        version="0.1.2",
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=metadata.package_digest,
         release_digest=metadata.release_digest,

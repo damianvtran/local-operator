@@ -775,7 +775,9 @@ class AwsProvider:
                 # single-shot transport, preserving the controller's input patch.
                 script = env.controller.pkgs_prefix.format(command=statement)
                 try:
-                    result = self._run_guest_command(["python", "-c", script], timeout=90)
+                    from local_operator.computer_input import python_source_argv
+
+                    result = self._run_guest_command(python_source_argv(script), timeout=90)
                 except Exception:
                     # Neither transport exceptions nor guest stderr are safe to
                     # expose: they may echo the command, credentials or UI text.
