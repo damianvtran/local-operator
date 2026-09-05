@@ -64,9 +64,13 @@ from tests.unit.evaluation.runner.test_provider_client import (
 
 
 def envelope(batch: str, notes: Any = "") -> str:
-    return json.dumps({
-        "reply_version": "1.0", "action_batch": json.loads(batch), "public_observations": notes,
-    })
+    return json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": json.loads(batch),
+            "public_observations": notes,
+        }
+    )
 
 
 @pytest.mark.parametrize("notes", ["", "Visible status: ready", "x" * 2000, "東京"])
@@ -90,11 +94,24 @@ def test_invalid_or_oversized_notes_reject_entire_decision(notes: Any) -> None:
         parse_decision(envelope(type_payload(observation()), notes), observation(), route=ROUTE)
 
 
-@pytest.mark.parametrize("change", [
-    "missing-version", "wrong-version", "extra-envelope", "extra-batch", "nested-envelope",
-    "nested-batch", "duplicate-note", "duplicate-action", "duplicate-version",
-    "trailing-prose", "trailing-batch", "leading-prose", "wrong-observation",
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing-version",
+        "wrong-version",
+        "extra-envelope",
+        "extra-batch",
+        "nested-envelope",
+        "nested-batch",
+        "duplicate-note",
+        "duplicate-action",
+        "duplicate-version",
+        "trailing-prose",
+        "trailing-batch",
+        "leading-prose",
+        "wrong-observation",
+    ],
+)
 def test_envelope_is_single_unambiguous_current_decision(change: str) -> None:
     current = observation()
     value = json.loads(envelope(type_payload(current), "visible fact"))
@@ -147,7 +164,8 @@ def test_legacy_trailing_envelope_cannot_supersede_current_decision() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("escaped_keys", [False, True])
 async def test_rejected_envelope_notes_are_not_replayed_as_facts(
-    tmp_path: Path, escaped_keys: bool,
+    tmp_path: Path,
+    escaped_keys: bool,
 ) -> None:
     secret = "invalid-note-must-not-enter-memory"
     raw = envelope(type_payload(observation(1)), secret)
@@ -169,9 +187,14 @@ async def test_rejected_envelope_notes_are_not_replayed_as_facts(
     assert not stream.summary_requests
 
 
-@pytest.mark.parametrize("transform", [
-    str, lambda s: quote(s, safe=""), lambda s: base64.b64encode(s.encode()).decode(),
-])
+@pytest.mark.parametrize(
+    "transform",
+    [
+        str,
+        lambda s: quote(s, safe=""),
+        lambda s: base64.b64encode(s.encode()).decode(),
+    ],
+)
 def test_resolved_secret_notes_are_redacted_before_replay(transform: Any) -> None:
     secret = "known-secret/credential-value"
     raw = envelope(type_payload(observation()), transform(secret))
@@ -206,8 +229,12 @@ def test_context_builder_retains_notes_as_append_only_shared_messages(tmp_path: 
     context = _ContextBuilder(artifact_root=tmp_path, keep_recent_frames=3, rebuild_every_frames=12)
     context.append_new_turns([EpisodeTurn(observation=first)])
     prefix = list(context.messages)
-    turns = [EpisodeTurn(observation=first, batch=decision.action_batch,
-                         public_reply=decision.public_reply), EpisodeTurn(observation=second)]
+    turns = [
+        EpisodeTurn(
+            observation=first, batch=decision.action_batch, public_reply=decision.public_reply
+        ),
+        EpisodeTurn(observation=second),
+    ]
     context.append_new_turns(turns)
     assert context.messages[0] is prefix[0]
     assert context.messages[1].role == "assistant"
@@ -223,17 +250,27 @@ def image_history(variant: str, *, notes: bool) -> list[Message]:
     for index in range(12):
         # IDs/text/actions are fixed: only the oldest screenshot's bytes vary.
         pixels = variant if index == 0 else f"unchanged-frame-{index}"
-        history.append(Message.user(f"Observation {index}", [ImageContent(
-            data=base64.b64encode(pixels.encode()).decode(), mime_type="image/png",
-        )]))
+        history.append(
+            Message.user(
+                f"Observation {index}",
+                [
+                    ImageContent(
+                        data=base64.b64encode(pixels.encode()).decode(),
+                        mime_type="image/png",
+                    )
+                ],
+            )
+        )
         batch = type_payload(observation(index))
         fact = f"Visible label: {variant}" if index == 0 else ""
         reply = envelope(batch, fact) if notes else batch
         history.append(Message.assistant(reply))
     # Message IDs default to UUIDs; fix them so the paired controls genuinely
     # differ only in the old image (and, for the treatment, its public note).
-    return [message.model_copy(update={"id": f"message-{index}"})
-            for index, message in enumerate(history)]
+    return [
+        message.model_copy(update={"id": f"message-{index}"})
+        for index, message in enumerate(history)
+    ]
 
 
 @pytest.mark.asyncio
@@ -242,8 +279,12 @@ async def test_twelve_frame_erasure_and_public_facts_after_prune_then_text_compa
 
     async def prune(history: list[Message]) -> Any:
         return await run_compaction_pass(
-            history, model=model, settings=CompactionSettings(keep_recent_frames=3),
-            summarize=None, now_ms=10_000, last_activity_ms=10_000,
+            history,
+            model=model,
+            settings=CompactionSettings(keep_recent_frames=3),
+            summarize=None,
+            now_ms=10_000,
+            last_activity_ms=10_000,
         )
 
     left, right = image_history("violet", notes=False), image_history("amber", notes=False)
@@ -269,13 +310,19 @@ async def test_twelve_frame_erasure_and_public_facts_after_prune_then_text_compa
             prompts.append(prompt)
             # Only extract from the actual serialized request, never inject
             # an external expected fact into the compactor's output.
-            return next(f"Visible label: {v}" for v in ("violet", "amber")
-                        if f"Visible label: {v}" in prompt)
+            return next(
+                f"Visible label: {v}"
+                for v in ("violet", "amber")
+                if f"Visible label: {v}" in prompt
+            )
 
         compacted = await run_compaction_pass(
-            result.messages, model=model,
+            result.messages,
+            model=model,
             settings=CompactionSettings(keep_recent_tokens=100, strategy="context-full"),
-            summarize=summarize, now_ms=10_000, last_activity_ms=10_000,
+            summarize=summarize,
+            now_ms=10_000,
+            last_activity_ms=10_000,
             respect_threshold=False,
         )
         assert compacted.ran and len(prompts) == 1
@@ -287,7 +334,9 @@ async def test_twelve_frame_erasure_and_public_facts_after_prune_then_text_compa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("secret", [False, True])
 async def test_real_provider_runner_records_and_replays_public_evidence(
-    tmp_path: Path, episode_id: str, secret: bool,
+    tmp_path: Path,
+    episode_id: str,
+    secret: bool,
 ) -> None:
     note = "known-secret/credential-value" if secret else "Visible status: ready"
     calls = 0
@@ -298,16 +347,30 @@ async def test_real_provider_runner_records_and_replays_public_evidence(
         raw = _wait_reply(message)
         if calls == 2:
             oid = json.loads(raw)["actions"][0]["observation_id"]
-            raw = json.dumps({"actions": [{"kind": "finish", "observation_id": oid,
-                                          "status": "done", "reason": "complete"}]})
+            raw = json.dumps(
+                {
+                    "actions": [
+                        {
+                            "kind": "finish",
+                            "observation_id": oid,
+                            "status": "done",
+                            "reason": "complete",
+                        }
+                    ]
+                }
+            )
         return envelope(raw, note if calls == 1 else "")
 
     config = build_config(tmp_path)
     stream = RecordingStream(reply)
     client = _client(stream, config.artifact_root)
     runner = EpisodeRunner(
-        build_spec(episode_id), config, selector=selector(tmp_path), model=client,
-        launch=lambda _: FakeAdapter(tmp_path, episode_id), rescue=_rescue_ok,
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
         redactions=RedactionSet.from_resolved_values([note] if secret else []),
     )
     outcome = await runner.run()
@@ -343,11 +406,15 @@ async def test_real_provider_runner_records_and_replays_public_evidence(
 
 @pytest.mark.asyncio
 async def test_old_fake_client_does_not_claim_a_new_reply_contract(
-    tmp_path: Path, episode_id: str,
+    tmp_path: Path,
+    episode_id: str,
 ) -> None:
     runner = EpisodeRunner(
-        build_spec(episode_id), build_config(tmp_path), selector=selector(tmp_path),
-        model=ScriptedModel(["finish"]), launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["finish"]),
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
         rescue=_rescue_ok,
     )
     outcome = await runner.run()

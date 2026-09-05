@@ -28,18 +28,24 @@ from local_operator.evaluation.evidence.models import (
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import EpisodeRunner
-from local_operator.evaluation.runner.provider_client import create_provider_model_client
+from local_operator.evaluation.runner.provider_client import (
+    create_provider_model_client,
+)
 from local_operator.harness.types import ImageContent, ModelSpec
 from local_operator.providers.auth_store import AuthStore
 from tests.unit.evaluation.runner import conftest as fixtures
 from tests.unit.evaluation.runner.test_episode import _rescue_ok
-from tests.unit.evaluation.runner.test_provider_client import _distinct_framed_observation
+from tests.unit.evaluation.runner.test_provider_client import (
+    _distinct_framed_observation,
+)
 from tests.unit.evaluation.runner.test_public_reply import envelope
 
 
 @pytest.mark.asyncio
 async def test_loopback_sse_factory_public_memory_and_secret_retention(
-    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    episode_id: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     public_fact = "Visible status: ready"
     secret = "fixture-resolved-secret-not-for-memory"
@@ -69,29 +75,44 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
             else:
                 decisions += 1
                 content = request["messages"][-1]["content"]
-                text = content if isinstance(content, str) else "\n".join(
-                    block["text"] for block in content if block["type"] == "text"
+                text = (
+                    content
+                    if isinstance(content, str)
+                    else "\n".join(block["text"] for block in content if block["type"] == "text")
                 )
-                oid = next(line.split(": ", 1)[1] for line in text.splitlines()
-                           if line.startswith("Observation ID: "))
+                oid = next(
+                    line.split(": ", 1)[1]
+                    for line in text.splitlines()
+                    if line.startswith("Observation ID: ")
+                )
                 action: dict[str, Any] = {"kind": "wait", "observation_id": oid, "duration_ms": 1}
                 if decisions == 13:
-                    action = {"kind": "finish", "observation_id": oid,
-                              "status": "done", "reason": "fixture complete"}
+                    action = {
+                        "kind": "finish",
+                        "observation_id": oid,
+                        "status": "done",
+                        "reason": "fixture complete",
+                    }
                 note = public_fact if decisions == 1 else secret if decisions == 2 else ""
                 reply = envelope(json.dumps({"actions": [action]}), note)
             replies.append(reply)
             # Two content deltas force the real SSE decoder to assemble the
             # envelope before decision parsing; usage takes its normal route.
-            chunks = [reply[:len(reply) // 2], reply[len(reply) // 2:]]
+            chunks = [reply[: len(reply) // 2], reply[len(reply) // 2 :]]
             events = [
-                {"id": f"fixture-{len(requests)}", "choices": [
-                    {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
-                ]} for chunk in chunks
+                {
+                    "id": f"fixture-{len(requests)}",
+                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                }
+                for chunk in chunks
             ]
-            events.append({"id": f"fixture-{len(requests)}", "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "stop"}
-            ], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}})
+            events.append(
+                {
+                    "id": f"fixture-{len(requests)}",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                }
+            )
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
             data = (body + "data: [DONE]\n\n").encode()
             self.send_response(200)
@@ -113,15 +134,21 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
     route = RouteIdentity(provider_id="openai", route_id="loopback", model_id="fixture-model")
     spec = replace(fixtures.build_spec(episode_id), requested_route=route)
     model = ModelSpec(
-        provider="openai", model_id="fixture-model", supports_images=True,
-        base_url=f"http://127.0.0.1:{server.server_port}/v1", context_window=128_000,
+        provider="openai",
+        model_id="fixture-model",
+        supports_images=True,
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        context_window=128_000,
     )
     client = create_provider_model_client(
         auth_store=store,
-        settings={"providers": {"openai": {"api": "chat_completions"}},
-                  "retry": {"maxRetries": 0}},
-        route=route, model_spec=model, artifact_root=config.artifact_root,
-        episode_id=episode_id, keep_recent_frames=3, rebuild_every_frames=8,
+        settings={"providers": {"openai": {"api": "chat_completions"}}, "retry": {"maxRetries": 0}},
+        route=route,
+        model_spec=model,
+        artifact_root=config.artifact_root,
+        episode_id=episode_id,
+        keep_recent_frames=3,
+        rebuild_every_frames=8,
         compaction=CompactionSettings(strategy="context-full", keep_recent_tokens=100),
     )
 
@@ -134,8 +161,12 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
     thread.start()
     try:
         runner = EpisodeRunner(
-            spec, config, selector=fixtures.selector(tmp_path), model=client,
-            launch=lambda _: fixtures.FakeAdapter(tmp_path, episode_id), rescue=_rescue_ok,
+            spec,
+            config,
+            selector=fixtures.selector(tmp_path),
+            model=client,
+            launch=lambda _: fixtures.FakeAdapter(tmp_path, episode_id),
+            rescue=_rescue_ok,
             redactions=RedactionSet.from_resolved_values([secret]),
         )
         outcome = await asyncio.wait_for(runner.run(), timeout=30)
@@ -155,8 +186,9 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
             assert json.loads(recorded)["public_observations"] == expected
             # The next *HTTP request* contains exactly the evidence-redacted
             # accepted reply, proving the normal Message/provider wire path.
-            assistant = [m["content"] for m in requests[index + 1]["messages"]
-                         if m["role"] == "assistant"]
+            assistant = [
+                m["content"] for m in requests[index + 1]["messages"] if m["role"] == "assistant"
+            ]
             assert recorded in assistant
         assert all(secret not in json.dumps(request) for request in requests)
         assert not any(secret.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
@@ -170,27 +202,39 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
             text, *_ = await client._stream(client._summary_request(prompt))
             return text
 
-        compacted = await asyncio.wait_for(run_compaction_pass(
-            history, model=model,
-            settings=CompactionSettings(strategy="context-full", keep_recent_tokens=100),
-            summarize=summarize, now_ms=10_000, last_activity_ms=10_000,
-            respect_threshold=False,
-        ), timeout=10)
+        compacted = await asyncio.wait_for(
+            run_compaction_pass(
+                history,
+                model=model,
+                settings=CompactionSettings(strategy="context-full", keep_recent_tokens=100),
+                summarize=summarize,
+                now_ms=10_000,
+                last_activity_ms=10_000,
+                respect_threshold=False,
+            ),
+            timeout=10,
+        )
         assert compacted.ran and summaries == 1 and len(requests) == 14
         assert public_fact in compacted.messages[0].text
         assert secret not in json.dumps(requests[-1])
         assert not any(secret in m.text for m in compacted.messages)
         # Visible under pytest -s for the offline handoff: actual response and
         # side-effect evidence, without dumping bodies or any credential value.
-        print(json.dumps({
-            "transport": "loopback HTTP/SSE via create_provider_model_client",
-            "http_requests": len(requests), "accepted_decisions": decisions,
-            "response_artifacts": len(responses), "bundle_valid": report.valid,
-            "frames_dropped": [record.frames_dropped for record in compactions],
-            "retained_public_fact": public_fact,
-            "secret_note": "redacted before artifact and next HTTP request",
-            "subsequent_text_summary": compacted.summary_text,
-        }))
+        print(
+            json.dumps(
+                {
+                    "transport": "loopback HTTP/SSE via create_provider_model_client",
+                    "http_requests": len(requests),
+                    "accepted_decisions": decisions,
+                    "response_artifacts": len(responses),
+                    "bundle_valid": report.valid,
+                    "frames_dropped": [record.frames_dropped for record in compactions],
+                    "retained_public_fact": public_fact,
+                    "secret_note": "redacted before artifact and next HTTP request",
+                    "subsequent_text_summary": compacted.summary_text,
+                }
+            )
+        )
     finally:
         await client._stream_fn.close()
         store.close()

@@ -11,8 +11,8 @@ import json
 from typing import Any, Mapping
 from urllib.parse import unquote
 
-from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.evidence.models import canonical_bytes, canonical_digest
+from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.receipts import RedactionSet
 
 REPLY_VERSION = "1.0"

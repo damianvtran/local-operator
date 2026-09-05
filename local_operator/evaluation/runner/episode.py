@@ -788,7 +788,10 @@ class EpisodeRunner:
         nothing -- a missing usage record leaves an unclosed operation and the
         bundle cannot reach a terminal.
         """
-        from local_operator.evaluation.runner.model import DecisionRejected, ModelDecision
+        from local_operator.evaluation.runner.model import (
+            DecisionRejected,
+            ModelDecision,
+        )
 
         request_id = f"req-{self._model_cycles}-{uuid.uuid4().hex[:12]}"
         message_count = len(self._turns)
@@ -867,7 +870,9 @@ class EpisodeRunner:
         served_route = decision.route or self._spec.requested_route
         response_artifact = None
         if isinstance(decision, ModelDecision) and decision.public_reply is not None:
-            from local_operator.evaluation.runner.public_reply import redact_public_reply
+            from local_operator.evaluation.runner.public_reply import (
+                redact_public_reply,
+            )
 
             public_reply = redact_public_reply(decision.public_reply, self._redactions)
             decision = decision.model_copy(update={"public_reply": public_reply})

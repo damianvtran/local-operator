@@ -655,10 +655,15 @@ class _ContextBuilder:
                 self._messages.append(
                     Message(
                         role="assistant",
-                        content=[TextContent(
-                            text=(turn.public_reply if turn.public_reply is not None
-                                  else turn.batch.to_canonical_json().decode("utf-8"))
-                        )],
+                        content=[
+                            TextContent(
+                                text=(
+                                    turn.public_reply
+                                    if turn.public_reply is not None
+                                    else turn.batch.to_canonical_json().decode("utf-8")
+                                )
+                            )
+                        ],
                     )
                 )
                 self._closed_turns.add(index)
