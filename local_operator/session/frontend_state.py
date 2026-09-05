@@ -1539,7 +1539,13 @@ class FrontendStateStore:
                     appended = trajectory
                     trajectory_replacements.append(job_id)
                 if appended:
-                    trajectory_appends[job_id] = appended
+                    # Unlike the job snapshot, this delta does not pass through
+                    # JobState's serializer. Pydantic validates the outer event
+                    # dict but leaves its Any-valued args/message/result frozen;
+                    # JSON then turns their tuple-backed mappings into arrays of
+                    # pairs. The viewer loses tool details until a fresh history
+                    # fetch. Thaw at this wire boundary, just as snapshots do.
+                    trajectory_appends[job_id] = [_wire_value(event) for event in appended]
                 summaries.append(_job_summary(job))
             wire_changes["jobs"] = summaries
         if not normalized:

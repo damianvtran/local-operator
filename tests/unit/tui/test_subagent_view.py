@@ -983,6 +983,59 @@ async def _open(pilot: Any, app: OperatorApp, job: Any) -> SubagentView:
     return app.query_one(SubagentView)
 
 
+@pytest.mark.asyncio
+async def test_live_wire_tool_details_match_reentered_history() -> None:
+    """A JSON delta and a later owner fetch must paint the same tool receipt."""
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        FrontendUpdate,
+        JobState,
+    )
+
+    state = FrontendSessionState(session_id="synthetic", epoch="test")
+    owner, follower = FrontendStateStore(state), FrontendStateStore(state)
+    job = _job_with([], status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        rows = [
+            _call("wire-call", "read", path="README.md"),
+            _result("wire-call", "read", "Synthetic documentation"),
+        ]
+        for end in (1, 2):
+            update = owner.mutate(
+                jobs=[JobState(id=job.id, type="subagent", trajectory=rows[:end])]
+            )
+            assert update is not None
+            assert follower.apply_update(
+                FrontendUpdate.model_validate_json(update.model_dump_json())
+            )
+            job.trajectory = follower.state.jobs[0].trajectory
+            app._refresh_subagent_view(job.id)
+            await pilot.pause()
+            card = view.query_one(ToolCard)
+            assert card._args == {"path": "README.md"}
+            assert "README.md" in card._summary
+        assert card._output == ["Synthetic documentation"]
+        assert card.can_expand()
+        await pilot.click(card)
+        await pilot.pause()
+        assert card._expanded
+        assert card.size.height > 1
+        await pilot.press("escape")
+        assert app._subagent_view is None
+        job.trajectory = rows
+        app._open_subagent_view(job.id)
+        await pilot.pause()
+        restored = app.query_one(SubagentView).query_one(ToolCard)
+        assert restored._args == card._args
+        assert restored._output == card._output
+        assert restored.can_expand()
+
+
 @pytest.mark.parametrize("size", [(100, 30), (140, 40)])
 @pytest.mark.asyncio
 async def test_the_page_takes_the_whole_view_when_opened_from_the_splash(
