@@ -12,15 +12,19 @@ from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import settings_io
+from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.jobs import JobManager
 from local_operator.providers import registry
 from local_operator.server.app import desktop_validation_error, managed_desktop_boundary
 from local_operator.server.routes import (
+    agents,
     auth,
     capabilities,
     config,
     credentials,
+    jobs,
     settings,
 )
 
@@ -39,10 +43,18 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.include_router(settings.router)
     app.include_router(config.router)
     app.include_router(credentials.router)
+    # The agent and job routers are mounted so the legacy-gate tests assert on
+    # the GATE rather than on a missing route: without them every gated path
+    # 404s, and the unmanaged-mode assertions ("status is not 401/403") pass
+    # whether or not the boundary works.
+    app.include_router(agents.router)
+    app.include_router(jobs.router)
     app.middleware("http")(managed_desktop_boundary)
     app.exception_handler(RequestValidationError)(desktop_validation_error)
     app.state.config_manager = ConfigManager(tmp_path)
     app.state.credential_manager = CredentialManager(tmp_path)
+    app.state.agent_registry = AgentRegistry(tmp_path)
+    app.state.job_manager = JobManager()
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -98,6 +110,137 @@ async def test_managed_legacy_controls_require_token_but_unmanaged_remains_compa
             headers={"Authorization": ""},
         )
     ).status_code == 200
+
+
+def test_managed_gate_covers_every_legacy_route() -> None:
+    """Every ``/v1/agents*`` and ``/v1/jobs*`` route is gated, or an explicit exception.
+
+    THE regression guard for this boundary. Hand-maintained string matching
+    missed three routes in review round 1 and five more in round 2 -- including
+    an unauthenticated cross-origin ``PATCH`` that renamed an agent and
+    persisted it -- because each new route had to be remembered into the gate.
+
+    This walks the ROUTER instead, so a route added tomorrow is covered the day
+    it exists: either the gate matches it, or its ``METHOD /template`` key sits
+    in ``_LEGACY_GATE_EXCEPTIONS`` with a stated reason and a reviewer had to
+    write that reason down. Do not silence a failure here by adding a key
+    without one.
+    """
+    from local_operator.server.app import (
+        _LEGACY_GATE_EXCEPTIONS,
+        _legacy_desktop_gated,
+        legacy_gate_routes,
+    )
+
+    routes = legacy_gate_routes()
+    # Guards the walker itself: an `_IncludedRouter` whose nested routes are not
+    # followed yields nothing, and every assertion below would pass vacuously.
+    assert len(routes) >= 25, f"router walk found only {len(routes)} routes; it is not descending"
+
+    sample = {"{agent_id}": "11111111-2222-3333-4444-555555555555", "{job_id}": "job-1"}
+    ungated: list[str] = []
+    for path, methods in routes:
+        concrete = path
+        for token, value in sample.items():
+            concrete = concrete.replace(token, value)
+        concrete = concrete.replace("{variable_key}", "some-key")
+        for method in methods:
+            key = f"{method} {path}"
+            if _legacy_desktop_gated(concrete, method):
+                assert key not in _LEGACY_GATE_EXCEPTIONS, (
+                    f"{key} is gated but also listed as an exception; "
+                    "remove the stale entry so the list stays meaningful."
+                )
+            elif key not in _LEGACY_GATE_EXCEPTIONS:
+                ungated.append(key)
+
+    assert not ungated, (
+        "these legacy routes answer without the desktop bearer in managed mode:\n  "
+        + "\n  ".join(sorted(ungated))
+        + "\nGate them, or add an entry to `_LEGACY_GATE_EXCEPTIONS` stating why "
+        "the route is safe to leave open."
+    )
+
+    # Every exception must name a route that still exists, so the list cannot
+    # rot into a set of keys that quietly match nothing.
+    live = {f"{method} {path}" for path, methods in routes for method in methods}
+    stale = set(_LEGACY_GATE_EXCEPTIONS) - live
+    assert not stale, f"exception list names routes that no longer exist: {sorted(stale)}"
+    assert all(reason.strip() for reason in _LEGACY_GATE_EXCEPTIONS.values())
+
+
+async def test_the_five_routes_round_two_found_are_gated(desktop, monkeypatch):
+    """The exact requests review round 2 reproduced against a live backend.
+
+    Named individually rather than folded into the router walk above because a
+    reviewer should be able to read this file and see the reported bypasses
+    closed, without re-deriving them from the routing table.
+    """
+    client, _ = desktop
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    reads = (
+        f"/v1/agents/{agent_id}/history",
+        f"/v1/agents/{agent_id}/execution-variables",
+        f"/v1/agents/{agent_id}/system-prompt",
+        f"/v1/agents/{agent_id}/export",
+        f"/v1/agents/{agent_id}/download",
+        "/v1/jobs/some-job-id",
+    )
+    for path in reads:
+        assert (await client.get(path, headers={"Authorization": ""})).status_code == 401, path
+        assert (
+            await client.get(path, headers={"Origin": "https://evil.example"})
+        ).status_code == 403, path
+        # Starlette answers HEAD from the GET route; the gate must cover it too.
+        assert (await client.head(path, headers={"Authorization": ""})).status_code == 401, path
+
+    # The WRITE. Unauthenticated and cross-origin, this renamed an agent and the
+    # rename persisted.
+    for headers in ({"Authorization": ""}, {"Origin": "https://evil.example"}):
+        response = await client.patch(
+            f"/v1/agents/{agent_id}",
+            json={"name": "PWNED-by-unauthenticated-caller"},
+            headers=headers,
+        )
+        assert response.status_code in (401, 403), response.status_code
+        assert (await client.delete(f"/v1/agents/{agent_id}", headers=headers)).status_code in (
+            401,
+            403,
+        )
+
+
+async def test_unmanaged_mode_keeps_every_legacy_route_open(desktop, monkeypatch):
+    """No desktop token: the CLI/script contract is unchanged on ALL of them.
+
+    The gate widened from 4 paths to the whole agent/job surface, including
+    mutating methods. That must remain invisible to a standalone legacy server,
+    which is the posture every CLI client and script runs against.
+    """
+    client, _ = desktop
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN")
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    for path, method in (
+        ("/v1/agents", "get"),
+        ("/v1/jobs", "get"),
+        (f"/v1/agents/{agent_id}", "get"),
+        (f"/v1/agents/{agent_id}/history", "get"),
+        (f"/v1/agents/{agent_id}/export", "get"),
+        (f"/v1/agents/{agent_id}/system-prompt", "get"),
+        ("/v1/jobs/some-job-id", "get"),
+    ):
+        response = await getattr(client, method)(path, headers={"Authorization": ""})
+        assert response.status_code not in (401, 403), f"{method} {path} -> {response.status_code}"
+    # Mutating methods too: these now sit on gated paths, and gating a PATH must
+    # not have changed what an unmanaged server accepts.
+    assert (
+        await client.patch(
+            f"/v1/agents/{agent_id}", json={"name": "cli-rename"}, headers={"Authorization": ""}
+        )
+    ).status_code not in (401, 403)
+    assert (
+        await client.post("/v1/agents", json={"name": "cli-created"}, headers={"Authorization": ""})
+    ).status_code not in (401, 403)
 
 
 async def test_legacy_reads_and_import_are_gated_in_managed_mode(desktop, monkeypatch):
