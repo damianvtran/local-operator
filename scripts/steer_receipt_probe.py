@@ -31,6 +31,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.events import SteeringDelivered, TurnEnded  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
@@ -112,7 +116,7 @@ async def _measure(cols: int, *, scrolled_up: bool, shot: str | None = None) -> 
         before = _geometry(app, block)
         before_rows = _rows(app)
         if shot:
-            app.save_screenshot(f"{shot}-before.svg")
+            save_capture(app, f"{shot}-before.svg")
 
         app.post_message(SteeringDelivered(1))
         await pilot.pause()
@@ -121,7 +125,7 @@ async def _measure(cols: int, *, scrolled_up: bool, shot: str | None = None) -> 
         after = _geometry(app, block)
         after_rows = _rows(app)
         if shot:
-            app.save_screenshot(f"{shot}-after.svg")
+            save_capture(app, f"{shot}-after.svg")
 
         changed = sum(1 for a, b in zip(before_rows, after_rows) if a != b)
         state = "scrolled up" if scrolled_up else "pinned to bottom"

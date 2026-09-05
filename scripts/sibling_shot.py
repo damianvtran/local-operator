@@ -32,6 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _SCRATCH = tempfile.mkdtemp(prefix="lo-sibling-shot-")
 os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 from tests.unit.tui.test_band_panels import FakeSession as BandSession  # noqa: E402
@@ -91,7 +95,7 @@ async def main() -> None:
         await pilot.pause()
         view = app._subagent_view if mode == "subagent" else app._org_chart_view
         assert view is not None
-        app.save_screenshot(out)
+        save_capture(app, out)
         print(_geometry(app, view, mode, size))
 
 
