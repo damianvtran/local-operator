@@ -6944,9 +6944,23 @@ class OperatorApp(App[None]):
             if not attached_name:
                 attached_name = str(getattr(session, "active_team_name", "") or "")
             if not attached_name:
+                # UX round 1, U2: the `=chart` escape was only ever taught
+                # once a chart of a team named `chart` OPENED — but the user
+                # who most needs it typed bare `/team chart` meaning "talk to
+                # my team called chart", attached nothing, and got only this
+                # empty-state notice. Teach the escape here too, and only when
+                # such a team exists so every other user keeps the short line.
+                escape_hint = ""
+                try:
+                    if registry.get_team_by_name("chart") is not None:
+                        escape_hint = (
+                            " To talk to the team named 'chart', use /team =chart <request>."
+                        )
+                except Exception:  # noqa: BLE001 — the hint is optional
+                    logger.debug("could not check for a team named chart", exc_info=True)
                 self._system_notice(
                     "no team to chart. Name one with /team chart <name>, "
-                    "or /team to list teams.",
+                    f"or /team to list teams.{escape_hint}",
                     "warning",
                 )
                 return
@@ -14108,7 +14122,14 @@ class OperatorApp(App[None]):
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
         if data.get("type") in ("team_attached", "agent_attached"):
-            self._sync_team_band()
+            # Each receipt syncs ITS OWN segment (review round 1, N1): the
+            # post-op push repaints both from ``frontend_state`` a tick later
+            # anyway, but the explicit call is what a test reads, and syncing
+            # the team band for an agent attach was simply the wrong one.
+            if data.get("type") == "team_attached":
+                self._sync_team_band()
+            else:
+                self._sync_agent_band()
             request = str(data.get("request") or "")
             if request:
                 self._submit_command_prompt(request, attachments)
@@ -18852,15 +18873,48 @@ class OperatorApp(App[None]):
             if answer.get("ok"):
                 return False
             reason = str(answer.get("reason") or "")
-            self._system_notice(
-                (
-                    "the session that holds this conversation is not reachable; "
-                    "credentials are stored there"
-                    if reason == "disconnected"
-                    else "this session cannot hold credentials"
-                ),
-                "warning",
-            )
+            if reason == "disconnected":
+                # THREE states used to share one "not reachable" sentence
+                # (UX round 1, U4), and only one of them was described by it.
+                # A cold viewer is normally engaged before this flow runs
+                # (`_needs_runtime_first`), so `disconnected` here means the
+                # runtime went away between the check and the call; a
+                # DELIBERATE stop is the one the facade can name (the same
+                # `_unavailable_reason()` the prompt path consults), and the
+                # reopen command is the answer. Only a genuinely dropped owner
+                # gets the "not reachable" wording.
+                if self._stopped_session_id:
+                    text_line, kind = self._no_session_notice()
+                    self._system_notice(text_line, kind)
+                elif getattr(self._session, "is_cold", False):
+                    self._system_notice(
+                        "no runtime is running for this session; "
+                        "send a message to start one, then run /credential again",
+                        "warning",
+                    )
+                else:
+                    self._system_notice(
+                        "the session that holds this conversation is not reachable; "
+                        "credentials are stored there",
+                        "warning",
+                    )
+            elif reason == "remote-client":
+                self._system_notice(
+                    "credentials are stored on the machine running the session — "
+                    "run /credential from a terminal on that machine",
+                    "warning",
+                )
+            elif reason == "unknown-action":
+                # A version-skewed owner that predates this verb. Named rather
+                # than folded into the store-failure copy (review round 1,
+                # N3), which would have read as "the value was empty".
+                self._system_notice(
+                    "the session's runtime does not know this /credential verb; "
+                    "restart it to pick up the update",
+                    "warning",
+                )
+            else:
+                self._system_notice("this session cannot hold credentials", "warning")
             return True
 
         if parsed.action == "list":
@@ -18895,14 +18949,17 @@ class OperatorApp(App[None]):
                 return
             self._notice(format_credential_forget_all(int(answer.get("count") or 0)))
             return
-        value = await self._request_login_key(parsed.key, secret=True, sole_path=True)
+        value = await self._request_login_key(
+            parsed.key, secret=True, sole_path=True, credential=True
+        )
         if value is None:
-            self._notice(f"Cancelled; {parsed.key} not stored.")
+            # The card's own settled receipt says "not stored"; a notice
+            # here doubled it (UX round 1, U5).
             return
         answer = await route("store", parsed.key, value)
         if not answer.get("ok"):
             reason = str(answer.get("reason") or "")
-            if reason in ("disconnected", "unavailable"):
+            if reason in ("disconnected", "unavailable", "remote-client", "unknown-action"):
                 _refused(answer)
                 return
             self._notice(
@@ -18923,9 +18980,9 @@ class OperatorApp(App[None]):
         """Masked paste for ``/credential <KEY>``, then store what arrived."""
         from local_operator.variables import describe_store_failure
 
-        value = await self._request_login_key(key, secret=True, sole_path=True)
+        value = await self._request_login_key(key, secret=True, sole_path=True, credential=True)
         if value is None:
-            self._notice(f"Cancelled; {key} not stored.")
+            # The card's own settled receipt says "not stored" (U5).
             return
         result = store.store_credential(key, value, "command")  # type: ignore[attr-defined]
         if not result.ok or result.credential is None:
@@ -19069,7 +19126,12 @@ class OperatorApp(App[None]):
         )
 
     async def _request_login_key(
-        self, provider_label: str, *, secret: bool = True, sole_path: bool = True
+        self,
+        provider_label: str,
+        *,
+        secret: bool = True,
+        sole_path: bool = True,
+        credential: bool = False,
     ) -> str | None:
         """Put a paste prompt in the transcript and await the key.
 
@@ -19093,7 +19155,9 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_aside()
-        block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
+        block = KeyPromptBlock(
+            provider_label, secret=secret, sole_path=sole_path, credential=credential
+        )
         self._key_prompt = block
         # Kept BEYOND the `finally` that clears `_key_prompt`, because the flow
         # only learns a paste was unusable after this method has returned the

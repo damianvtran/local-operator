@@ -1612,3 +1612,111 @@ async def test_a_daemon_class_dial_is_refused_a_grant() -> None:
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+# --- the credential op --------------------------------------------------------
+#
+# The one op whose frame carries a secret. It has a dedicated name so the
+# value never rides a general-purpose field; the server gates the STORE verb
+# on the client's declared locality the way the `/mcp` grant verbs are gated,
+# and validates the frame so a non-string value is refused rather than
+# coerced. Every assertion below is on lengths and outcomes — the placeholder
+# is never printed.
+
+
+class _CredentialHandle(FakeHandle):
+    """Records each credential verb with the LENGTH of its value, never the value."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.verbs: list[tuple[str, str, int]] = []
+
+    def credential_op(self, action: str, key: str, value: str) -> dict[str, object]:
+        self.verbs.append((action, key, len(value)))
+        if action == "store":
+            return {"ok": True, "key": key, "replaced": False}
+        if action == "names":
+            return {"ok": True, "names": [key] if key else []}
+        return {"ok": True}
+
+
+async def _credential(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, req: int, **fields: object
+) -> dict[str, Any]:
+    writer.write(json.dumps({"op": "credential", "req": req, **fields}).encode() + b"\n")
+    await writer.drain()
+    return await _until(reader, "result", req)
+
+
+@pytest.mark.asyncio
+async def test_a_local_client_may_store_a_credential() -> None:
+    """Loopback attach clients are local by construction; the store lands."""
+    handle = _CredentialHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        placeholder = "x" * 24
+        frame = await _credential(
+            reader, writer, 11, action="store", key="DEMO_TOKEN", value=placeholder
+        )
+        assert frame["data"] == {"ok": True, "key": "DEMO_TOKEN", "replaced": False}
+        assert handle.verbs == [("store", "DEMO_TOKEN", len(placeholder))]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_remote_client_is_refused_the_store_but_may_list() -> None:
+    """Review round 1, R4: the phone relay must not push a secret into the
+    desktop's environment. The read verbs return key NAMES only and stay open."""
+    handle = _CredentialHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach", locality="remote")
+        placeholder = "x" * 24
+        frame = await _credential(
+            reader, writer, 12, action="store", key="DEMO_TOKEN", value=placeholder
+        )
+        assert frame["data"] == {"ok": False, "reason": "remote-client"}
+        assert handle.verbs == [], "the handle must never see a remote store"
+        frame = await _credential(reader, writer, 13, action="names")
+        assert frame["data"]["ok"] is True
+        assert handle.verbs == [("names", "", 0)]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_credential_frame_with_a_non_string_value_is_refused() -> None:
+    """Review round 1, N2: validated rather than ``str()``-coerced into a repr."""
+    handle = _CredentialHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps(
+                {"op": "credential", "req": 14, "action": "store", "key": "K", "value": 12345}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        frame = await _until(reader, "error", 14)
+        assert "value must be a string" in frame.get("message", ""), frame
+        assert handle.verbs == []
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()

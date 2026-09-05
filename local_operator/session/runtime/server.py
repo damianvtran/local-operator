@@ -1436,6 +1436,15 @@ class RuntimeServer:
                 result = await result
             return result
         if op == "credential":
+            # Validated HERE because the payload path does not run
+            # ``validate_control_frame`` the way ``_dispatch`` does (a
+            # pre-existing gap for every payload op). Only this op is wired,
+            # deliberately: it is the one that carries a secret, and widening
+            # the validator over ``slash_result`` is a behaviour change for
+            # every routed slash that belongs in its own review.
+            from local_operator.mobile.types import validate_control_frame
+
+            validate_control_frame(frame)
             # A DEDICATED op rather than a `slash_result` with the secret in
             # its `args` string. The value must never sit in a general-purpose
             # field that other code paths echo, log, or put in a transcript —
@@ -1453,8 +1462,21 @@ class RuntimeServer:
             credential = getattr(h, "credential_op", None)
             if not callable(credential):
                 raise ValueError("this owner cannot hold session credentials")
+            action = str(frame.get("action", ""))
+            if action == "store" and locality == "remote":
+                # Same locality rule the `/mcp` grant verbs apply
+                # (``mcp/grants.py::REMOTE_GRANT_NOTICE``): a secret pasted on
+                # a RELAYED client — a phone, in a future relay topology —
+                # would be typed on a device the desktop's environment was
+                # never meant to trust, and then injected into every bash
+                # command here. Loopback attach clients are ``local`` by
+                # construction, so no user today is refused; the gate exists
+                # so the relay, when it lands, does not inherit a write it
+                # never opted into (review round 1, R4). The read verbs stay
+                # open: they return key NAMES only, never a value.
+                return {"ok": False, "reason": "remote-client"}
             result = credential(
-                str(frame.get("action", "")),
+                action,
                 str(frame.get("key", "")),
                 str(frame.get("value", "")),
             )
