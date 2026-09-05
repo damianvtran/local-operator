@@ -184,6 +184,13 @@ class Setting:
     #: anything — a preview must never reach a writer, which is exactly why the
     #: flag lives beside the write facade rather than inside it.
     preview: bool = False
+    #: The key of a BOOL master switch this setting is INERT without. The
+    #: settings page paints the value dim while the master is off (the same
+    #: ink as a READONLY row) and the row's detail says so, so a leftover
+    #: ``max_sessions: 200`` under a switched-off ``session.cleanup`` cannot
+    #: read as a cap in force (design round 1, D1). Presentational only: the
+    #: consumer of the gated key is responsible for honouring the master.
+    gated_by: str | None = None
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -760,6 +767,10 @@ SETTINGS: tuple[Setting, ...] = (
     # there, so the opt-out never worked and the reaper it gated deleted 225
     # named sessions. `test_settings_io.py` round-trips every nested setting
     # through that reader to keep this from recurring.
+    # Help strings are budgeted: the detail row sheds the help before the
+    # key path, so each sub-row LEADS with the gate ("Needs cleanup on.") and
+    # stays under ~63 cells (design round 1, D3). The master's help fits the
+    # 94-cell budget at 100 cols and names what ON does and what is spared.
     Setting(
         key="session.cleanup.enabled",
         path=("session", "cleanup", "enabled"),
@@ -767,51 +778,55 @@ SETTINGS: tuple[Setting, ...] = (
         label="Session cleanup",
         kind=Kind.BOOL,
         default=False,
-        help="Master switch. Off: nothing ever removes a session directory automatically.",
+        help="Off: nothing is ever removed. On: limits below run at launch, sparing recent/live.",
         choices=_bool_choices(
-            "apply the limits below on startup",
-            "never remove sessions automatically",
+            "limits run at launch; newest 10 + live kept",
+            "nothing is ever removed",
         ),
     ),
     Setting(
         key="session.cleanup.max_sessions",
         path=("session", "cleanup", "max_sessions"),
         section="session",
-        label="↳ Cleanup: max sessions",
+        label="↳ max sessions",
         kind=Kind.INT,
         default=0,
-        help="Keep only the N most recently active sessions. 0 = unlimited. Needs cleanup on.",
+        help="Needs cleanup on. Keep the N most recently active; 0 = no cap.",
         minimum=0,
+        gated_by="session.cleanup.enabled",
     ),
     Setting(
         key="session.cleanup.max_inactive_days",
         path=("session", "cleanup", "max_inactive_days"),
         section="session",
-        label="↳ Cleanup: max inactive days",
+        label="↳ max inactive days",
         kind=Kind.INT,
         default=0,
-        help="Remove sessions idle longer than this (last activity). 0 = never. Needs cleanup on.",
+        help="Needs cleanup on. Remove sessions idle this many days; 0 = never.",
         minimum=0,
+        gated_by="session.cleanup.enabled",
     ),
     Setting(
         key="session.cleanup.max_total_bytes",
         path=("session", "cleanup", "max_total_bytes"),
         section="session",
-        label="↳ Cleanup: max total bytes",
+        label="↳ max total bytes",
         kind=Kind.INT,
         default=0,
-        help="Trim least recently active sessions past this size. 0 = unlimited. Needs cleanup on.",
+        help="Needs cleanup on. Trim oldest past this many bytes; 0 = no cap.",
         minimum=0,
+        gated_by="session.cleanup.enabled",
     ),
     Setting(
         key="session.cleanup.remove_empty",
         path=("session", "cleanup", "remove_empty"),
         section="session",
-        label="↳ Cleanup: remove empty",
+        label="↳ remove empty",
         kind=Kind.BOOL,
         default=False,
-        help="Remove directories that never got a transcript. Needs cleanup on.",
+        help="Needs cleanup on. Remove dirs that never got a transcript.",
         choices=_bool_choices("remove transcript-less directories", "keep them"),
+        gated_by="session.cleanup.enabled",
     ),
     Setting(
         key="runtime.unattended_gate_timeout",

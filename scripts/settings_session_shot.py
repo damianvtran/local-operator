@@ -28,7 +28,32 @@ async def main() -> None:
 
     out = sys.argv[1]
     size = tuple(int(part) for part in (sys.argv[2] if len(sys.argv) > 2 else "100x40").split("x"))
-    toggle = len(sys.argv) > 3 and sys.argv[3] == "toggle"
+    mode = sys.argv[3] if len(sys.argv) > 3 else ""
+    toggle = mode in ("toggle", "stale")
+    # `stale`: the design-round state — limits typed in, then the master
+    # switched OFF, so the sub-rows hold values the policy will not apply.
+    if mode == "stale":
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        ConfigManager(config_dir()).update_config(
+            {
+                "session": {
+                    "cleanup": {"enabled": False, "max_sessions": 200, "max_inactive_days": 30}
+                }
+            }
+        )
+        toggle = False
+    if mode == "armed":
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        ConfigManager(config_dir()).update_config(
+            {"session": {"cleanup": {"enabled": True, "max_sessions": 5}}}
+        )
+        toggle = False
+    if mode == "expand":
+        toggle = False
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:  # type: ignore[arg-type]
@@ -48,6 +73,15 @@ async def main() -> None:
         if toggle:
             view.action_toggle_bool()
             await pilot.pause()
+            await pilot.pause()
+        if mode == "expand":
+            view.action_activate()
+            await pilot.pause()
+            await pilot.pause()
+        if mode == "stale":
+            # Land on a sub-row so its "inert" clause is the one on screen.
+            view._select_setting_row("session.cleanup.max_sessions")
+            view._land()
             await pilot.pause()
         save_capture(app, out)
 

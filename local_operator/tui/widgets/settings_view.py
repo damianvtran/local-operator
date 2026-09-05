@@ -39,6 +39,7 @@ out of a click handler.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from rich.cells import cell_len
@@ -387,6 +388,9 @@ class SettingsView(Vertical):
         #: (review round 1, B1). Do not add a write path that bypasses
         #: ``settings_io``.
         self._manager = manager
+        #: ``(policy, would-remove count)`` for the cleanup master row's detail
+        #: clause; see ``_cleanup_preview_count``.
+        self._cleanup_preview_cache: tuple[Any, int] | None = None
         #: Rows are rebuilt from the registry on every repaint (cheap: it is a
         #: tuple walk) so a write is reflected without a second bookkeeping
         #: path that could disagree with the config.
@@ -2741,7 +2745,10 @@ class SettingsView(Vertical):
         # dim, so the config's actual shape is visible at a glance — which is
         # the state a user needs before they can decide what to reset.
         value_style = fg if changed else dim
-        if setting.kind is Kind.READONLY:
+        if setting.kind is Kind.READONLY or self._gated_off(setting):
+            # A value under a switched-off master is INERT and reads as such:
+            # the READONLY ink, whatever the value (design round 1, D1). The
+            # master row itself keeps the ordinary changed/default ink (N3).
             value_style = dim
         if setting.kind is Kind.CASCADE and self._cascade_is_malformed(setting):
             # NOT `_render_value`, which would fall through to `str(value)` and
@@ -3245,9 +3252,70 @@ class SettingsView(Vertical):
             # fitted at 160 columns, which is not a size this page measures
             # (review round 1, U2).
             return "not saved until enter"
+        gated = self._gate_clause(setting)
+        if gated:
+            return gated
         if not settings_io.is_default(self._manager, setting):
             return f"default: {_render_value(setting.default)}"
         return ""
+
+    def _gated_off(self, setting: Setting) -> bool:
+        """Is ``setting`` a child of a master switch that is currently OFF?"""
+        if setting.gated_by is None:
+            return False
+        master = settings_io.BY_KEY.get(setting.gated_by)
+        return master is not None and not bool(settings_io.read_setting(self._manager, master))
+
+    def _gate_clause(self, setting: Setting) -> str:
+        """The state clause for a master switch and for its children.
+
+        The page's one state-dependent sentence about the cleanup policy,
+        from the SAME dry-run path the CLI uses, so the number here and the
+        number ``lop sessions cleanup --dry-run`` prints cannot disagree
+        (UX round 1, U1; design D6):
+
+        * child with master OFF → ``inert: <master label> is off``;
+        * master ON with no limits → ``on, but no limits set below``;
+        * master ON with limits → ``would remove N now · preview: lop
+          sessions cleanup --dry-run``.
+
+        The count is computed lazily and cached against the cleanup values,
+        never on every repaint: a store walk per keystroke would make the
+        page feel slow on a large store, and the values are what change it.
+        """
+        if setting.gated_by is not None:
+            if self._gated_off(setting):
+                master = settings_io.BY_KEY.get(setting.gated_by)
+                return f"inert: {master.label if master else setting.gated_by} is off"
+            return ""
+        if setting.key != "session.cleanup.enabled":
+            return ""
+        if not bool(settings_io.read_setting(self._manager, setting)):
+            return ""
+        count = self._cleanup_preview_count()
+        if count is None:
+            return "on, but no limits set below"
+        return f"would remove {count} now · preview: lop sessions cleanup --dry-run"
+
+    def _cleanup_preview_count(self) -> int | None:
+        """How many sessions the configured policy would remove at next
+        launch, or ``None`` when no limit is set. Cached per policy value."""
+        from local_operator.session.cleanup import policy_from_config, run_cleanup
+
+        policy = policy_from_config(self._manager)
+        if not policy.has_any_limit:
+            return None
+        cached = self._cleanup_preview_cache
+        if cached is not None and cached[0] == policy:
+            return cached[1]
+        try:
+            root = Path(self._manager.config_dir)
+            result = run_cleanup(root, policy, dry_run=True)
+            count = len(result.removed)
+        except Exception:  # noqa: BLE001 — a preview must never take the page down
+            count = 0
+        self._cleanup_preview_cache = (policy, count)
+        return count
 
     #: Narrowest page that still shows BOTH columns. Below it the pane is
     #: hidden and the settings list takes the whole body: the pane is context,
@@ -4329,6 +4397,20 @@ def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
     expand into an empty group.
     """
     if setting.kind is Kind.BOOL:
+        # A bool that DECLARES its two members carries a description per
+        # side ("apply the limits below…" / "never remove…") that the bare
+        # on/off cannot; those strings were dead text on this page until
+        # design round 1 (D2) noticed the cleanup master leaned on them.
+        # Undeclared bools keep the synthesised pair.
+        declared = setting.choices
+        if len(declared) == 2 and {c.value for c in declared} == {True, False}:
+            ordered = sorted(declared, key=lambda c: not bool(c.value))
+            return tuple(
+                settings_io.Choice(
+                    value=c.value, label=_render_value(c.value), description=c.description
+                )
+                for c in ordered
+            )
         return _BOOL_CHOICES
     return setting.resolved_choices
 

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 from rich.cells import cell_len
+from rich.style import Style
 from textual import events
 
 from local_operator import settings_io
@@ -4744,3 +4745,118 @@ async def test_a_windowed_dropdown_shows_a_position_count() -> None:
 
         lines = view.render_lines_for_test()
         assert any("1/12" in line for line in lines), lines
+
+
+# ---------------------------------------------------------------------------
+# Session cleanup block: gating ink, clauses, declared bool descriptions
+# ---------------------------------------------------------------------------
+
+
+def _value_ink(view: SettingsView, key: str) -> str:
+    """The colour the VALUE column of ``key``'s row is painted in."""
+    from local_operator.tui.widgets.settings_view import _VALUE_COLUMN
+
+    index = _select(view, key)
+    text = view._row_text(view._rows[index], index, 100)
+    for span in text.spans:
+        style = span.style
+        if not isinstance(style, Style) or style.color is None:
+            continue
+        if span.start >= _VALUE_COLUMN:
+            return style.color.name.lower()
+    return ""
+
+
+@pytest.mark.asyncio
+async def test_cleanup_children_paint_dim_while_the_master_is_off(tmp_path: Path) -> None:
+    """Design round 1, D1 / UX U9 / QA Q6: a leftover ``max_sessions: 200``
+    under a switched-off master must read as inert, not as a cap in force —
+    the READONLY ink, whatever the value. Switching the master on restores
+    the ordinary changed/default ink."""
+    from local_operator.tui import theme as theme_mod
+
+    ConfigManager(tmp_path).update_config(
+        {"session": {"cleanup": {"enabled": False, "max_sessions": 200}}}
+    )
+    dim = theme_mod.semantic_color("dim").lower()
+    fg = theme_mod.semantic_color("fg").lower()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        assert _value_ink(view, "session.cleanup.max_sessions") == dim
+        # The row says WHY on its detail line.
+        assert "inert: Session cleanup is off" in view.render_lines_for_test()[-1]
+        _select(view, "session.cleanup.enabled")
+        view.action_toggle_bool()
+        await pilot.pause()
+        assert _value_ink(view, "session.cleanup.max_sessions") == fg
+
+
+@pytest.mark.asyncio
+async def test_master_on_detail_says_no_limits_or_the_would_remove_count(
+    tmp_path: Path,
+) -> None:
+    """UX U1 / design D6: the page must show a NUMBER between "value saved"
+    and the next launch's removal, from the same dry-run path the CLI uses."""
+    from local_operator.session.cleanup import mark_store
+
+    sessions = tmp_path / "sessions"
+    mark_store(sessions)
+    import os
+    import time
+
+    old = time.time() - 40 * 86400
+    for index in range(15):
+        directory = sessions / f"s{index:02d}"
+        directory.mkdir()
+        (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+        os.utime(directory / "transcript.jsonl", (old + index, old + index))
+    ConfigManager(tmp_path).update_config({"session": {"cleanup": {"enabled": True}}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.enabled")
+        assert "on, but no limits set below" in view.render_lines_for_test()[-1]
+        _select(view, "session.cleanup.max_inactive_days")
+        await pilot.press("enter")
+        await pilot.press("7")
+        await pilot.press("enter")
+        await pilot.pause()
+        _select(view, "session.cleanup.enabled")
+        detail = view.render_lines_for_test()[-1]
+        # 15 sessions all 40 d idle; the 10 most recent are spared -> 5.
+        assert "would remove 5 now" in detail and "--dry-run" in detail, detail
+
+
+@pytest.mark.asyncio
+async def test_a_bool_that_declares_choices_shows_their_descriptions(tmp_path: Path) -> None:
+    """Design round 1, D2 / UX U8: ``_bool_choices(...)`` descriptions were
+    dead text because every BOOL expanded into the synthesised on/off pair."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.enabled")
+        await pilot.press("enter")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        assert any("limits run at launch" in line for line in lines), lines
+        assert any("nothing is ever removed" in line for line in lines), lines
+        # An undeclared bool still expands into the plain pair.
+        await pilot.press("escape")
+        await pilot.pause()
+        _select(view, "display.shimmer")
+        await pilot.press("enter")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        assert any(line.strip().endswith(" on") or " on " in line for line in lines)
+
+
+def test_every_gated_setting_names_a_bool_master() -> None:
+    for setting in settings_io.SETTINGS:
+        if setting.gated_by is not None:
+            master = settings_io.BY_KEY[setting.gated_by]
+            assert master.kind is Kind.BOOL, setting.key
+            assert master.section == setting.section, setting.key
