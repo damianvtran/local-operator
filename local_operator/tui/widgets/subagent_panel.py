@@ -1502,8 +1502,10 @@ class SubagentPanel(Container):
         #: were derived from, and the counts themselves. Keyed rather than
         #: invalidated because the caption is reached from every tick, and
         #: re-deriving every job's facts there is the cheap state costing more
-        #: than the expensive one (round 1, F3).
-        self._summary_counts_key: tuple[tuple[int, str], ...] | None = None
+        #: than the expensive one (round 1, F3). One entry per job of
+        #: ``(identity, status, queued)`` — see the method for why the flag is
+        #: a term and not redundant with the status (round 2, Q2/F7).
+        self._summary_counts_key: tuple[tuple[int, str, bool], ...] | None = None
         self._summary_counts_value: SummaryCounts = SummaryCounts()
         # Logical focus within the full roster. The expanded DOM displays only
         # one screenful around it; every job remains keyboard-reachable without
@@ -2358,15 +2360,36 @@ class SubagentPanel(Container):
 
         ``summary_counts`` calls :func:`row_facts` once per job and is reached
         from every ``sync`` AND every tick — 956 µs/call at 60 children, on
-        the state that is supposed to be the CHEAP one (round 1, F3). The
-        memo is keyed on the same ledger identity ``sync`` already maintains,
-        so it needs no invalidation of its own: ``_sync_rows`` replaces
-        ``_jobs_by_id`` wholesale when the roster moves, and a job object
-        mutating in place is picked up because the key carries each job's
-        identity, not just the dict's.
+        the state that is supposed to be the CHEAP one (round 1, F3).
+
+        THE KEY MUST NAME EVERY FIELD THE COUNTS ARE DERIVED FROM. ``id(job)``
+        catches the roster changing shape, but it is stable ACROSS a mutation
+        of the job it identifies, so it detects nothing about a job that is
+        edited in place — only the fields spelled out beside it do. This
+        docstring previously claimed the opposite ("a job object mutating in
+        place is picked up because the key carries each job's identity"),
+        which was wrong in exactly one reachable way and shipped a caption
+        that lied (round 2, Q2/F7).
+
+        ``queued`` is that second field, and it is not a redundant one:
+        :func:`summary_counts` buckets on ``facts.queued`` BEFORE it looks at
+        the status, and a queued child already carries
+        ``status == "running"``. So when the capacity gate admits it,
+        ``AsyncJobManager.start_queued`` clears ``job.queued`` in place and
+        leaves ``status`` untouched — the one ledger move that changes
+        neither the identity nor the status while changing the counts. With
+        ``status`` alone the memo returned the pre-admission numbers
+        indefinitely, until an unrelated job happened to settle and move the
+        key. In `summary` the caption is the panel's ONLY representation, so
+        that stale tuple was the whole surface.
+
+        Anything added to :func:`summary_counts`' bucketing belongs here too.
         """
         jobs = list(self._jobs_by_id.values())
-        key = tuple((id(job), getattr(job, "status", "")) for job in jobs)
+        key = tuple(
+            (id(job), getattr(job, "status", ""), bool(getattr(job, "queued", False)))
+            for job in jobs
+        )
         if self._summary_counts_key != key:
             self._summary_counts_key = key
             self._summary_counts_value = summary_counts(jobs)

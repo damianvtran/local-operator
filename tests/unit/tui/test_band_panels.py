@@ -1888,3 +1888,50 @@ async def test_the_band_counts_queued_children_so_a_hidden_dock_is_never_silent(
         # The fallback the design leans on is present rather than empty.
         assert app._job_count("task") == 3
         assert format_agents(app._job_count("task")) == "3 agents"
+
+
+@pytest.mark.asyncio
+async def test_the_gate_admitting_a_queued_child_updates_the_summary_caption() -> None:
+    """Round 2 Q2/F7: the counts memo must see a queued→running promotion.
+
+    The one ledger move that changes NEITHER the job's identity nor its
+    status. A queued child already carries ``status == "running"``
+    (`summary_counts` buckets on ``facts.queued`` first), and
+    ``AsyncJobManager.start_queued`` clears ``job.queued`` in place when the
+    capacity gate opens — so a memo keyed on ``(id, status)`` alone returns
+    the pre-admission counts and the caption reports children as queued
+    while they are actually running, indefinitely, until some unrelated job
+    happens to move its status.
+
+    In `summary` that caption is the panel's ONLY representation, which is
+    what made a cheap-path optimisation into a user-visible wrong number.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)]
+    # One running, two parked behind the gate — `queued` set without touching
+    # `status`, exactly as the manager holds them.
+    jobs[1].queued = True
+    jobs[2].queued = True
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert "2 queued" in panel.summary_text(), panel.summary_text()
+        assert "1 running" in panel.summary_text(), panel.summary_text()
+
+        # The gate opens: `start_queued` flips this flag in place and leaves
+        # `status` alone (`harness/jobs.py`, which even guards on the status
+        # already being "running").
+        jobs[1].queued = False
+        jobs[2].queued = False
+        session.jobs = _fake_jobs(*jobs)
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+
+        caption = panel.summary_text()
+        assert "3 running" in caption, caption
+        assert "queued" not in caption, caption
