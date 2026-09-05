@@ -416,3 +416,40 @@ async def test_bare_stream_fn_degrades_to_the_selected_model(tmp_path):
     session = _session(tmp_path, stream)
     assert session.effective_model is session.model
     assert session.effective_model_label == session.model_label
+
+
+class FastRoutedStream(RoutedStream):
+    """A stream fn that also exposes the fast-mode refusal bridge."""
+
+    def __init__(self, turns: Any = None) -> None:
+        super().__init__(turns or [[StreamEndEvent(stop_reason="stop")]])
+        self.fast_refused_handler: Any = None
+
+    def set_fast_refused_handler(self, handler) -> None:
+        self.fast_refused_handler = handler
+
+
+@pytest.mark.asyncio
+async def test_a_fast_mode_refusal_switches_the_sessions_own_dial_off(tmp_path):
+    """The session's half of review F1: after the stream reports that the
+    provider refused fast mode, the SPEC the next request is built from no
+    longer asks for it, so the band stops painting `fast` over standard
+    requests and no later call re-pays the refusal.
+    """
+    stream = FastRoutedStream()
+    model = MODEL.model_copy(update={"supports_fast_mode": True, "fast_mode": True})
+    session = _session(tmp_path, stream, model=model)
+    assert stream.fast_refused_handler is not None
+    assert session.model.fast_mode is True
+
+    await stream.fast_refused_handler(
+        "anthropic/claude-opus-5", "Usage credits are required for fast mode."
+    )
+
+    assert session.model.fast_mode is False, "the dial must come off the spec"
+    assert session.effective_model.fast_mode is False
+    assert session.model_label == "test/m", "a knob change, never a model change"
+
+    # Idempotent: a second report on a dial already off changes nothing.
+    await stream.fast_refused_handler("anthropic/claude-opus-5", "again")
+    assert session.model.fast_mode is False

@@ -3857,3 +3857,33 @@ def test_muse_spark_listing_no_longer_overflows_its_window(monkeypatch) -> None:
 
     prompt_tokens = len("word " * 120_000) // 4
     assert body["max_tokens"] + prompt_tokens < spec.context_window
+
+
+@pytest.mark.asyncio
+async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session() -> None:
+    """The stream fn's half of review F1: the provider's own words reach the
+    user as a warning, the session bridge is called so the dial comes off,
+    and `forget_fast_refusal` re-opens the latch for an explicit `/fast on`."""
+    stream = create_stream_fn(MagicMock(), None)
+    notices: list[str] = []
+    forwarded: list[tuple[str, str]] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    stream.set_fast_refused_handler(lambda sel, msg: forwarded.append((sel, msg)))
+
+    state = stream._route_state
+    assert state.on_fast_refused is not None
+    first = await state.record_fast_refusal(
+        "anthropic/claude-opus-5", "Usage credits are required for fast mode."
+    )
+    second = await state.record_fast_refusal("anthropic/claude-opus-5", "again")
+
+    assert (first, second) == (True, False), "latched: the second report is silent"
+    assert notices == [
+        "warning:fast mode: refused by anthropic/claude-opus-5 — Usage credits are "
+        "required for fast mode; switched off, serving at standard speed"
+    ]
+    assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
+    assert state.fast_refused_for("anthropic/claude-opus-5")
+
+    stream.forget_fast_refusal()
+    assert not state.fast_refused_for("anthropic/claude-opus-5")

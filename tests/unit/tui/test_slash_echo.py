@@ -66,6 +66,10 @@ ECHO_POLICY = {
     # A setting, not words the model is told: the receipt names the level that
     # is now in force and the band carries it from then on.
     "effort": False,
+    # A setting, not words the model is told: the receipt names the resulting
+    # state and the band carries it from then on. Same rule as `/effort`, its
+    # neighbour on the same request.
+    "fast": False,
     # A setting, not words the model is told: the receipt names the theme now
     # in force, and the screen itself is wearing the change.
     "theme": False,
@@ -135,6 +139,7 @@ PROMPT_POLICY = {
     "rename": False,
     "model": False,
     "effort": False,
+    "fast": False,
     "theme": False,
     "provider": False,
     # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it

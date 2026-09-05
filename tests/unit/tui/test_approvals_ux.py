@@ -519,6 +519,10 @@ def test_the_registry_states_which_commands_offer_values() -> None:
     }
     assert modes == {
         "effort": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/effort`: bare `/fast` TOGGLES the dial, and the space
+        # offers on/off/status for a user who would rather name the resulting
+        # state than flip into it.
+        "fast": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/effort`: bare `/theme` answers with the active theme,
         # and the space opens the ramp list with live preview.
         "theme": ArgumentMode.OPTIONAL,

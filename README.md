@@ -192,6 +192,7 @@ current session's cost live).
 | --- | --- |
 | `/model` | Switch model for this session; `/model default` saves it for new ones |
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
+| `/fast` | Toggle fast mode where the provider sells one — the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
