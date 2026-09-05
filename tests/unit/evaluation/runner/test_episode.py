@@ -568,17 +568,35 @@ async def test_context_compaction_event_is_recorded_and_verifies(
 
 
 @pytest.mark.asyncio
-async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode_id: str) -> None:
-    """A floundering guard stops the episode the way ``max_steps`` does: the
-    last step is truncated with the guard's code, the episode is SCORED on the
-    state reached, and the bundle verifies."""
+@pytest.mark.parametrize("stationary", [True, False])
+async def test_guard_truncation_seals_scored_with_reason(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, stationary: bool
+) -> None:
+    """A stationary loop stops early, but repeated input with text progress
+    reaches the step cap. Both paths score and seal a verifiable bundle."""
 
+    from local_operator.evaluation.adapters.api import observation_content_id
+    from local_operator.evaluation.protocol import Observation
     from local_operator.evaluation.runner.guards import RepeatedBatchGuard
+    from tests.unit.evaluation.runner import conftest
+
+    if stationary:
+        original_observation = conftest.observation
+
+        def observation(episode_id: str, sequence: int, *, text: str = "state") -> Observation:
+            # Keep real sequence/identity validation while removing visible
+            # progress; the normal fixture's changing text is not a loop.
+            current = original_observation(episode_id, sequence, text=text).model_copy(
+                update={"text": text}
+            )
+            return current.model_copy(update={"observation_id": observation_content_id(current)})
+
+        monkeypatch.setattr(conftest, "observation", observation)
 
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id),
-        build_config(tmp_path, max_steps=10, guards=(RepeatedBatchGuard(repeats=2),)),
+        build_config(tmp_path, max_steps=4, guards=(RepeatedBatchGuard(repeats=2),)),
         selector=selector(tmp_path),
         model=ScriptedModel(["type"] * 8),
         launch=lambda _: adapter,
@@ -594,9 +612,13 @@ async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode
     report = verify_bundle(root)
     assert report.valid, [issue.code for issue in report.issues]
     steps = payloads(root, EnvironmentStepPayload)
-    assert len(steps) == 2
-    assert [step.truncated for step in steps] == [False, True]
-    assert [step.truncation_reason for step in steps] == [None, "repeated-batch"]
+    expected_steps = 2 if stationary else 4
+    expected_reason = "repeated-batch" if stationary else "max-steps"
+    assert len(steps) == expected_steps
+    assert [step.truncated for step in steps] == [False] * (expected_steps - 1) + [True]
+    assert [step.truncation_reason for step in steps] == [None] * (expected_steps - 1) + [
+        expected_reason
+    ]
 
 
 @pytest.mark.asyncio

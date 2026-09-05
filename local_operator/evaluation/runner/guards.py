@@ -256,15 +256,58 @@ def _acted(turns: Sequence[EpisodeTurn]) -> list[EpisodeTurn]:
     ]
 
 
-class RepeatedBatchGuard:
-    """Truncate when the last ``repeats`` batches are canonically identical.
+def _action_span(turns: Sequence[EpisodeTurn], repeats: int) -> Sequence[EpisodeTurn]:
+    """Include the result of every counted action, including intervening waits.
 
-    Identical bytes, not "similar": the model issuing the exact same action
-    list on consecutive turns is doing nothing new. Batches are compared by
-    their canonical JSON with the observation id removed -- the id changes
-    every turn by construction, so with it every batch is unique. Wait-only
-    batches are transparent (see :func:`_is_waiting`): they neither count as
-    a repeat nor break a run of repeats around them.
+    Turn i's batch produces turn i+1's observation. Without that final,
+    undecided observation, a guard could stop on the very action that moved
+    the screen. Waits do not count as attempts, but progress during a wait
+    still disproves a stationary loop.
+    """
+    if not turns or turns[-1].batch is not None:
+        return ()
+    acting = 0
+    for index in range(len(turns) - 2, -1, -1):
+        turn = turns[index]
+        if turn.batch is None:
+            return ()
+        if turn.batch.actions and not _is_waiting(turn):
+            acting += 1
+            if acting == repeats:
+                return turns[index:]
+    return ()
+
+
+def _unchanged_observations(turns: Sequence[EpisodeTurn]) -> bool:
+    """Exact public text and ordered frame digests, never capture IDs or sequence.
+
+    Digests are already verified by the runner, so equality needs no image I/O
+    or visual-similarity threshold. Preserve every frame's order and count:
+    an unchanged first frame cannot hide progress in a later one. Missing
+    both text and frames is unknown state, not evidence of no progress.
+    """
+    if not turns:
+        return False
+    keys = []
+    for turn in turns:
+        observation = turn.observation
+        if observation.text is None and not observation.frames:
+            return False
+        keys.append(
+            (observation.text, tuple(frame.artifact.sha256 for frame in observation.frames))
+        )
+    return len(set(keys)) == 1
+
+
+class RepeatedBatchGuard:
+    """Truncate when ``repeats`` identical batches leave observable state unchanged.
+
+    Repeated input can legitimately advance pages or move through a view, so
+    action identity alone proves nothing. Compare canonical actions without
+    observation IDs, and require exact public text and frame equality across
+    the entire span including the last result. Wait-only batches are
+    transparent (see :func:`_is_waiting`), but their observations still count
+    as evidence of progress.
     """
 
     def __init__(self, repeats: int = 4) -> None:
@@ -275,16 +318,16 @@ class RepeatedBatchGuard:
         self._repeats = repeats
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
-        decided = _acted(snapshot.recent_turns)
-        if len(decided) < self._repeats:
-            return CONTINUE
-        tail = decided[-self._repeats :]
-        keys = {_batch_key(turn) for turn in tail}
-        if len(keys) == 1:
+        span = _action_span(snapshot.recent_turns, self._repeats)
+        keys = {_batch_key(turn) for turn in _acted(span)}
+        if len(keys) == 1 and _unchanged_observations(span):
             return GuardVerdict(
                 kind="truncate",
                 code="repeated-batch",
-                detail=f"the same action batch was issued {self._repeats} times in a row",
+                detail=(
+                    f"the same action batch was issued {self._repeats} times "
+                    "without observable change"
+                ),
             )
         return CONTINUE
 
@@ -300,14 +343,12 @@ def _batch_key(turn: EpisodeTurn) -> str:
 
 
 class NoChangeGuard:
-    """Truncate when ``repeats`` consecutive NON-EMPTY batches produced
-    byte-identical frames -- the model keeps acting and the screen does not
-    move.
+    """Truncate when ``repeats`` NON-EMPTY batches leave frames AND text unchanged.
 
-    Frames are compared by their content digest (``artifact.sha256``), which
-    the adapter already computed and the runner already verified, so this
-    costs no bytes. An observation with no frames cannot be judged and does
-    not count; a text-only benchmark never trips this guard.
+    Share exact observation equality with :class:`RepeatedBatchGuard` so text
+    progress beside a static image cannot trigger a conflicting stop. This
+    guard still requires frames throughout; a text-only benchmark never trips
+    it, since different actions can legitimately produce the same text.
 
     Wait-only batches are not actions (see :func:`_is_waiting`): a model
     waiting on a static screen is loading, not floundering. Waits interleaved
@@ -326,34 +367,14 @@ class NoChangeGuard:
         self._repeats = repeats
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
-        turns = list(snapshot.recent_turns)
-        # Walk back from the newest observation until ``repeats`` acting turns
-        # are in the span. The frame produced by turn i's batch is turn i+1's
-        # observation, so the span always includes one observation beyond the
-        # last acting turn (the current, undecided one at the end).
-        start = None
-        acting = 0
-        for index in range(len(turns) - 2, -1, -1):
-            turn = turns[index]
-            if turn.batch is None:
-                return CONTINUE
-            if turn.batch.actions and not _is_waiting(turn):
-                acting += 1
-                if acting == self._repeats:
-                    start = index
-                    break
-        if start is None:
+        span = _action_span(snapshot.recent_turns, self._repeats)
+        if any(not turn.observation.frames for turn in span):
             return CONTINUE
-        digests: list[tuple[str, ...]] = []
-        for turn in turns[start:]:
-            if not turn.observation.frames:
-                return CONTINUE
-            digests.append(tuple(frame.artifact.sha256 for frame in turn.observation.frames))
-        if len(set(digests)) == 1:
+        if _unchanged_observations(span):
             return GuardVerdict(
                 kind="truncate",
                 code="no-change",
-                detail=f"{self._repeats} consecutive actions left the screen byte-identical",
+                detail=f"{self._repeats} consecutive actions left frames and text unchanged",
             )
         return CONTINUE
 
