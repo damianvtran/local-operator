@@ -1,9 +1,0 @@
-typed buffer            : '/mcp reauth lnr'
-picker rows             : ['reauth linear']
-editor says destructive : True
-buffer AFTER enter      : '/mcp reauth linear'
-credentials forgotten   : []
-transcript tail         : 
-
-RESULT: SAFE — the row FILLED; no credential was touched.
-        A second, deliberate Enter is required to run it.
