@@ -2,7 +2,7 @@
 
 The optional SDK test exercises its real signing helper without making a model
 call. CI need not install OSWorld's large optional dependency tree merely to
-check policy; the paid runtime runs this same test with that tree installed.
+check policy; the paid runtime runs the shared standalone probe without pytest.
 """
 
 from __future__ import annotations
