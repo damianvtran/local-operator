@@ -548,6 +548,37 @@ def _loop_goal_label(goal: str) -> str:
     return cleaned
 
 
+def _loop_status_line(data: dict[str, Any]) -> str:
+    """One line describing an OWNER-side loop, for a viewer that did not run it.
+
+    A viewer's `/loop` executes on the owner and comes back as a block payload;
+    the local path narrates its own loop as it goes, and this is the equivalent
+    sentence for a terminal that only sees the result. Kept in the local path's
+    vocabulary ("loop <state> after N iteration(s)") so the two hosts do not
+    describe the same loop two different ways.
+
+    Both free-text values here (`goal`, and the judge's `reason`) originate off
+    this machine, so they go through `_loop_goal_label`: it strips control
+    sequences -- a `\\x1b[2J` arriving in a judge's explanation must not clear
+    the reader's terminal -- and collapses a multi-line answer to one line.
+    """
+    status = str(data.get("status") or "idle")
+    completed = data.get("completed")
+    completed_n = completed if isinstance(completed, int) else 0
+    head = {
+        "running": f"loop running: {completed_n} iteration(s) done",
+        "judging": f"loop judging after {completed_n} iteration(s)",
+        "achieved": f"loop achieved the goal after {completed_n} iteration(s)",
+        "completed": f"loop finished after {completed_n} iteration(s)",
+        "cancelled": f"loop cancelled after {completed_n} iteration(s)",
+        "interrupted": f"loop interrupted after {completed_n} iteration(s)",
+        "failed": f"loop stopped after {completed_n} iteration(s)",
+        "idle": "no loop is running",
+    }.get(status, f"loop {status} after {completed_n} iteration(s)")
+    reason = _loop_goal_label(str(data.get("reason") or ""))
+    return f"{head} — {reason}" if reason else head
+
+
 def _looks_like_botched_count(arg: str) -> bool:
     """Whether ``arg`` reads as a mistyped integer count rather than a goal.
 
@@ -14275,6 +14306,26 @@ class OperatorApp(App[None]):
                 return
             if block_type == "agent_list":
                 self._append_block(self._agent_list_block(data.get("items") or []))
+                return
+            if block_type == "forked":
+                # The OWNER did the fork, so the viewer cannot narrate it the way
+                # the local path does (no snapshot worker ran here). What the
+                # reader needs is the same thing that path ends with: the new id
+                # and how to open it. Without this branch the block fell through
+                # to a `text`-only notice, and the owner sends no text with it --
+                # so `/fork` completed and the terminal said nothing at all.
+                fork_id = str(data.get("session_id") or "")
+                self._notice(
+                    (
+                        f"fork saved: {fork_id}. Open it with /resume {fork_id}"
+                        if fork_id
+                        else "fork saved"
+                    ),
+                    "info",
+                )
+                return
+            if block_type == "loop":
+                self._notice(_loop_status_line(data), "info")
                 return
         if text:
             notice_kind: NoticeKind = "warning" if style == "warning" else "info"
