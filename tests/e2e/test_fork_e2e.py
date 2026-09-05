@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,22 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
         raise AssertionError("default switch must never open a native terminal")
 
     monkeypatch.setattr(registry, "active_backend", forbid_window)
+    # HOME isolation does not remove inherited native terminal targets. Exercise
+    # that environment deliberately, but intercept the subprocess boundary so a
+    # regression fails here instead of pinning a developer's real sidebar title.
+    monkeypatch.setenv("CMUX_WORKSPACE_ID", "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setenv("CMUX_SURFACE_ID", "22222222-2222-4222-8222-222222222222")
+    monkeypatch.setattr("local_operator.multiplexer.cmux._cmux_binary", lambda: "/bin/cmux")
+    native_calls = []
+    run = subprocess.run
+
+    def intercept_native(argv, *args, **kwargs):
+        if isinstance(argv, list) and Path(str(argv[0])).name == "cmux":
+            native_calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", intercept_native)
     # Naming is a separate provider call and would consume this finite model
     # script before the actual tool turn. It is not part of fork admission.
     monkeypatch.setattr(OwnedSessionHandle, "_maybe_name_conversation", lambda *_: None)
@@ -194,6 +211,15 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
                 await wait_for_adoption(app, pilot)
                 app._set_approve_all(not approval)
                 assert app._session is not None
+                from local_operator.tui.terminal_title import TerminalTitle, osc_title
+
+                # Capture the production OSC writer without enabling the headless
+                # driver's output. The same status band survives each adoption.
+                title_wire: list[str] = []
+                title = TerminalTitle(title_wire.append)
+                assert app._status is not None
+                app._status.set_terminal_title(title)
+                title.start()
                 pending: tuple[str, ...] = ()
                 pending_id = ""
                 await app._session.prompt("continue original")
@@ -229,6 +255,18 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
                 assert "Return to original: /resume forkparent01" in painted
                 assert "Work still in progress was not copied" in painted
                 await _capture(app, pilot, f"after-{'approval' if approval else 'tool'}-{size[0]}")
+                assert "Original question" in title.current
+                assert osc_title(title.current) in title_wire
+                assert native_calls == [], "headless fork leaked a native cmux mutation"
+                app._run_slash_command("/rename Divergent work")
+                await _pump(
+                    pilot,
+                    lambda: runtimes[fork_id][0].conversation_name == "Divergent work"
+                    and "Divergent work" in title.current,
+                )
+                assert "Divergent work" in title.current
+                assert osc_title(title.current) in title_wire
+                assert native_calls == [], "fork rename must use OSC, not a user override"
                 assert (
                     "original-write"
                     not in (config / "sessions" / fork_id / "transcript.jsonl").read_text()
@@ -243,6 +281,8 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
                     and app._session.session_id == owner.session_id,
                 )
                 assert runtimes[owner.session_id][0] is owner
+                assert "Divergent work" not in title.current
+                assert osc_title(title.current) in title_wire
                 assert len(runtimes) == 2
                 if approval:
                     await _pump(pilot, lambda: app._approval is not None)
@@ -281,6 +321,22 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
                     pilot, lambda: app._session is not None and app._session.session_id == fork_id
                 )
                 assert len(branch_stream.requests) == 1
+                assert "Divergent work" in title.current
+                assert osc_title(title.current) in title_wire
+                assert native_calls == [], "resuming a fork must not pin a native title"
+                await _capture(
+                    app, pilot, f"renamed-{'approval' if approval else 'tool'}-{size[0]}"
+                )
+                print(
+                    json.dumps(
+                        {
+                            "terminal_title": title.current,
+                            "osc": title_wire[-1],
+                            "native_calls": native_calls,
+                        }
+                    )
+                )
+                title.stop()
                 assert (
                     sum(
                         m.text == "try another route"

@@ -170,8 +170,6 @@ class TestCmuxArgv:
         assert workspace_argv("/opt/bin/cmux", launch) == [
             "/opt/bin/cmux",
             "new-workspace",
-            "--name",
-            "fork · Refactor the loader",
             "--cwd",
             "/Users/x/projects/thing",
             "--command",

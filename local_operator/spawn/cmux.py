@@ -64,12 +64,15 @@ def workspace_argv(binary: str, launch: ForkLaunch) -> list[str]:
     the argv is joined with ``shlex.join`` and not ``" ".join``: a launcher path
     containing a space (``/Applications/My Tools/lop``) would otherwise arrive as
     two arguments and start nothing.
+
+    Do not pass ``--name``: cmux treats it as a persistent USER override, so it
+    masks every later OSC title. The resumed app already owns the automatic
+    title (including fork provenance and run state); explicit user renames must
+    remain free to override it without a competing socket writer.
     """
     return [
         binary,
         "new-workspace",
-        "--name",
-        launch.title,
         "--cwd",
         launch.cwd,
         "--command",
