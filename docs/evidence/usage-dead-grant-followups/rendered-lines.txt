@@ -1,0 +1,162 @@
+== alibaba_32 (before)
+Usage  3d ago  · 1 sign-in …
+────────────────────────────
+alibaba-token-plan-oauth  …
+  alibaba-token-plan-oauth
+
+● 5 hour  ████████░░░░  64%
+
+r refresh · esc close
+== alibaba_32 (after)
+Usage  3d ago  · 1 sign-in …
+────────────────────────────
+alibaba-token-plan-oauth  …
+  sign-in expired
+
+● 5 hour  ████████░░░░  64%
+
+r refresh · esc close
+== alibaba_40 (before)
+Usage  3d ago  · 1 sign-in ex…
+──────────────────────────────
+alibaba-token-plan-oauth  cr…
+  alibaba-token-plan-oauth
+
+● 5 hour  █████████░░░░░  64%
+
+r refresh · esc close
+== alibaba_40 (after)
+Usage  3d ago  · 1 sign-in ex…
+──────────────────────────────
+alibaba-token-plan-oauth  cr…
+  sign-in expired
+
+● 5 hour  █████████░░░░░  64%
+
+r refresh · esc close
+== alibaba_48 (before)
+Usage  3d ago  · 1 sign-in expired
+──────────────────────────────────────
+alibaba-token-plan-oauth  cred:3  · …
+  /login alibaba-token-plan-oauth
+
+● 5 hour  ██████████████░░░░░░░░  64%
+
+1 window · r refresh · esc close
+== alibaba_48 (after)
+Usage  3d ago  · 1 sign-in expired
+──────────────────────────────────────
+alibaba-token-plan-oauth  cred:3  · …
+  /login alibaba-token-plan-oauth
+
+● 5 hour  ██████████████░░░░░░░░  64%
+
+1 window · r refresh · esc close
+== mixed_40 (before)
+Usage  1m ago  · 1 stale  · 1…
+──────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ███░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hou…
+  last known 2h ago
+
+● 5 hour  ████░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour…
+  /login anthropic
+
+● 5 hour  █████████░░░░░  64%
+
+r refresh · esc close
+== mixed_40 (after)
+Usage  1m ago  · 1 sign-in ex…
+──────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ███░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hou…
+  last known 2h ago
+
+● 5 hour  ████░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour…
+  /login anthropic
+
+● 5 hour  █████████░░░░░  64%
+
+r refresh · esc close
+== mixed_48 (before)
+Usage  1m ago  · 1 stale  · 1 sign-in…
+──────────────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ████░░░░░░░░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hour 30%
+  last known 2h ago
+
+● 5 hour  ███████░░░░░░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour 64%
+  sign-in expired — /login anthropic
+
+● 5 hour  ██████████████░░░░░░░░  64%
+
+3 windows · r refresh · esc close
+== mixed_48 (after)
+Usage  1m ago  · 1 sign-in expired  ·…
+──────────────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ████░░░░░░░░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hour 30%
+  last known 2h ago
+
+● 5 hour  ███████░░░░░░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour 64%
+  sign-in expired — /login anthropic
+
+● 5 hour  ██████████████░░░░░░░░  64%
+
+3 windows · r refresh · esc close
+== mixed_56 (before)
+Usage  1m ago  · 1 stale  · 1 sign-in expired
+──────────────────────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ██████░░░░░░░░░░░░░░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hour 30%
+  last known 2h ago
+
+● 5 hour  █████████░░░░░░░░░░░░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour 64%
+  sign-in expired — /login anthropic
+
+● 5 hour  ███████████████████░░░░░░░░░░░  64%
+
+3 windows · r refresh · esc close
+== mixed_56 (after)
+Usage  1m ago  · 1 sign-in expired  · 1 stale
+──────────────────────────────────────────────
+anthropic  a@x  ·  5 hour 20%
+
+● 5 hour  ██████░░░░░░░░░░░░░░░░░░░░░░░░  20%
+
+anthropic  stuck@x  ·  5 hour 30%
+  last known 2h ago
+
+● 5 hour  █████████░░░░░░░░░░░░░░░░░░░░░  30%
+
+anthropic  dead@x  ·  5 hour 64%
+  sign-in expired — /login anthropic
+
+● 5 hour  ███████████████████░░░░░░░░░░░  64%
+
+3 windows · r refresh · esc close

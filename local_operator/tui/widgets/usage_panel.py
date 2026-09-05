@@ -561,13 +561,15 @@ def _fit_status_note(note: str, width: int) -> str:
 
     The dead-grant note descends a further ladder, because its tail is a
     COMMAND and a truncated command is worse than no command: it still looks
-    like an instruction and then fails when followed. The provider id is the
-    argument ``/login`` requires and the one thing no other row on the card
-    supplies, so it is the last thing to go — the verb yields first, then the
-    age, and the id survives to the 32-col ``PANEL_MIN_WIDTH`` floor for every
-    id in ``USAGE_PROVIDERS`` (the longest, ``alibaba-token-plan-oauth``, needs
-    31 cells against the floor's 25 budget, so nothing shorter than dropping
-    the verb suffices).
+    like an instruction and then fails when followed. The age yields first,
+    then the verb — ``/login <id>`` is runnable as printed and survives to the
+    32-col ``PANEL_MIN_WIDTH`` floor for every id in ``USAGE_PROVIDERS`` but
+    the longest (``alibaba-token-plan-oauth`` needs 31 cells against the
+    floor's 25 budget). Where even that does not fit, the STATE is kept and
+    the command dropped: the id is already on the heading directly above, so
+    a bare id repeated the line above it and said nothing about what happened
+    (#618 D6). ``sign-in expired`` is 15 cells, fits the floor, and sends the
+    reader to ``/login``, which the panel vocabulary already teaches.
     """
     if cell_len(note) <= width:
         return note
@@ -584,12 +586,12 @@ def _fit_status_note(note: str, width: int) -> str:
     if dead_grant:
         # `sign-in expired — /login kimi` gains nothing from the generic
         # rewrite below (both halves are already minimal), so go straight to
-        # the tail, then to the bare provider id. The verb is recoverable from
-        # `/help` and from the heading vocabulary; the id is recoverable from
-        # nothing else on this card.
+        # the tail. Past that the label is what survives, NOT the bare id: the
+        # heading renders the id whole at every width that reaches this rung,
+        # while the state — that the sign-in died — is on no other row.
         if cell_len(tail) <= width:
             return tail
-        return tail.replace("/login ", "")
+        return label
     # `last known 2h ago` -> `2h ago`; the `·` keeps the two facts separable.
     short = f"{label.replace('usage ', '')} · {tail.replace('last known ', '')}"
     return short if cell_len(short) <= width else note
@@ -1422,15 +1424,23 @@ class UsagePanel(Static):
             # misreading in the opposite direction from the one this panel was
             # reported for. The count makes the title self-correcting and points
             # at the blocks carrying their own `last known` line.
-            if stale:
-                row.append("  · ", style=faint)
-                row.append(f"{stale} stale", style=warning)
-            # A mixed set reads `1 stale · 1 sign-in expired`. Both counts are
+            #
+            # A mixed set reads `1 sign-in expired · 1 stale`. Both counts are
             # kept rather than folded into one number, because they ask the
-            # user for opposite things: wait, versus act.
+            # user for opposite things: act, versus wait. The ACTIONABLE one
+            # goes first: the row truncates from the right, and with `stale`
+            # leading, a mixed set below 56 cols read `1 stale ·…` — the
+            # category error the split exists to correct, restored at exactly
+            # the widths where the title is all the reader gets (#618 D7).
+            # Same rule as the target above: what the user can do nothing
+            # about is what yields. The `wanted` budget sums both clauses, so
+            # the order changes nothing there.
             if expired:
                 row.append("  · ", style=faint)
                 row.append(f"{expired} sign-in expired", style=warning)
+            if stale:
+                row.append("  · ", style=faint)
+                row.append(f"{stale} stale", style=warning)
         if self._refreshing and not self._error:
             row.append("  · ", style=faint)
             row.append("refreshing…", style=dim)

@@ -30,6 +30,7 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
     PANEL_MAX_WIDTH,
+    PANEL_MIN_WIDTH,
     PANEL_PADDING_ROWS,
     PANEL_WIDTH_MARGIN,
     UsagePanel,
@@ -638,8 +639,9 @@ def test_the_provider_id_is_never_what_the_ellipsis_eats(provider: str, width: i
     every width, so it passed without ever reaching the last-resort rung. The
     longest real id, `alibaba-token-plan-oauth`, needs 31 cells for
     `/login <id>` against a 25-cell budget at the 32-col `PANEL_MIN_WIDTH`
-    floor — so the verb has to yield before the id does. A truncated command
-    is worse than none: it still looks like an instruction and then fails.
+    floor. A truncated command is worse than none: it still looks like an
+    instruction and then fails. So either the command survives WHOLE, or the
+    note falls back to the state alone (D6, below) — never to a clipped id.
     """
     report = _report(
         _percent("a:5h", "5 hour", 50.0, shared=True), provider=provider, identity="acct"
@@ -655,9 +657,48 @@ def test_the_provider_id_is_never_what_the_ellipsis_eats(provider: str, width: i
     budget = width - 2
     note = _fit_status_note(_account_status_note(report, 2 * 86_400_000), budget)
     assert "…" not in note, note
-    # The whole id survives, so whatever remains is typeable as `/login <id>`.
-    assert provider in note, note
     assert cell_len(note) <= budget, note
+    # Either the whole command — typeable as printed — or the bare state.
+    assert note == "sign-in expired" or f"/login {provider}" in note, note
+
+
+def test_the_last_rung_keeps_the_state_not_the_id() -> None:
+    """Design D6 on #618: what survives at the floor is what no other row says.
+
+    The bare-id rung rendered a verbatim copy of the heading directly above
+    it, in the attention colour, on the row the user reads for the remedy —
+    and said nothing: no state, no verb. The id IS recoverable from the
+    heading; the state is not, so the state is what the last rung keeps.
+    Reach: one provider (`alibaba-token-plan-oauth`) at 32–41 cols; every
+    shorter id still gets `/login <id>` at the floor.
+    """
+    report = _report(
+        _percent("a:5h", "5 hour", 50.0, shared=True),
+        provider="alibaba-token-plan-oauth",
+        identity="acct",
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+    note = _account_status_note(report, 2 * 86_400_000)
+
+    assert _fit_status_note(note, 25) == "sign-in expired"
+    # The state fits the `PANEL_MIN_WIDTH` floor's real note budget (the card
+    # loses `PANEL_WIDTH_MARGIN` to the screen and the note is indented two)
+    # with room to spare, so no width a user can reach produces an ellipsis.
+    assert cell_len("sign-in expired") <= PANEL_MIN_WIDTH - PANEL_WIDTH_MARGIN - 2
+    assert "alibaba-token-plan-oauth" not in _fit_status_note(note, 30)
+    # One cell wider than the command needs (`/login alibaba-token-plan-oauth`
+    # is 31 cells) and the command is back — the rung is only ever reached
+    # where the command genuinely cannot fit.
+    assert _fit_status_note(note, 31) == "/login alibaba-token-plan-oauth"
+
+    # And on the rendered card at the floor, the note row is no longer a
+    # duplicate of the heading above it.
+    rows = _lines([report], width=32, now=2 * 86_400_000)
+    heading = rows[0].strip()
+    note_row = next(row for row in rows[1:] if row.strip()).strip()
+    assert heading.startswith("alibaba-token-plan-oauth"), heading
+    assert note_row == "sign-in expired", note_row
 
 
 def test_a_dead_grant_states_the_vintage_of_the_meters_below_it() -> None:
@@ -2008,6 +2049,51 @@ async def test_the_title_does_not_call_an_expired_sign_in_stale() -> None:
     assert "stale" not in dead_title, dead_title
     # A mixed set keeps both tallies: they are different instructions.
     assert "1 stale" in mixed_title and "1 sign-in expired" in mixed_title, mixed_title
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cols", [40, 48, 56, 100])
+async def test_a_mixed_title_yields_the_stale_count_before_the_expired_one(cols: int) -> None:
+    """Design D7 on #618: the title truncates from the right, so whichever
+    tally is appended last is the one the ellipsis eats. With `stale` first,
+    a mixed set below 56 cols read `1 stale ·…` — the reader concluded the
+    panel would catch up on its own, which is the D3 category error restored
+    at exactly the widths where the title is all they get. The actionable
+    count is stated first; the passive one yields.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    dead = _aged(
+        _report(_percent("k:5h", "5 hour", 64.0, shared=True), identity="dead@x"),
+        now - 169 * 60_000,
+    )
+    dead.credential_invalid = True
+    stale = _aged(
+        _report(_percent("o:5h", "5 hour", 30.0, shared=True), identity="stuck@x"),
+        now - 169 * 60_000,
+    )
+    stale.consecutive_failures = 1
+
+    async with _panel_app(size=(cols, 36)) as panel:
+        panel.set_clock(now)
+        panel.start_fetch("anthropic")
+        panel.show_reports([fresh, stale, dead], now_ms=fresh.fetched_at)
+        title = panel.render_lines_for_test()[0]
+
+    # The actionable clause leads at every width. At 40 it clips to
+    # `1 sign-in expi…`, which cannot be misread as staleness; `stale` only
+    # reaches the screen once the expired count is on it whole.
+    assert "1 sign-in" in title, title
+    assert "stale" not in title or "1 sign-in expired" in title, title
+    if "1 stale" in title:
+        assert title.index("1 sign-in expired") < title.index("1 stale"), title
+    if cols >= 56:
+        assert "1 sign-in expired" in title and "1 stale" in title, title
+    if cols >= 100:
+        assert "…" not in title, title
 
 
 def test_the_unavailable_note_keeps_its_age_on_a_narrow_card() -> None:
