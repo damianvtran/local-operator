@@ -124,7 +124,7 @@ def test_negotiation_controls_admission_prompt_and_schema_identity() -> None:
 
 
 def test_old_rpc_refused_before_allocation() -> None:
-    with pytest.raises(ValidationError, match="1.5"):
+    with pytest.raises(ValidationError, match="1.6"):
         AdapterSelector.model_validate({"schema_version": "1.4"})
 
 

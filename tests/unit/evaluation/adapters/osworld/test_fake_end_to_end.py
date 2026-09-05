@@ -266,7 +266,6 @@ async def test_an_unanswered_ask_cancels_the_episode(tmp_path: Path, episode_id:
         build_config(tmp_path),
         selector=selector,
         model=ScriptedModel(["ask"]),
-        responder=RecordingResponder(None),  # the user never answers
         launch=lambda _selector: shim,
     )
     outcome = await runner.run()
@@ -278,25 +277,24 @@ async def test_an_unanswered_ask_cancels_the_episode(tmp_path: Path, episode_id:
 
 @pytest.mark.asyncio
 async def test_an_answered_ask_runs_the_exchange(tmp_path: Path, episode_id: str) -> None:
-    # The task declares no user_simulator, so the adapter refuses the exchange
-    # honestly (accepted=False) while the harness responder still supplies the
-    # answer the model sees — the documented one-sided PR 1 wiring.
-    provider = FakeProvider(has_user_simulator=False)
+    provider = FakeProvider(has_user_simulator=True, simulator_answer="simulator public reply")
     adapter = _adapter(tmp_path, provider)
+    (adapter._workspace_root / "tasks" / "task_plain.py").write_text(fixtures.SCRIPTED_SIMULATOR)
+    model = ScriptedModel(["ask", "finish"])
     selector = _selector(tmp_path, adapter._workspace_root, adapter)
     shim = _AdapterSupervisorShim(adapter, selector)
     runner = EpisodeRunner(
         _spec_with_task(episode_id),
         build_config(tmp_path),
         selector=selector,
-        model=ScriptedModel(["ask", "finish"]),
-        responder=RecordingResponder("the answer"),
+        model=model,
         launch=lambda _selector: shim,
     )
     outcome = await runner.run()
     assert outcome.status == "completed", outcome.diagnostic
     assert outcome.bundle_root is not None
     assert verify_bundle(outcome.bundle_root).valid
+    assert model.histories[1][0].ask_answer == "simulator public reply"
 
 
 @pytest.mark.asyncio
@@ -392,3 +390,57 @@ async def test_a_blind_guest_costs_a_re_read_not_the_episode(
 
     # The re-reads really happened: 1 reset + 2 failed + 2 successful.
     assert provider.observe_calls == 5
+
+
+@pytest.mark.asyncio
+async def test_adapter_owned_responder_override_fails_before_prepare(
+    tmp_path: Path, episode_id: str
+) -> None:
+    provider = FakeProvider(has_user_simulator=True)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    outcome = await EpisodeRunner(
+        _spec_with_task(episode_id),
+        build_config(tmp_path),
+        selector=selector,
+        model=ScriptedModel(["ask"]),
+        responder=RecordingResponder("host substitute"),
+        launch=lambda _: shim,
+    ).run()
+    assert outcome.status == "failed_pre_bundle", outcome.diagnostic
+    assert outcome.diagnostic is not None and "cannot override" in outcome.diagnostic
+    assert not provider.allocated and adapter._plan is None
+    assert shim.terminated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [None, "public answer"])
+async def test_simulator_is_called_once_and_host_finish_is_refused(
+    tmp_path: Path, answer: str | None
+) -> None:
+    from local_operator.evaluation.adapters.api import AskUserExchangeParams
+    from unittest.mock import AsyncMock
+    from lop_osworld_v2_adapter import taskfile
+
+    provider = FakeProvider(has_user_simulator=True)
+    provider.respond = AsyncMock(return_value=answer)
+    adapter = _adapter(tmp_path, provider)
+    adapter._provider = provider
+    adapter._task = taskfile.load_static(
+        fixtures.SCRIPTED_SIMULATOR.encode(), module_name="synthetic.py"
+    )
+    begin = AskUserExchangeParams(
+        operation_id="begin", episode_id="episode", ask_id="ask", prompt="Public question?"
+    )
+    result = await adapter.ask_user_exchange(begin)
+    assert result.accepted == (answer is not None) and result.answer == answer
+    assert result.request_digest == begin.request_digest
+    provider.respond.assert_awaited_once_with("Public question?")
+    with pytest.raises(ValueError, match="adapter-owned"):
+        await adapter.ask_user_exchange(begin.model_copy(update={"answer": "host substitute"}))
+    provider.respond.assert_awaited_once()
+    adapter._task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="synthetic.py")
+    refused = await adapter.ask_user_exchange(begin.model_copy(update={"ask_id": "no-simulator"}))
+    assert not refused.accepted and refused.answer is None
+    provider.respond.assert_awaited_once()
