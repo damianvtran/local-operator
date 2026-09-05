@@ -9132,7 +9132,7 @@ class _StoppedFollowerSession(_AsyncLabelSession):
     the socket rig: cell C2).
     """
 
-    def __init__(self, *, cold: bool = True) -> None:
+    def __init__(self, *, cold: bool = True, commands: tuple[str, ...] = ("model",)) -> None:
         super().__init__()
         from local_operator.session.frontend_state import (
             CommandScope,
@@ -9142,13 +9142,20 @@ class _StoppedFollowerSession(_AsyncLabelSession):
 
         self._cold = cold
         self.routed: list[tuple[str, str]] = []
+        # ``commands`` is parametrised because the pre-route answer is
+        # COMMAND-AGNOSTIC: the owner advertises ~35 authoritative slashes and
+        # the facade refuses all of them identically once the socket is gone,
+        # so a fixture that can only advertise ``model`` would let the breadth
+        # regress to a `/model` special case unnoticed (review round 3,
+        # MINOR-1).
         self.frontend_state = FrontendSessionState(
             session_id=self.session_id,
             epoch="owner",
             slash_capabilities=[
                 SlashCapability(
-                    command="model", scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+                    command=name, scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
                 )
+                for name in commands
             ],
         )
 
@@ -9187,6 +9194,92 @@ async def test_switch_on_a_stopped_follower_names_the_reopen_command_before_rout
     assert _unwrapped("this session was stopped") in text, text
     assert _unwrapped("/resume abc123def456") in text, text
     assert _unwrapped("reconnecting") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_bare_model_on_a_stopped_follower_still_opens_the_picker() -> None:
+    """A bare ``/model`` is not a switch: it opens the INVOKING terminal's own
+    picker, which reads this machine's catalogue and needs no owner at all.
+
+    The round-2 pre-route answer was placed above the picker pullback and so
+    swallowed the bare form (and its ``/models`` alias), painting a refusal
+    where 51dc347cd painted a list — design D1, QA Q9 and review round 3 found
+    the same regression independently. The pullback now sits first, so the
+    stopped answer only ever sees a command carrying an argument.
+    """
+    session = _StoppedFollowerSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model")
+        for _ in range(10):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        text = _unwrapped(_transcript_text(app))
+        picker_open = editor.model_picker.is_open()
+    assert picker_open, editor.text
+    assert session.routed == [], "browsing a local catalogue must not route"
+    assert _unwrapped("this session was stopped") not in text, text
+    # The concrete switch a chosen row submits still gets the stopped answer:
+    # the argument gate moves the bare form only.
+    assert _unwrapped("/resume abc123def456") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_follower_answers_every_routed_command_not_only_model() -> None:
+    """The pre-route answer is command-agnostic by design.
+
+    ``route_shared_slash`` refuses every authoritative slash identically once
+    the client is gone, with the same "reconnecting" wording, so a
+    ``/model``-only guard would have fixed one command and left ``/goal``,
+    ``/rename``, ``/effort`` and ~35 neighbours telling the user to wait for an
+    owner that was stopped on purpose (review round 3 MINOR-1; QA Q8 measured
+    the breadth on the socket rig). Pinned with a SECOND command so the
+    generalisation reads as designed rather than accidental.
+    """
+    session = _StoppedFollowerSession(commands=("model", "goal"))
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/goal ship the receipt fix")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_with_a_stopped_id_names_the_reopen_command() -> None:
+    """``_cmd_model``'s own stopped branch, on the shape that actually reaches it.
+
+    The pre-route answer intercepts a follower that still advertises the
+    owner's stale capabilities, so it never enters ``_cmd_model``. The branch
+    is NOT dead in production: a cold viewer advertising NO capabilities plus a
+    recorded stopped id falls through to the local handler and is answered
+    there. Review round 3 MINOR-2 found that shape had lost its last test when
+    the round-1 test was re-pointed at ``_StoppedFollowerSession``; this pins
+    it again by fixture rather than by prose.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
     assert _unwrapped("(this session)") not in text, text
 
 

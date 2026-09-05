@@ -14911,6 +14911,24 @@ class OperatorApp(App[None]):
             and getattr(remote_capability.scope, "value", remote_capability.scope)
             == "authoritative_session"
         ):
+            # Bare ``/model`` opens the INVOKING terminal's own picker — there
+            # is nothing for the owner to paint, and hosting the widget here is
+            # the whole point of the interaction (the old routing opened it in
+            # the owner's process, invisible to the user who asked). Choosing a
+            # row still routes the switch back to the owner.
+            #
+            # It sits ABOVE the stopped-follower answer below deliberately, so
+            # that answer only ever sees a command carrying an ARGUMENT. The
+            # picker is a local widget over this terminal's own catalogue and
+            # needs no owner, so a stopped session is no reason to refuse it:
+            # placing the guard first swallowed bare ``/model`` (and its
+            # ``/models`` alias) and painted no list, a regression against
+            # 51dc347cd that design D1, QA Q9 and review round 3 all found
+            # independently. Reading which model you are on, and `/model
+            # default`'s config write, both work with no runtime at all.
+            if command == "/model" and not arg:
+                self._open_model_picker()
+                return
             if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
                 # A viewer that `/stop` ended keeps the owner's LAST capability
                 # list (the sync that would clear it is never coming), so a
@@ -14922,16 +14940,24 @@ class OperatorApp(App[None]):
                 # a second `/stop` give. Gated on `is_cold` as well: the id is
                 # recorded before the socket closes, and a still-connected
                 # facade must keep routing so the owner's own reply lands.
+                #
+                # COMMAND-AGNOSTIC BY DESIGN, not by accident of placement:
+                # this answers EVERY routed command a stopped follower can
+                # reach — `/goal`, `/rename`, `/effort`, `/compact` and the
+                # ~35 others the owner advertises — because
+                # `route_shared_slash` refuses all of them identically on
+                # `client is None`, with the same misleading "reconnecting"
+                # wording. A `/model`-only guard would have fixed one command
+                # and left every neighbour telling the user to wait for an
+                # owner that is not coming back (review round 3, MINOR-1; QA
+                # Q8 measured the breadth on `/goal`, `/rename`, `/effort`).
+                # The LOCAL pullbacks above are untouched by that breadth:
+                # `/model default`, bare `/mcp` and `/team chart` set
+                # `remote_capability = None` before this branch is entered, so
+                # they never reach it, and bare `/model` is pulled back just
+                # above for the same reason.
                 text_line, kind = self._no_session_notice()
                 self._system_notice(text_line, kind)
-                return
-            # Bare ``/model`` opens the INVOKING terminal's own picker — there
-            # is nothing for the owner to paint, and hosting the widget here is
-            # the whole point of the interaction (the old routing opened it in
-            # the owner's process, invisible to the user who asked). Choosing a
-            # row still routes the switch back to the owner.
-            if command == "/model" and not arg:
-                self._open_model_picker()
                 return
 
             async def run_remote_slash() -> None:
