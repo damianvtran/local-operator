@@ -2250,10 +2250,55 @@ async def test_model_opens_the_picker_instead_of_reporting_a_label() -> None:
         assert editor.text == "/model ", editor.text
         assert editor.model_picker.is_open()
         # NOTHING was submitted: completing a command whose argument drives its
-        # own list is not running it, so there is no echoed UserBlock and no
-        # notice — just the list.
-        assert app.query_one(TranscriptView).blocks() == []
+        # own list is not running it, so there is no echoed UserBlock. The one
+        # block is the persist-hint notice, which rides the list's OPEN
+        # transition rather than the dispatch (UX review U5) so this keystroke
+        # route — the primary one — names `/model saved` and `/settings` just
+        # as the dispatched `/model` does. A system notice, so the empty state
+        # is intact and the composition has not collapsed.
+        blocks = app.query_one(TranscriptView).blocks()
+        assert [type(b).__name__ for b in blocks] == ["NoticeBlock"], blocks
+        assert _unwrapped(PERSIST_HINT) in _unwrapped(_transcript_text(app))
+        assert app._welcome_visible is True
     assert session.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+async def test_the_picker_notice_is_exactly_its_rows_tall(size: tuple[int, int]) -> None:
+    """A notice appended from a message handler must not keep a stale height.
+
+    Found the moment the persist-hint notice moved onto ``ModelQueryOpened``:
+    built before layout at the 80-column fallback, measured at the 75-cell
+    boot column where each fallback row folded once more, and then re-authored
+    at the right width — but the second measurement never replaced the first
+    in the box-model cache, so a three-row notice held five rows and put a
+    scrollbar on a two-block transcript at 80-100 columns. ``NoticeBlock``
+    now pins its authored height like ``UserBlock`` does. Asserted as the
+    invariant (block height equals authored rows; no scrollbar) rather than
+    as a number, so a longer hint does not turn this into a golden.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(6):
+            await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
+        assert len(notices) == 1, notices
+        notice = notices[0]
+        authored = len(_renderable_plain(notice.renderable).split("\n"))
+        assert notice.size.height == authored, (notice.size, authored)
+        assert transcript.virtual_size.height <= transcript.size.height, (
+            transcript.virtual_size,
+            transcript.size,
+        )
+        assert transcript.show_vertical_scrollbar is False
 
 
 @pytest.mark.asyncio
@@ -8358,7 +8403,9 @@ async def test_model_default_explicit_selector_still_writes(
 
 
 @pytest.mark.asyncio
-async def test_d_in_the_model_picker_filters_and_never_acts() -> None:
+async def test_d_in_the_model_picker_filters_and_never_acts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The regression guard for the REMOVED `d` affordance.
 
     #369 briefly bound `d` on an empty query to "save the highlighted row as the
@@ -8368,7 +8415,14 @@ async def test_d_in_the_model_picker_filters_and_never_acts() -> None:
     happened to be on. `d` is an ordinary filter character, always — asserted
     through the real key path rather than by checking the handler is gone, since
     what matters is what the keystroke DOES.
+
+    The FILE is asserted too (review round 1, R4): a re-added handler that wrote
+    config and then also let the key fall through to the filter would pass the
+    query assertions alone.
     """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    before = (tmp_path / "config.yml").read_bytes()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(_SwitchableSession()), provider_controller=ctrl)
     async with app.run_test(size=(90, 30)) as pilot:
@@ -8388,6 +8442,183 @@ async def test_d_in_the_model_picker_filters_and_never_acts() -> None:
     assert "deepseek/deepseek-chat" in visible, visible
     assert "qwen3:8b" not in visible, visible
     assert len(visible) < offered, (visible, offered)
+    assert (tmp_path / "config.yml").read_bytes() == before, "the `d` key wrote config"
+
+
+class _CountingSession(_SwitchableSession):
+    """Records every ``set_model`` call, so a test can assert the switch tail was
+    or was not taken — the label alone cannot tell a skipped switch from a
+    same-model re-selection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_model_calls: list[tuple[str, bool]] = []
+
+    def set_model(self, model, *, explicit: bool = False) -> None:
+        self.set_model_calls.append((f"{model.provider}/{model.model_id}", explicit))
+        super().set_model(model, explicit=explicit)
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_is_write_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bare `/model default` never enters the switch tail (review round 1, R3/Q1).
+
+    "Switches nothing" has to be true of the CODE PATH, not just the label:
+    `Session.set_model(..., explicit=True)` on the model already in force
+    withdraws a pinned provider fallback and clears the effort-refusal latch, so
+    a persist that rode the switch path silently dropped the route serving the
+    user. The explicit form with a different model is the control — it must
+    still switch, or the test would pass on a `set_model` nobody calls.
+
+    The access note is asserted absent for the same reason (UX review U7): it
+    answers "can I use the model I just switched to", and nothing was switched to.
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: anthropic\n")
+    session = _CountingSession()  # on openrouter/deepseek/deepseek-chat
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        bare_receipt = _unwrapped(_transcript_text(app))
+        assert session.set_model_calls == [], session.set_model_calls
+        app._run_slash_command("/model default anthropic/claude-opus-5")
+        await pilot.pause()
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    # The bare form WROTE (its receipt names the pair) without the access note…
+    assert _unwrapped("hosting openrouter, model_name deepseek/deepseek-chat") in bare_receipt
+    assert _unwrapped("openrouter logged in") not in bare_receipt, bare_receipt
+    # …and the explicit form with a different model took the switch tail once.
+    assert session.set_model_calls == [("anthropic/claude-opus-5", True)], session.set_model_calls
+    assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_on_an_unwritable_dir_does_not_claim_a_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-only form's failure receipt must not say "model switched" (Q1b)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: anthropic\n")
+    session = _CountingSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        # Fail the write at the facade rather than with a chmod: a read-only
+        # directory is what this simulates, and chmod is unreliable as root and
+        # on some CI filesystems.
+        from local_operator import settings_io
+
+        def _refuse(*_args, **_kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(settings_io, "write_setting", _refuse)
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.set_model_calls == [], session.set_model_calls
+    assert _unwrapped("could not save default") in text, text
+    assert _unwrapped("model switched") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE row follows the command, not the receipt plus the config watcher's
+    "someone else edited your file" notice (design review D1 / UX review U4).
+
+    The write goes through the ``settings_io`` facade, which tells the watcher
+    the change is this process's own (``source="local"``); ``_on_config_change``
+    then stays silent. Written underneath the facade, the poll delivered the
+    app's own write one tick later as ``config.yml changed: model_name needs a
+    relaunch`` — worded for a foreign edit, naming only the key that differed.
+    The watcher is polled explicitly so the assertion is bound by loop turns,
+    not its 2 s cadence.
+    """
+    from local_operator.config_watch import _reset_for_tests, process_watcher
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    _reset_for_tests()
+    try:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: openrouter\n  model_name: old-model\n"
+        )
+        session = _SwitchableSession()
+        ctrl = _AccessController(stored=("openrouter", "anthropic"))
+        app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+        async with app.run_test(size=(90, 24)) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is not None and app._unsubscribe_config_watch is not None:
+                    break
+            assert app._unsubscribe_config_watch is not None, "the app never subscribed"
+            app._run_slash_command("/model default")
+            await pilot.pause()
+            # Nothing pending for the poll: the local write already advanced
+            # the watcher's fingerprint.
+            assert process_watcher(tmp_path).poll_now() is None
+            await pilot.pause()
+            await pilot.pause()
+            notices = [block.text() or "" for block in app.query(NoticeBlock)]
+        receipts = [n for n in notices if "boot default saved" in n]
+        assert len(receipts) == 1, notices
+        assert not [n for n in notices if "config.yml changed" in n], notices
+        # The receipt is the LAST row: nothing followed it.
+        assert "boot default saved" in notices[-1], notices
+    finally:
+        _reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_model_default_and_saved_in_setup_state_name_the_way_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup-state trap (UX review U1 / QA Q2).
+
+    With `hosting` valid and no model, the picker footer advertises
+    `/model default`, and both the bare form and `/model saved` used to fall
+    into the generic "session is still starting…" — a message that never
+    resolves, because nothing is starting. Each must answer with the state's
+    own next step, and neither may write: an empty pair would leave the next
+    launch with no model at all.
+    """
+    from local_operator.session_factory import ModelNotConfiguredError
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    before = (tmp_path / "config.yml").read_bytes()
+
+    async def _no_model_factory():
+        raise ModelNotConfiguredError("no model for openrouter", hosting="openrouter")
+
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(_no_model_factory, provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._session is None and app._model_missing_for == "openrouter"
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        after_default = _unwrapped(_transcript_text(app))
+        app._run_slash_command("/model saved")
+        await pilot.pause()
+        after_saved = _unwrapped(_transcript_text(app))
+        still_setup = app._setup_state
+    assert _unwrapped("session is still starting") not in after_saved, after_saved
+    assert _unwrapped("usage: /model default <provider>/<model-id>") in after_default
+    assert _unwrapped("pick a row in /model") in after_default, after_default
+    assert _unwrapped("no saved default to switch to") in after_saved, after_saved
+    assert _unwrapped("/model default <provider>/<model-id>") in after_saved, after_saved
+    assert still_setup is True
+    assert (tmp_path / "config.yml").read_bytes() == before, "the setup state wrote config"
 
 
 _MODEL_DEFAULT_KEYS = {" ": "space", "/": "slash", "-": "minus"}
@@ -8571,7 +8802,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used from the next launch") in text, text
+    assert _unwrapped("used by new sessions") in text, text
 
 
 @pytest.mark.asyncio

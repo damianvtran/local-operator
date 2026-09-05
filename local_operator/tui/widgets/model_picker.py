@@ -466,8 +466,7 @@ class ModelPicker(Static):
         No printable key is an action in this picker, so nothing routes on this
         any more — it survives as the state a test asserts to prove that (a `d`
         typed here filters rather than saving a boot default; see
-        `test_d_in_the_model_picker_filters_and_never_acts`) and as the read the
-        editor's non-printable branches sit beside.
+        `test_d_in_the_model_picker_filters_and_never_acts`).
         """
         return self._query
 
