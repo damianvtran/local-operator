@@ -1,0 +1,14 @@
+boot: disk=auto  app gate = auto
+  a command tool under auto -> approved without a prompt? True
+
+OPERATOR WRITES `ask` THROUGH THE /settings PAGE (settings_io.write_setting,
+the exact call SettingsView._write makes; notifies the watcher as source=local)
+  disk      = 'ask'
+  app gate  = ask   <-- MUST be ask
+  band      = ask
+  re-announced? False  (must be False: the page is its own receipt)
+  a command tool now -> PROMPTS (card mounted)
+  denied -> tool ran? False
+
+And the page can loosen its OWN pane back (a choice made HERE):
+  app gate = auto

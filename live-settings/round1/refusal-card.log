@@ -1,0 +1,10 @@
+web_fetch refusal:
+  text    = web_fetch is disabled by config (web_fetch.enabled) — turn it on in /settings › Web tools
+  details = {}
+  is_error= True
+  CARD ROWS the user sees above the sentence: []
+  -> contains a 'Fetched:' claim? False
+
+web_search refusal (the shape web_fetch was brought into line with):
+  text    = web_search is disabled by config (web_search.enabled) — turn it on in /settings › Web tools
+  details = None

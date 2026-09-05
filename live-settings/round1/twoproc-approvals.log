@@ -1,0 +1,31 @@
+========================================================================
+CELL 1 — LOOSENING against an explicit in-session /approvals ask
+========================================================================
+  pane B: /approvals ask      -> tool approvals: ask — write and command tools prompt before running
+          gate = ask   explicit=True
+  pane A (separate OS process): config edit tool_approval_mode auto  rc=0 in 0.71s
+  delivered in 0.057s
+  disk = 'auto'
+  pane B gate = ask   <-- MUST still be ask
+  [notice/info] keeping tool approvals: ask — set with /approvals in this session; config.yml now says auto, /approvals auto adopts it
+  a real tool decision -> PARKED for the human
+  human denied it -> tool ran? False
+  pane B: /approvals          -> tool approvals: ask (this session) — write and command tools prompt before running; config.yml says auto
+  pane B: /approvals auto     -> adopts: gate = auto
+
+========================================================================
+CELL 2 — TIGHTENING over an explicit choice (must ALWAYS follow)
+========================================================================
+  pane B: /approvals auto     -> gate = auto  explicit=True
+  pane A: config edit tool_approval_mode ask  rc=0 in 0.31s
+  delivered in 0.002s
+  pane B gate = ask   <-- MUST be ask (safety always propagates)
+  [notice/info] tool approvals: ask — config.yml changed; write and command tools prompt again
+
+========================================================================
+CELL 3 — a session that NEVER chose follows the file BOTH ways
+========================================================================
+  disk -> auto  pane B gate = auto  OK
+  disk -> ask   pane B gate = ask   OK
+
+config dir: /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/ev-approvals-xohgx988/config

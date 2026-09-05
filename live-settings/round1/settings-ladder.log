@@ -1,0 +1,18 @@
+--- 80 cols, detail budget = 74 ---
+hosting                  help= 72 painted= 20 key=YES clipped=no
+model_name               help= 72 painted= 23 key=YES clipped=no
+tool_approval_mode       help= 74 painted= 33 key=YES clipped=no
+web_search.enabled       help= 61 painted= 61 key=no  clipped=no
+web_fetch.enabled        help= 60 painted= 60 key=no  clipped=no
+--- 100 cols, detail budget = 94 ---
+hosting                  help= 72 painted= 85 key=no  clipped=no
+model_name               help= 72 painted= 85 key=no  clipped=no
+tool_approval_mode       help= 74 painted= 89 key=no  clipped=no
+web_search.enabled       help= 61 painted= 82 key=YES clipped=no
+web_fetch.enabled        help= 60 painted= 80 key=YES clipped=no
+--- 120 cols, detail budget = 114 ---
+hosting                  help= 72 painted= 95 key=YES clipped=no
+model_name               help= 72 painted= 98 key=YES clipped=no
+tool_approval_mode       help= 74 painted=110 key=YES clipped=no
+web_search.enabled       help= 61 painted= 82 key=YES clipped=no
+web_fetch.enabled        help= 60 painted= 80 key=YES clipped=no
