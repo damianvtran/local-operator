@@ -4540,14 +4540,14 @@ class SessionStreamFn:
 
         if self._cache_lineage_id and request.prompt_cache_key is None:
             # The transcript directory name is stable for the session, so
-            # reusing it keeps every turn on the same provider cache without
+            # reusing it helps related turns find reusable cached prefixes without
             # coupling the harness loop to session storage. For a FORK this is
             # the PARENT's id (see ``_cache_lineage_id``): the fork replays a
             # byte-identical transcript, so it really is the same prefix, and a
             # routing/stickiness hint is exactly what should follow it. Without
             # the inheritance a fork's first request routes as a fresh prefix —
             # the same class of regression measured when this key was stripped
-            # entirely, which moved cache-read rates from ~97-98% to ~89-90%.
+            # entirely. It remains a routing hint, never a cache-hit guarantee.
             #
             # Only the OpenAI-shaped wire reads this key
             # (``OpenAICompatClient._build_responses_body``); Anthropic keys its
