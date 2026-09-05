@@ -69,7 +69,7 @@ from local_operator.harness.jobs import (
     AsyncJob,
     AsyncJobManager,
 )
-from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
 from local_operator.harness.subagent import run_subagent
 from local_operator.harness.types import (
     AbortSignal,
@@ -96,7 +96,6 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     PeerMessageDeliveredEvent,
-    StaleAside,
     SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
@@ -549,6 +548,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             SESSION_INCIDENT_MESSAGE_TYPE,
             SESSION_MODEL_SWITCH_MESSAGE_TYPE,
             SESSION_CREDENTIAL_MESSAGE_TYPE,
+            "session_state",
         ):
             # An incident rides the sender's preformatted text (the classifier
             # already wrote category + suggested action), exactly like a wake
@@ -683,6 +683,7 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
 #: does not exist yet; this one excludes it by default.
 _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
+        "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
@@ -1672,6 +1673,27 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        self._frozen_system_blocks: list[str] | None = None
+        self._last_system_blocks: list[str] | None = None
+        self._system_state_message_id: str | None = None
+        marker = transcript.latest_entry("compaction")
+        self._system_state_compaction_id = marker.id if marker is not None else None
+        # Prefix bytes are session memory too. Reconstruct state once on resume
+        # (also for a transcript fork); hot calls compare only four blocks.
+        if getattr(system_blocks_provider, "append_only_state", False):
+            saved_prefix = transcript.latest_custom("system_prefix")
+            if saved_prefix and isinstance(saved_prefix.get("blocks"), list):
+                self._frozen_system_blocks = list(saved_prefix["blocks"])
+                self._last_system_blocks = list(self._frozen_system_blocks)
+                for entry in transcript.entries():
+                    payload = entry.payload
+                    if payload.get("custom_type") != "session_state":
+                        continue
+                    for key, value in payload.get("details", {}).get("blocks", {}).items():
+                        index = int(key)
+                        if 0 <= index < len(self._last_system_blocks):
+                            self._last_system_blocks[index] = str(value)
+                    self._system_state_message_id = entry.id
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
         # providers do, a bare zero-arg callable (some hosts, most tests) does
@@ -1731,6 +1753,17 @@ class Session:
 
         self._loop = AgentLoop()
         replayed_messages = list(transcript.build_llm_history())
+        if (
+            self._system_state_compaction_id is not None
+            and self._system_state_message_id is not None
+            and not any(
+                message.id == self._system_state_message_id for message in replayed_messages
+            )
+        ):
+            # Resume can restore the last state from pre-compaction journal
+            # rows which no longer reach the model. Re-anchor it on the next
+            # main request, or transiently for a helper that runs before it.
+            self._system_state_compaction_id = None
         # A fork's inherited bytes stay untouched for prompt-cache continuity;
         # its lineage warning exists only at the live context tail and is
         # consumed once, so resume never accumulates synthetic transcript rows.
@@ -2117,6 +2150,16 @@ class Session:
         # open") and that every turn which opened a browser stranded a cmux tab
         # the agent could never close. dispose() closes whatever is still open.
         self._browser = BrowserSurface()
+        # Connections and overlapping read requests have a conversation owner.
+        # This avoids rebuilding pools for every tool call without allowing one
+        # child's disposal to close a sibling's active transport.
+        from local_operator.web_search.io import WebReadIO
+
+        self._web_io = WebReadIO()
+        self.add_dispose_hook(self._web_io.aclose)
+        from local_operator.tools.eval import close_session_kernel
+
+        self.add_dispose_hook(lambda: close_session_kernel(self.session_id))
 
         # ``SESSION_CAPABILITY_TOOLS`` are createIf-gated on the ToolContext
         # fields only a SESSION can provide (subagent_launcher, jobs,
@@ -2876,6 +2919,106 @@ class Session:
             # compatible way from now on.
             self._blocks_provider_takes_label = False
             return self._system_blocks_provider()
+
+    async def _prepare_system_blocks(
+        self, model: ModelSpec | None = None, *, commit_state: bool = True
+    ) -> list[str]:
+        """Freeze the historical prefix and append authoritative state deltas.
+
+        Called at the provider boundary before history is snapshotted. Durable
+        publication precedes injection, so resume/fork sees identical bytes.
+        The raw provider remains available for read-only inspection and legacy
+        embedders; only production builders opt into this protocol.
+        """
+        desired = self._system_blocks(model)
+        if inspect.isawaitable(desired):
+            desired = await desired
+        desired = list(desired)
+        if not getattr(self._system_blocks_provider, "append_only_state", False):
+            return desired
+        if self._frozen_system_blocks is None:
+            await self._transcript.append_custom("system_prefix", {"blocks": desired})
+            self._frozen_system_blocks = list(desired)
+            self._last_system_blocks = list(desired)
+            return list(desired)
+        if desired[:1] != self._frozen_system_blocks[:1]:
+            # Standing instructions are authoritative, not immutable. A resume
+            # can load edited AGENTS/custom instructions or a newer packaged
+            # prompt, and a live provider can publish the same change mid-run.
+            # Start a new persisted prefix epoch BEFORE issuing any request;
+            # paying a cold cache is mandatory when the authority changes.
+            # Keep _last_system_blocks until the delta below is committed: old
+            # state messages still occur in history and must be superseded if
+            # this epoch also changes a dynamic section.
+            await self._transcript.append_custom("system_prefix", {"blocks": desired})
+            self._frozen_system_blocks = list(desired)
+        if not commit_state:
+            return list(self._frozen_system_blocks)
+        changes, compaction_id = self._system_state_delta(desired)
+        if changes:
+            message = self._system_state_message(changes)
+            await self._transcript.append_message(message)
+            self._context.messages.append(message)
+            self._system_state_message_id = message.id
+        self._last_system_blocks = list(desired)
+        self._system_state_compaction_id = compaction_id
+        return list(self._frozen_system_blocks)
+
+    def _system_state_delta(self, desired: list[str]) -> tuple[dict[str, str], str | None]:
+        """The same live-state/reanchor decision for main turns and helpers."""
+        previous = self._last_system_blocks or self._frozen_system_blocks or desired
+        # Compaction may replace the record that carried the latest state.
+        # Re-anchor a complete live snapshot then; otherwise only changed
+        # sections are added and an unchanged model step pays no write.
+        marker = self._transcript.latest_entry("compaction")
+        compaction_id = marker.id if marker is not None else None
+        lost_state = (
+            self._system_state_message_id is not None
+            and compaction_id != self._system_state_compaction_id
+        )
+        changes = {
+            str(index): block
+            for index, block in enumerate(desired)
+            if index > 0 and (lost_state or index >= len(previous) or block != previous[index])
+        }
+        return changes, compaction_id
+
+    @staticmethod
+    def _system_state_message(changes: dict[str, str]) -> CustomMessage:
+        labels = {1: "Available tools", 2: "Environment", 3: "Knowledge and session state"}
+        text = "[session-state]\n" + "\n\n".join(
+            f"## {labels.get(int(index), 'Session state')}\n{block or '(empty)'}"
+            for index, block in changes.items()
+        )
+        return CustomMessage(
+            custom_type="session_state",
+            attribution="system",
+            details={"text": text, "blocks": changes},
+        )
+
+    async def _read_only_prompt(
+        self, turns: Sequence[AgentMessage]
+    ) -> tuple[list[str], list[Message]]:
+        """Match the working prefix for an aside without journalling its state.
+
+        A helper can race the main turn and may not mutate its history. Any
+        state newer than the last committed snapshot is appended only to this
+        request. The next real turn still performs its own durable publication.
+        """
+        desired = self._system_blocks()
+        if inspect.isawaitable(desired):
+            desired = await desired
+        desired = list(desired)
+        history = self._wire_legal_snapshot()
+        blocks = list(self._frozen_system_blocks or desired)
+        if desired[:1] != blocks[:1]:
+            # Helpers do not journal, but they must obey a new standing rule
+            # immediately too. The real turn commits this epoch independently.
+            blocks = list(desired)
+        changes, _ = self._system_state_delta(desired)
+        if changes:
+            history.append(self._system_state_message(changes))
+        return blocks, self._render_history([*history, *turns])
 
     @property
     def model(self) -> ModelSpec:
@@ -3872,7 +4015,11 @@ class Session:
         if task is not None and not task.done():
             return
         try:
-            task = asyncio.ensure_future(self._persist_conversation_name())
+            # Check for a loop before constructing the coroutine: ensure_future
+            # can raise after creation, leaking an unawaited coroutine in a
+            # browsing-only session named outside an event loop.
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._persist_conversation_name())
             # Consume the exception explicitly. The failure is already intended
             # to be swallowed (a title must never cost a turn), but nothing
             # retrieves the result of a task that finishes BEFORE the dispose
@@ -4152,6 +4299,27 @@ class Session:
         )
         if inspect.isawaitable(result):
             await result
+        await self._refresh_context_metadata()
+
+    async def _refresh_context_metadata(self) -> None:
+        resolver = getattr(self._stream_fn, "resolve_context_model", None)
+        if not callable(resolver):
+            return
+        result = resolver(self.effective_model)
+        spec = await result if inspect.isawaitable(result) else result
+        if not isinstance(spec, ModelSpec):
+            return
+        await self._emit(
+            ModelChangeEvent(
+                provider=spec.provider,
+                model_id=spec.model_id,
+                context_window=spec.context_window,
+                default_context_window=spec.default_context_window,
+                max_context_window=spec.max_context_window,
+                context_metadata=True,
+                context_metadata_resolved=spec.context_metadata_resolved,
+            )
+        )
 
     # -- driving turns --------------------------------------------------------
     async def prompt(
@@ -5096,6 +5264,36 @@ class Session:
 
         return _unsubscribe
 
+    def subscribe_presentation(
+        self,
+        handler: EventHandler,
+        *,
+        max_pending: int = 256,
+        on_overflow: Callable[[], None] | None = None,
+    ) -> Callable[[], None]:
+        """Deliver an observer off the turn path with a bounded ordered queue.
+
+        For slow async viewers, not reducers, approvals or persistence. Text
+        deltas coalesce without losing text. Queue overflow disconnects with an
+        explicit callback; the viewer must resync from frontend_state/history.
+        The ordinary subscribe contract stays synchronous and ordered.
+        """
+        from local_operator.session.subscriptions import PresentationSubscription
+
+        observer = PresentationSubscription(
+            handler, max_pending=max_pending, on_overflow=on_overflow
+        )
+        detach = self.subscribe(observer.enqueue)
+        self.add_dispose_hook(observer.aclose)
+
+        def unsubscribe() -> None:
+            detach()
+            observer.close()
+            with contextlib.suppress(ValueError):
+                self._dispose_hooks.remove(observer.aclose)
+
+        return unsubscribe
+
     async def _stream_notice(
         self,
         text: str,
@@ -5189,6 +5387,37 @@ class Session:
             return None
 
     async def _emit(self, event: AgentEvent) -> None:
+        if isinstance(event, ModelChangeEvent) and event.context_metadata:
+            current = self.effective_model
+            primary = (self._model.provider, self._model.model_id) == (
+                event.provider,
+                event.model_id,
+            )
+            if primary:
+                # A recovering primary reports metadata before failover clears
+                # its old pin. Save it on selection so recovery cannot revive
+                # the pre-rotation/default window.
+                current = self._model
+            if (current.provider, current.model_id) == (event.provider, event.model_id):
+                update = {
+                    "context_window": event.context_window,
+                    "default_context_window": event.default_context_window,
+                    "max_context_window": event.max_context_window,
+                    "context_metadata_resolved": event.context_metadata_resolved,
+                }
+                if all(getattr(current, key) == value for key, value in update.items()):
+                    return
+                refreshed = current.model_copy(update=update)
+                if primary:
+                    self._model = refreshed
+                else:
+                    self._active_fallback = refreshed
+                event = event.model_copy(
+                    update={
+                        "is_fallback": self._active_fallback is not None,
+                        "effort": current.reasoning_effort,
+                    }
+                )
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         store = getattr(self, "_frontend_state_store", None)
@@ -5254,6 +5483,7 @@ class Session:
         The generation stamp on the emitted end is the one from the start that
         opened the run, so the TUI's supersede guard still pairs them.
         """
+        await self._refresh_context_metadata()
         # Re-arm the todo guardrail: a fresh user message may well be the answer
         # a stalled list was waiting for, so the latch must not carry over. It is
         # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
@@ -5361,9 +5591,7 @@ class Session:
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
-            blocks = self._system_blocks()
-            if inspect.isawaitable(blocks):
-                blocks = await blocks
+            blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
 
@@ -5378,7 +5606,7 @@ class Session:
                 # while a tool runs reaches the next call in THIS turn rather than
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
-                get_system_blocks=self._system_blocks,
+                get_system_blocks=self._prepare_system_blocks,
                 # Cross-turn seed for the prompt-cache TTL hint: the loop stamps
                 # it on the run's first request and then prefers the counts its
                 # own calls report. Lives here — not on the shared stream fn —
@@ -5532,6 +5760,7 @@ class Session:
             if pending_incident:
                 await self.journal_incident(pending_incident)
 
+            await self._refresh_context_metadata()
             await self._maybe_compact()
         finally:
             # LAST-RESORT durability. The persistence above runs only on the
@@ -5696,6 +5925,7 @@ class Session:
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
+            web_io=self._web_io,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
@@ -6149,26 +6379,26 @@ class Session:
         return self._steering_queue.qsize() > self._courtesy_wake_count
 
     async def _drain_asides(self) -> list[Aside]:
-        """Drain queued aside thunks (the loop materializes them at the
-        injection boundary and fires commit/discard hooks)."""
+        """Materialize and durably publish live asides before loop injection.
+
+        Historically the synchronous thunk scheduled a fire-and-forget append.
+        Offloading that write made a child act on context missing from its
+        durable transcript. This async boundary now acknowledges the batch
+        first; the loop still owns commit/discard hooks and ordered injection.
+        """
         thunks = self._aside_thunks
         self._aside_thunks = []
-        return list(thunks)
+        messages = _materialize_asides(thunks)
+        # Asides explicitly admit custom hub/wake rows, which the generic
+        # flush excludes because those producers already own persistence.
+        await self._transcript.append_messages(
+            [message for message in messages if not self._transcript.has_entry(message.id)]
+        )
+        return list(messages)
 
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
-        """Queue a lazy aside message for the next injection boundary. The thunk
-        is wrapped so a materialized (non-None, non-stale) message is
-        persisted exactly once, at the moment it actually reaches the model.
-        A :class:`StaleAside` result passes through unpersisted; the loop
-        fires its ``on_discard``."""
-
-        def _wrapped() -> AsideResult:
-            message = thunk()
-            if message is not None and not isinstance(message, StaleAside):
-                self._spawn_background(self._transcript.append_message(message))
-            return message
-
-        self._aside_thunks.append(_wrapped)
+        """Queue a lazy aside; the async drain persists only live materializations."""
+        self._aside_thunks.append(thunk)
         # Every aside is a ``hub`` message for this session's model (a child's
         # unprompted "I am blocked" to its parent, or a parent's note/question
         # to a child), and the injection boundary that materializes it is
@@ -6310,13 +6540,15 @@ class Session:
         transcript stores a message under its OWN id, so "already stored" is
         an exact check rather than a heuristic.
         """
-        stored = {entry.id for entry in self._transcript.entries()}
-        for message in messages:
-            if not _is_persistable_message(message):
-                continue
-            if getattr(message, "id", None) in stored:
-                continue
-            await self._transcript.append_message(message)
+        fresh = [
+            message
+            for message in messages
+            if _is_persistable_message(message) and not self._transcript.has_entry(message.id)
+        ]
+        # This list is a paired prefix at mid-turn gates and a closed run at
+        # settlement. One durable commit preserves the same admission/fork
+        # boundary while avoiding an fsync for every already-paired result.
+        await self._transcript.append_messages(fresh)
 
     async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
         """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
@@ -6438,9 +6670,17 @@ class Session:
             # pending hint rather than consuming it: the hint is consumed at
             # exactly one point (``_plan_compaction``), and a pre-gate that
             # consumed it would leave the plan gate nothing to act on.
+            # A provider receipt counted the input BEFORE the assistant and
+            # tool results just appended. A large output can cross the trigger
+            # in one step, so the cheap proof must also bound the current
+            # history. Reuse the planner's conservative ruler, not a second
+            # token heuristic calibrated to typical tool outputs.
+            current_bound = compaction_api.messages_tokens_upper_bound(
+                self._render_history(messages)
+            )
             if not _should_compact(
                 compaction_api,
-                provider_reported,
+                max(provider_reported, current_bound),
                 self.effective_model.context_window,
                 settings,
                 self._has_pending_advisory(settings),
@@ -6575,7 +6815,23 @@ class Session:
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).
-        if getattr(plan.settings, "auto_continue", False):
+        # A normal terminal response means the task has finished; shrinking
+        # history must not buy another model call to reconsider that answer.
+        # Only a length-interrupted answer owes continuation at this boundary.
+        terminal = (
+            next(
+                (
+                    message
+                    for message in reversed(self._held_end.messages)
+                    if isinstance(message, Message) and message.role == "assistant"
+                ),
+                None,
+            )
+            if self._held_end is not None
+            else None
+        )
+        interrupted = terminal is not None and terminal.stop_reason == "length"
+        if getattr(plan.settings, "auto_continue", False) and interrupted:
             compaction_api = plan.compaction_api
             threshold = compaction_api.resolve_threshold_tokens(
                 self.effective_model.context_window, plan.settings
@@ -6986,8 +7242,7 @@ class Session:
         # first_kept_entry_id is persisted and matched on resume, and a cut
         # whose first kept message has no transcript entry (a converter-minted
         # id) would make replay drop the whole kept window silently.
-        entry_ids = {entry.id for entry in self._transcript.entries()}
-        if llm_history[cut].id not in entry_ids:
+        if not self._transcript.has_entry(llm_history[cut].id):
             logger.warning(
                 "compaction cut rejected: kept[0].id %s is not a transcript entry",
                 llm_history[cut].id,
@@ -7946,15 +8201,14 @@ class Session:
     def _previous_archive_text(self) -> str | None:
         """The latest compaction's archive text, so snapcompact re-renders from
         accumulated history instead of carrying old PNGs forward."""
-        for entry in reversed(self._transcript.entries()):
-            if entry.type != "compaction":
-                continue
-            preserve = entry.payload.get("preserve_data") or {}
-            snap = preserve.get("snapcompact")
-            if isinstance(snap, dict) and snap.get("text"):
-                return str(snap["text"])
-            return entry.payload.get("summary")
-        return None
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return None
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        if isinstance(snap, dict) and snap.get("text"):
+            return str(snap["text"])
+        return entry.payload.get("summary")
 
     #: Output cap for :meth:`complete_once`, and the only bound on what a model
     #: that ignores the output format can bill us for. The cap counts EVERY
@@ -8003,6 +8257,7 @@ class Session:
         model = self._errand_model()
         request = ChatRequest(
             model=model,
+            purpose="naming",
             system_blocks=[system],
             messages=[Message.user(prompt)],
             tools=[],
@@ -8081,6 +8336,11 @@ class Session:
         discarded and retried. Without it a single stalled read failed the
         compaction outright and the context it was meant to shrink kept growing.
         """
+        from local_operator.compaction.api import MAX_SUMMARY_TOKENS
+
+        # The post-hoc cap remains a malformed-output guard. Budget generation
+        # itself as well, including reasoning, and keep this helper's effort
+        # independent from the current user turn's classification.
         request = ChatRequest(
             model=self._model,
             system_blocks=[system],
@@ -8088,6 +8348,9 @@ class Session:
             tools=[],
             tool_choice="none",
             replayable=True,
+            max_tokens=MAX_SUMMARY_TOKENS,
+            effort_override=("low" if "low" in self._model.reasoning_efforts else None),
+            purpose="compaction",
             # ``0`` is a DELIBERATE hint, not a missing one: this prompt is a
             # fresh write-once system+transcript prefix, not the turn's cached
             # prefix, so a 1h entry (2x write rate) buys nothing — it is never
@@ -8186,12 +8449,10 @@ class Session:
         Safe to call mid-turn, and the pairing below is what makes that true —
         see :meth:`_wire_legal_snapshot`.
         """
-        blocks = self._system_blocks()
-        if inspect.isawaitable(blocks):
-            blocks = await blocks
-        messages = self._render_history([*self._wire_legal_snapshot(), *turns])
+        blocks, messages = await self._read_only_prompt(turns)
         request = ChatRequest(
             model=self._model,
+            purpose="aside",
             system_blocks=list(blocks),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
@@ -8310,6 +8571,7 @@ class Session:
             blocks = await blocks
         request = ChatRequest(
             model=self._model,
+            purpose="compaction_advisor",
             system_blocks=list(blocks),
             messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
             # Live tools, same as an aside: the tools block is the FRONT of the
@@ -9687,10 +9949,10 @@ class Session:
         * ``retry.*``, ``providers.openai.api``, ``effort.*`` — handed to the
           stream fn's ``apply_settings``, which rebinds the mapping its
           per-call ``RetrySettings.from_settings`` reads. A subagent shares
-          the parent's stream fn, so the parent's rebind covers the tree;
-          the child still calls it (idempotent) so a child built against a
-          parent whose stream fn has no ``apply_settings`` degrades the same
-          way as its parent.
+          only the parent's transport pool; its routing state belongs to its
+          own stream fn. Each child's watcher therefore applies the same live
+          settings to that independent owner. Legacy stream functions without
+          ``apply_settings`` retain their existing behavior.
         * ``subagents.max_running`` — pushed into the live job manager with
           the same validation the constructor applied; an unset or invalid
           value restores the manager's built-in default rather than freezing

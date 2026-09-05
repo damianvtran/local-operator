@@ -1,0 +1,10 @@
+{
+  "source": "/Users/damian/workspace/repos/lo-harness-efficiency",
+  "python": "/Users/damian/workspace/repos/lo-harness-efficiency/.venv/bin/python",
+  "loop_sha256": "5de0c3d38f602b3952e76e1b30784342f6864d5825b8c76732eafbf05e229f29",
+  "plan": "composed",
+  "accepted": true,
+  "actual_reads": 3,
+  "model_requests": 2,
+  "retained_tool_result_bytes": 55
+}

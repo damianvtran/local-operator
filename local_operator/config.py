@@ -169,7 +169,7 @@ DEFAULT_CONFIG = Config(
             # were only 14.7M (~11M base-equivalent extra at 2×). 150k is the
             # size above which the rewrite dominates; 0 disables the feature.
             "providers": {
-                "openai": {"api": "responses"},
+                "openai": {"api": "responses", "use_max_context_window": True},
                 "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
             },
             # One ordered cascade for every text-model call. Entries may be

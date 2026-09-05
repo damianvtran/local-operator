@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import logging
 import time
+import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -58,6 +60,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
     ProviderTurnStartEvent,
@@ -65,6 +68,7 @@ from local_operator.harness.types import (
     StaleAside,
     StreamEndEvent,
     StreamEvent,
+    StreamModelEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -134,6 +138,14 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
+
+# Count identical all-error batches, not seconds or successful repeated reads.
+# Polling and long tasks are legitimate; spending six model calls submitting
+# unchanged failing arguments is not progress. One explicit recovery hint is
+# supplied halfway through, so a model can change course before the guard ends
+# the run with a diagnosable error. These are loop safety bounds, not task caps.
+REPEATED_TOOL_ERROR_WARNING = 3
+REPEATED_TOOL_ERROR_LIMIT = 6
 
 #: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
 #: reasoning model that spent its whole output budget thinking) is retried one
@@ -339,6 +351,9 @@ class _PlannedCall:
     args: dict[str, Any] = field(default_factory=dict)
     failure: ToolResult | None = None  # resolution/validation/approval failure
     intent: str | None = None
+    # None means the tool has not declared independently lockable resources.
+    # An empty tuple is a valid declaration of no exclusive resources.
+    resources: tuple[str, ...] | None = None
 
 
 def _batches_shared(item: _PlannedCall) -> bool:
@@ -348,7 +363,38 @@ def _batches_shared(item: _PlannedCall) -> bool:
     it cannot conflict with anything. Only a resolved ``exclusive`` tool
     forces a batch of one.
     """
-    return item.tool is None or item.tool.concurrency == "shared"
+    return (
+        item.failure is not None
+        or item.tool is None
+        or item.tool.concurrency == "shared"
+        or item.resources is not None
+    )
+
+
+def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -> str | None:
+    """Recognize exact repeated failure without retaining tool output bodies.
+
+    Calls and results are paired by position, since duplicate IDs are legal
+    input the executor diagnoses. Successful calls, skipped work, and changing
+    errors all break the streak. Intent narration is excluded: rewriting the
+    explanation while repeating the failed operation is still the same error.
+    """
+    if not calls or len(calls) != len(results) or any(not result.is_error for result in results):
+        return None
+    digest = hashlib.sha256()
+    for call, result in zip(calls, results):
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
+            return None
+        args = {key: value for key, value in call.arguments.items() if key != INTENT_FIELD}
+        digest.update(
+            json.dumps(
+                [call.name, args, call.raw_arguments if not args else None],
+                sort_keys=True,
+                default=str,
+            ).encode()
+        )
+        digest.update(result.text.encode())
+    return digest.hexdigest()
 
 
 async def _abortable_stream(
@@ -546,6 +592,8 @@ class AgentLoop:
         # would otherwise never carry a hint at all. Once a call in this run
         # has reported, its count beats the seed (review F9).
         run_context_tokens: int | None = None
+        last_error_batch: str | None = None
+        repeated_error_batches = 0
 
         yield AgentStartEvent(generation=generation)
 
@@ -564,6 +612,9 @@ class AgentLoop:
                         if config.get_steering_messages is not None:
                             pending.extend(await config.get_steering_messages())
                     first_inner = False
+                    if pending:
+                        last_error_batch = None
+                        repeated_error_batches = 0
                     self._drain_pending(pending, context)
                     pending = []
 
@@ -977,6 +1028,39 @@ class AgentLoop:
                         return
 
                     yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                    fingerprint = _error_batch_fingerprint(assistant.tool_calls, tool_results)
+                    repeated_error_batches = (
+                        repeated_error_batches + 1
+                        if fingerprint is not None and fingerprint == last_error_batch
+                        else int(fingerprint is not None)
+                    )
+                    last_error_batch = fingerprint
+                    if repeated_error_batches >= REPEATED_TOOL_ERROR_LIMIT:
+                        names = ", ".join(sorted({call.name for call in assistant.tool_calls}))
+                        yield AgentEndEvent(
+                            messages=new_messages,
+                            error=(
+                                f"No progress: {names} returned the same errors for "
+                                f"{repeated_error_batches} unchanged tool batches. "
+                                "Change the arguments or resolve the reported blocker "
+                                "before retrying."
+                            ),
+                            generation=generation,
+                        )
+                        return
+                    if repeated_error_batches == REPEATED_TOOL_ERROR_WARNING:
+                        recovery = Message.user(
+                            "Harness recovery notice: the last three tool batches repeated "
+                            "the same arguments and errors. Inspect the error and change approach; "
+                            "do not repeat the unchanged failing calls. If an external condition "
+                            "must change, use a supported wait operation or explain the blocker."
+                        )
+                        context.messages.append(recovery)
+                        new_messages.append(recovery)
+                        yield NoticeEvent(
+                            text="Repeated tool errors — requesting a different approach.",
+                            kind="warning",
+                        )
                     has_more_tool_calls = bool(assistant.tool_calls)
                     if has_more_tool_calls and config.on_turn_end is not None:
                         # The boundary hook fires only when the loop will
@@ -1104,6 +1188,12 @@ class AgentLoop:
             live = resolver(model)
             if inspect.isawaitable(live):
                 live = await live
+        except OSError:
+            # A durable host-state publication failed. Sending the old prompt
+            # could ignore a newly tightened constraint; this call must stop
+            # before reaching the provider instead of silently using stale
+            # authority. Generic accessor bugs retain the legacy fallback.
+            raise
         except Exception:  # host accessor bug — never fatal to a running turn
             logger.exception("get_system_blocks resolver failed; using the run's snapshot")
             return list(context.system_blocks)
@@ -1141,15 +1231,6 @@ class AgentLoop:
         to — never remembered on the shared stream fn, where a subagent's
         registration would overwrite the parent's (review F8).
         """
-        shaped = list(context.messages)
-        if config.transform_context is not None:
-            outcome = config.transform_context(shaped)
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            shaped = list(outcome)
-        converted = config.convert_to_llm(shaped)
-        if inspect.isawaitable(converted):
-            converted = await converted
         assistant = Message(role="assistant")
         text_parts: list[str] = []
         tool_states: dict[int, dict[str, Any]] = {}
@@ -1171,8 +1252,24 @@ class AgentLoop:
             # across that await. If /model changes during the build, the next call
             # sees it; this call remains internally consistent, exactly like an
             # already-open provider stream does.
+            preparing_at = time.monotonic()
             model = self._current_model(config)
             system_blocks = await self._current_system_blocks(context, config, model)
+            # Resolving the prompt can publish a durable host-state update
+            # (new goal, credentials, knowledge) into the append-only history.
+            # Snapshot AFTER that boundary so the request that prompted the
+            # update sees it immediately, while the historical prefix stays
+            # byte-stable. Copying before resolution delayed authority by one
+            # model call and could send a newly obsolete instruction instead.
+            shaped = list(context.messages)
+            if config.transform_context is not None:
+                outcome = config.transform_context(shaped)
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                shaped = list(outcome)
+            converted = config.convert_to_llm(shaped)
+            if inspect.isawaitable(converted):
+                converted = await converted
             if effort_ceiling is not None:
                 # An empty-truncation retreat is in force. The host's resolver
                 # returns ITS model, so clamp the RESOLVED spec or the retry goes
@@ -1196,10 +1293,23 @@ class AgentLoop:
                 tools=list(context.tools),
                 effort_ceiling=effort_ceiling,
                 context_tokens_hint=context_tokens_hint,
+                preparation_ms=(time.monotonic() - preparing_at) * 1000,
             )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
-                if isinstance(event, StreamStartEvent):
+                if isinstance(event, StreamModelEvent):
+                    model = event.model
+                    yield ModelChangeEvent(
+                        provider=model.provider,
+                        model_id=model.model_id,
+                        effort=model.reasoning_effort,
+                        context_window=model.context_window,
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
+                        context_metadata=True,
+                        context_metadata_resolved=model.context_metadata_resolved,
+                    )
+                elif isinstance(event, StreamStartEvent):
                     # The provider is generating for THIS request. Republish it
                     # as a harness event so supervisors get a boundary that
                     # means "on the wire" — ``MessageStartEvent`` above is
@@ -1515,7 +1625,21 @@ class AgentLoop:
                 index += 1
             else:
                 end = index
+                resources: set[str] = set()
+                keyed = plan[index].resources is not None
                 while end < len(plan) and _batches_shared(plan[end]):
+                    item = plan[end]
+                    # Keep a barrier between ordinary shared reads and keyed
+                    # writes. Only tools explicitly declaring independent
+                    # resources gain concurrency; a read immediately following
+                    # a write must still observe it without having to infer
+                    # arbitrary read/grep footprints from their arguments.
+                    if (item.resources is not None) != keyed:
+                        break
+                    keys = set(item.resources or ())
+                    if resources & keys:
+                        break
+                    resources.update(keys)
                     end += 1
                 async for event in self._execute_batch(
                     plan[index:end], context, config, signal, results
@@ -1566,12 +1690,31 @@ class AgentLoop:
                 tool=tool,
                 failure=self._synthetic_result(call, "Invalid arguments: " + "; ".join(errors)),
             )
-        return _PlannedCall(call=call, tool=tool, args=args, intent=intent)
+        resources: tuple[str, ...] | None = None
+        if tool.resource_keys is not None:
+            try:
+                # Canonical paths and inode identities may probe a slow mount.
+                # Planning must not stall unrelated sessions on the loop thread.
+                keys = await asyncio.to_thread(
+                    tool.resource_keys, args, (context.tool_context or ToolContext()).cwd
+                )
+                if (
+                    isinstance(keys, tuple)
+                    and len(keys) <= 32
+                    and all(isinstance(key, str) and 0 < len(key) <= 4096 for key in keys)
+                ):
+                    resources = keys
+            except Exception:
+                # Unknown resource identity keeps the legacy exclusive
+                # barrier; a failed optimization must never create a race.
+                logger.debug("tool resource identity failed for %s", call.name, exc_info=True)
+        return _PlannedCall(call=call, tool=tool, args=args, intent=intent, resources=resources)
 
     async def _runner_result(
         self,
         item: _PlannedCall,
         context: LoopContext,
+        config: LoopConfig,
         signal: AbortSignal | None,
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone],
     ) -> ToolResult:
@@ -1672,9 +1815,86 @@ class AgentLoop:
             )
 
         try:
-            return await tool.execute(
-                call.id, item.args, signal, on_update, context.tool_context or ToolContext()
-            )
+            execution_context = context.tool_context or ToolContext()
+            if tool.name == "eval":
+                # The worker receives a request-owned capability, never the
+                # Session object or an MCP client. Nested calls reuse THIS
+                # executor's resolver, schema validation, role filters, approval
+                # tier and events; Python composition cannot bypass any gate.
+                # Sequential nested calls inherit eval's outer exclusive slot,
+                # so they cannot reorder neighbouring native tool calls.
+                async def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    nested = ToolCall(
+                        id=f"{call.id}:{uuid.uuid4().hex}", name=name, arguments=arguments
+                    )
+                    if name == "eval":
+                        return self._synthetic_result(
+                            nested, "Recursive eval tool calls are not supported."
+                        ).model_dump(mode="json")
+                    if signal is not None and signal.aborted:
+                        return self._synthetic_result(nested, ABORTED_RESULT_TEXT).model_dump(
+                            mode="json"
+                        )
+                    planned = await self._plan_call(nested, context, config)
+                    if planned.failure is not None or planned.tool is None:
+                        return (
+                            planned.failure or self._synthetic_result(nested, "Tool not found.")
+                        ).model_dump(mode="json")
+                    started = time.monotonic()
+                    queue.put_nowait(
+                        ToolExecutionStartEvent(
+                            tool_call_id=nested.id,
+                            tool_name=name,
+                            args=planned.args,
+                            intent=planned.intent,
+                        )
+                    )
+                    try:
+                        result = await self._runner_result(planned, context, config, signal, queue)
+                    except asyncio.CancelledError:
+                        result = self._synthetic_result(nested, ABORTED_RESULT_TEXT)
+                        result.duration_s = time.monotonic() - started
+                        queue.put_nowait(
+                            ToolExecutionEndEvent(
+                                tool_call_id=nested.id,
+                                tool_name=name,
+                                result=result,
+                                duration_s=result.duration_s,
+                                is_error=True,
+                            )
+                        )
+                        raise
+                    # Redact before the result crosses back into arbitrary
+                    # Python, the same text policy used for native history.
+                    if config.redact_tool_result is not None:
+                        result = result.model_copy(
+                            update={
+                                "content": [
+                                    (
+                                        TextContent(text=config.redact_tool_result(block.text))
+                                        if isinstance(block, TextContent)
+                                        else block
+                                    )
+                                    for block in result.content
+                                ]
+                            }
+                        )
+                    result.duration_s = time.monotonic() - started
+                    queue.put_nowait(
+                        ToolExecutionEndEvent(
+                            tool_call_id=nested.id,
+                            tool_name=name,
+                            result=result,
+                            duration_s=result.duration_s,
+                            is_error=result.is_error,
+                        )
+                    )
+                    return result.model_dump(mode="json")
+
+                execution_context = execution_context.model_copy(
+                    update={"dispatch_tool": dispatch_tool}
+                )
+            return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1731,6 +1951,7 @@ class AgentLoop:
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
+        started_slots: set[int] = set()
         peek = (
             config.has_urgent_steering_messages
             if config.has_urgent_steering_messages is not None
@@ -1774,7 +1995,7 @@ class AgentLoop:
             # one alone leaves the other emitting it (R4-1 fixed the flush, R5-1
             # was the drain doing the same thing a moment earlier). The result
             # still parks, so the WIRE stays paired; only the event is withheld.
-            started = item.failure is None and item.tool is not None
+            started = slot in started_slots
             if started:
                 queue.put_nowait(
                     ToolExecutionEndEvent(
@@ -1790,6 +2011,7 @@ class AgentLoop:
         async def runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
+            started_slots.add(slot)
             await queue.put(
                 # `item.args`, not `item.call.arguments`: the event must show
                 # what the tool is actually being run with, and those two now
@@ -1805,7 +2027,7 @@ class AgentLoop:
                 )
             )
             try:
-                result = await self._runner_result(item, context, signal, queue)
+                result = await self._runner_result(item, context, config, signal, queue)
             except asyncio.CancelledError:
                 # Cancelled (abort/GeneratorExit): pair the call with a
                 # synthetic aborted result so tool_use/tool_result pairing
@@ -1822,6 +2044,7 @@ class AgentLoop:
         async def interruptible_runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
+            started_slots.add(slot)
             await queue.put(
                 ToolExecutionStartEvent(
                     tool_call_id=item.call.id,
@@ -1830,7 +2053,9 @@ class AgentLoop:
                     intent=item.intent,
                 )
             )
-            tool_task = asyncio.ensure_future(self._runner_result(item, context, signal, queue))
+            tool_task = asyncio.ensure_future(
+                self._runner_result(item, context, config, signal, queue)
+            )
             try:
                 try:
                     while True:
@@ -1912,6 +2137,7 @@ class AgentLoop:
         # NameError that hides the real failure.
         close_task: asyncio.Task[None] | None = None
         try:
+            runnable: list[tuple[int, _PlannedCall]] = []
             for slot, item in enumerate(batch):
                 if item.failure is not None or item.tool is None:
                     # Duplicate-id and resolution failures never execute: the
@@ -1949,14 +2175,34 @@ class AgentLoop:
                         kind="error",
                     )
                     continue
-                interruptible = item.tool.interruptible
-                tasks.append(
-                    asyncio.ensure_future(
-                        interruptible_runner(slot, item)
-                        if interruptible and poll_interruptible
-                        else runner(slot, item)
-                    )
-                )
+                runnable.append((slot, item))
+
+            pending = iter(enumerate(runnable))
+
+            async def worker() -> None:
+                # A fixed number of workers refill immediately after completion.
+                # Batch waves would leave seven idle slots behind one slow read;
+                # one task per queued call would instead make memory unbounded.
+                # next() has no await, so each slot has exactly one owner.
+                for position, (slot, item) in pending:
+                    if signal is not None and signal.aborted:
+                        break
+                    if (
+                        position >= config.max_parallel_tools
+                        and config.interrupt_mode == "immediate"
+                        and self._peek_steering(config)
+                    ):
+                        park(slot, item, self._synthetic_result(item.call, SKIPPED_RESULT_TEXT))
+                        continue
+                    if item.tool is not None and item.tool.interruptible and poll_interruptible:
+                        await interruptible_runner(slot, item)
+                    else:
+                        await runner(slot, item)
+
+            tasks.extend(
+                asyncio.ensure_future(worker())
+                for _ in range(min(config.max_parallel_tools, len(runnable)))
+            )
             # Started AFTER the runner tasks exist, so it can see all of them,
             # and only when there is a signal to watch. An already-aborted
             # signal is handled by the same path: ``wait()`` returns at once.
@@ -2076,7 +2322,7 @@ class AgentLoop:
                 if results_by_slot[slot] is None:
                     result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
                     results_by_slot[slot] = result
-                    if item.failure is None and item.tool is not None:
+                    if slot in started_slots and item.tool is not None:
                         # Only for calls that actually STARTED. A planning
                         # failure parked its result up front and never emitted a
                         # start event, so an end event for it would be the

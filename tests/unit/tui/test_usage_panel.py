@@ -18,7 +18,12 @@ from rich.style import Style
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage import (
+    USAGE_PROVIDERS,
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+)
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
@@ -28,6 +33,8 @@ from local_operator.tui.widgets.usage_panel import (
     PANEL_PADDING_ROWS,
     PANEL_WIDTH_MARGIN,
     UsagePanel,
+    _account_status_note,
+    _fit_status_note,
     binding_limit,
     build_usage_body,
     collect_stats,
@@ -568,6 +575,139 @@ def test_unavailable_with_last_known_meters_keeps_binding_on_the_heading() -> No
     no_meters.consecutive_failures = 5
     no_heading = _lines([no_meters])[0]
     assert "usage unavailable" in no_heading
+
+
+def test_a_dead_grant_names_the_remedy_instead_of_an_age() -> None:
+    """The reported defect's frame: `kimi cred:8 · usage unavailable — last
+    known 2d ago`, which implies the numbers return on their own when the only
+    fix is signing in again. A dead grant is the one failure state with an
+    action attached, so the note states the action.
+    """
+    report = _report(
+        _percent("k:5h", "5h limit", 100.0, shared=True),
+        provider="kimi",
+        identity="cred:8",
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+    lines = _lines([report], now=2 * 86_400_000)
+    joined = "\n".join(lines)
+
+    assert "sign-in expired — /login kimi" in joined, joined
+    # The wait-it-out copy must be gone: it is the misleading half.
+    assert "usage unavailable" not in joined, joined
+    assert "last known" not in joined, joined
+    # The login is still real, so its last numbers stay on the card.
+    assert "cred:8" in joined
+    assert any("100%" in line for line in lines)
+
+
+def test_the_dead_grant_note_is_generic_across_providers() -> None:
+    """Nothing about this is kimi-specific — every OAuth provider can hit it."""
+    for provider in ("anthropic", "openai", "xai", "zai"):
+        report = _report(provider=provider, identity="me@example.com")
+        report.credential_invalid = True
+        joined = "\n".join(_lines([report]))
+        assert f"/login {provider}" in joined, joined
+
+
+def test_a_dead_grant_keeps_the_command_runnable_on_a_narrow_card() -> None:
+    """The provider name is the actionable half, so it is what survives.
+
+    `sign-in expired — /login anthropic` gains nothing from the generic
+    shortener (both halves are already minimal), and right-truncation would
+    print `/login anthro…` — a command that fails if typed as shown.
+    """
+    report = _report(provider="anthropic", identity="me@example.com")
+    report.credential_invalid = True
+
+    narrow = next(line for line in _lines([report], width=24) if "login" in line)
+    wide = next(line for line in _lines([report], width=76) if "login" in line)
+
+    assert "…" not in narrow, narrow
+    assert "/login anthropic" in narrow, narrow
+    assert wide.strip() == "sign-in expired — /login anthropic", wide
+
+
+@pytest.mark.parametrize("provider", sorted(USAGE_PROVIDERS))
+@pytest.mark.parametrize("width", [32, 40, 48, 72])
+def test_the_provider_id_is_never_what_the_ellipsis_eats(provider: str, width: int) -> None:
+    """Design D1, over EVERY usage provider at the narrow widths.
+
+    The previous test used `anthropic`, whose 16-cell tail fits comfortably at
+    every width, so it passed without ever reaching the last-resort rung. The
+    longest real id, `alibaba-token-plan-oauth`, needs 31 cells for
+    `/login <id>` against a 25-cell budget at the 32-col `PANEL_MIN_WIDTH`
+    floor — so the verb has to yield before the id does. A truncated command
+    is worse than none: it still looks like an instruction and then fails.
+    """
+    report = _report(
+        _percent("a:5h", "5 hour", 50.0, shared=True), provider=provider, identity="acct"
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+
+    # The NOTE row is asserted directly rather than picked out of the rendered
+    # block: the heading also carries the provider id and is allowed to
+    # truncate, being a label rather than a command.
+    # `width - 2` is the note's real budget: `build_usage_body` indents it by
+    # two cells before fitting it (see the call at the `account_note` branch).
+    budget = width - 2
+    note = _fit_status_note(_account_status_note(report, 2 * 86_400_000), budget)
+    assert "…" not in note, note
+    # The whole id survives, so whatever remains is typeable as `/login <id>`.
+    assert provider in note, note
+    assert cell_len(note) <= budget, note
+
+
+def test_a_dead_grant_states_the_vintage_of_the_meters_below_it() -> None:
+    """Design D2: the block keeps rendering last-known meters, and the title
+    says `just now`, so without an age a two-day-old 100% reads as current —
+    the unmarked stale meter this note exists to prevent."""
+    report = _report(
+        _percent("k:5h", "5h limit", 100.0, shared=True), provider="kimi", identity="cred:8"
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+
+    note = next(line for line in _lines([report], width=76, now=3 * 86_400_000) if "login" in line)
+    assert note.strip() == "sign-in expired — /login kimi · numbers 2d ago", note
+
+    # With no meters there is no vintage to state, so the age is omitted.
+    bare = _report(provider="kimi", identity="cred:8")
+    bare.credential_invalid = True
+    bare_note = next(line for line in _lines([bare], width=76) if "login" in line)
+    assert bare_note.strip() == "sign-in expired — /login kimi", bare_note
+
+
+def test_the_age_is_shed_before_the_command_on_a_narrow_card() -> None:
+    """D1 and D2 together: the age qualifies meters that are still on screen,
+    while the command is the only actionable thing on the row."""
+    report = _report(
+        _percent("k:5h", "5h limit", 100.0, shared=True), provider="kimi", identity="cred:8"
+    )
+    report.credential_invalid = True
+    report.fetched_at = 1
+    now = 3 * 86_400_000
+
+    wide = next(line for line in _lines([report], width=76, now=now) if "login" in line)
+    narrow = next(line for line in _lines([report], width=40, now=now) if "login" in line)
+
+    assert "numbers 2d ago" in wide
+    assert "numbers" not in narrow, narrow
+    assert "/login kimi" in narrow, narrow
+
+
+def test_a_dead_grant_does_not_repeat_itself_on_the_heading() -> None:
+    """With no meters the heading may say a probe failed — but not here, where
+    the note already states the condition AND the remedy in the same cells."""
+    report = _report(provider="kimi", identity="cred:8")
+    report.credential_invalid = True
+    report.usage_unavailable = True
+    heading, note, *_rest = _lines([report], width=72)
+
+    assert "usage unavailable" not in heading, heading
+    assert "/login kimi" in note, note
 
 
 def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
@@ -1832,6 +1972,42 @@ async def test_the_title_names_how_many_accounts_it_does_not_speak_for() -> None
 
     assert "1m ago" in title and "1 stale" in title, title
     assert "stale" not in healthy_title, healthy_title
+
+
+@pytest.mark.asyncio
+async def test_the_title_does_not_call_an_expired_sign_in_stale() -> None:
+    """Design D3: the title is the most-read row, and the two states ask for
+    opposite things — wait, versus act. Counting a dead grant as `stale` puts
+    back the category error the block note exists to correct, for any user who
+    reads only the top line.
+    """
+    now = 200 * 60_000.0
+    fresh = _aged(
+        _report(_percent("a:5h", "5 hour", 20.0, shared=True), identity="a@x"),
+        now - 1.8 * 60_000,
+    )
+    dead = _aged(
+        _report(_percent("k:5h", "5 hour", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 169 * 60_000,
+    )
+    dead.credential_invalid = True
+    stale = _aged(
+        _report(_percent("o:5h", "5 hour", 30.0, shared=True), provider="openai", identity="o@x"),
+        now - 169 * 60_000,
+    )
+    stale.consecutive_failures = 1
+
+    async with _panel_app() as panel:
+        panel.set_clock(now)
+        panel.show_reports([fresh, dead], now_ms=fresh.fetched_at)
+        dead_title = panel.render_lines_for_test()[0]
+        panel.show_reports([fresh, dead, stale], now_ms=fresh.fetched_at)
+        mixed_title = panel.render_lines_for_test()[0]
+
+    assert "1 sign-in expired" in dead_title, dead_title
+    assert "stale" not in dead_title, dead_title
+    # A mixed set keeps both tallies: they are different instructions.
+    assert "1 stale" in mixed_title and "1 sign-in expired" in mixed_title, mixed_title
 
 
 def test_the_unavailable_note_keeps_its_age_on_a_narrow_card() -> None:

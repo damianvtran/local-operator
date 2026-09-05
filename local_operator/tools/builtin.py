@@ -42,6 +42,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import codecs
 import contextlib
 import difflib
 import fnmatch
@@ -55,6 +56,7 @@ import threading
 import time
 import traceback
 import unicodedata
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -983,17 +985,54 @@ ToolExecutor = Callable[
 _FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
+def _file_path_identity(path: Path) -> str:
+    """Coalesce spelling aliases before a new file has an inode to lock.
+
+    macOS can resolve composed/decomposed Unicode names to the same file while
+    ``Path.resolve`` preserves their different spellings. Both the scheduler
+    and cross-session transaction locks must share this identity, otherwise
+    two creators can enter concurrently before either can observe an inode.
+    Folding/normalizing may conservatively serialize distinct files on other
+    filesystems; it only affects coordination, never the actual I/O path.
+    Normalize after folding because folding can introduce decomposed text.
+    """
+    return unicodedata.normalize("NFC", str(path.resolve(strict=False)).casefold())
+
+
+def _file_resource_keys(args: dict[str, Any], cwd: str) -> tuple[str, ...]:
+    """Declare mutation conflicts without weakening the transaction locks.
+
+    Always include the canonical path (also for new files), plus device/inode
+    for existing hardlinks. Resolution failures raise so the loop can retain
+    the exclusive barrier. The loop runs this filesystem probe off-thread.
+    """
+    raw = args.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("mutation requires a path")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    keys = ["file:path:" + _file_path_identity(path)]
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        pass
+    else:
+        keys.append(f"file:inode:{stat.st_dev}:{stat.st_ino}")
+    return tuple(keys)
+
+
 @contextlib.contextmanager
 def _file_transaction(path: Path) -> Iterator[None]:
     """Lock the canonical path and, when it exists, its filesystem identity.
 
     The path stripe is always held, so a transaction that creates a file
     cannot be bypassed by a second caller that observes the new inode. The
-    inode stripe additionally coalesces hardlinks. Symlink/case aliases share
-    the resolved, case-folded path key. Multiple stripes are acquired in
+    inode stripe additionally coalesces hardlinks. Symlink/case/Unicode aliases
+    share the canonical path key. Multiple stripes are acquired in
     numeric order to make overlapping alias sets deadlock-free.
     """
-    canonical = ("path", str(path.resolve(strict=False)).casefold())
+    canonical = ("path", _file_path_identity(path))
     keys: list[object] = [canonical]
     try:
         stat = path.stat()
@@ -1129,9 +1168,100 @@ class BashParams(BaseModel):
     )
 
 
+class _BashOutput:
+    """Bound retention while the pipe is drained, keeping both diagnostic ends.
+
+    The spill store already caps a transcript at 4 MiB. Retaining arbitrarily
+    many raw bytes until that write bought no recoverability and let a noisy
+    process exhaust the host. Each pipe keeps at most that existing cap, so
+    outputs that fit the store remain complete and larger ones keep head/tail.
+    The explicit gap is part of the stored text; its line numbers describe the
+    retained copy, never pretend to address discarded original lines.
+    """
+
+    def __init__(self, limit: int = SPILL_ENTRY_LIMIT_BYTES) -> None:
+        self.limit = limit
+        self.total_bytes = 0
+        self.head = bytearray()
+        self.tail: deque[bytes] = deque()
+        self.tail_bytes = 0
+
+    @property
+    def retained_bytes(self) -> int:
+        return len(self.head) + self.tail_bytes
+
+    @property
+    def omitted_bytes(self) -> int:
+        return self.total_bytes - self.retained_bytes
+
+    def append(self, chunk: bytes) -> None:
+        self.total_bytes += len(chunk)
+        head_room = max(self.limit // 2 - len(self.head), 0)
+        self.head.extend(chunk[:head_room])
+        chunk = chunk[head_room:]
+        if chunk:
+            self.tail.append(chunk)
+            self.tail_bytes += len(chunk)
+        ceiling = self.limit - len(self.head)
+        while self.tail_bytes > ceiling:
+            first = self.tail.popleft()
+            excess = self.tail_bytes - ceiling
+            if len(first) > excess:
+                self.tail.appendleft(first[excess:])
+                self.tail_bytes -= excess
+            else:
+                self.tail_bytes -= len(first)
+
+    def chunks(self) -> list[bytes]:
+        return [bytes(self.head), *self.tail]
+
+    def decode(self) -> str:
+        if not self.omitted_bytes:
+            return b"".join(self.chunks()).decode("utf-8", errors="replace")
+        return (
+            self.head.decode("utf-8", errors="replace")
+            + f"\n[retention limit: {self.omitted_bytes} bytes omitted]\n"
+            + b"".join(self.tail).decode("utf-8", errors="replace")
+        )
+
+
+class _PipeRedactor:
+    """Delay only a possible credential suffix before publishing pipe bytes.
+
+    Redacting each read independently leaks a secret split across reads. Keep
+    enough undecided text for the longest injected credential, and never cut
+    through a complete match. UTF-8 decoding is incremental for the same
+    reason. Retained output and live job tails receive the same safe bytes.
+    """
+
+    def __init__(self, credentials: dict[str, str]) -> None:
+        self.secrets = sorted(
+            {value for value in credentials.values() if value}, key=len, reverse=True
+        )
+        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+        self.pending = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
+        text = self.pending + self.decoder.decode(chunk, final=final)
+        cut = len(text) if final else max(len(text) - self.lookbehind, 0)
+        while True:
+            previous_cut = cut
+            for secret in self.secrets:
+                start = text.find(secret, max(cut - len(secret) + 1, 0))
+                if 0 <= start < cut < start + len(secret):
+                    cut = start
+            if cut == previous_cut:
+                break
+        ready, self.pending = text[:cut], text[cut:]
+        for secret in self.secrets:
+            ready = ready.replace(secret, "[redacted]")
+        return ready.encode("utf-8")
+
+
 def _bash_progress_line(
-    stdout_chunks: list[bytes],
-    stderr_chunks: list[bytes],
+    stdout_chunks: _BashOutput,
+    stderr_chunks: _BashOutput,
     context: ToolContext | None = None,
 ) -> str:
     """One short status line for a running background command.
@@ -1142,7 +1272,9 @@ def _bash_progress_line(
     and read by a renderer, so an unbounded line from a command printing a
     megabyte without newlines must not become a per-frame cost.
     """
-    tail = b"".join(stdout_chunks[-4:] + stderr_chunks[-4:]).decode("utf-8", errors="replace")
+    tail = b"".join(_tail_chunks(stdout_chunks, 1024) + _tail_chunks(stderr_chunks, 1024)).decode(
+        "utf-8", errors="replace"
+    )
     for line in reversed(tail.splitlines()):
         if line.strip():
             return _redact_tool_text(line.strip()[:200], context)
@@ -1210,12 +1342,12 @@ def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tupl
 #: which is the tool-call freeze the operator reported. Kept one power of two
 #: above the ingest bound so the banner framing and the redaction of a secret
 #: that straddles the cut cannot shrink the visible tail below what the card
-#: expects. The FINAL result path is untouched: it still joins and prices the
-#: whole output once, off-loop, exactly as before.
+#: expects. The final result formats the bounded retained head/tail once,
+#: off-loop; output beyond the existing spill cap is explicitly marked partial.
 _EMIT_SNAPSHOT_BYTES = 128 * 1024
 
 
-def _tail_chunks(chunks: list[bytes], budget: int) -> list[bytes]:
+def _tail_chunks(chunks: list[bytes] | _BashOutput, budget: int) -> list[bytes]:
     """The trailing ``budget`` bytes of ``chunks`` without a full join.
 
     Walking from the end keeps the work proportional to the BUDGET rather
@@ -1224,6 +1356,12 @@ def _tail_chunks(chunks: list[bytes], budget: int) -> list[bytes]:
     records of what the pipe reader delivered, so slicing the straddling
     one copies at most ``budget`` bytes once — still O(budget).
     """
+    if isinstance(chunks, _BashOutput):
+        # Do not materialize the retained 2 MiB head for a 128 KiB live tail.
+        # Only a stream shorter than the requested tail needs head bytes.
+        head_needed = max(budget - chunks.tail_bytes, 0)
+        head = [bytes(chunks.head[-head_needed:])] if head_needed else []
+        chunks = [*head, *chunks.tail]
     taken: list[bytes] = []
     remaining = budget
     for chunk in reversed(chunks):
@@ -1281,7 +1419,8 @@ async def execute_bash(
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
     if isinstance(extra, dict):
-        env.update({str(name): str(value) for name, value in extra.items()})
+        extra = {str(name): str(value) for name, value in extra.items()}
+        env.update(extra)
 
     process = await asyncio.create_subprocess_exec(
         "/bin/sh",
@@ -1320,8 +1459,8 @@ async def execute_bash(
         with contextlib.suppress(Exception):
             group_reaper.unregister_group(spawned_pgid)
 
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
+    stdout_chunks = _BashOutput()
+    stderr_chunks = _BashOutput()
     # Set once the command is owned by a background job, so the pipe readers
     # know where to mirror output for `jobs(op="peek")`. Held in a mutable cell
     # rather than captured by value because the readers start BEFORE the job id
@@ -1346,20 +1485,26 @@ async def execute_bash(
             _redact_tool_text(chunk.decode("utf-8", errors="replace"), context),
         )
 
-    async def _pump(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
+    async def _pump(stream: asyncio.StreamReader | None, sink: _BashOutput) -> None:
         # Both pipes were requested at spawn, so neither is ever None here;
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
+        redactor = _PipeRedactor(extra if isinstance(extra, dict) else {})
         try:
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
                     break
-                sink.append(chunk)
-                _mirror(chunk)
+                safe = redactor.feed(chunk)
+                sink.append(safe)
+                _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
             pass
+        finally:
+            safe = redactor.feed(b"", final=True)
+            sink.append(safe)
+            _mirror(safe)
 
     # Hold the tasks ourselves so the readers are never abandoned mid-run.
     stdout_task = asyncio.create_task(_pump(process.stdout, stdout_chunks))
@@ -1422,8 +1567,18 @@ async def execute_bash(
         implementation rather than two that drift.
         """
         partial = _bash_output_summary(
-            _redact_tool_text(b"".join(stdout_chunks).decode("utf-8", errors="replace"), context),
-            _redact_tool_text(b"".join(stderr_chunks).decode("utf-8", errors="replace"), context),
+            _redact_tool_text(
+                b"".join(_tail_chunks(stdout_chunks, TOOL_OUTPUT_LIMIT_CHARS)).decode(
+                    "utf-8", errors="replace"
+                ),
+                context,
+            ),
+            _redact_tool_text(
+                b"".join(_tail_chunks(stderr_chunks, TOOL_OUTPUT_LIMIT_CHARS)).decode(
+                    "utf-8", errors="replace"
+                ),
+                context,
+            ),
         )
         wait_task.cancel()
         if abort_waiter is not None and not abort_waiter.done():
@@ -1502,23 +1657,23 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out = _redact_tool_text(
-                b"".join(stdout_chunks).decode("utf-8", errors="replace"), context
-            )
-            err = _redact_tool_text(
-                b"".join(stderr_chunks).decode("utf-8", errors="replace"), context
-            )
+            out, err = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
+            out = _redact_tool_text(out, context)
+            err = _redact_tool_text(err, context)
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
-            combined = _bash_output_summary(out, err)
-            summary, _spill_details = _capped_list_body(
-                combined,
-                combined[:TOOL_OUTPUT_LIMIT_CHARS],
-                "bash",
+            out, err, footer, _spill_details = await asyncio.to_thread(
+                _bash_oversized_streams,
+                out,
+                err,
+                TOOL_OUTPUT_LIMIT_CHARS - 2 * len(BASH_TRUNCATION_MARKER),
+                code != 0 or timed_out_bg,
                 context,
+                not (stdout_chunks.omitted_bytes or stderr_chunks.omitted_bytes),
             )
+            summary = _bash_output_summary(out, err) + footer
             return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
 
         def _kill_unstarted() -> None:
@@ -1564,9 +1719,12 @@ async def execute_bash(
         live_job["id"] = bg_job_id
         appender = getattr(jobs, "append_output", None)
         if appender is not None:
-            already = b"".join(stdout_chunks + stderr_chunks).decode("utf-8", errors="replace")
+            already = b"".join(
+                _tail_chunks(stdout_chunks, _EMIT_SNAPSHOT_BYTES)
+                + _tail_chunks(stderr_chunks, _EMIT_SNAPSHOT_BYTES)
+            ).decode("utf-8", errors="replace")
             if already:
-                appender(bg_job_id, already)
+                appender(bg_job_id, _redact_tool_text(already, context))
         return _text(
             tool_call_id,
             "bash",
@@ -1608,7 +1766,13 @@ async def execute_bash(
 
     try:
         while True:
-            waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
+            # Pipe EOF can precede exit (a child may close both descriptors and
+            # continue computing). Race only unfinished tasks or FIRST_COMPLETED
+            # would repeatedly wake on the same EOF and spin. ALL_COMPLETED, in
+            # contrast, waits the full poll interval for a never-fired abort.
+            waiters: list[asyncio.Task[object]] = [
+                task for task in (wait_task, stdout_task, stderr_task) if not task.done()
+            ]
             if abort_waiter is not None:
                 waiters.append(abort_waiter)
             if wait_task.done():
@@ -1618,7 +1782,9 @@ async def execute_bash(
                 timed_out = True
                 _kill()
                 break
-            done, _pending = await asyncio.wait(waiters, timeout=min(0.25, remaining))
+            done, _pending = await asyncio.wait(
+                waiters, timeout=min(0.25, remaining), return_when=asyncio.FIRST_COMPLETED
+            )
             if wait_task in done:
                 break
             if abort_waiter is not None and abort_waiter in done:
@@ -1714,6 +1880,7 @@ async def execute_bash(
             budget,
             return_code != 0 or timed_out,
             context,
+            not (stdout_chunks.omitted_bytes or stderr_chunks.omitted_bytes),
         )
     else:
         stdout, stderr = stdout_raw, stderr_raw
@@ -1725,19 +1892,19 @@ async def execute_bash(
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
-def _bash_partial_summary(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> str:
+def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> str:
     """Both streams' partial text under the abort receipt's framing."""
     return _bash_output_summary(
-        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        truncate_output(stdout_chunks.decode()),
+        truncate_output(stderr_chunks.decode()),
     )
 
 
-def _decode_chunks(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> tuple[str, str]:
+def _decode_chunks(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> tuple[str, str]:
     """Join and decode both captured streams off the event loop."""
     return (
-        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        stdout_chunks.decode(),
+        stderr_chunks.decode(),
     )
 
 
@@ -1747,6 +1914,7 @@ def _bash_oversized_streams(
     budget: int,
     failed: bool,
     context: ToolContext | None,
+    source_complete: bool = True,
 ) -> tuple[str, str, str, dict[str, Any] | None]:
     """The oversized-output tail of ``bash``: spill once, elide both streams.
 
@@ -1761,13 +1929,28 @@ def _bash_oversized_streams(
     somewhere other than where they resolve.
     """
     combined = _bash_output_summary(stdout_raw, stderr_raw)
-    meta = _spill(combined, "bash", context)
+    if len(stdout_raw) + len(stderr_raw) <= budget and source_complete:
+        return stdout_raw, stderr_raw, "", None
+    meta = get_store().write(
+        combined,
+        tool_name="bash",
+        session_id=(context.session_id if context else "") or "",
+        source_complete=source_complete,
+    )
     stdout_budget, stderr_budget = _stream_budgets(stdout_raw, stderr_raw, budget, failed=failed)
     spill_details: dict[str, Any] | None = None
     footer = ""
     if meta is None:
         stdout = truncate_output(stdout_raw, stdout_budget)
         stderr = truncate_output(stderr_raw, stderr_budget)
+    elif not meta.complete:
+        # The stored copy has its own head/tail cap. Original-stream line
+        # offsets no longer address that copy; offer its real first page and
+        # search, never a plausible-looking out-of-range expansion command.
+        spill_details = {"spill": _spill_detail(meta)}
+        stdout = truncate_output(stdout_raw, stdout_budget)
+        stderr = truncate_output(stderr_raw, stderr_budget)
+        footer = _spill_footer(meta)
     else:
         spill_details = {"spill": _spill_detail(meta)}
         # Offsets map each stream's local line numbers onto the combined
@@ -2850,6 +3033,7 @@ def build_edit_tool() -> AgentTool:
         concurrency="exclusive",
         interruptible=False,
         execute=execute_edit,
+        resource_keys=_file_resource_keys,
     )
 
 
@@ -3005,6 +3189,7 @@ def build_write_tool() -> AgentTool:
         concurrency="exclusive",
         interruptible=False,
         execute=execute_write,
+        resource_keys=_file_resource_keys,
     )
 
 

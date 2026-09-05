@@ -11,6 +11,7 @@ propagate into the turn.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 from local_operator.analytics.recorder import reset_recorder_for_test
 from local_operator.analytics.store import AnalyticsStore
@@ -163,14 +164,25 @@ def test_failed_stream_still_recorded(tmp_path):
     assert agg.ok_calls == 0
 
 
-def test_no_usage_records_nothing(tmp_path):
+def test_missing_usage_is_recorded_as_unknown_spend_and_incomplete(tmp_path):
     store = AnalyticsStore(tmp_path / "a.db")
     rec = reset_recorder_for_test(store)
     fn = _fn()
-    # A stream that never reported usage: nothing to attribute, nothing stored.
+    # Missing usage must not make failed requests invisible or invent free
+    # successful work. Old rows retain their counts; new diagnostics are exact.
     asyncio.run(_drain(fn, _request(), [StreamTextDelta(delta="x")]))
     rec.flush_for_test()
-    assert store.aggregate().calls == 0
+    assert store.aggregate().calls == 1
+    assert store.aggregate().ok_calls == 0
+    with sqlite3.connect(tmp_path / "a.db") as connection:
+        row = connection.execute(
+            "SELECT request_id, purpose, duration_ms, ttft_ms, outcome, "
+            "usage_reported, cost_known FROM calls"
+        ).fetchone()
+    assert row[0]
+    assert row[1] == "turn"
+    assert row[2] >= row[3] >= 0
+    assert row[4:] == ("incomplete", 0, 0)
 
 
 def test_context_fallback_from_input(tmp_path):
@@ -185,6 +197,23 @@ def test_context_fallback_from_input(tmp_path):
     agg = store.aggregate()
     assert agg.calls == 1
     assert sum(agg.components.values()) == 500  # 400 + 100
+
+
+def test_context_fallback_uses_serving_provider_cache_convention(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    usage = Usage(
+        input_tokens=400,
+        cache_read_tokens=300,
+        cache_write_tokens=50,
+        provider="openai",
+        context_tokens=None,
+    )
+    asyncio.run(_drain(_fn(), _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    assert sum(store.aggregate().components.values()) == 400
+    rec.close()
+    store.close()
 
 
 def test_analytics_failure_never_breaks_turn(tmp_path, monkeypatch):

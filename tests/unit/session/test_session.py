@@ -944,6 +944,7 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
     # Rigorous upper bound (>= the exact estimate) used by the cheap pre-check
@@ -1016,6 +1017,10 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     summary_request = stream.requests[1]
     assert summary_request.tools == []
     assert summary_request.tool_choice == "none"
+    assert summary_request.max_tokens == 16384
+    assert summary_request.purpose == "compaction"
+    # A terminal answer remains terminal even if the pass creates headroom.
+    assert len(stream.requests) == 2
 
     # Context rebuilt: marker + the kept assistant message (cut=1 keeps it).
     assert len(session._context.messages) == 2
@@ -1062,6 +1067,7 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", lambda messages, *a, **k: (list(messages), False))
     setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 1_000)
 
@@ -2311,6 +2317,7 @@ async def test_compaction_on_a_text_only_model_keeps_images_in_the_live_context(
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(
         fake_api,
         "prune_tool_outputs",
@@ -2437,6 +2444,7 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
     setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
@@ -2581,6 +2589,7 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
 
     fake_api = types.ModuleType("local_operator.compaction.api")
     setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "MAX_SUMMARY_TOKENS", 16384)
     setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
     setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
     setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 95_000)
@@ -2942,6 +2951,91 @@ async def test_the_naming_errand_leaves_the_session_isolated_and_cheap(tmp_path,
     assert signal is None, "the errand carries no abort signal"
     # It is not a turn: nothing about it may reach the transcript.
     assert [entry.type for entry in session._transcript.entries()] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire", ["responses", "codex", "chat_completions"])
+@pytest.mark.parametrize("configured_tier", [False, True])
+async def test_naming_uses_the_supported_floor_on_every_openai_wire(
+    tmp_path, monkeypatch, wire, configured_tier
+):
+    """The title must traverse the real session AND wire shaper.
+
+    A mocked completion hid this bug: the main turn's high effort worked,
+    while the errand selected GPT-5's unsupported none floor for GPT-6. The
+    fixture reproduces the provider's actual 400 instead of accepting whatever
+    ladder our implementation invented. Both model-selection routes matter.
+    """
+    import json
+
+    import httpx
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.providers.clients import OpenAICompatClient
+    from local_operator.session.naming import generate_title
+
+    provider = "openrouter" if wire == "chat_completions" else "openai"
+    model_id = "openai/gpt-6-astra" if provider == "openrouter" else "gpt-6-astra"
+    config: dict[str, object] | None = (
+        {"models": {"lo": f"{provider}/{model_id}"}} if configured_tier else None
+    )
+    _config_dir_with(tmp_path, monkeypatch, config)
+    # A warm aggregator listing can already supply the corrected ladder. Pin
+    # its absence so this regression also protects cold/offline discovery.
+    monkeypatch.setattr("local_operator.model.configure._listing_effort", lambda *args: None)
+    requests = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        effort = body.get("reasoning_effort") or body.get("reasoning", {}).get("effort")
+        if effort not in ("low", "medium", "high", "xhigh", "max"):
+            return httpx.Response(400, json={"error": {"message": "Unsupported reasoning effort"}})
+        title = "<title>Fix the login redirect loop</title>"
+        if wire == "chat_completions":
+            chunks = [{"choices": [{"delta": {"content": title}, "finish_reason": "stop"}]}]
+        else:
+            chunks = [
+                {"type": "response.output_text.delta", "delta": title},
+                {"type": "response.completed", "response": {"id": "synthetic"}},
+            ]
+        return httpx.Response(
+            200,
+            text="".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http, openai_api=wire)
+        access = OAuthAccess("synthetic", 1, org_id="synthetic") if wire == "codex" else None
+
+        async def stream(request, signal):
+            assert request.isolated and not request.replayable
+            assert request.max_tokens == 1024
+            async for event in client.stream(request, "synthetic", access):
+                yield event
+
+        selected = build_model_spec(provider, model_id).model_copy(
+            update={"reasoning_effort": "high", "supports_responses_api": wire == "responses"}
+        )
+        # Discovery normally supplies the endpoint capability. Keep the lo
+        # route on the same explicit fixture spec without consulting a cache.
+        if configured_tier:
+            monkeypatch.setattr(Session, "_resolve_subagent_model", lambda *args: selected)
+        session = make_session(tmp_path, stream, model=selected)
+        try:
+            title = await generate_title("Fix the login redirect loop", session.complete_once)
+            assert title == "Fix the login redirect loop"
+            assert len(requests) == 1
+            body = requests[0]
+            effort = body.get("reasoning_effort") or body.get("reasoning", {}).get("effort")
+            assert effort == "low"
+            assert "temperature" not in body and "top_p" not in body
+            assert session.effective_model.reasoning_effort == "high"
+            assert list(session._transcript.entries()) == []
+        finally:
+            await session.dispose()
 
 
 @pytest.mark.asyncio

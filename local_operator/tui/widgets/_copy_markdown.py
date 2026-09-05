@@ -79,10 +79,19 @@ def _strip_markup(line: str) -> str:
     return line.strip()
 
 
-#: A rendered row's leading structure: a quote bar (``▌ ``), a bullet (``• ``)
-#: or an ordered marker (``1. ``), any of them nested. Stripped before the
-#: row's first CONTENT word is read so it can be anchored to its source line.
-_RENDERED_PREFIX_RE = re.compile(r"^\s*(?:(?:▌|•|◦|▪|\d{1,9}[.)])\s*)*")
+#: A rendered row's leading structure: a quote bar (``▌ ``), a bullet (``• ``),
+#: an ordered marker (``1. ``) or an ATX heading marker (``## ``), any of them
+#: nested. Stripped before the row's first CONTENT word is read so it can be
+#: anchored to its source line.
+#:
+#: The heading marker is painted by ``markdown_theme._flat_heading`` (rich
+#: itself strips it), so a heading row reaches this module as ``## Section``
+#: rather than ``Section``. It is FURNITURE on the rendered side exactly like
+#: a bullet: the source line carries its own ``##`` which ``_strip_markup``
+#: removes, so leaving it in here would anchor the two sides on different
+#: words and the row would never be placed — dropping every heading from a
+#: copied selection.
+_RENDERED_PREFIX_RE = re.compile(r"^\s*(?:(?:▌|•|◦|▪|#{1,6}|\d{1,9}[.)])\s*)*")
 
 #: A leading LIST marker on a rendered row (bullet or number). A new list item
 #: always opens with one and a wrapped continuation never does, so its presence
@@ -92,11 +101,12 @@ _RENDERED_PREFIX_RE = re.compile(r"^\s*(?:(?:▌|•|◦|▪|\d{1,9}[.)])\s*)*")
 _RENDERED_MARKER_RE = re.compile(r"^\s*(?:•|◦|▪|\d{1,9}[.)])(?:\s|$)")
 
 #: A single whitespace-delimited token that is ONLY a structure marker (quote
-#: bar, bullet, or ordered number) — skipped when reading a row's content word.
-#: Rich renders an ordered marker as a bare number (`` 1 alpha`` splits to the
-#: token ``1``, the ``.`` is not painted), so the marker token is a bullet, a
-#: bar, an ordered marker WITH its dot, or a bare integer.
-_MARKER_TOKEN_RE = re.compile(r"(?:▌|•|◦|▪|\d{1,9}[.)]|\d{1,9})")
+#: bar, bullet, ordered number, or ATX heading marker) — skipped when reading a
+#: row's content word. Rich renders an ordered marker as a bare number
+#: (`` 1 alpha`` splits to the token ``1``, the ``.`` is not painted), so the
+#: marker token is a bullet, a bar, an ordered marker WITH its dot, a bare
+#: integer, or a run of one to six ``#``.
+_MARKER_TOKEN_RE = re.compile(r"(?:▌|•|◦|▪|#{1,6}|\d{1,9}[.)]|\d{1,9})")
 
 
 def _first_word(text: str) -> str:
