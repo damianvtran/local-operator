@@ -158,7 +158,7 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 # Deliberately a NARROW allowlist rather than "reject every undeclared infra
 # value". ``inspect_requirements`` runs before the task is named, so it returns
 # only the adapter's UNCONDITIONAL baseline -- a task-conditional requirement
-# (OSWORLD_PROXY_CREDENTIALS, OSWORLD_PROXY_ENDPOINT) is legitimately absent
+# (GOOGLE_ACCOUNT_CREDENTIALS for a login task) is legitimately absent
 # from it, and a blanket rule would refuse correct proxy runs. Only a value
 # whose silent drop corrupts the evidence record belongs here.
 #
@@ -181,6 +181,9 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # ~t+383s exhaustion wall that truncated earlier runs, so it is not
         # comparable to one that hit it, and the bundle has to say so on its own.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
+        # Network policy changes comparability too: older adapters must refuse
+        # this request rather than seal a disabled-policy claim while enabling it.
+        "OSWORLD_ENABLE_PROXY": "osworld_enable_proxy_override",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)

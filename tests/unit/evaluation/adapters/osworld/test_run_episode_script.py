@@ -484,6 +484,8 @@ def test_a_root_volume_override_is_disclosed_in_the_sealed_manifest(
             "AWS_ROOT_VOLUME_SIZE=120",
             "--infra",
             "AWS_INSTANCE_TYPE=m5.xlarge",
+            "--infra",
+            "OSWORLD_ENABLE_PROXY=false",
         ],
         {"AWS_ACCESS_KEY_ID": CANARY_KEY, "AWS_SECRET_ACCESS_KEY": CANARY_SECRET},
     )
@@ -498,3 +500,4 @@ def test_a_root_volume_override_is_disclosed_in_the_sealed_manifest(
     assert report.manifest is not None
     assert report.manifest.metadata["aws_root_volume_size_override"] == "120"
     assert report.manifest.metadata["aws_instance_type_override"] == "m5.xlarge"
+    assert report.manifest.metadata["osworld_enable_proxy_override"] == "false"

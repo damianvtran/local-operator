@@ -458,6 +458,39 @@ async def test_an_instance_type_override_reaches_the_real_run_instances_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hint", [False, True])
+@pytest.mark.parametrize("policy", [None, "false", "true"])
+async def test_proxy_policy_reaches_desktop_env_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hint: bool, policy: str | None
+) -> None:
+    task = taskfile.TaskDescriptor(
+        task_id="synthetic", instruction="", source_sha256="0" * 64, proxy=hint
+    )
+    infra = _infra() + (() if policy is None else (
+        ScopedInfraValue(name="OSWORLD_ENABLE_PROXY", purpose="benchmark_compute", value=policy),
+    ))
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=infra)
+    captured: list[_FakeEnv] = []
+
+    def factory(**kwargs: Any) -> _FakeEnv:
+        env = _FakeEnv(**kwargs)
+        captured.append(env)
+        return env
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs, plan=plan)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(stubs, monkeypatch, desktop_env_factory=factory,
+                             task_factory=lambda t: {"id": t.task_id, "proxy": t.proxy})
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+    assert len(captured) == 1
+    assert captured[0].kwargs["enable_proxy"] is (hint if policy is None else policy == "true")
+
+
+@pytest.mark.asyncio
 async def test_desktop_env_cache_dir_is_absolute_and_outside_the_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

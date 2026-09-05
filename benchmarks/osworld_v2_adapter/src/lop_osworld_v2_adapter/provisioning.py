@@ -153,12 +153,36 @@ def resolve(
         subnet_id=subnet_id,
         security_group_id=security_group_id,
         scheduler_role_arn=scheduler_role_arn,
-        enable_proxy=bool(task.proxy),
+        enable_proxy=resolve_proxy_policy(infra_values, task_proxy=bool(task.proxy)),
         client_password=client_password,
         file_base_url=file_base_url,
         tags=tags,
         client_token=client_token,
     )
+
+
+def resolve_proxy_policy(
+    infra_values: tuple[ScopedInfraValue, ...], *, task_proxy: bool = False
+) -> bool:
+    """Resolve the upstream system switch without changing the pinned task.
+
+    Omission preserves the adapter's legacy task-derived switch, not upstream's
+    default False. Validate even before a task is loaded: malformed policy must
+    never survive prepare and reach the allocation boundary.
+    """
+
+    policies = [item for item in infra_values if item.name == "OSWORLD_ENABLE_PROXY"]
+    if not policies:
+        return task_proxy
+    if any(
+        item.purpose != "benchmark_compute" or item.value not in {"true", "false"}
+        for item in policies
+    ) or len({item.value for item in policies}) != 1:
+        # Infra can be mistyped secret material; never echo rejected values.
+        raise ProvisioningError(
+            "OSWORLD_ENABLE_PROXY requires benchmark_compute scope and exactly true or false"
+        )
+    return policies[0].value == "true"
 
 
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
