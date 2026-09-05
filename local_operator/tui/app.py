@@ -577,9 +577,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # `<message>` is front-loaded rather than trailing so it survives that
         # truncation: at 60 columns a user still sees that the argument is a
         # message the branch STARTS ON, which is what stops them typing a title
-        # and being billed for a turn in another window. `docs/fork.md` carries
+        # and being billed for a turn in the fork. `docs/fork.md` carries
         # the rest.
-        "Branch this conversation; /fork <message> starts it on that",
+        "Branch this chat; --switch here, --window elsewhere; <message> starts work",
         echo=True,
         consumes_prompt=True,
     ),
@@ -2556,6 +2556,12 @@ class OperatorApp(App[None]):
         #: the adopted session IS the fork makes that unconstructable rather
         #: than relying on every adoption path remembering to clear it.
         self._pending_fork_receipt: tuple[str, str] | None = None
+        # Unlike a destination-scoped switch receipt, a completed create must
+        # remain discoverable wherever the user navigated while it was copying.
+        self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
+        self._fork_in_progress = False
+        self._fork_source_session: Any = None
+        self._fork_cancelled = False
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
         # purpose: a conversation is identified by what it was opened for, and
@@ -4910,7 +4916,9 @@ class OperatorApp(App[None]):
             # session still booting rather than one waiting on the user.
             self._status.update(model_label="setup", model_name="", streaming=False)
 
-    async def _reload_session(self, *, keep_context: bool = False) -> None:
+    async def _reload_session(
+        self, *, keep_context: bool = False, preserve_outgoing: bool = False
+    ) -> None:
         """Dispose the current session, boot its replacement, and rebuild the
         ledger from what that replacement ACTUALLY holds.
 
@@ -4935,6 +4943,15 @@ class OperatorApp(App[None]):
         """
         previous_id = self._conversation_id()
         previous_len = self._history_length()
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
+        if preserve_outgoing:
+            detach_gates = getattr(self._session, "detach_viewer_gates", None)
+            if callable(detach_gates):
+                # Cancel the bridge before clearing UI futures; clearing first
+                # would send a denial to the owner whose work we must preserve.
+                await cast(Callable[[], Awaitable[None]], detach_gates)()
         # Invalidate latch ownership synchronously and request cancellation
         # before disposing the old session. The provider lock is drained after
         # disposal below, so no stale title call can delay the replacement.
@@ -5156,8 +5173,14 @@ class OperatorApp(App[None]):
                 # the WRONG session, but a stash left set would sit there until
                 # some later boot happened to match the id — so the switch that
                 # did not happen drops its copy here.
-                self._pending_fork_receipt = None
+                failed_fork, self._pending_fork_receipt = self._pending_fork_receipt, None
                 self._on_boot_failed(error)
+                if failed_fork is not None:
+                    self._notice(
+                        f"fork saved but could not open: /resume {failed_fork[0]}. "
+                        f"Return to original: /resume {previous_id}",
+                        "warning",
+                    )
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
@@ -5700,7 +5723,9 @@ class OperatorApp(App[None]):
         # without remembering the symbol.
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
-    def _resume_session(self, resume_id: str, notice: NoticeFn) -> None:
+    def _resume_session(
+        self, resume_id: str, notice: NoticeFn, *, preserve_outgoing: bool = False
+    ) -> None:
         """Rebind the factory to ``resume_id`` and reboot onto that session.
 
         Shared by the picker and by ``/resume <id>`` so both paths reload
@@ -5738,7 +5763,13 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
-        left_running = self._detach_or_stop_outgoing()
+        # A navigation entered during /fork must not queue a stop behind its
+        # snapshot RPC. The original's ownership guarantee lasts through that
+        # create, even when the ordinary resume preference would stop it.
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
+        left_running = preserve_outgoing or self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         # Name what happened to the session being LEFT (round 1, D5). This is
         # the release's headline behaviour change and it INVERTS a prior
@@ -5752,7 +5783,7 @@ class OperatorApp(App[None]):
             notice(f"resuming session {resume_id}… (previous session left running)")
         else:
             notice(f"resuming session {resume_id}…")
-        self._run_session_transition(self._reload_session())
+        self._run_session_transition(self._reload_session(preserve_outgoing=preserve_outgoing))
 
     def _detach_or_stop_outgoing(self) -> bool:
         """Decide what happens to the session being LEFT by a /resume.
@@ -5988,6 +6019,9 @@ class OperatorApp(App[None]):
             # Both success and refusal/failure reopen the same ordinary composer:
             # either the new session is now authoritative or the old one remains.
             self._session_transition_pending = False
+            outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
+            if outcome is not None:
+                self._notice(*outcome)
             # If the settled session has an authoritative EMPTY roster, retire
             # the one-row transition reserve now. Waiting for another keystroke
             # would leave a blank/loading hole indefinitely after a refused
@@ -6036,6 +6070,12 @@ class OperatorApp(App[None]):
             self._system_notice(str(error), "warning")
             return
 
+        detach_gates = getattr(self._session, "detach_viewer_gates", None)
+        if callable(detach_gates):
+            await cast(Callable[[], Awaitable[None]], detach_gates)()
+        self._deny_queued_approvals()
+        self._settle_ask_picker()
+        self._approval = None
         # Reuse the ordinary replacement path's cleanup discipline, but the
         # remote is already built and history-loaded. Dispose the old local
         # session and substitute in one frame; no attach banner/emission.
@@ -6175,121 +6215,117 @@ class OperatorApp(App[None]):
         self._load_approvals_default()
 
     def _cmd_fork(self, arg: str, notice: NoticeFn) -> None:
-        """``/fork [message]`` — branch this conversation into a new session.
+        """Fork committed history without interrupting or stopping original work.
 
-        The gap in the session-command family: ``/clear`` wipes the screen and
-        keeps the conversation, ``/new`` discards the conversation and keeps the
-        app, ``/resume`` moves to an existing one. Nothing carried history INTO
-        a fresh session, so "try this two ways" meant polluting one conversation
-        with a dead end or rebuilding context from scratch.
-
-        **The original session keeps running and is not disturbed.** The fork
-        opens in a new window or cmux workspace (``fork.mode = window``, the
-        default), because the entire value of forking is trying a direction
-        without leaving the conversation that got you there — a switch-in-place
-        would cost two context switches per branch. ``fork.mode = switch`` opts
-        into moving this terminal onto the fork instead.
-
-        Three arrival states, and they get three different behaviours:
-
-        * **idle** — clone immediately, right here. The transcript on disk is
-          already complete (every message is appended as it happens), so a copy
-          at idle is a consistent snapshot needing no coordination at all.
-        * **turn running** — defer to the session's next safe boundary, which
-          also interrupts an in-flight interruptible tool so the boundary
-          arrives in ~250 ms rather than after a ten-minute ``wait``. The
-          parent's turn is otherwise untouched: no steering message, no skipped
-          tool calls.
-        * **compacting** — REFUSE. ``_compacting`` means the transcript's head is
-          being rewritten, and a clone taken then can copy a half-rewritten
-          file. A refusal rather than a defer because compaction is minutes and
-          the user should decide whether to wait.
+        The runtime owns snapshot consistency. A viewer cannot copy its cached
+        transcript or interrupt a tool merely to hurry a boundary. Legacy local
+        hosts cannot preserve a busy owner across disposal and refuse at busy.
         """
-        session = self._session
-        if session is None:
-            self._system_notice("fork unavailable: the session is still starting", "warning")
+        from local_operator.spawn.policy import fork_mode, parse_fork_args
+
+        try:
+            override, message = parse_fork_args(arg)
+        except ValueError as error:
+            notice(str(error), "warning")
             return
-        session_id = self._resumable_session_id()
-        if not session_id:
-            # Nothing on disk to copy yet. Said plainly rather than creating an
-            # empty fork, which would look like it worked and open a window onto
-            # a conversation with no history in it.
-            self._system_notice("nothing to fork yet — this conversation has no history", "warning")
+        session = self._session
+        parent_id = self._resumable_session_id()
+        mode = override or fork_mode(self._config_values())
+        if session is None:
+            notice("fork unavailable: the session is still starting", "warning")
+            return
+        if not parent_id:
+            notice("nothing to fork yet: this conversation has no history", "warning")
             return
         if self._compacting:
-            self._system_notice("esc first — history is being rewritten", "warning")
+            notice("history is being rewritten; retry /fork when compaction finishes", "warning")
             return
-
-        from local_operator.paths import config_dir
-
-        message = arg.strip()
-        # The echo lands here, once the command is known to be actionable: it is
-        # the only place the fork's opening instruction is visible in THIS
-        # window, and echoing before the refusals above would attribute a
-        # message to the user that no model was ever given.
-        if message:
-            self._echo_user_command(f"/fork {message}")
-
-        if not self._turn_is_live():
-            notice("forking…")
-            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+        if self._fork_in_progress or self._session_transition_pending:
+            notice("a session transition is already in progress; wait or press esc", "warning")
             return
-
-        # Deferred: the session drains it at its next boundary. `request_fork`
-        # documents why there are two such boundaries and why both are needed.
-        # An OPTIONAL session capability, probed rather than required, matching
-        # how this app treats every other one (`subscribe_frontend`,
-        # `set_takeover_callback`, `set_model`). Deferring needs a tool loop to
-        # have a boundary in, which the lightweight hosts and `RemoteSession` do
-        # not have — and a fork on a follower must run against THIS machine
-        # anyway, since it opens a window here and reads this config.yml.
-        request_fork = getattr(session, "request_fork", None)
-        if not callable(request_fork):
-            # No boundary to wait for: clone now. The transcript on disk is
-            # missing the turn in flight, which is the honest snapshot such a
-            # host can offer, and it is strictly better than refusing.
-            notice("forking…")
-            self.run_worker(self._fork_now(config_dir(), session_id, message), exclusive=False)
+        if mode == "switch" and self._resume_factory is None:
+            notice("this launcher cannot switch sessions; use /fork --window", "warning")
             return
-
-        # The callback fires from the session's drain, which runs on this same
-        # event loop. It only SCHEDULES the report: opening a window can block
-        # for seconds (see `_on_fork_complete`), and the drain happens at the
-        # parent's turn boundary — blocking there would stall the very turn this
-        # feature promises to leave running.
-        replaced = request_fork(
-            config_dir(),
-            message=message,
-            on_complete=self._schedule_fork_report,
-        )
-        if replaced:
-            # Say that the earlier request was dropped. Two identical
-            # acknowledgements for two `/fork`s that produce ONE fork is the
-            # defect this closes: the replacement is fine, doing it invisibly
-            # is not, and the single receipt lands minutes later far up the
-            # scrollback where the discrepancy would never be spotted.
+        snapshot = getattr(session, "fork_snapshot", None)
+        detachable = callable(getattr(session, "detach_viewer_gates", None))
+        if mode == "switch" and not detachable:
+            jobs = getattr(session, "jobs", None)
+            scheduler = getattr(session, "wake_scheduler", None)
+            has_jobs = jobs is not None and any(job.status == "running" for job in jobs.list())
+            has_wakes = bool(getattr(scheduler, "schedules", ()))
+            if has_jobs or has_wakes:
+                notice(
+                    "this launcher cannot leave jobs or wakes running; use /fork --window",
+                    "warning",
+                )
+                return
+        if self._turn_is_live() and (
+            not callable(snapshot) or (mode == "switch" and not detachable)
+        ):
             notice(
-                (
-                    f"fork request replaced — the branch will carry “{message}”"
-                    if message
-                    else "fork request replaced — the branch will carry no message"
-                ),
-                "note",
+                "this launcher cannot switch away from active work safely; wait until it finishes",
+                "warning",
             )
             return
-        # The escape hatch is named IN the acknowledgement, because this is the
-        # only moment the user is looking for it. `action_interrupt` has always
-        # withdrawn a pending fork, but nothing ever said so — and a mistyped
-        # `/fork rewrite everythign` costs a billed model call in a window the
-        # user is not watching, so "this is revocable" has to be discoverable
-        # before it fires rather than in the docs afterwards.
-        notice("forking at the next safe boundary… (esc to cancel)")
-        # A STANDING indication that the fork is still coming. The line above
-        # scrolls away behind a long tool run, and without this the user is left
-        # with nothing on screen saying anything is armed — then a window opens
-        # minutes later with no visible cause. Cleared by `_sync_fork_pending`
-        # at the receipt and by `action_interrupt`'s cancel.
-        self._sync_fork_pending()
+        self._echo_user_command(f"/fork {arg}".rstrip())
+        self._fork_in_progress = True
+        self._fork_cancelled = False
+        notice(
+            "copying committed history; work still in progress is not included (esc to stay here)"
+            if self._turn_is_live()
+            else "forking… (esc to stay here)"
+        )
+        self._fork_source_session = session
+        self.run_worker(
+            self._fork_snapshot_worker(session, parent_id, message, mode), exclusive=False
+        )
+
+    async def _fork_snapshot_worker(
+        self, session: Any, parent_id: str, message: str, mode: str
+    ) -> None:
+        from local_operator.fork import fork_session
+        from local_operator.paths import config_dir
+
+        try:
+            result: dict[str, Any] = {}
+            snapshot = getattr(session, "fork_snapshot", None)
+            if callable(snapshot):
+                result = await cast(Callable[[str], Awaitable[dict[str, Any]]], snapshot)(message)
+                fork_id = result["fork_id"]
+            else:
+                fork_id = await asyncio.to_thread(
+                    fork_session, config_dir(), parent_id, message=message
+                )
+            if (
+                self._fork_cancelled
+                or self._session is not session
+                or self._session_transition_pending
+            ):
+                self._report_fork_outcome(
+                    f"fork saved: {fork_id}. Open it with /resume {fork_id}", "note"
+                )
+                return
+            await self._on_fork_complete(
+                fork_id,
+                "",
+                mode=mode,
+                original_busy=bool(result.get("busy")) if callable(snapshot) else False,
+                incomplete=bool(result.get("incomplete")) if callable(snapshot) else False,
+            )
+        except Exception as error:  # noqa: BLE001 — a failed fork never stops the original
+            self._report_fork_outcome(f"fork failed: {error}", "warning")
+        finally:
+            self._fork_source_session = None
+            self._fork_in_progress = False
+
+    def _report_fork_outcome(self, body: str, kind: NoticeKind) -> None:
+        # An incoming ledger reset would erase a notice emitted on the outgoing
+        # transcript. Publish after the common transition boundary on success,
+        # failure or cancellation; never switch away from the user's new target.
+        if self._session_transition_pending:
+            self._pending_fork_outcome = (body, kind)
+        else:
+            self._notice(body, kind)
 
     def _sync_fork_pending(self) -> None:
         """Push ``session.has_pending_fork()`` at the band's fork indicator.
@@ -6342,7 +6378,15 @@ class OperatorApp(App[None]):
             return
         await self._on_fork_complete(fork_id, "")
 
-    async def _on_fork_complete(self, fork_id: str, error: str) -> None:
+    async def _on_fork_complete(
+        self,
+        fork_id: str,
+        error: str,
+        *,
+        mode: str | None = None,
+        original_busy: bool = False,
+        incomplete: bool = False,
+    ) -> None:
         """Report the clone, then open the fork. Runs on the app's own loop.
 
         The two failure kinds are deliberately NOT reported the same way. A
@@ -6362,10 +6406,10 @@ class OperatorApp(App[None]):
         )
 
         values = self._config_values()
-        if fork_mode(values) == FORK_MODE_SWITCH:
-            # No spawn at all: the proven session transition moves this terminal
-            # onto the fork. The original stays on disk, untouched and
-            # resumable — which is what makes this mode safe rather than lossy.
+        if (mode or fork_mode(values)) == FORK_MODE_SWITCH:
+            # Navigation detaches only this viewer. The explicit preservation
+            # flag overrides background_on_resume and withdraws UI gate bridges
+            # before cleanup, so neither work nor approvals are cancelled.
             #
             # The receipt has to survive the transition, which is why it is
             # STASHED rather than printed here. `_resume_session` reboots the
@@ -6379,13 +6423,20 @@ class OperatorApp(App[None]):
             self._pending_fork_receipt = (
                 fork_id,
                 (
-                    f"switched to fork {fork_id} — the original is still there: "
-                    f"lop --resume {parent_id}"
+                    f"now in fork {fork_id}. "
+                    + (
+                        "Original work stays in the background. "
+                        "Pending approvals still need your response. "
+                        if original_busy
+                        else ""
+                    )
+                    + ("Work still in progress was not copied. " if incomplete else "")
+                    + f"Return to original: /resume {parent_id}. Preferences: /settings, then Fork."
                     if parent_id
                     else f"switched to fork {fork_id}"
                 ),
             )
-            self._resume_session(fork_id, self._notice)
+            self._resume_session(fork_id, self._notice, preserve_outgoing=True)
             return
 
         from local_operator.multiplexer.broadcast import resume_argv, resume_executable
@@ -9676,6 +9727,14 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        if self._fork_in_progress:
+            # The snapshot may already be copying. Let it settle safely, but
+            # withdraw navigation without forwarding Esc to the original tool.
+            self._fork_cancelled = True
+            self._notice(
+                "staying here; the saved fork will be listed when copying finishes", "note"
+            )
+            return
         # Expanded roster navigation temporarily owns focus so arrows can reach
         # every child. Its first Esc returns to the draft-bearing composer;
         # only a subsequent Esc enters the stop ladder below.
