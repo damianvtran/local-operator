@@ -1,0 +1,86 @@
+== boot: two runtimes (A, B) from the worktree binary, one shared config dir ==
+  A pid=25000 model=test/m-boot   B pid=25012 model=test/m-boot
+
+== cell 1: tool_approval_mode ask -> auto (both runtimes, no /new) ==
+  [A] /approvals  -> tool approvals: ask — write and command tools prompt before running
+  before: A 'tool approvals: ask — write and command tools prompt before running'
+  $ lop config edit tool_approval_mode auto
+    -> rc=0 'Successfully updated tool_approval_mode to auto'
+  [A notice/warning] tool approvals: auto — config.yml changed; every tool runs without asking
+  [B notice/warning] tool approvals: auto — config.yml changed; every tool runs without asking
+  both runtimes announced auto 0.05s after the write
+  [A] /approvals  -> tool approvals: auto — every tool runs without asking
+  after:  A 'tool approvals: auto — every tool runs without asking'
+  [B] /approvals  -> tool approvals: auto — every tool runs without asking
+  after:  B 'tool approvals: auto — every tool runs without asking'
+
+== cell 2: tool_approval_mode auto -> ask, overriding a per-session /approvals ==
+  [B] /approvals auto -> tool approvals: auto — every tool runs without asking
+  $ lop config edit tool_approval_mode ask
+    -> rc=0 'Successfully updated tool_approval_mode to ask'
+  [B notice/info] tool approvals: ask — config.yml changed; write and command tools prompt again
+  [A notice/info] tool approvals: ask — config.yml changed; write and command tools prompt again
+  both runtimes announced ask 0.05s after the write
+  [A] /approvals  -> tool approvals: ask — write and command tools prompt before running
+  after:  A 'tool approvals: ask — write and command tools prompt before running'
+  [B] /approvals  -> tool approvals: ask — write and command tools prompt before running
+  after:  B 'tool approvals: ask — write and command tools prompt before running'  (was /approvals auto; disk wins)
+
+== cell 3: model_name edit alone -> config-sourced runtimes switch ==
+  before: A=test/m-boot B=test/m-boot
+  $ lop config edit model_name m-live
+    -> rc=0 'Successfully updated model_name to m-live'
+  [B notice/info] model: test/m-boot → test/m-live — config.yml default changed
+  [A notice/info] model: test/m-boot → test/m-live — config.yml default changed
+  after:  A=test/m-live B=test/m-live  (0.05s after the write)
+
+== cell 4: B makes an explicit /model choice; default edit keeps it ==
+  [B] /model test/m-chosen -> model: test/m-live → test/m-chosen (this session)
+  B now test/m-chosen (explicit)
+  $ lop config edit model_name m-live-2
+    -> rc=0 'Successfully updated model_name to m-live-2'
+  [B notice/info] keeping test/m-chosen — chosen with /model; config.yml default changed, /model saved adopts it
+  [A notice/info] model: test/m-live → test/m-live-2 — config.yml default changed
+  after:  A=test/m-live-2 (0.05s)  B=test/m-chosen (kept)
+
+== cell 5: hosting -> unknown provider: warning, no switch ==
+  $ lop config edit hosting no-such-provider
+    -> rc=0 'Successfully updated hosting to no-such-provider'
+  [A notice/warning] config.yml names unknown provider 'no-such-provider'; keeping test/m-live-2
+  [B notice/info] keeping test/m-chosen — chosen with /model; config.yml default changed, /model saved adopts it
+  after:  A=test/m-live-2 (unchanged)
+  $ lop config edit hosting test
+    -> rc=0 'Successfully updated hosting to test'
+
+== cell 6: web_fetch.enabled false -> read <url> refused per call ==
+  $ lop config edit web_fetch.enabled false
+    -> rc=0 'Successfully updated web_fetch.enabled to False'
+  $ lop config edit web_search.enabled false
+    -> rc=0 'Successfully updated web_search.enabled to False'
+  probe (after disable):
+    read <url>   : error web_fetch is disabled by config (web_fetch.enabled: false) — turn it on in /settings › Web tools
+    web_search   : error web_search is disabled by config (web_search.enabled: false) — turn it on in /settings › Web tools
+  $ lop config edit web_fetch.enabled true
+    -> rc=0 'Successfully updated web_fetch.enabled to True'
+  $ lop config edit web_search.enabled true
+    -> rc=0 'Successfully updated web_search.enabled to True'
+  probe (after enable):
+    read <url>   : ok    [200] https://example.com markdownify · text/html · cache miss · sparse/JS-gated (try `browser`)  Ex
+    web_search   : ok    Provider: duckduckgo (credential-free)  Sources: 1. X - Official Site    https://x.com/    From brea
+
+== cell 7: web tool INVENTORY follows at the next turn boundary (runtime A) ==
+  [B notice/info] keeping test/m-chosen — chosen with /model; config.yml default changed, /model saved adopts it
+  [A] /context  -> {'type': 'context', 'items': [['Instructions', '~0'], ['Tool inventory', '~0'], ['Tool schemas', '~10.0k'], ['Environment', '~0'], ['Skills / MCP / goal', '~0'], ['Messages', '~94'], ['Total', '~10.1k / 128k (7.9%)']], 'title': 'Estimated next request'}
+  $ lop config edit web_search.enabled false
+    -> rc=0 'Successfully updated web_search.enabled to False'
+  $ lop config edit web_fetch.enabled false
+    -> rc=0 'Successfully updated web_fetch.enabled to False'
+  [A] /context  -> {'type': 'context', 'items': [['Instructions', '~0'], ['Tool inventory', '~0'], ['Tool schemas', '~9.3k'], ['Environment', '~0'], ['Skills / MCP / goal', '~0'], ['Messages', '~94'], ['Total', '~9.4k / 128k (7.3%)']], 'title': 'Estimated next request'}
+  tool schemas before: {'type': 'context', 'items': [['Instructions', '~0'], ['Tool inventory', '~0'], ['Tool schemas', '~10.0k'], ['Environment', '~0'], ['Skills / MCP / goal', '~0'], ['Messages', '~94'], ['Total', '~10.1k / 128k (7.9%)']], 'title': 'Estimated next request'}
+  tool schemas after : {'type': 'context', 'items': [['Instructions', '~0'], ['Tool inventory', '~0'], ['Tool schemas', '~9.3k'], ['Environment', '~0'], ['Skills / MCP / goal', '~0'], ['Messages', '~94'], ['Total', '~9.4k / 128k (7.3%)']], 'title': 'Estimated next request'}
+  $ lop config edit web_search.enabled true
+    -> rc=0 'Successfully updated web_search.enabled to True'
+  $ lop config edit web_fetch.enabled true
+    -> rc=0 'Successfully updated web_fetch.enabled to True'
+  [A] /context  -> {'type': 'context', 'items': [['Instructions', '~4.5k'], ['Tool inventory', '~1.6k'], ['Tool schemas', '~10.0k'], ['Environment', '~31'], ['Skills / MCP / goal', '~16'], ['Messages', '~109'], ['Total', '~16.3k / 128k (12.8%)']], 'title': 'Estimated next request'}
+  tool schemas back  : {'type': 'context', 'items': [['Instructions', '~4.5k'], ['Tool inventory', '~1.6k'], ['Tool schemas', '~10.0k'], ['Environment', '~31'], ['Skills / MCP / goal', '~16'], ['Messages', '~109'], ['Total', '~16.3k / 128k (12.8%)']], 'title': 'Estimated next request'}
