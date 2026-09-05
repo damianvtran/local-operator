@@ -1104,6 +1104,79 @@ async def test_relayed_transient_404_does_not_also_spend_the_flap_budget(monkeyp
     assert calls["n"] == 2, "transient ladder only: one attempt plus one retry, no flap re-asks"
 
 
+async def test_model_routing_flap_reask_keeps_codex_affinity_headers(monkeypatch) -> None:
+    """Every flap re-ask carries the SAME ``session-id``/``thread-id`` pair on
+    the wire as the attempt it repeats (PR #647 round-2 F1).
+
+    The header pair is a UUIDv5 of ``prompt_cache_key`` alone, so the property
+    holds today because nothing on the flap path rewrites that key — but the
+    loop does hand the client a fresh ``model_copy`` on every OAuth attempt
+    (``context_spec_for_access`` rebinding, QA round-2 Q2), so a future rewrite
+    that dropped the key on the copy would silently break cache affinity with
+    no test noticing at the header-derivation layer. Pinned end to end: the
+    real ``OpenAICompatClient`` over a mock transport, a ChatGPT OAuth grant,
+    the real ``stream_with_failover`` flap arm. The account catalogue lookup
+    that the rebinding performs is stubbed so no listing fetch is attempted.
+    Asserted on the wire, never on request-object identity."""
+    import local_operator.providers.failover as fo
+    from local_operator.model import discovery
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.providers.clients import CODEX_RESPONSES_URL
+
+    monkeypatch.setattr(fo, "MODEL_FLAP_RETRY_DELAY_MS", 1)
+    monkeypatch.setattr(fo, "_SERVED_SELECTORS", {"openai/gpt-6-astra"})
+    monkeypatch.setattr(discovery, "available_models", lambda *a, **kw: ([], "ok"))
+
+    class OAuthAuth(FakeAuth):
+        """One ChatGPT subscription grant: the only route that ships the pair."""
+
+        access = OAuthAccess("synthetic", 1, org_id="account")
+
+        async def get_oauth_access(self, provider: str, session_id: Any = None, **kw: Any):
+            return self.access
+
+    wire: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        wire.append(request)
+        if len(wire) <= 2:
+            return httpx.Response(
+                400, json={"error": {"message": "gpt-6-astra is not a valid model ID"}}
+            )
+        return httpx.Response(
+            200,
+            content='data: {"type":"response.completed","response":{"output":[],'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        )
+
+    request = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-6-astra", supports_responses_api=True),
+        messages=[],
+        prompt_cache_key="lineage",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        got = [
+            e
+            async for e in stream_with_failover(
+                request,
+                OAuthAuth({"openai": ["synthetic"]}),
+                {"retry": {"baseDelayMs": 1}},
+                client_for,
+            )
+        ]
+    assert any(isinstance(e, StreamEndEvent) for e in got)
+    assert len(wire) == 3  # two flaps re-asked in place, third served
+    pairs = [(w.headers["session-id"], w.headers["thread-id"]) for w in wire]
+    assert all(str(w.url) == CODEX_RESPONSES_URL for w in wire)
+    assert pairs[0][0] == pairs[0][1]
+    assert len(set(pairs)) == 1, pairs
+
+
 async def test_fallback_request_400_still_walks() -> None:
     """A request-shape 400 on a FALLBACK target still walks to the next target.
 

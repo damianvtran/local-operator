@@ -41,7 +41,12 @@ A deterministic UUIDv5 over `local-operator:codex-cache:<lineage>` in the standa
 URL namespace supplies both headers. It is stable across retries, restored
 sessions, fresh clients and model changes; it does not transmit a raw path or
 session label in the headers. UUIDv5 is identity encoding, not encryption or an
-authorization mechanism.
+authorization mechanism. Because the pair is derived per lineage rather than per
+attempt, every retry `stream_with_failover` issues for one turn — the transport
+backoff ladder, the model-routing flap re-ask, the fast-mode refusal retry and a
+fallback hop — carries the same headers: the loop rewrites `model` on its
+request copies but never `prompt_cache_key`, which
+`test_model_routing_flap_reask_keeps_codex_affinity_headers` pins on the wire.
 
 This is an **affinity group**, not the unique identity of every fork. That choice
 preserves existing fork cache grouping without adding another persisted identity
