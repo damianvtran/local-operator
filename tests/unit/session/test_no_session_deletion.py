@@ -494,6 +494,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove(listener)",
     ),
     (
+        "local_operator/session/runtime/launch.py::engage_runtime",
+        "<path>.unlink",
+        "the spawn CAPTURE FILE, built at "
+        "Path(tempfile.gettempdir())/lop-runtime-<session>-<uuid8>.log and held in a "
+        "local: never under the config dir, so it cannot name a session directory",
+        # Four exits from the engage loop, each disposing of the same local: the
+        # candidate became the owner, a spawn died and its reason was read, the
+        # spawn cap was reached, and the deadline expired. All four unlink the
+        # same tempdir path, so they share one argument rather than four.
+        4,
+    ),
+    (
+        "local_operator/session/runtime/owned.py::OwnedSessionHandle._cancel_loop_turn",
+        "<path>.remove",
+        "self._prompt_queue.remove(command): deque[_PromptCommand].remove, dropping "
+        "one queued in-memory prompt so a cancelled loop leaves no iteration behind",
+    ),
+    (
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",
         "<path>.replace",
         "in-memory .replace",
