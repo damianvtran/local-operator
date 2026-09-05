@@ -31,7 +31,17 @@ herdr agent get "$HERDR_PANE_ID"
 ```
 
 Every report carries a `--seq` so Herdr drops a stale one that lands out of
-order; the session id goes along as `--agent-session-id` metadata. Subagent
+order; the session id goes along as `--agent-session-id` metadata.
+
+**The session id is sent but not visible on Herdr 0.8.2.** `--agent-session-id`
+is accepted (`rc=0`), but `agent get` / `agent list` only populate the
+read-only `agent_session` object for Herdr's *official* integrations, so you
+will not find the id in the output above for a `custom:` source. It is sent
+anyway — it costs nothing and is correct the moment Herdr opens that field to
+custom sources — but do not go looking for it today. Herdr-managed session
+restoration from that id is out of scope either way.
+
+Subagent
 child sessions never report — they run inside their parent's pane and would
 overwrite its row. Like the resume binding, every call is best-effort: a
 missing binary, a dead socket, a non-zero exit or a timeout is logged at debug

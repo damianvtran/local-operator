@@ -277,13 +277,27 @@ def test_the_production_clock_is_epoch_microseconds() -> None:
     assert seq < 2**63
 
 
-def test_reports_are_ordered_by_enqueue_not_by_completion() -> None:
-    """The seq is minted on the caller's thread, so it reflects state order.
+def test_delivery_order_is_mint_order_under_contention() -> None:
+    """Two threads racing `report`: the delivered seqs are strictly ascending.
 
-    Two threads racing `report` still produce seqs in the order the reports
-    were queued: the call at position N in the invoker's log carries the Nth
-    seq. A seq minted inside the worker could not be wrong here — it is
-    single-threaded — but a seq minted OUTSIDE the lock could.
+    This is the module's central ordering claim, and it is a real one only
+    because the seq is minted and the call enqueued in ONE critical section.
+    An earlier version minted under the lock and queued outside it, so two
+    callers could mint 1, 2 and deliver 2, 1 — and the test that pinned it
+    asserted the same `sorted` property this one does while passing purely
+    because the default 5 ms GIL switch interval hid the window (review round
+    1, A2: 80/200 inverted at 1e-6, 0/400 at the default).
+
+    So the window is FORCED open rather than hoped shut: `setswitchinterval`
+    is dropped to 1 µs for the duration, which makes the interleaving that
+    used to fail the common case instead of a rare one. That is what makes
+    this a test rather than a bet on machine load (AGENTS.md "Timing,
+    flakes") — there is no sleep and no deadline anywhere in it; the wait is
+    on the threads' own completion.
+
+    `test_the_mint_and_enqueue_are_one_critical_section` below is the
+    can-it-still-fail control: it reintroduces the split and shows this
+    property breaking.
     """
     recorder = Recorder()
     reporter = _reporter(recorder)
@@ -294,26 +308,183 @@ def test_reports_are_ordered_by_enqueue_not_by_completion() -> None:
         for state in states:
             reporter.report(state)
 
-    threads = [
-        threading.Thread(
-            target=hammer, args=(cast(Sequence[HerdrState], ("working", "idle") * 20),)
-        ),
-        threading.Thread(
-            target=hammer, args=(cast(Sequence[HerdrState], ("blocked", "idle") * 20),)
-        ),
-    ]
-    for thread in threads:
-        thread.start()
-    start.set()
-    for thread in threads:
-        thread.join(WAIT_S)
-    reporter.release()
-    reporter.join()
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("working", "idle") * 20),)
+            ),
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("blocked", "idle") * 20),)
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        start.set()
+        for thread in threads:
+            thread.join(WAIT_S)
+        reporter.release()
+        reporter.join()
+    finally:
+        sys.setswitchinterval(previous)
+
     seqs = recorder.seqs()
-    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert seqs == sorted(seqs), f"delivered out of mint order: {seqs}"
+    assert len(set(seqs)) == len(seqs), f"duplicate seq: {seqs}"
     # De-dupe held under contention: no two consecutive reports share a state.
     states = recorder.states()
     assert all(a != b for a, b in zip(states, states[1:]))
+    # The release is last, and no report was delivered behind it.
+    assert [sub for sub, _ in recorder.calls][-1] == "release-agent"
+
+
+def test_the_mint_and_enqueue_are_one_critical_section() -> None:
+    """Prove the test above can still fail: reintroduce the split, see it break.
+
+    AGENTS.md requires a guard to be shown catching the bug it exists for
+    rather than passing vacuously. A subclass restores the OLD shape — mint
+    under the lock, enqueue after releasing it — and the same hammering then
+    produces an inverted delivery log. Asserting that the inversion HAPPENS
+    would itself be a race, so the assertion is one-sided: the real reporter
+    is run in the identical arrangement and must be ordered every time, while
+    the broken one is merely reported on. That keeps this test deterministic
+    while still exercising the exact code path that used to fail.
+    """
+
+    class SplitMintAndEnqueue(HerdrReporter):
+        """The PRE-FIX shape, and nothing else: mint under the lock, put after it.
+
+        Deliberately a thin override rather than a copy of the real method —
+        what is being reintroduced is exactly one thing, the gap between the
+        mint and the put, so that is all this changes.
+        """
+
+        def report(self, state: HerdrState) -> None:  # type: ignore[override]
+            if self._released.is_set():
+                return
+            with self._lock:
+                if state == self._last:
+                    return
+                self._last = state
+                seq = self._next_seq_locked()
+                argv = self._argv("report-agent", "--state", state, "--seq", str(seq))
+            # THE DEFECT: the lock is dropped before the put, so two callers
+            # that minted in one order can enqueue in the other.
+            self._queue.put(("report-agent", argv))
+            with self._lock:
+                self._enqueue_started = getattr(self, "_enqueue_started", False)
+                if not self._enqueue_started:
+                    self._enqueue_started = True
+                    self._thread = threading.Thread(
+                        target=self._run, name="lop-herdr-report", daemon=True
+                    )
+                    pending = self._thread
+                else:
+                    pending = None
+            if pending is not None:
+                pending.start()
+
+    def hammer_seqs(reporter: HerdrReporter, recorder: Recorder) -> list[int]:
+        start = threading.Event()
+
+        def hammer(states: Sequence[HerdrState]) -> None:
+            start.wait()
+            for state in states:
+                reporter.report(state)
+
+        threads = [
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("working", "idle") * 30),)
+            ),
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("blocked", "idle") * 30),)
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        start.set()
+        for thread in threads:
+            thread.join(WAIT_S)
+        reporter.release()
+        reporter.join()
+        return recorder.seqs()
+
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    inversions = 0
+    try:
+        # Several trials, because the defect is probabilistic even with the
+        # window forced open. Nothing is asserted about the count.
+        for _ in range(12):
+            recorder = Recorder()
+            counter = itertools.count(1)
+            broken = SplitMintAndEnqueue(
+                pane_id="w1:p1",
+                binary="/opt/herdr",
+                invoker=recorder,
+                clock=lambda: next(counter),
+            )
+            seqs = hammer_seqs(broken, recorder)
+            if seqs != sorted(seqs):
+                inversions += 1
+
+        # The FIXED reporter, in the identical arrangement, every trial.
+        for _ in range(12):
+            recorder = Recorder()
+            fixed = _reporter(recorder)
+            seqs = hammer_seqs(fixed, recorder)
+            assert seqs == sorted(seqs), f"the fix regressed: {seqs}"
+    finally:
+        sys.setswitchinterval(previous)
+
+    # Recorded for the reader, not asserted: on the machine this was written
+    # on the split shape inverted in most trials. A zero here would mean the
+    # control did not exercise the window, not that the fix is wrong, so it
+    # must never fail the suite.
+    print(f"[control] split-mint/enqueue inverted {inversions}/12 trials")
+
+
+def test_a_report_racing_a_release_is_dropped_not_resent() -> None:
+    """A1: nothing may be delivered after `release-agent` with a higher seq.
+
+    That is the failure `release-agent` exists to prevent — Herdr's high-water
+    mark cannot discard a HIGHER seq, so the row would keep describing an
+    exited process. The pre-fix code tested the released latch outside the
+    lock, so a report could pass the check, block on the lock the release
+    held, then mint a later seq and be delivered behind it (reproduced at
+    3/6000). The window is forced open here the same way, and the invariant is
+    checked over many trials rather than one.
+    """
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for trial in range(400):
+            recorder = Recorder()
+            reporter = _reporter(recorder)
+            reporter.report("idle")
+            ready = threading.Event()
+
+            def racer(rep: HerdrReporter = reporter, gate: threading.Event = ready) -> None:
+                gate.wait()
+                rep.report("working")
+
+            thread = threading.Thread(target=racer)
+            thread.start()
+            ready.set()
+            reporter.release()
+            thread.join(WAIT_S)
+            reporter.join()
+
+            subs = [sub for sub, _ in recorder.calls]
+            assert subs.count("release-agent") == 1, f"trial {trial}: {subs}"
+            assert (
+                subs[-1] == "release-agent"
+            ), f"trial {trial}: a report was delivered after the release: {subs}"
+            seqs = recorder.seqs()
+            assert seqs == sorted(seqs), f"trial {trial}: {seqs}"
+    finally:
+        sys.setswitchinterval(previous)
 
 
 def test_the_invoker_runs_off_the_calling_thread() -> None:

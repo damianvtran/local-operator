@@ -11502,11 +11502,15 @@ class OperatorApp(App[None]):
         path, and no subprocess runs on this thread: the reporter owns a
         worker thread so the event loop never waits on the ``herdr`` CLI.
         """
-        # Headless means no pane, and this gate is what keeps the test suite
-        # off a developer's own Herdr pane: `tests/conftest.py` does not scrub
-        # `HERDR_*` (only `CMUX_*`), so without it every pilot test run from
-        # inside Herdr would overwrite the Agents row of the session running
-        # the tests. Same hazard `_start_multiplexer_broadcast` documents.
+        # Headless means no pane, and this is the SECOND of two independent
+        # guards keeping the test suite off a developer's own Herdr pane: a
+        # pilot test run from inside Herdr would otherwise overwrite the Agents
+        # row of the session running the tests. `tests/conftest.py` scrubs
+        # `HERDR_*` (alongside `CMUX_*`, for the same reason and after the same
+        # class of incident), so detection already fails there — this gate is
+        # what holds if that scrub is ever narrowed, and it is verified on its
+        # own by `test_a_headless_app_reports_nothing` plus its lifted-gate
+        # control. Same hazard `_start_multiplexer_broadcast` documents.
         if self.is_headless:
             return
         session = self._session

@@ -15,11 +15,25 @@ and silently ignores any report carrying a lower one ("accepted by the API
 but ignored by pane state"). That is the mechanism this module leans on to
 make out-of-order delivery harmless — but it only works if the number
 reflects the order the STATE CHANGED in, not the order the subprocesses
-happened to finish in. So the sequence number is taken under a lock at the
-moment :meth:`HerdrReporter.report` is called, before the call is queued, and
-the single worker thread then executes the queue in that order. Two workers,
-or a seq assigned inside the worker, would let a ``working`` overtake the
-``idle`` that followed it and leave the panel spinning on a finished turn.
+happened to finish in. So the sequence number is minted **and the call
+enqueued in the same critical section**, under ``_lock``, at the moment
+:meth:`HerdrReporter.report` is called; the single worker thread then
+executes the queue in that order. Two workers, or a seq assigned inside the
+worker, would let a ``working`` overtake the ``idle`` that followed it and
+leave the panel spinning on a finished turn.
+
+MINTING AND ENQUEUEING MUST BE ONE ATOMIC STEP, not two. An earlier version
+took the seq under the lock and then queued outside it, which is a weaker
+promise than it looks: two callers could mint 1, 2 and enqueue 2, 1, so the
+delivery order was not the mint order and this paragraph was false of the
+code — measured at 80/200 trials under ``sys.setswitchinterval(1e-6)``.
+Worse, a ``report`` that lost that race to a concurrent ``release`` was
+delivered AFTER the ``release-agent`` carrying a HIGHER seq, which Herdr's
+high-water mark cannot discard, leaving the pane's row alive for an exited
+process (review round 1, A1/A2). ``release`` puts its call and the worker's
+stop sentinel inside that same section, so nothing can be queued behind it,
+and ``report`` re-tests the released latch inside the lock so a report that
+loses the race is DROPPED rather than re-sent.
 
 WHY THE SEQUENCE IS NOT A COUNTER FROM ONE
 ------------------------------------------
@@ -223,6 +237,10 @@ class HerdrReporter:
         #: stop sentinel and is enqueued exactly once, by `release`.
         self._queue: queue.SimpleQueue[tuple[str, tuple[str, ...]] | None] = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
+        #: A worker created under `_lock` by `_enqueue` and started outside it
+        #: by `_start_worker`. Exists so the mint-and-enqueue critical section
+        #: contains nothing that can block (review round 1, A2).
+        self._pending_start: threading.Thread | None = None
         # Latched by `release` before the release call is queued, and what
         # makes `release` exactly-once and every later `report` a no-op. An
         # Event rather than a bool under `_lock` so `released` is readable
@@ -278,23 +296,40 @@ class HerdrReporter:
         ``StatusLine.refresh``: one comparison under a lock in the common case
         and nothing else. Never raises.
         """
+        # Re-tested INSIDE the lock below, not only here. This early exit is a
+        # cheap filter for the common post-release case; it is not the
+        # decision, because a `report` that passes it and then blocks on
+        # `_lock` — held by a concurrent `release` — would otherwise mint a
+        # HIGHER seq than the release and resurrect the row for a process that
+        # has already exited. Herdr's high-water mark cannot discard a higher
+        # seq, so that row would say `working` forever (review round 1, A1).
         if self._released.is_set():
             return
         with self._lock:
+            if self._released.is_set():
+                return
             if state == self._last:
                 return
             self._last = state
             seq = self._next_seq_locked()
             session_id = self._session_id
-        argv = self._argv(
-            "report-agent",
-            "--state",
-            state,
-            "--seq",
-            str(seq),
-            *(("--agent-session-id", session_id) if session_id else ()),
-        )
-        self._enqueue(("report-agent", argv))
+            argv = self._argv(
+                "report-agent",
+                "--state",
+                state,
+                "--seq",
+                str(seq),
+                *(("--agent-session-id", session_id) if session_id else ()),
+            )
+            # Enqueued UNDER the lock, so the queue order is the mint order.
+            # Building the argv outside it and putting afterwards let two
+            # callers mint 1,2 and enqueue 2,1 — measured at 80/200 trials
+            # under `sys.setswitchinterval(1e-6)` (review round 1, A2). The
+            # lock is held for a list build and a `SimpleQueue.put`, both
+            # non-blocking, so this costs the caller nothing it can feel.
+            self._enqueue(("report-agent", argv))
+        # Outside the lock: see `_start_worker`.
+        self._start_worker()
 
     def release(self) -> None:
         """Queue the ``release-agent``, exactly once, and stop the worker after it.
@@ -312,9 +347,14 @@ class HerdrReporter:
                 return
             self._released.set()
             seq = self._next_seq_locked()
-        argv = self._argv("release-agent", "--seq", str(seq))
-        self._enqueue(("release-agent", argv))
-        self._queue.put(None)
+            argv = self._argv("release-agent", "--seq", str(seq))
+            # Under the lock for the same reason as `report`, and with the
+            # stop sentinel in the same critical section: the release must be
+            # the LAST item in the queue, which is only guaranteed if no
+            # `report` can slip between the two puts.
+            self._enqueue(("release-agent", argv))
+            self._queue.put(None)
+        self._start_worker()
 
     def join(self, timeout: float = EXIT_DRAIN_TIMEOUT_S) -> None:
         """Wait for the worker to drain, bounded. Tests and the exit drain only.
@@ -347,23 +387,43 @@ class HerdrReporter:
         )
 
     def _enqueue(self, item: tuple[str, tuple[str, ...]]) -> None:
-        self._queue.put(item)
-        self._ensure_worker()
+        """Queue one call. THE CALLER MUST HOLD ``_lock``.
 
-    def _ensure_worker(self) -> None:
-        # Started on the first call rather than in the constructor so a
-        # reporter that never reports (built and discarded) costs no thread.
-        # The exit drain is registered at the same moment, and BEFORE the
-        # thread exists, so an interpreter exit racing the start still finds
-        # this reporter in the registry.
-        with self._lock:
-            if self._thread is not None:
-                return
+        That requirement is the ordering guarantee, not an implementation
+        detail: the queue order has to be the order the seqs were minted in,
+        and the only way to promise that is to mint and put in one critical
+        section (review round 1, A2).
+
+        ``_lock`` is a plain :class:`threading.Lock` and is therefore NOT
+        reentrant, which is why the worker start is split out below rather
+        than called from here — an ``_ensure_worker`` that took the lock again
+        would deadlock every caller.
+        """
+        self._queue.put(item)
+        # Registered while the lock is held and BEFORE the thread exists, so
+        # an interpreter exit racing the first enqueue still finds this
+        # reporter in the registry and drains it.
+        if self._thread is None:
             _LIVE_REPORTERS.add(self)
             _register_exit_drain()
-            thread = threading.Thread(target=self._run, name="lop-herdr-report", daemon=True)
-            self._thread = thread
-        thread.start()
+            # Created here but started by `_start_worker` outside the lock:
+            # a reporter that never reports (built and discarded) costs no
+            # thread, and nothing user-facing waits on the start.
+            self._thread = threading.Thread(target=self._run, name="lop-herdr-report", daemon=True)
+            self._pending_start = self._thread
+
+    def _start_worker(self) -> None:
+        """Start the worker created by :meth:`_enqueue`, if any. Lock NOT held.
+
+        Split from the enqueue so the ordering-critical section stays free of
+        anything that could block, and so a plain (non-reentrant) lock is
+        enough to hold the whole mint-and-put together.
+        """
+        with self._lock:
+            pending = self._pending_start
+            self._pending_start = None
+        if pending is not None:
+            pending.start()
 
     def _run(self) -> None:
         while True:
@@ -443,10 +503,21 @@ def release_reporter(reporter: HerdrReporter | None) -> None:
 _EXIT_DRAIN_LOCK = threading.Lock()
 _exit_drain_registered = False
 
-#: Every reporter that has started its worker in this process. Weak, so a
-#: reporter dropped before exit is not kept alive to be drained for nothing.
-#: Several reporters per process happens only in tests; production has one
-#: per pane, and a pane is a process.
+#: Every reporter that has queued a call in this process, so the exit drain
+#: can release and join each one.
+#:
+#: A ``WeakSet`` for hygiene rather than for reclamation, and the difference
+#: is worth stating because the comment here used to claim the latter: a
+#: reporter whose worker is RUNNING is never collected while it is in the set,
+#: because the worker thread's own ``self._run`` bound method holds a strong
+#: reference to it (measured: 50 built-and-dropped reporters → 50 still
+#: retained and 50 threads parked on ``queue.get`` after two ``gc.collect``
+#: passes — review round 1, A3). What the weak set does buy is that once a
+#: reporter IS released and its worker has returned, nothing here keeps it
+#: alive. Production has one reporter per process — a pane is a process, and
+#: a session swap re-labels the existing reporter rather than building
+#: another — so the retention is bounded at one; only a test that builds many
+#: accumulates threads, which is why they release explicitly.
 _LIVE_REPORTERS: weakref.WeakSet["HerdrReporter"] = weakref.WeakSet()
 
 

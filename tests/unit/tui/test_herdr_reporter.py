@@ -1,11 +1,14 @@
 """The app's and the band's half of Herdr agent-state reporting.
 
 As with the multiplexer broadcast, the single most important property is that
-the SUITE ITSELF must not report: ``tests/conftest.py`` does not scrub
-``HERDR_*``, so a developer running the tests from inside a Herdr pane would
-otherwise have every pilot test overwrite the Agents row of the session they
-are running the tests from. The headless gate is what prevents that, and the
-first two tests here pin it and its control.
+the SUITE ITSELF must not report: a developer running the tests from inside a
+Herdr pane must not have a pilot test overwrite — and then RELEASE — the
+Agents row of the session they are running the tests from. Two independent
+guards stop that, and this file pins the second one. ``tests/conftest.py``
+scrubs ``HERDR_*`` in the autouse isolation fixture, so detection fails
+before any gate is consulted; the app's ``is_headless`` check is what still
+holds if that scrub is ever narrowed. The first two tests here set the
+markers back explicitly and pin the headless gate and its lifted control.
 
 The band tests below use the same ``FakeDock`` host as the terminal-title
 tests: the band is a plain object and needs no running app.
