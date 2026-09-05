@@ -103,7 +103,8 @@ async def test_background_bills_survive_failure_resume_sweep_and_restart(
         )
         job_id = owner._launch_subagent("accounted", "BILLING_CHILD")
         await asyncio.wait_for(owner.jobs.settled_event(job_id).wait(), 20)
-        assert owner.jobs.get(job_id).status == "failed"
+        failed = owner.jobs.get(job_id)
+        assert failed is not None and failed.status == "failed"
         assert effect.read_text() == "billed"
         assert owner.frontend_state.cumulative_cost == 0.125
         new_id, error = owner.subagent_comms.resume(job_id, "Continue BILLING_CHILD")
