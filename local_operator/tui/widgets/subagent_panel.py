@@ -1376,7 +1376,11 @@ class SubagentPanel(Container):
         preview_budget = self._preview_job_rows()
         if self._expanded:
             try:
-                budget = max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
+                budget = (
+                    max(1, preview_budget)
+                    if self.screen.has_class("subagent")
+                    else max(1, int(self.screen.size.height) - _EXPANDED_DOCK_ROWS)
+                )
             except Exception:
                 budget = len(job_ids)
             self._navigation_index = max(0, min(len(job_ids) - 1, self._navigation_index))
@@ -1437,12 +1441,13 @@ class SubagentPanel(Container):
             return _PREVIEW_JOB_ROWS
         if screen_height <= 0:
             return _PREVIEW_JOB_ROWS
-        available = (
-            screen_height
-            - _COLLAPSED_DOCK_ROWS
-            - _TRANSCRIPT_FLOOR_ROWS
-            - self._band_sibling_rows()
-        )
+        floor = _TRANSCRIPT_FLOOR_ROWS
+        if self.screen.has_class("subagent") and not self.screen.has_class("subagent-compact"):
+            # The detail page has title/breadcrumb/footer rows the root transcript
+            # does not. Compact mode recovers those from its disabled composer;
+            # normal mode must reserve them before allocating auxiliary rows.
+            floor += 6
+        available = screen_height - _COLLAPSED_DOCK_ROWS - floor - self._band_sibling_rows()
         return max(_MIN_PREVIEW_JOB_ROWS, min(_PREVIEW_JOB_ROWS, available))
 
     def _band_sibling_rows(self) -> int:
@@ -1498,7 +1503,9 @@ class SubagentPanel(Container):
         self._stop_spinner()
 
     # -- sync -------------------------------------------------------------
-    def sync(self, session: Any, *, jobs: Sequence[Any] | None = None) -> None:
+    def sync(
+        self, session: Any, *, jobs: Sequence[Any] | None = None, selected_job: Any = None
+    ) -> None:
         """Re-read ``session.jobs`` and schedule a repaint.
 
         Called on every Subagent* event (immediate) and on the 1 Hz poll (the
@@ -1519,9 +1526,14 @@ class SubagentPanel(Container):
         job_rows = jobs or []
         self._model_label = str(getattr(session, "model_label", "") or "")
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
+        selected_id = str(getattr(selected_job, "id", "") or "")
+        if selected_id:
+            # The viewed manager is not its own child row, but its status band
+            # still needs the same off-thread stats cache as visible children.
+            self._stats_for(selected_id, selected_job, True)
         if not task_jobs:
             self._jobs_by_id = {}
-            self._stats = {}
+            self._stats = {key: value for key, value in self._stats.items() if key == selected_id}
             self._sync_rows([])
             self.display = False
             self._dirty = False

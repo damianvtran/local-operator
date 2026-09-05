@@ -1137,7 +1137,8 @@ async def test_narrow_subagent_mode_preserves_a_useful_transcript_viewport() -> 
         for _ in range(3):
             await pilot.pause()
         assert app.screen.has_class("subagent-compact")
-        assert app.query_one("#band").display is False
+        assert app.query_one("#input-row").display is False
+        assert app.query_one("#input-shell").size.height >= 1
         assert view._body.size.height >= 8, view._body.size
         assert app.screen.virtual_size.height <= app.screen.size.height
 

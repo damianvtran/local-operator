@@ -1384,9 +1384,9 @@ COMFORTABLE_ROWS_CLASS = "comfortable-rows"
 #: recede rather than disappear, or the page stops reading as the same app.
 #: Flipped in exactly two places, ``_open_subagent_view``/``_close_subagent_view``.
 SUBAGENT_LAYOUT_CLASS = "subagent"
-#: At phone-height terminals the live roster and todos can consume nearly the
-#: entire detail page. The compact mode keeps the selected transcript primary;
-#: secondary context remains one ``Esc`` away in the parent conversation.
+#: At phone-height terminals the scoped roster and todos still need to be
+#: reachable. Compact mode reclaims the disabled composer and decorative rows,
+#: keeping the selected transcript primary without hiding the owner's controls.
 SUBAGENT_COMPACT_LAYOUT_CLASS = "subagent-compact"
 SUBAGENT_COMPACT_MAX_ROWS = 24
 
@@ -13233,6 +13233,44 @@ class OperatorApp(App[None]):
                 wake_rows = 0
         return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
+    def _subagent_job(self, job_id: str) -> Any:
+        session = self._session
+        comms = getattr(session, "_subagent_comms", None)
+        lookup = getattr(comms, "job", None)
+        job = lookup(job_id) if callable(lookup) else None
+        manager = getattr(session, "jobs", None)
+        if job is None and manager is not None:
+            job = manager.get(job_id)
+        if job is None:
+            # Restored descendants have reader DTOs, not local execution rows.
+            frontend = getattr(session, "frontend_state", None)
+            job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
+        return job
+
+    def _subagent_roster(self) -> tuple[list[Any], Any]:
+        """Resolve one direct-child scope for open, retarget, tick and close.
+
+        The execution ledger is local on an owner and flattened on a follower.
+        The comms graph is the common ownership contract, never the current row
+        selection or a best-effort label match.
+        """
+        session = self._session
+        comms = getattr(session, "_subagent_comms", None)
+        manager = getattr(session, "jobs", None)
+        view = self._subagent_view
+        try:
+            job_for = self._subagent_job
+
+            if comms is not None and callable(getattr(comms, "children", None)):
+                nodes = comms.children(view.job_id if view is not None else None)
+                jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                return jobs, job_for(view.job_id) if view is not None else None
+            # Old/local hosts without lineage can still show their root ledger,
+            # but a child must never inherit its parent's roster by default.
+            return (manager.list() if manager is not None and view is None else []), None
+        except Exception:
+            return [], None
+
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
 
@@ -13245,11 +13283,7 @@ class OperatorApp(App[None]):
         # The settle loop deliberately runs several panel passes, but the job
         # ledger cannot change synchronously inside one refresh. Snapshot once
         # so 100-child sessions do not copy and sort the same roster per pass.
-        try:
-            manager = getattr(session, "jobs", None)
-            jobs = manager.list() if manager is not None else []
-        except Exception:
-            jobs = []
+        jobs, selected_job = self._subagent_roster()
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -13284,7 +13318,7 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session, jobs=jobs)
+                self._subagent_panel.sync(session, jobs=jobs, selected_job=selected_job)
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
@@ -13309,6 +13343,10 @@ class OperatorApp(App[None]):
                     session,
                     session_id=selected_session_id,
                     transcript_directory=selected_directory,
+                    loading=(
+                        self._subagent_view is not None
+                        and self._trajectory_state.get(self._subagent_view.job_id) == "loading"
+                    ),
                 )
             self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
@@ -13477,7 +13515,23 @@ class OperatorApp(App[None]):
         un-dimmed under the view precisely so a reader can hop between
         subagents without going back up a level to do it.
         """
+        comms = getattr(self._session, "_subagent_comms", None)
+        node_lookup = getattr(comms, "node", None)
+        node = node_lookup(job_id) if callable(node_lookup) else None
+        canonical_id = getattr(node, "job_id", None)
+        if isinstance(canonical_id, str) and canonical_id:
+            job_id = canonical_id
         if self._subagent_view is not None:
+            previous_id = self._subagent_view.job_id
+            if previous_id != job_id:
+                unload = getattr(self._session, "unload_job_trajectory", None)
+                if callable(unload):
+                    self._trajectory_loads.discard(previous_id)
+                    self.run_worker(
+                        cast(Callable[[str], Awaitable[None]], unload)(previous_id),
+                        group="subagent-trajectory",
+                        exclusive=False,
+                    )
             # Retargeting is opening another child's page; it owes the same
             # fetch a first open does.
             self._load_subagent_trajectory(job_id)
@@ -13575,6 +13629,9 @@ class OperatorApp(App[None]):
             )
         self._subagent_view = None
         view.remove()
+        if self._subagent_panel is not None:
+            scoped_jobs, _ = self._subagent_roster()
+            self._subagent_panel.sync(self._session, jobs=scoped_jobs)
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
@@ -13974,16 +14031,17 @@ class OperatorApp(App[None]):
         session = self._session
         manager = getattr(session, "jobs", None) if session is not None else None
         comms = getattr(session, "_subagent_comms", None) if session is not None else None
+        node_lookup = getattr(comms, "node", None)
+        node = node_lookup(job_id) if callable(node_lookup) else None
+        canonical_id = getattr(node, "job_id", None)
+        if isinstance(canonical_id, str) and canonical_id and canonical_id != job_id:
+            # Resume may replace the attempt while its page is open. Resolve
+            # before reading the ledger, and use the normal navigation path to
+            # move the watch/fetch rather than painting a phantom missing job.
+            self._open_subagent_view(canonical_id)
+            return
         try:
-            lookup = getattr(comms, "job", None) if comms is not None else None
-            job = lookup(job_id) if callable(lookup) else None
-            # Owner comms resolves durable attempt aliases to a live job. The
-            # follower graph facade deliberately has no job objects of its own;
-            # its canonical SnapshotJobs ledger is authoritative instead. A
-            # callable lookup returning None must therefore fall through, not
-            # turn every follower child page into a false "no longer on ledger".
-            if job is None and manager is not None:
-                job = manager.get(job_id)
+            job = self._subagent_job(job_id)
         except Exception:
             job = manager.get(job_id) if manager is not None else None
         # Comms accepts durable predecessor IDs, but the panel contains only the
@@ -14067,6 +14125,9 @@ class OperatorApp(App[None]):
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(job_id)
         self._point_band_at(job)
+        if self._subagent_panel is not None:
+            scoped_jobs, selected_job = self._subagent_roster()
+            self._subagent_panel.sync(session, jobs=scoped_jobs, selected_job=selected_job)
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
                 session,
@@ -14076,6 +14137,7 @@ class OperatorApp(App[None]):
                     if node is not None and getattr(node, "session_dir", None) is not None
                     else None
                 ),
+                loading=self._trajectory_state.get(job_id) == "loading",
             )
 
     def _point_band_at(self, job: Any) -> None:

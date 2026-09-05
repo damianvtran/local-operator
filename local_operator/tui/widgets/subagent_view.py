@@ -3307,11 +3307,12 @@ class SubagentView(Vertical):
         # (visible hints, esc label, state label) per rung, widest first.
         arrows = (self._up_hint, self._down_hint, self._scroll_label)
         relations = (self._parent_hint, self._peer_hint, self._child_hint, self._root_hint)
+        back_label = "back to parent" if self._ancestors else "back to conversation"
         rungs: tuple[tuple[tuple[HintButton, ...], str], ...] = (
-            ((*relations, *arrows, self._exit_hint, self._state_hint), "back to conversation"),
-            ((*arrows, self._exit_hint, self._state_hint), "back to conversation"),
-            ((*relations, *arrows, self._exit_hint), "back to conversation"),
-            ((*arrows, self._exit_hint), "back to conversation"),
+            ((*relations, *arrows, self._exit_hint, self._state_hint), back_label),
+            ((*arrows, self._exit_hint, self._state_hint), back_label),
+            ((*relations, *arrows, self._exit_hint), back_label),
+            ((*arrows, self._exit_hint), back_label),
             ((*arrows, self._exit_hint), "back"),
             ((self._exit_hint,), "back"),
             ((self._exit_hint,), ""),
