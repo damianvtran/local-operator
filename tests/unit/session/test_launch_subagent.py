@@ -2627,3 +2627,92 @@ async def test_the_parent_name_resolver_holds_its_parent_weakly(tmp_path, monkey
     # The resolver alone never kept it alive, and a dead parent lends no name.
     assert parent_ref() is None
     assert resolve() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_swept_child_keeps_its_durable_identity_on_the_roster(tmp_path, monkeypatch):
+    """The retention sweep releases execution evidence, never identity.
+
+    ``AsyncJobManager._sweep_due`` deletes a settled row from ``_jobs`` five
+    minutes after it settles (``DEFAULT_RETENTION_MS``), which is what makes a
+    long session's memory bounded. The row must nevertheless keep riding
+    ``state.jobs``, because that projection is the ONLY thing a follower sees:
+    the comms registry cannot cross the socket, so a child whose row vanished
+    would lose the ``session_id``/``session_dir`` its page needs to reach a
+    ``transcript.jsonl`` that outlives the process forever.
+
+    It survives through ``_ChildRecord.job_ref`` — the registry holds a live
+    reference the sweep's ``del`` cannot free — which ``comms.job_rows()``
+    re-adds to the roster. Pinned here because that is a load-bearing
+    consequence of an unrelated-looking field, and a future sweep that also
+    dropped the comms record would silently reintroduce the defect (a settled
+    child rendering "no saved transcript" over a fully intact transcript).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    try:
+        job_id = parent._launch_subagent(label="swept", prompt="go do a thing")
+        await asyncio.wait_for(parent.jobs.settled_event(job_id).wait(), timeout=10)
+        child_dir = parent.subagent_comms.session_dir_of(job_id)
+        assert child_dir is not None and (child_dir / "transcript.jsonl").exists()
+
+        # Exactly what the five-minute retention does, without waiting for it.
+        parent.jobs._retention_ms = 0
+        parent.jobs._sweep_due()
+        assert parent.jobs.get(job_id) is None, "the execution row must be swept"
+
+        parent.refresh_frontend_state()
+        row = next((row for row in parent.frontend_state.jobs if row.id == job_id), None)
+        assert row is not None, "a swept child must not vanish from the roster"
+        assert row.session_id == child_dir.name
+        assert row.session_dir == str(child_dir)
+        assert row.status == "completed"
+        # The owner's own page reads the live registry, which also survives.
+        assert parent.subagent_comms.session_dir_of(job_id) == child_dir
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_restored_swept_child_still_points_at_its_transcript(tmp_path, monkeypatch):
+    """The state the operator's machine was actually in.
+
+    A session that is RESTARTED after a child was swept persists an asymmetric
+    roster: ``_persist_subagent_roster`` writes ``jobs`` from ``jobs.list()``
+    (the swept row is gone) but ``records`` from the comms snapshot (kept, so
+    resume works). Restore therefore rebuilds those children from the comms
+    graph alone, as ``restored`` rows with an EMPTY trajectory — the honest
+    result, since in-memory execution evidence is precisely what the sweep
+    released.
+
+    What must NOT be lost is the way back to the durable transcript. Observed
+    live on a nine-child session that persisted one job row: the eight
+    reconstructed children carried ``session_id`` but no directory, so the
+    follower's page painted "no saved transcript" over a 1153-row file.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    try:
+        job_id = parent._launch_subagent(label="swept", prompt="go do a thing")
+        await asyncio.wait_for(parent.jobs.settled_event(job_id).wait(), timeout=10)
+        child_dir = parent.subagent_comms.session_dir_of(job_id)
+        snapshot = parent.subagent_comms.snapshot()
+    finally:
+        await parent.dispose()
+
+    # The restart: comms records survive to disk, the swept job row does not.
+    resumed = make_session(tmp_path / "resumed", OneShotStream())
+    try:
+        resumed.subagent_comms.restore(snapshot)
+        assert resumed.jobs.get(job_id) is None, "no execution row survives a restart"
+
+        resumed.refresh_frontend_state()
+        row = next((row for row in resumed.frontend_state.jobs if row.id == job_id), None)
+        assert row is not None, "the comms graph must still reconstruct the child"
+        assert row.restored is True
+        assert not row.trajectory, "a swept child has no in-memory trajectory to serve"
+        # The one fact the page cannot do without.
+        assert row.session_id == child_dir.name
+        assert row.session_dir == str(child_dir)
+    finally:
+        await resumed.dispose()
