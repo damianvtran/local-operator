@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from dataclasses import replace
 
@@ -107,6 +108,7 @@ async def test_assembled_slash_snapshot_scroll_and_focus(tmp_path, monkeypatch, 
         await pilot.pause()
         assert isinstance(app.screen, SessionScreen)
         screen = app.screen
+        assert screen.report is not None
         assert screen.report.aggregate.calls == 1
         assert screen._scroll.max_scroll_y > 0
         assert screen._scroll.max_scroll_x == 0
@@ -128,6 +130,7 @@ async def test_assembled_slash_snapshot_scroll_and_focus(tmp_path, monkeypatch, 
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         assert isinstance(app.screen, SessionScreen)
+        assert app.screen.report is not None
         assert app.screen.report.aggregate.calls == 2
 
 
@@ -175,6 +178,11 @@ async def test_disk_worker_is_off_loop_and_drops_stale_session(monkeypatch, repl
             finish.set()
             await app.workers.wait_for_complete()
             assert len(observed) == 1 and observed[0] != ui_thread
+            # The result cannot be published, even if the pending modal is
+            # still finishing its queued mount before it can safely be popped.
+            if isinstance(app.screen, SessionScreen):
+                assert app.screen.presentation_cancelled and app.screen.report is None
+            await pilot.pause()
             assert not isinstance(app.screen, SessionScreen)
         finally:
             finish.set()
@@ -208,3 +216,87 @@ async def test_scroll_hint_tracks_actual_overflow_after_resize():
         assert screen._scroll.max_scroll_y > 0
         assert "↑↓ scroll" in str(screen._hint.render())
         assert screen._scroll.max_scroll_x == 0
+
+
+@pytest.mark.parametrize("cancel_key", ["escape", "q"])
+@pytest.mark.asyncio
+async def test_real_locked_read_can_be_cancelled_without_interrupting_draft(
+    tmp_path, monkeypatch, cancel_key
+):
+    path = tmp_path / "ledger.db"
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: path)
+    store = AnalyticsStore(path)
+    store.record_batch([_snap(session_id="sess")])
+    store.close()
+    # WAL readers intentionally bypass a writer lock. A real legacy DELETE
+    # journal reproduces the reported slow-read path without sleeping a mock.
+    locker = sqlite3.connect(path)
+    locker.execute("PRAGMA journal_mode=DELETE")
+    locker.execute("BEGIN EXCLUSIVE")
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(50, 24)) as pilot:
+            await pilot.pause()
+            await _submit(pilot, app, "/session")
+            try:
+                assert isinstance(app.screen, SessionScreen)
+                pending = app.screen
+                assert pending.report is None
+                assert "Loading usage records" in str(pending._body.render())
+                assert "esc / q cancel" in str(pending._hint.render())
+                await pilot.press(cancel_key)
+                await pilot.press(*list("next task"))
+                await pilot.pause()
+                assert app.focused is app.query_one(Editor)
+                assert app.query_one(Editor).text == "next task"
+            finally:
+                locker.rollback()
+                await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert not isinstance(app.screen, SessionScreen)
+            assert pending.presentation_cancelled and pending.report is None
+            assert app.focused is app.query_one(Editor)
+            assert app.query_one(Editor).text == "next task"
+            assert session.prompts == [] and session.aborts == []
+    finally:
+        locker.close()
+
+
+@pytest.mark.asyncio
+async def test_fast_result_during_mount_replaces_loading_text():
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionScreen(None, runtime())
+        app.push_screen(screen)
+        # No pause/await: the SQLite worker can settle before the mounted body
+        # exists. Losing this update would strand a fast read in loading state.
+        screen.set_report(SessionReport("sess"))
+        await pilot.pause()
+        assert "No recorded requests" in str(screen._body.render())
+        assert "Loading usage records" not in str(screen._body.render())
+        assert "cancel" not in str(screen._hint.render())
+
+
+@pytest.mark.asyncio
+async def test_invalidating_buried_pending_view_never_pops_newer_modal():
+    from local_operator.tui.widgets.analytics_panel import AnalyticsScreen
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        pending = SessionScreen(None, runtime())
+        app.push_screen(pending)
+        await pilot.pause()
+        other = AnalyticsScreen(UsageAggregate())
+        app.push_screen(other)
+        await pilot.pause()
+        pending.invalidate()
+        pending.set_report(SessionReport("sess"))
+        assert app.screen is other
+        assert pending.report is None
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, (SessionScreen, AnalyticsScreen))
+        assert app.focused is app.query_one(Editor)
