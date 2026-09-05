@@ -1655,14 +1655,43 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
     # Prices are deliberately 0.0: the Token Plan bills subscription CREDITS,
     # not per-token dollars, so any USD rate written here would be an invention.
     # 0.0 renders as "cost unavailable" rather than "free", per the registry's
-    # zero-means-unknown convention for keyed providers.
+    # zero-means-unknown convention for keyed providers. The same reasoning
+    # leaves `cache_writes_price`/`cache_reads_price` unset: the cache discount
+    # is real, but it is a CREDIT multiplier rather than a USD rate.
+    #
+    # PROMPT CACHING is supported, and was MEASURED rather than inferred. Each
+    # text row below was driven twice with an identical 6.5k-token system
+    # prefix carrying `cache_control: {"type": "ephemeral"}`, over the
+    # OpenAI-compatible wire this provider actually uses. The second call
+    # reported the prefix as a hit every time:
+    #
+    #   req 1  prompt_tokens_details.cache_creation_input_tokens = 6547
+    #   req 2  prompt_tokens_details.cached_tokens               = 6547
+    #
+    # These rows previously said `supports_prompt_cache=False`, and that flag
+    # is exactly what gates `_message_cache_markers` in
+    # `providers/clients.py`. With it off lop sent no markers at all, so every
+    # turn re-billed the entire prefix as fresh input. That is the expensive
+    # direction for agent traffic, where a growing transcript is resent on
+    # each turn: a week of real subagent sessions measured 1.5B input tokens
+    # at a 97% cache-read share, where the flag alone is a ~6x difference in
+    # billed input.
+    #
+    # Alibaba documents two modes, mutually exclusive per request
+    # (https://www.alibabacloud.com/help/en/model-studio/context-cache):
+    # IMPLICIT applies automatically to every supported model and cannot be
+    # disabled, billing hits at 20% of the input price; EXPLICIT is what a
+    # `cache_control` marker selects, billing hits at 10% with a 5-minute TTL
+    # renewed on each hit. So the flag is not the difference between caching
+    # and no caching — the server caches either way — it is the difference
+    # between the 20% path and the 10% one.
     "qwen3.8-max": ModelInfo(
         id="qwen3.8-max",
         name="Qwen3.8 Max",
         max_tokens=131_072,
         context_window=1_000_000,
         supports_images=True,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="Alibaba's flagship Qwen3.8 model via the Token Plan subscription",
         # The only row marked recommended: it is the plan's flagship, the model
         # the subscription is bought for, and the one both available sources
@@ -1675,7 +1704,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=131_072,
         context_window=1_000_000,
         supports_images=False,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="Previous-generation flagship Qwen model on the Token Plan",
         recommended=False,
     ),
@@ -1685,7 +1714,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=131_072,
         context_window=1_000_000,
         supports_images=True,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="Balanced Qwen model on the Token Plan",
         recommended=False,
     ),
@@ -1695,8 +1724,34 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=65_536,
         context_window=1_000_000,
         supports_images=True,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="Fast, lightweight Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.8-flash": ModelInfo(
+        id="qwen3.8-flash",
+        name="Qwen3.8 Flash",
+        # On the plan's published allowlist
+        # (https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview)
+        # and missing here, so it resolved to `unknown_model_info` — a -1
+        # context window, which the spec reads as the 128k default. That is the
+        # exact defect the surrounding rows exist to prevent, and it is worse
+        # for this SKU than for most: it is the current-generation Flash, so a
+        # 1M-window model compacted at 128k.
+        #
+        # Both numbers below are first-party. The cap is what the endpoint
+        # itself reports for an over-large request ("Range of max_tokens should
+        # be [1, 131072]") — twice qwen3.6-flash's 65,536, which is the
+        # substantive reason to prefer this row over that one. Vision was
+        # confirmed against a real 64x64 PNG rather than assumed from the
+        # allowlist's "visual understanding" column: a 1x1 image is rejected on
+        # dimensions by every row here, which is itself evidence the endpoint
+        # decodes the image instead of ignoring the block.
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        description="Current-generation fast Qwen model on the Token Plan",
         recommended=False,
     ),
     "glm-5.2": ModelInfo(
@@ -1715,7 +1770,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=131_072,
         context_window=1_000_000,
         supports_images=False,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="Zhipu's GLM-5.2 served through the Token Plan",
         recommended=False,
     ),
@@ -1740,7 +1795,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=393_216,
         context_window=1_000_000,
         supports_images=False,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="DeepSeek V4 Flash (0731) served through the Token Plan",
         recommended=False,
     ),
@@ -1754,7 +1809,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         max_tokens=384_000,
         context_window=1_000_000,
         supports_images=False,
-        supports_prompt_cache=False,
+        supports_prompt_cache=True,
         description="DeepSeek V4 Pro served through the Token Plan",
         recommended=False,
     ),
