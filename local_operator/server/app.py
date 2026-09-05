@@ -6,9 +6,12 @@ through HTTP requests instead of CLI.
 """
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from importlib.metadata import version
+from re import Pattern
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -16,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
+from starlette.routing import compile_path
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -172,57 +176,134 @@ app = FastAPI(
 )
 
 
-def _legacy_desktop_control_path(path: str) -> bool:
-    """Legacy routes that carry desktop-privileged CONTROL in managed mode.
-
-    ``/v1/agents/import`` writes a whole agent from an uploaded ZIP, which is
-    every bit as privileged as the credential and config writes beside it. It
-    was reachable cross-origin with no bearer while its own renderer caller
-    already went through the authenticated media relay, so gating it closes a
-    write bypass without moving a single call site.
-    """
-    return path in {
-        "/v1/agents/import",
+#: Legacy CONTROL routes outside the agent/job families, gated on every method.
+#:
+#: The agent and job families are deliberately absent: they are enumerated from
+#: the router by :func:`_legacy_gate_matchers` so a newly added route under them
+#: is gated BY DEFAULT. This set is only the flat singleton paths, which have no
+#: id segment and no family to walk.
+_LEGACY_CONTROL_PATHS = frozenset(
+    {
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",
         "/v1/models",
         "/v1/tools/speech",
         "/v1/transcriptions",
-    } or (path.startswith("/v1/agents/") and path.rsplit("/", 1)[-1] in {"upload", "speech"})
+    }
+)
 
+#: Route families gated wholesale in managed mode. Everything the router
+#: publishes under these prefixes reads or mutates the same tenant's data:
+#: agent inventory and names, working-directory paths (the filesystem layout of
+#: the user's machine), conversation content, system prompts, execution
+#: variables, exported agent ZIPs, and job history.
+_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs")
 
-#: Legacy READ routes that disclose the same tenant's data as the gated control
-#: plane: agent inventory and names, working-directory paths (the filesystem
-#: layout of the user's machine), job history, and conversation content.
+#: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
+#: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using
+#: the router's own template, so a stale or misspelled key cannot silently widen
+#: the boundary: ``test_managed_gate_covers_every_legacy_route`` fails on any
+#: entry matching no live route.
 #:
-#: They are gated only in managed mode, exactly like the control paths above, so
-#: a standalone legacy server and every CLI/script client stay wire-compatible.
-#: The desktop app reaches them through the authenticated contract instead --
-#: see ``legacy.agents.list`` / ``legacy.agent.get`` / ``legacy.jobs.list``.
-_LEGACY_READ_PATHS = {"/v1/agents", "/v1/jobs"}
+#: Deny-by-default is the whole point. Hand-maintained string matching missed
+#: three routes in review round 1 and five more in round 2 -- including an
+#: unauthenticated cross-origin ``PATCH`` that renamed an agent and persisted it
+#: -- because every new route had to be REMEMBERED into the gate. A route is now
+#: gated the moment it exists, and an omission fails a test instead of shipping
+#: a bypass.
+_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {
+    # The agent-scoped half of the schedules surface; the other half lives under
+    # `/v1/schedules/{id}`, outside these prefixes and ungated. Gating only this
+    # half would split one feature across two auth postures -- breaking the
+    # renderer's schedule screens while the same rows stayed readable through
+    # the ungated half, a boundary that looks tighter without being tighter.
+    # Moving the whole schedules surface behind the contract is its own change.
+    "GET /v1/agents/{agent_id}/schedules": (
+        "paired with ungated /v1/schedules/{schedule_id}; gate the surface as one change"
+    ),
+    "POST /v1/agents/{agent_id}/schedules": (
+        "paired with ungated /v1/schedules/{schedule_id}; gate the surface as one change"
+    ),
+}
 
 
-def _legacy_desktop_read_path(path: str, method: str) -> bool:
-    if method not in {"GET", "HEAD"}:
-        return False
-    if path in _LEGACY_READ_PATHS:
+def _iter_routes(routes: Iterable[Any]) -> Iterator[tuple[str, frozenset[str]]]:
+    """Every ``(path template, methods)`` the app publishes, nested routers included.
+
+    FastAPI wraps each ``include_router`` in an ``_IncludedRouter`` whose own
+    ``path`` is ``None``, with the real routes hanging off ``original_router``.
+    A flat scan of ``app.routes`` therefore sees the four docs endpoints and
+    nothing else -- which would make the gate coverage test vacuously green.
+    """
+    for route in routes:
+        nested = getattr(route, "routes", None)
+        if nested is None:
+            original = getattr(route, "original_router", None)
+            nested = getattr(original, "routes", None) if original is not None else None
+        if nested:
+            yield from _iter_routes(nested)
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if path and methods:
+            yield path, frozenset(methods)
+
+
+def legacy_gate_routes() -> list[tuple[str, frozenset[str]]]:
+    """The router's own view of the gated families, shared by the gate and its test."""
+    return sorted(
+        (path, methods)
+        for path, methods in set(_iter_routes(app.routes))
+        if path.startswith(_LEGACY_GATED_PREFIXES)
+    )
+
+
+@lru_cache(maxsize=1)
+def _legacy_gate_matchers() -> tuple[tuple[Pattern[str], frozenset[str]], ...]:
+    """Compiled ``(path regex, gated methods)`` pairs, built FROM THE ROUTER.
+
+    Starlette's own :func:`compile_path` produces the same regex the router
+    matches with, so the gate cannot drift from the routing table the way a
+    hand-written ``len(parts) == 4`` check did.
+
+    Cached because it would otherwise recompile on every request; the routing
+    table is fixed once the app is constructed.
+    """
+    matchers: list[tuple[Pattern[str], frozenset[str]]] = []
+    for path, methods in legacy_gate_routes():
+        gated = {method for method in methods if f"{method} {path}" not in _LEGACY_GATE_EXCEPTIONS}
+        if not gated:
+            continue
+        # Starlette answers HEAD from a GET route, so the gate must cover it or
+        # a HEAD reads a gated response's headers without a bearer.
+        if "GET" in gated:
+            gated.add("HEAD")
+        regex, _format, _converters = compile_path(path)
+        matchers.append((regex, frozenset(gated)))
+    return tuple(matchers)
+
+
+def _legacy_desktop_gated(path: str, method: str) -> bool:
+    """Whether this request sits behind the managed-mode desktop boundary.
+
+    Enforced only when a desktop token is configured, so a standalone legacy
+    server and every CLI/script client stay wire-compatible -- see
+    :func:`managed_desktop_boundary`.
+    """
+    if path in _LEGACY_CONTROL_PATHS:
         return True
-    # `/v1/agents/{id}` and `/v1/agents/{id}/conversation`. Matched structurally
-    # rather than by a literal set because the id is caller-supplied.
-    parts = path.strip("/").split("/")
-    if len(parts) == 3 and parts[:2] == ["v1", "agents"]:
-        return parts[2] != "import"
-    return len(parts) == 4 and parts[:2] == ["v1", "agents"] and parts[3] == "conversation"
+    if not path.startswith(_LEGACY_GATED_PREFIXES):
+        return False
+    return any(
+        method in methods and regex.match(path) for regex, methods in _legacy_gate_matchers()
+    )
 
 
 @app.middleware("http")
 async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
     sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
-    legacy_control = _legacy_desktop_control_path(path) or _legacy_desktop_read_path(
-        path, request.method
-    )
+    legacy_control = _legacy_desktop_gated(path, request.method)
     # Explicit desktop-token mode must close the old mutation bypass too. A
     # standalone legacy server remains wire-compatible unless opted into this
     # mode; Electron moves these calls through the same main-process proxy.
@@ -243,7 +324,7 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
     # protects model dumps, not failures before a model was constructed.
     if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
         os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN")
-        and _legacy_desktop_control_path(request.url.path)
+        and _legacy_desktop_gated(request.url.path, request.method)
     ):
         return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
     return await request_validation_exception_handler(request, error)
