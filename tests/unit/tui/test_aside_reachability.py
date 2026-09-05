@@ -613,6 +613,34 @@ def test_a_settle_that_shrinks_the_answer_does_not_strand_the_window(
     assert _rows_present(_exhaust_the_wheel(panel), 10) == set(range(10))
 
 
+@pytest.mark.parametrize("budget", [1, 2, 3, 4, 5, 9, 25])
+def test_question_separation_fits_the_row_window(
+    budget: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned separator consumes overlay rows without hiding answer content.
+
+    Below four rows the existing marker/question/content priority has no spare
+    row for the pin's gap. The flat turn still owns a separator; at budget one
+    the separator must not become an otherwise empty frame.
+    """
+    panel = _panel(
+        [AsideTurn("This question wraps across several narrow rows", _long_answer(30), "done")],
+        budget + 8,
+        monkeypatch,
+    )
+    monkeypatch.setattr(panel, "_fit", lambda: (budget + 8, 2, budget))
+    monkeypatch.setattr(panel, "_content_width", lambda: 26)
+    for offset in range(panel._max_scroll_back() + 1):
+        panel._scroll_back_rows = offset
+        rows = [row.plain for row in panel._visible_rows().lines]
+        assert len(rows) <= budget
+        if budget >= 4:
+            for question, following in zip(rows, rows[1:]):
+                if question.startswith("▌") and not following.startswith("▌"):
+                    assert not following.strip(), (budget, offset, rows)
+    assert _rows_present(_exhaust_the_wheel(panel), 30) == set(range(30))
+
+
 # -- the smallest budgets, and each direction on its own -------------------
 @pytest.mark.parametrize("rows_above_dock", [4, 5, 6, 7, 8, 9, 10])
 def test_the_smallest_budgets_still_show_the_answer(
