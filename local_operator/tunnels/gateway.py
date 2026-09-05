@@ -214,9 +214,20 @@ class Gateway:
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
         expected_origin = "https://" + host
         origin = request.headers.get("origin")
+        # A signed document navigation is how a phone opens a saved/shared
+        # harness URL. Fetch Metadata marks that cross-site even though the
+        # edge already authenticated it. Only safe top-level navigation gets
+        # this exception; sibling fetches and browser mutations remain denied.
+        navigation = (
+            request.method in {"GET", "HEAD"}
+            and request.headers.get("sec-fetch-mode") == "navigate"
+        )
         if (
             (origin is not None and origin != expected_origin)
-            or request.headers.get("sec-fetch-site") == "cross-site"
+            or (
+                request.headers.get("sec-fetch-site") in {"cross-site", "same-site"}
+                and not navigation
+            )
             or (request.method not in {"GET", "HEAD", "OPTIONS"} and origin != expected_origin)
         ):
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
@@ -240,6 +251,12 @@ class Gateway:
             return JSONResponse(
                 {"error": "valid Radient origin assertion required"}, status_code=401
             )
+        # Uploads can yield to the policy poller for arbitrarily long periods.
+        # Authorization at request arrival cannot authorize a later mutation:
+        # recheck after consuming/verifying its body, immediately before any
+        # harness request or local side effect begins.
+        if self.revoked or time.monotonic() >= self.authorized_until:
+            return JSONResponse({"error": "tunnel authorization unavailable"}, status_code=503)
         if request.url.path == "/logout":
             response = RedirectResponse("/_radient/logout", status_code=303)
             response.headers["Clear-Site-Data"] = '"storage"'

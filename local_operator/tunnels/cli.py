@@ -130,7 +130,7 @@ async def dispatch(args: argparse.Namespace) -> str:
     action = args.tunnel_command
     if action in {"billing", "activate"}:
         async with httpx.AsyncClient(trust_env=False) as client:
-            api = RadientTunnels(credential_id(), client)
+            api = RadientTunnels(credential_id(getattr(args, "credential_id", None)), client)
             result = (
                 await api.request("GET", "/billing")
                 if action == "billing"
@@ -139,7 +139,9 @@ async def dispatch(args: argparse.Namespace) -> str:
         return _billing_summary(result)
     if action == "list":
         async with httpx.AsyncClient(trust_env=False) as client:
-            records = await RadientTunnels(credential_id(), client).request("GET")
+            records = await RadientTunnels(
+                credential_id(getattr(args, "credential_id", None)), client
+            ).request("GET")
         if isinstance(records, dict):
             records = records.get("tunnels", [])
         return "\n\n".join(_summary(record) for record in records) or "No Radient tunnels."
@@ -358,6 +360,14 @@ def mobile_action(action: str, accepted: str | None = None) -> str:
             receipts = []
             if not (config.directory() / "config.json").exists():
                 args = ["tunnel", "create"]
+                if accepted is not None:
+                    args += ["--accept-monthly-price", accepted]
+                receipts.append(await dispatch(parser.parse_args(args)))
+            else:
+                # An existing local config may refer to a remotely paused or
+                # billing-suspended tunnel. Re-enable through the same explicit
+                # quote acceptance before starting any connector service.
+                args = ["tunnel", "configure", "--enable"]
                 if accepted is not None:
                     args += ["--accept-monthly-price", accepted]
                 receipts.append(await dispatch(parser.parse_args(args)))

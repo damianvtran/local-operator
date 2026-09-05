@@ -41,11 +41,13 @@ def add_parser(subparsers: Any) -> None:
             "--accept-monthly-price",
             help="Accept the exact USD monthly price from lop tunnel billing",
         )
-    actions.add_parser("billing", help="Show the server's current monthly cost and price")
+    billing = actions.add_parser("billing", help="Show the server's current monthly cost and price")
+    billing.add_argument("--credential-id", type=int)
     activate = actions.add_parser(
         "activate", help="Activate tunnel billing at an explicitly accepted price"
     )
     activate.add_argument("--accept-monthly-price", required=True)
+    activate.add_argument("--credential-id", type=int)
     for name in (
         "install",
         "start",
@@ -57,4 +59,6 @@ def add_parser(subparsers: Any) -> None:
         "revoke",
         "uninstall",
     ):
-        actions.add_parser(name)
+        child = actions.add_parser(name)
+        if name == "list":
+            child.add_argument("--credential-id", type=int)

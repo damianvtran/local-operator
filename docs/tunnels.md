@@ -27,7 +27,7 @@ harnesses must remain running and connected to the internet.
    sign in with the same Radient account.
 
 In the TUI, `/mobile billing` shows the quote and `/mobile enable <amount>`
-performs creation and installation. `/mobile status`, `/mobile stop`, and
+creates or reactivates the tunnel, then installs its connector. `/mobile status`, `/mobile stop`, and
 `/mobile start` use the same lifecycle as the CLI. Billing is never activated
 silently by a provider login.
 

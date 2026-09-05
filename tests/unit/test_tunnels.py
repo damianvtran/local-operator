@@ -280,6 +280,70 @@ async def test_mutation_bound_body_and_replay_and_sibling_origin(connection, sig
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("withdraw", ["revoke", "expire"])
+async def test_upload_cannot_outlive_its_gateway_authorization(connection, signing_key, withdraw):
+    origin = AsyncMock(return_value=httpx.Response(200))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+
+        async def upload():
+            yield b"{"
+            # This executes only after handle() has admitted the request and
+            # started consuming its body. No timing assumption or sleep races
+            # the policy change against the proxy's final authorization check.
+            if withdraw == "revoke":
+                gateway.revoked = True
+            else:
+                gateway.authorized_until = 0
+            yield b"}"
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as client:
+            response = await client.post(
+                "/api/sessions",
+                content=upload(),
+                headers={
+                    "origin": "https://" + HOST,
+                    PROOF_HEADER: proof(signing_key, method="POST", body=b"{}"),
+                },
+            )
+            assert response.status_code == 503
+    origin.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+async def test_external_phone_navigation_is_allowed_but_subrequests_are_denied(
+    connection, signing_key, site
+):
+    origin = AsyncMock(return_value=httpx.Response(200, stream=httpx.ByteStream(b"phone page")))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as client:
+            headers = {
+                "sec-fetch-site": site,
+                "sec-fetch-mode": "navigate",
+                "accept": "text/html",
+                PROOF_HEADER: proof(signing_key, target="/"),
+            }
+            assert (await client.get("/", headers=headers)).status_code == 200
+            for mode in ("cors", "no-cors"):
+                assert (
+                    await client.get("/", headers={**headers, "sec-fetch-mode": mode})
+                ).status_code == 403
+            assert (
+                await client.post("/", headers={**headers, "origin": "https://" + HOST})
+            ).status_code == 403
+            assert (
+                await client.get("/", headers={**headers, "origin": "https://other.invalid"})
+            ).status_code == 403
+    assert origin.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_raw_encoded_target_and_unknown_host(connection, signing_key):
     seen = []
 
@@ -544,3 +608,62 @@ async def test_configuration_edit_preserves_private_origin_and_explicit_stop(
     with pytest.raises(ValueError, match="Gateway port is fixed"):
         await dispatch(parser.parse_args(["tunnel", "configure", "--gateway-port", "4100"]))
     assert all(call.args[0] == "GET" for call in api.request.call_args_list)
+
+
+@pytest.mark.parametrize("billing_succeeds", [False, True])
+def test_mobile_enable_reactivates_existing_tunnel_before_starting(
+    tmp_path, monkeypatch, billing_succeeds
+):
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save({"tunnel_id": "existing"})
+    calls = []
+
+    async def command(args):
+        calls.append(args)
+        if args.tunnel_command == "configure":
+            assert args.remote_enabled is True
+            assert args.accept_monthly_price == "0.05"
+            if not billing_succeeds:
+                raise ValueError("The accepted price differs from the current quote.")
+            return "Reactivated"
+        return "Service started"
+
+    monkeypatch.setattr(cli, "dispatch", command)
+    receipt = cli.mobile_action("enable", "0.05")
+    assert [args.tunnel_command for args in calls] == (
+        ["configure", "install"] if billing_succeeds else ["configure"]
+    )
+    assert ("Service started" in receipt) is billing_succeeds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["billing", "activate", "list"])
+async def test_account_wide_commands_accept_and_use_explicit_login(action, monkeypatch):
+    from local_operator.tunnels import cli
+
+    select = Mock(return_value=19)
+    monkeypatch.setattr(cli, "credential_id", select)
+    api = AsyncMock()
+    api.request.return_value = (
+        []
+        if action == "list"
+        else {
+            "eligible": True,
+            "monthly_cost_usd": 0.2,
+            "monthly_price_usd": 1,
+            "balance_usd": 10,
+            "amount_due_usd": 0,
+        }
+    )
+    factory = Mock(return_value=api)
+    monkeypatch.setattr(cli, "RadientTunnels", factory)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    argv = ["tunnel", action, "--credential-id", "19"]
+    if action == "activate":
+        argv += ["--accept-monthly-price", "1"]
+    await dispatch(parser.parse_args(argv))
+    select.assert_called_once_with(19)
+    assert factory.call_args.args[0] == 19
