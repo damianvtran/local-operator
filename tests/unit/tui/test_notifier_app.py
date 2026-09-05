@@ -109,7 +109,9 @@ def test_a_real_build_produces_a_registered_bundle(tmp_path: Path) -> None:
     assert notifier_app.is_built(app) is True
 
 
-def test_a_crashed_build_does_not_disable_the_bundle_forever(tmp_path: Path) -> None:
+def test_a_crashed_build_does_not_disable_the_bundle_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A `.building` marker is a lock, not a tombstone.
 
     The builder is a daemon thread in a runtime that exits as soon as its
@@ -123,33 +125,65 @@ def test_a_crashed_build_does_not_disable_the_bundle_forever(tmp_path: Path) -> 
     Asserted on the decision rather than by building: an old marker must be
     reclaimed, a fresh one must be respected (or two runtimes racing on first
     use would both start a compiler).
+
+    Hold a real builder thread at its entry event so its finally block cannot
+    unlink the marker between exists() and stat(), the old test's CI race.
+    Thread-start publication proves the decision synchronously; the timeout
+    only guards a wedged thread, never determines whether reclamation happened.
+    No compiler or platform-dependent build speed participates in this test.
     """
     import os
-    import time
+    import threading
+    from types import SimpleNamespace
+
+    entered = threading.Event()
+    release = threading.Event()
+    builders: list[threading.Thread] = []
+    errors: list[str] = []
+    test_thread_id = threading.get_ident()
+
+    class ObservedThread(threading.Thread):
+        def start(self) -> None:
+            # The module imports threading inside the launch function. This
+            # shared spy must ignore work surviving from earlier fixtures.
+            if self.name == "notifier-build" and threading.get_ident() == test_thread_id:
+                builders.append(self)
+            super().start()
+
+    def held_build(_config_dir: Path) -> None:
+        entered.set()
+        if not release.wait(timeout=10):
+            errors.append("the test never released the builder")
+
+    monkeypatch.setattr(threading, "Thread", ObservedThread)
+    monkeypatch.setattr(notifier_app, "build_bundle", held_build)
+    fresh = 1000.0
+    monkeypatch.setattr(notifier_app, "time", SimpleNamespace(time=lambda: fresh))
 
     lock = tmp_path / "notifier" / ".building"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text("")
+    lock.write_text("original marker")
+    try:
+        # A current marker must not even launch a second builder thread.
+        assert notifier_app._BUILD_LOCK_STALE_S > 0
+        os.utime(lock, (fresh, fresh))
+        notifier_app._build_in_background(tmp_path)
+        assert builders == [], "a fresh marker must be respected"
+        assert lock.read_text() == "original marker"
 
-    # A marker written seconds ago: a real build could still be running.
-    assert notifier_app._BUILD_LOCK_STALE_S > 0
-    fresh = time.time()
-    os.utime(lock, (fresh, fresh))
-    notifier_app._build_in_background(tmp_path)
-    assert lock.exists(), "a fresh marker must be respected"
+        old = fresh - notifier_app._BUILD_LOCK_STALE_S - 60
+        os.utime(lock, (old, old))
+        notifier_app._build_in_background(tmp_path)
+        assert len(builders) == 1, "a stale marker must start a replacement builder"
+        assert entered.wait(timeout=10), "the replacement builder never entered"
+        # The original marker is replaced before the thread starts; the held
+        # builder owns this new marker until the test explicitly releases it.
+        assert lock.read_text() == ""
+    finally:
+        release.set()
+        for builder in builders:
+            builder.join(timeout=10)
+            assert not builder.is_alive(), "the builder did not finish after release"
 
-    # A marker from an hour ago has no survivor behind it.
-    old = time.time() - notifier_app._BUILD_LOCK_STALE_S - 60
-    os.utime(lock, (old, old))
-    notifier_app._build_in_background(tmp_path)
-    # The reclaimer takes the lock (and its builder thread clears it when
-    # done); either way the stale file must not still be the ORIGINAL one.
-    for _ in range(50):
-        if not lock.exists() or lock.stat().st_mtime > old + 1:
-            break
-        time.sleep(0.1)
-    assert (
-        not lock.exists()
-    ) or lock.stat().st_mtime > old + 1, (
-        "a stale marker must be reclaimed, not treated as a permanent tombstone"
-    )
+    assert errors == []
+    assert not lock.exists(), "the completed builder must remove its marker"

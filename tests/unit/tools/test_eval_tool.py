@@ -30,6 +30,9 @@ async def _clean_kernel_registry():
     """Isolate the module-level kernel registry, killing any workers a test
     leaves behind — a leaked interpreter outlives the test that spawned it."""
     eval_tool._KERNELS.clear()
+    eval_tool._LOST_KERNELS.clear()
+    eval_tool._ACTIVE_KERNELS.clear()
+    eval_tool._CLOSE_ON_RETURN.clear()
     yield
     for kernel in list(eval_tool._KERNELS.values()):
         await eval_tool._close_kernel(kernel)
@@ -348,6 +351,98 @@ async def test_kernel_lru_cap_evicts_oldest_session(tmp_path) -> None:
     assert len(eval_tool._KERNELS) == eval_tool.MAX_KERNELS
     assert "cap-0" not in eval_tool._KERNELS
     assert "cap-4" in eval_tool._KERNELS
+    # A namespace reset is surfaced before code can take a wrong branch or
+    # repeat a side effect against an unexpectedly empty namespace.
+    sentinel = tmp_path / "must-not-run"
+    reset = await _call(contexts[0], f"open({str(sentinel)!r}, 'w').write('bad')")
+    assert reset.is_error
+    assert (reset.details or {}).get("kernel_reset")
+    assert (reset.details or {}).get("code_executed") is False
+    assert not sentinel.exists()
+    rebuilt = await _call(contexts[0], "n = 123; n")
+    assert not rebuilt.is_error
+    assert "result: 123" in rebuilt.text
+
+
+@pytest.mark.asyncio
+async def test_idle_kernel_budget_accounts_for_live_work(context, monkeypatch) -> None:
+    await _call(context, "n = 1")
+    kernel = eval_tool._KERNELS[context.session_id]
+    monkeypatch.setattr(eval_tool, "_ACTIVE_KERNELS", {"busy-1", "busy-2", "busy-3"})
+    other = await eval_tool._spawn(str(context.cwd))
+    eval_tool._remember("other", other)
+    assert len(eval_tool._KERNELS) == 1
+    assert context.session_id not in eval_tool._KERNELS
+    assert "evicted" in eval_tool._LOST_KERNELS[context.session_id]
+    await eval_tool._close_kernel(kernel)
+
+
+@pytest.mark.asyncio
+async def test_eval_tool_bridge_uses_this_calls_dispatch(context) -> None:
+    seen = []
+
+    async def dispatch(name, arguments):
+        seen.append((name, arguments))
+        return {"is_error": False, "text": "answer"}
+
+    context.dispatch_tool = dispatch
+    result = await _call(context, "tool('read', path='a')['text']")
+    assert not result.is_error, result.text
+    assert "answer" in result.text
+    assert seen == [("read", {"path": "a"})]
+    # The same persistent kernel must not retain the prior turn's callback.
+    context.dispatch_tool = None
+    unavailable = await _call(context, "tool('read', path='a')")
+    assert unavailable.is_error
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_dispose_retires_idle_kernel(context) -> None:
+    await _call(context, "n = 1")
+    kernel = eval_tool._KERNELS[context.session_id]
+    await eval_tool.close_session_kernel(context.session_id)
+    assert context.session_id not in eval_tool._KERNELS
+    assert kernel.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_dispose_during_exchange_cannot_repopulate_idle_pool(context, monkeypatch) -> None:
+    import asyncio
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = eval_tool._exchange
+
+    async def exchange(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(eval_tool, "_exchange", exchange)
+    work = asyncio.create_task(_call(context, "n = 1"))
+    await entered.wait()
+    await eval_tool.close_session_kernel(context.session_id)
+    release.set()
+    assert not (await work).is_error
+    assert context.session_id not in eval_tool._KERNELS
+    assert context.session_id not in eval_tool._CLOSE_ON_RETURN
+
+
+@pytest.mark.asyncio
+async def test_dead_idle_kernel_reports_reset_before_any_new_code(context, tmp_path) -> None:
+    await _call(context, "state = 123")
+    kernel = eval_tool._KERNELS[context.session_id]
+    kernel.process.kill()
+    await kernel.process.wait()
+    sentinel = tmp_path / "must-not-execute"
+    result = await _call(context, f"open({str(sentinel)!r}, 'w').write('bad')")
+    assert result.is_error
+    assert (result.details or {}).get("code_executed") is False
+    assert "idle Python kernel exited" in result.text
+    assert not sentinel.exists()
+    recovered = await _call(context, "'state' in globals()")
+    assert not recovered.is_error
+    assert "False" in recovered.text
 
 
 @pytest.mark.asyncio
@@ -357,6 +452,10 @@ async def test_idle_kernel_is_reaped_on_access(context) -> None:
     stale_pid = eval_tool._KERNELS[key].process.pid
     # Simulate the 5-minute idle window without waiting for it.
     eval_tool._KERNELS[key].last_used -= eval_tool.KERNEL_IDLE_SECONDS + 1
+    result = await _call(context, "a = 2")
+    assert result.is_error is True
+    assert (result.details or {}).get("code_executed") is False
+    assert "idle kernel expired" in result.text
     result = await _call(context, "a = 2")
     assert result.is_error is False
     fresh = eval_tool._KERNELS[key]
@@ -754,7 +853,13 @@ async def test_timeout_kills_eval_descendant_process_group(context, tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_raw_stdout_protocol_overflow_retires_kernel_and_recovers(context) -> None:
+async def test_raw_stdout_protocol_overflow_retires_kernel_and_recovers(
+    context, monkeypatch
+) -> None:
+    # Exercise the actual reader boundary without allocating the production
+    # 32 MiB JSON envelope in every test worker. Large valid bridge requests
+    # separately run through the default ceiling in test_efficiency.py.
+    monkeypatch.setattr(eval_tool, "_PROTOCOL_FRAME_LIMIT", 64 * 1024)
     result = await _call(
         context,
         "import os\nos.write(1, b'x' * 100_000 + b'\\n')\n42",

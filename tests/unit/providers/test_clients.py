@@ -4638,13 +4638,19 @@ def test_context_tokens_hint_is_used_whole_and_not_re_padded() -> None:
     prefix is — the hint already contains it.
     """
     spec = _sonnet_spec()
-    bare = ChatRequest(model=spec, messages=[Message.user("hi")], context_tokens_hint=100_000)
+    bare = ChatRequest(
+        model=spec,
+        messages=[Message.user("hi")],
+        context_tokens_hint=100_000,
+        context_tokens_hint_model=f"{spec.provider}/{spec.model_id}",
+    )
     padded = ChatRequest(
         model=spec,
         messages=[Message.user("hi")],
         system_blocks=["s" * 20_000],
         tools=[_tool(f"t{i}") for i in range(15)],
         context_tokens_hint=100_000,
+        context_tokens_hint_model=f"{spec.provider}/{spec.model_id}",
     )
 
     assert _estimated_prompt_tokens(bare) == (100_000, 100_000)
@@ -4680,6 +4686,7 @@ def test_the_refusal_never_pre_empts_compaction() -> None:
                 # A session sitting exactly ON its compaction trigger is the last
                 # moment compaction can still save it; it must not be refused.
                 context_tokens_hint=trigger,
+                context_tokens_hint_model=f"{spec.provider}/{spec.model_id}",
             )
             _effective_max_tokens(request)  # must not raise
 

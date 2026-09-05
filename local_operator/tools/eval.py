@@ -40,7 +40,7 @@ import sys
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Callable, cast
+from typing import Any, Awaitable, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -83,9 +83,10 @@ EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS = 3600.0
 #: event loop that outlives sessions, and 5 minutes of staleness costs nothing
 #: compared to the complexity of keeping one alive correctly.
 KERNEL_IDLE_SECONDS = 5 * 60.0
-#: Most kernels ever resident. Each is a full interpreter (tens of MB RSS);
-#: 4 concurrent sessions with live kernels is already an unusual host, and the
-#: LRU eviction below makes room rather than refusing the call.
+#: Interpreter retention target, including busy/background workers. In-flight
+#: work is never evicted to meet it; only idle namespaces are reclaimed. The
+#: scheduler owns admission, while this target prevents keeping four additional
+#: idle interpreters on top of a host's active workload.
 MAX_KERNELS = 4
 #: Stderr kept from a crashed worker: enough for the fatal exception, the
 #: rest is gone with the process. Same value the guard uses for its
@@ -152,12 +153,49 @@ class _Kernel:
         # POSIX killpg. It is assigned before any user code can run.
         self.windows_job = windows_job
         self.last_used = time.monotonic()
+        self.generation = uuid.uuid4().hex
 
 
 #: Session key -> kernel, least-recently-used first. Process-wide on purpose:
 #: the worker's namespace is per SESSION, and sessions outlive the tool
 #: objects the registry builds for each of them.
 _KERNELS: OrderedDict[str, _Kernel] = OrderedDict()
+
+# A bounded receipt ledger outlives an evicted interpreter. Refuse the first
+# stale-namespace call BEFORE executing it: running code against an empty
+# namespace can silently take a different branch or repeat external effects,
+# which is worse than a NameError. The next call can deliberately rebuild it.
+_LOST_KERNELS: OrderedDict[str, str] = OrderedDict()
+_ACTIVE_KERNELS: set[str] = set()
+_CLOSE_ON_RETURN: set[str] = set()
+_MAX_RESET_RECEIPTS = 4096
+# Includes JSON's worst-case character escaping across all bounded worker
+# output fields; tool-bridge requests have their smaller own protocol budget.
+_PROTOCOL_FRAME_LIMIT = 32 * 1024 * 1024
+
+
+def _record_reset(key: str, reason: str) -> None:
+    _LOST_KERNELS[key] = reason
+    _LOST_KERNELS.move_to_end(key)
+    while len(_LOST_KERNELS) > _MAX_RESET_RECEIPTS:
+        _LOST_KERNELS.popitem(last=False)
+
+
+async def close_session_kernel(session_id: str) -> None:
+    """Release a retired session's idle interpreter and reset receipt.
+
+    Session disposal first cancels its turn, but an eval may still be unwinding
+    (or spawning). Mark that owner for retirement on return rather than killing
+    an interpreter under a live protocol exchange. The in-flight call retains
+    its normal abort/timeout ownership, and can never repopulate the idle pool.
+    """
+    _LOST_KERNELS.pop(session_id, None)
+    if session_id in _ACTIVE_KERNELS:
+        _CLOSE_ON_RETURN.add(session_id)
+    kernel = _KERNELS.pop(session_id, None)
+    if kernel is not None:
+        await _close_kernel(kernel)
+
 
 #: References to in-flight reap tasks. A bare task can be garbage-collected
 #: before it runs, which would strand the kill half-done — the same reason
@@ -393,18 +431,25 @@ def _reap_idle(now: float) -> None:
     ]
     for key in stale:
         _retire(_KERNELS.pop(key))
+        _record_reset(key, "idle kernel expired")
 
 
 def _remember(key: str, kernel: _Kernel) -> None:
     """Re-insert a healthy kernel as most-recently-used, evicting past the cap."""
     _KERNELS[key] = kernel
     _KERNELS.move_to_end(key)
-    while len(_KERNELS) > MAX_KERNELS:
+    # Busy/background workers already consume the same interpreter budget.
+    # Never kill work in flight, but don't retain four more idle interpreters
+    # on top of it. Keep this just-used namespace so a concurrent completion
+    # cannot immediately invalidate its own successful receipt.
+    idle_budget = max(1, MAX_KERNELS - len(_ACTIVE_KERNELS) - len(_BACKGROUND_KERNELS))
+    while len(_KERNELS) > idle_budget:
         _key, evicted = _KERNELS.popitem(last=False)
         # Safe by construction: this call's kernel was just moved to the
         # MRU end, and eviction only runs while more than one entry is
         # resident, so the LRU end it pops can never be the kernel in use.
         _retire(evicted)
+        _record_reset(_key, "kernel evicted to make room for other active sessions")
 
 
 async def _spawn(cwd: str) -> _Kernel:
@@ -418,6 +463,12 @@ async def _spawn(cwd: str) -> _Kernel:
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
         "cwd": cwd,
+        # readline's 64 KiB default is smaller than both a valid bridge write
+        # request (up to 1 MiB) and the worker's bounded stdout/stderr payload.
+        # JSON escaping can expand each character sixfold. This bounded ceiling
+        # admits capped legitimate frames while retaining the crash/retirement
+        # path for arbitrary fd-1 noise that exceeds the protocol budget.
+        "limit": _PROTOCOL_FRAME_LIMIT,
     }
     if sys.platform == "win32":
         spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -465,6 +516,7 @@ async def _exchange(
     request: dict[str, Any],
     request_id: str,
     on_stream: Callable[[str, str], None] | None = None,
+    dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Send one request line, await its response line by id.
 
@@ -504,6 +556,69 @@ async def _exchange(
         except (ValueError, UnicodeError):
             continue
         if not isinstance(response, dict) or response.get("id") != request_id:
+            continue
+        call = response.get("tool_call")
+        if isinstance(call, dict):
+            # The worker is only a framing transport. Every actual tool call
+            # must cross the owning loop's validation/approval/event path.
+            # The callback is supplied per exchange, never saved in a kernel
+            # where a later turn could inherit stale credentials or approval.
+            name, arguments = call.get("name"), call.get("arguments")
+            bridge_call_id = str(call.get("call_id") or "")
+            bridge_name = str(name or "")
+
+            def bridge_error(message: str) -> dict[str, Any]:
+                return _error(bridge_call_id, bridge_name, message).model_dump(mode="json")
+
+            if dispatch_tool is None:
+                tool_result = bridge_error("tool() is unavailable in this eval context")
+            elif not isinstance(name, str) or not isinstance(arguments, dict):
+                tool_result = bridge_error("invalid tool() request")
+            else:
+                try:
+                    tool_result = await dispatch_tool(name, arguments)
+                except Exception as exc:
+                    tool_result = bridge_error(f"tool call failed: {type(exc).__name__}: {exc}")
+            wire = json.dumps(
+                {"id": request_id, "call_id": call.get("call_id"), "tool_result": tool_result}
+            )
+            # ToolResult text is normally already bounded by the harness. A
+            # custom host callback must not balloon the worker protocol either.
+            if len(wire.encode("utf-8")) > 1024 * 1024:
+                # Execution has already happened. Replacing a successful write
+                # with an error invites a duplicate mutation on retry. Return a
+                # bounded execution receipt with the ORIGINAL outcome instead.
+                preview = "\n".join(
+                    str(block.get("text", ""))[:4096]
+                    for block in tool_result.get("content", [])[:4]
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                receipt = ToolResult(
+                    tool_call_id=str(tool_result.get("tool_call_id", bridge_call_id))[:256],
+                    tool_name=bridge_name[:256],
+                    is_error=bool(tool_result.get("is_error", False)),
+                    content=[
+                        TextContent(
+                            text=(
+                                preview
+                                + "\n[Response truncated at the eval bridge. The tool already "
+                                "executed; is_error preserves its outcome. "
+                                "Do not repeat a mutation "
+                                "to recover output. Use a bounded read to inspect its result.]"
+                            )
+                        )
+                    ],
+                    details={"bridge_truncated": True, "executed": True},
+                )
+                wire = json.dumps(
+                    {
+                        "id": request_id,
+                        "call_id": call.get("call_id"),
+                        "tool_result": receipt.model_dump(mode="json"),
+                    }
+                )
+            stdin.write((wire + "\n").encode())
+            await stdin.drain()
             continue
         channel = response.get("stream")
         if channel:
@@ -729,22 +844,58 @@ async def execute_eval(
 
     key = _session_key(context)
     _reap_idle(time.monotonic())
+    idle = _KERNELS.get(key)
+    if idle is not None and idle.process.returncode is not None:
+        # OS-killed interpreters lose the same namespace as LRU/TTL eviction.
+        # Refuse the first subsequent cell before a fresh-state branch can
+        # silently repeat an external effect.
+        _KERNELS.pop(key)
+        _retire(idle)
+        _record_reset(key, "idle Python kernel exited")
+
+    reset = _LOST_KERNELS.pop(key, None)
+    if reset is not None:
+        result = _error(
+            tool_call_id,
+            "eval",
+            f"Session state was reset: {reset}. Code was NOT run. "
+            "Variables/imports are gone; rebuild the namespace explicitly "
+            "in the next eval call.",
+        )
+        result.details = {"kernel_reset": True, "reset_reason": reset, "code_executed": False}
+        return result
+
+    if key in _ACTIVE_KERNELS:
+        return _error(
+            tool_call_id,
+            "eval",
+            "Session kernel is busy; wait for the current eval call to finish.",
+        )
+    _ACTIVE_KERNELS.add(key)
 
     kernel = _KERNELS.pop(key, None)
-    if kernel is not None and kernel.process.returncode is not None:
-        # Dead husk (prior crash whose retire task has since reaped it) —
-        # never send a request to a corpse.
-        kernel = None
     if kernel is None:
         try:
             kernel = await _spawn(_safe_cwd(context))
         except OSError as exc:
+            _ACTIVE_KERNELS.discard(key)
+            _CLOSE_ON_RETURN.discard(key)
             return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
+        except BaseException:
+            _ACTIVE_KERNELS.discard(key)
+            _CLOSE_ON_RETURN.discard(key)
+            raise
     kernel.last_used = time.monotonic()
 
     request_id = uuid.uuid4().hex
+    dispatch = context.dispatch_tool if context is not None else None
     exchange = asyncio.create_task(
-        _exchange(kernel, {"id": request_id, "code": params.code}, request_id)
+        _exchange(
+            kernel,
+            {"id": request_id, "code": params.code, "tool_bridge": callable(dispatch)},
+            request_id,
+            dispatch_tool=dispatch,
+        )
     )
     abort_waiter = asyncio.create_task(signal.wait()) if signal is not None else None
 
@@ -795,6 +946,11 @@ async def execute_eval(
                 await abort_waiter
         if externally_cancelled:
             _retire(kernel)
+        # No await between releasing active ownership and either retirement or
+        # _remember below; disposal cannot miss a kernel in a transition gap.
+        dispose_requested = key in _CLOSE_ON_RETURN
+        _CLOSE_ON_RETURN.discard(key)
+        _ACTIVE_KERNELS.discard(key)
 
     if aborted or timed_out:
         # The code may be mid-run inside the kernel: reuse is not an option.
@@ -822,8 +978,13 @@ async def execute_eval(
 
     # Success: the kernel stays resident for the next call.
     kernel.last_used = time.monotonic()
-    _remember(key, kernel)
-    return await _render(tool_call_id, response or {}, context, on_update)
+    if dispose_requested:
+        _retire(kernel)
+    else:
+        _remember(key, kernel)
+    result = await _render(tool_call_id, response or {}, context, on_update)
+    result.details = {**(result.details or {}), "kernel_generation": kernel.generation}
+    return result
 
 
 async def _render(
@@ -954,7 +1115,11 @@ def build_eval_tool() -> AgentTool:
             "library behaviour: cheaper and safer than bash one-shots. The "
             "trailing expression's value is returned. display(value) shows "
             "output to the user only, excluded from your context; use it "
-            "instead of print() when only the human needs to see something."
+            "instead of print() when only the human needs to see something. "
+            "In foreground calls, tool(name, **arguments) invokes an available "
+            "tool through its normal validation and approval gate and returns "
+            "a result dictionary; compose reads/filtering locally and print "
+            "only the answer. Background kernels do not support tool()."
         ),
         parameters=EvalParams.model_json_schema(),
         approval_tier="exec",

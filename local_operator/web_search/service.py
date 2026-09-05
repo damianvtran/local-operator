@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
+from local_operator.web_search.io import WebReadIO
 from local_operator.web_search.models import (
     DEFAULT_WEB_SEARCH_CONFIG,
     PROVIDER_IDS,
@@ -146,11 +147,13 @@ class WebSearchService:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         tavily_oauth_search: TavilyOAuthSearch | None = None,
+        io: WebReadIO | None = None,
     ) -> None:
         self.settings = settings
         self.credentials = credentials
         self.transport = transport
         self.tavily_oauth_search = tavily_oauth_search
+        self.io = io
 
     def candidates(self, forced_provider: SearchProviderId | None = None) -> list[SearchProviderId]:
         if not self.settings.enabled:
@@ -188,7 +191,26 @@ class WebSearchService:
             )
 
         timeout = httpx.Timeout(self.settings.timeout_seconds)
-        async with httpx.AsyncClient(
+        owner = self.io or WebReadIO()
+        try:
+            return await self._search_with_client(
+                owner, timeout, candidates, clean_query, limit, failures
+            )
+        finally:
+            if self.io is None:
+                await owner.aclose()
+
+    async def _search_with_client(
+        self,
+        owner: WebReadIO,
+        timeout: httpx.Timeout,
+        candidates: list[SearchProviderId],
+        clean_query: str,
+        limit: int,
+        failures: list[str],
+    ) -> SearchResponse:
+        async with owner.client(
+            ("search", self.settings.timeout_seconds, id(self.transport)),
             timeout=timeout,
             follow_redirects=True,
             transport=self.transport,

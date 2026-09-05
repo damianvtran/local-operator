@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message, ToolContext, Usage
+from local_operator.harness.types import (
+    CustomMessage,
+    Message,
+    TextContent,
+    ToolContext,
+    Usage,
+)
 from local_operator.mcp.tool_bridge import format_mcp_result
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -508,3 +514,100 @@ def test_entry_from_json_rejects_bad_rows():
         TranscriptEntry.from_json('{"id": "a", "type": "message"}') is not None
     )  # payload defaults
     assert TranscriptEntry.from_json('{"ts": 1, "type": "message"}') is None  # missing id
+
+
+@pytest.mark.asyncio
+async def test_message_batch_fsyncs_once_off_loop_and_indexes_after_commit(tmp_path, monkeypatch):
+    """Disk spikes cannot park sibling sessions; one closed batch is one commit."""
+    import os
+    import threading
+
+    loop_thread = threading.get_ident()
+    calls = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        calls.append(threading.get_ident())
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    transcript = Transcript(tmp_path / "batch")
+    messages = [Message.user(str(index)) for index in range(12)]
+    rows = await transcript.append_messages(messages)
+    assert len(calls) == 1
+    assert all(thread != loop_thread for thread in calls)
+    assert [row.id for row in rows] == [message.id for message in messages]
+    assert all(transcript.has_entry(message.id) for message in messages)
+    newest = transcript.latest_user_entry()
+    assert newest is not None and newest.id == messages[-1].id
+    assert [row.id for row in Transcript(transcript.directory).entries()] == [
+        m.id for m in messages
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_write_settles_before_successor_and_publishes_durable_rows(
+    tmp_path, monkeypatch
+):
+    """Cancellation cannot release the journal lock while its syscall is live."""
+    import asyncio
+    import threading
+
+    transcript = Transcript(tmp_path / "cancelled")
+    started = threading.Event()
+    release = threading.Event()
+    original = transcript._write_entries
+
+    def write(rows):
+        if rows[0].id == "first":
+            started.set()
+            assert release.wait(10), "test did not release the disk worker"
+        original(rows)
+
+    monkeypatch.setattr(transcript, "_write_entries", write)
+    first = asyncio.create_task(transcript.append_message(Message.user("one", id="first")))
+    assert await asyncio.to_thread(started.wait, 10)
+    first.cancel()
+    second = asyncio.create_task(transcript.append_message(Message.user("two", id="second")))
+    assert not transcript.has_entry("first")
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+    assert [entry.id for entry in transcript.entries()] == ["first", "second"]
+    assert [entry.id for entry in Transcript(transcript.directory).entries()] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_fold_cannot_replace_a_successors_new_message(tmp_path, monkeypatch):
+    """Append and atomic file compaction share the same cancellation boundary."""
+    import asyncio
+    import threading
+
+    transcript = Transcript(tmp_path / "fold-cancel")
+    old = Message(role="tool", content=[TextContent(text="large " * 2000)], tool_call_id="old")
+    await transcript.append_message(old)
+    await transcript.append_prune(old.id, "pruned")
+    entered = threading.Event()
+    release = threading.Event()
+    original = transcript._replace_file
+
+    def replace(payload):
+        entered.set()
+        assert release.wait(10), "test did not release the file replacement"
+        original(payload)
+
+    monkeypatch.setattr(transcript, "_replace_file", replace)
+    fold = asyncio.create_task(transcript.compact_file(min_reclaim_bytes=0))
+    assert await asyncio.to_thread(entered.wait, 10)
+    fold.cancel()
+    append = asyncio.create_task(transcript.append_message(Message.user("new", id="new")))
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await fold
+    await append
+    reopened = Transcript(transcript.directory)
+    assert reopened.has_entry("new")
+    assert transcript.has_entry("new")
+    history = reopened.build_llm_history()
+    assert any(isinstance(message, Message) and message.text == "new" for message in history)

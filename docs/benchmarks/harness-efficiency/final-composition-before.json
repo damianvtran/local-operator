@@ -1,0 +1,10 @@
+{
+  "source": "/Users/damian/workspace/repos/lo-harness-baseline",
+  "python": "/Users/damian/workspace/repos/lo-harness-baseline/.venv/bin/python",
+  "loop_sha256": "4bb63f1b35186da349fb4f2870eebe22d7a54dbcd1ec149ab35ad9613ae68c8d",
+  "plan": "native",
+  "accepted": true,
+  "actual_reads": 3,
+  "model_requests": 4,
+  "retained_tool_result_bytes": 150078
+}

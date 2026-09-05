@@ -1,0 +1,36 @@
+{
+  "source": "/Users/damian/workspace/repos/lo-harness-efficiency/local_operator/tools/builtin.py",
+  "python": "/Users/damian/workspace/repos/lo-harness-efficiency/.venv/bin/python",
+  "short_bash_ms": [
+    16.94479095749557,
+    64.66816598549485,
+    29.293791041709483,
+    31.74870798829943,
+    68.47025000024587,
+    24.126417003571987,
+    44.639458996243775,
+    16.034375061281025,
+    37.49258304014802,
+    66.18195807095617,
+    58.50158305838704,
+    36.42645908985287
+  ],
+  "short_bash_median_ms": 36.959521065000445,
+  "capture": [
+    {
+      "produced_mib": 1,
+      "peak_python_mib": 4.09423828125,
+      "wall_s": 0.11494412505999207
+    },
+    {
+      "produced_mib": 32,
+      "peak_python_mib": 28.140999794006348,
+      "wall_s": 0.5789059998933226
+    }
+  ],
+  "web": {
+    "requests": 12,
+    "tcp_connections": 1,
+    "wall_ms": 249.3036249652505
+  }
+}

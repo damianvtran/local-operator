@@ -57,7 +57,9 @@ import reprlib
 import shlex
 import subprocess
 import sys
+import threading
 import traceback
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -74,6 +76,66 @@ TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]
 #: the same moment — writing to ``sys.stdout`` there would land in the capture
 #: buffer and never be seen.
 _PROTOCOL_OUT = sys.stdout
+_PROTOCOL_IN = sys.stdin
+
+# A worker can ask the parent to execute a harness tool, but cannot grant
+# itself one. The parent resolves only the current session's available or
+# explicitly discovered tools and repeats normal validation/approval. Keeping
+# the wire synchronous makes a Python fetch/filter/join pipeline one eval cell
+# without another model turn or concurrent mutations of the worker namespace.
+_BRIDGE_LOCK = threading.Lock()
+_ACTIVE_BRIDGE: tuple[str, bool] = ("", False)
+_BRIDGE_FRAME_LIMIT = 1_000_000
+_EXECUTION_THREAD = threading.get_ident()
+
+
+def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
+    """Execute one approved harness tool and return its structured ToolResult.
+
+    Read ``result['is_error']`` and ``result['content']`` before consuming it.
+    Results stay in Python unless the cell prints or returns them, allowing a
+    pipeline to project just the fields needed by the next reasoning step.
+    Errors remain data exactly as with direct calls. This helper is rebound
+    per cell, and reads the current cell identity even through an old alias.
+    """
+    # Only the foreground cell may consume protocol input. A Python thread can
+    # outlive its cell and otherwise steal the next cell's request/response or
+    # inherit its capability through the global bridge state. Check BEFORE the
+    # lock so stale threads cannot block the valid foreground reader either.
+    if threading.get_ident() != _EXECUTION_THREAD:
+        raise RuntimeError("Harness tool calls require the foreground eval execution thread.")
+    with _BRIDGE_LOCK:
+        request_id, enabled = _ACTIVE_BRIDGE
+        if not enabled:
+            raise RuntimeError("Harness tool calls are unavailable in this eval context.")
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool name must be a nonempty string")
+        call_id = uuid.uuid4().hex
+        frame = json.dumps(
+            {
+                "id": request_id,
+                "tool_call": {
+                    "name": name,
+                    "arguments": arguments,
+                    "call_id": call_id,
+                },
+            }
+        )
+        if len(frame.encode()) > _BRIDGE_FRAME_LIMIT:
+            raise ValueError("tool call exceeds the 1 MB bridge request limit")
+        _PROTOCOL_OUT.write(frame + "\n")
+        _PROTOCOL_OUT.flush()
+        line = _PROTOCOL_IN.readline()
+        if not line:
+            raise RuntimeError("Harness tool bridge closed before returning a result.")
+        response = json.loads(line)
+        if response.get("id") != request_id or response.get("call_id") != call_id:
+            raise RuntimeError("Harness tool bridge returned an unmatched result.")
+        result = response.get("tool_result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Harness tool bridge returned an invalid result.")
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Disclosure-gated redaction of subprocess argv in error rendering
@@ -454,6 +516,9 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
     display_sink = _DisplaySink(DISPLAY_CHAR_LIMIT)
     # Rebound per request (see _make_display).
     namespace["display"] = _make_display(display_sink)
+    namespace["tool"] = _call_tool
+    global _ACTIVE_BRIDGE
+    _ACTIVE_BRIDGE = (str(request.get("id", "")), bool(request.get("tool_bridge")))
 
     request_id = request.get("id", "")
     # Record the source BEFORE running it: a failure in this very cell can
@@ -491,6 +556,12 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
     except BaseException as exc:  # noqa: BLE001 — user code failing is data
         ok = False
         error = _format_error(exc)
+        if len(error) > STREAM_CHAR_LIMIT:
+            error = error[:STREAM_CHAR_LIMIT] + TRUNCATED_MARKER
+    finally:
+        # Background threads left behind by arbitrary Python code cannot issue
+        # tool calls between cells using an expired turn's authority.
+        _ACTIVE_BRIDGE = ("", False)
     return {
         "id": request.get("id", ""),
         "ok": ok,

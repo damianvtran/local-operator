@@ -1,0 +1,36 @@
+{
+  "source": "/Users/damian/workspace/repos/lo-harness-baseline/local_operator/tools/builtin.py",
+  "python": "/Users/damian/workspace/repos/lo-harness-baseline/.venv/bin/python",
+  "short_bash_ms": [
+    289.15945801418275,
+    268.6736671021208,
+    266.4270830573514,
+    283.9769170386717,
+    273.4469579299912,
+    268.57066701631993,
+    269.3440420553088,
+    277.7659168932587,
+    263.80658394191414,
+    298.5719999996945,
+    349.29949999786913,
+    281.54274995904416
+  ],
+  "short_bash_median_ms": 275.60643741162494,
+  "capture": [
+    {
+      "produced_mib": 1,
+      "peak_python_mib": 4.038317680358887,
+      "wall_s": 0.2908245410071686
+    },
+    {
+      "produced_mib": 32,
+      "peak_python_mib": 140.04818153381348,
+      "wall_s": 0.6728449590737
+    }
+  ],
+  "web": {
+    "requests": 12,
+    "tcp_connections": 12,
+    "wall_ms": 303.3589581027627
+  }
+}

@@ -20,6 +20,7 @@ disk fills (the incident that shaped :mod:`local_operator.tools.spill`).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -46,6 +47,7 @@ from local_operator.web_fetch.render import (
     render_json,
     render_text,
 )
+from local_operator.web_search.io import WebReadIO
 
 #: Sidecar directory for the URL→spill cache index. A sibling of the spill store
 #: under the config dir (honouring ``LOCAL_OPERATOR_CONFIG_DIR``) so a test or
@@ -444,9 +446,10 @@ class WebFetchService:
     """Resolve settings and run one SSRF-guarded, bounded, cached fetch.
 
     ``transport`` is injectable purely for tests (httpx ``MockTransport``); in
-    production it is ``None`` and httpx opens real connections. The service is
-    cheap to construct per call — it holds no connection state — so the tool
-    builds a fresh one each invocation, mirroring ``WebSearchService``.
+    production it is ``None`` and httpx opens real connections. Services remain
+    cheap per-call views of settings; the session-owned ``io`` retains bounded
+    per-origin pools. Embedders without an owner use a temporary pool that is
+    closed before returning, so no event-loop or connection lifetime is leaked.
     """
 
     def __init__(
@@ -454,9 +457,11 @@ class WebFetchService:
         settings: WebFetchSettings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        io: WebReadIO | None = None,
     ) -> None:
         self.settings = settings
         self.transport = transport
+        self.io = io
 
     async def fetch(
         self,
@@ -477,29 +482,33 @@ class WebFetchService:
         ceiling = max(max_bytes if max_bytes is not None else self.settings.max_bytes, 1)
         timeout = timeout_seconds if timeout_seconds is not None else self.settings.timeout_seconds
 
-        async with httpx.AsyncClient(
-            transport=self.transport,
-            follow_redirects=False,
-            timeout=timeout,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            # Enrichment (design §6 step 3): before scraping HTML, try the cheap,
-            # high-value candidates that many docs sites expose — a ``.md`` twin
-            # and content negotiation. If one yields substantial non-HTML text we
-            # use it; otherwise fall through to the plain page. Gated by the
-            # ``enrich`` switch and skipped for ``raw`` (the caller asked for the
-            # source verbatim, not a cleaner rendition).
-            if self.settings.enrich and not raw:
-                enriched = await self._try_enrichment(client, normalized, ceiling)
-                if enriched is not None:
-                    return enriched
-            final_url, status, headers, body, complete = await self._follow(
-                client, normalized, ceiling
-            )
-            return self._render(normalized, final_url, status, headers, body, complete, raw)
+        owner = self.io or WebReadIO()
+        try:
+            return await self._fetch_owned(owner, normalized, ceiling, timeout, raw)
+        finally:
+            if self.io is None:
+                await owner.aclose()
+
+    async def _fetch_owned(
+        self, owner: WebReadIO, normalized: str, ceiling: int, timeout: float, raw: bool
+    ) -> FetchResult:
+        # Enrichment (design §6 step 3): before scraping HTML, try the cheap,
+        # high-value candidates that many docs sites expose — a ``.md`` twin
+        # and content negotiation. If one yields substantial non-HTML text we
+        # use it; otherwise fall through to the plain page. Gated by the
+        # ``enrich`` switch and skipped for ``raw`` (the caller asked for the
+        # source verbatim, not a cleaner rendition).
+        if self.settings.enrich and not raw:
+            enriched = await self._try_enrichment(owner, normalized, ceiling, timeout)
+            if enriched is not None:
+                return enriched
+        final_url, status, headers, body, complete = await self._follow(
+            owner, normalized, ceiling, timeout
+        )
+        return self._render(normalized, final_url, status, headers, body, complete, raw)
 
     async def _follow(
-        self, client: httpx.AsyncClient, start_url: str, ceiling: int
+        self, owner: WebReadIO, start_url: str, ceiling: int, timeout: float
     ) -> tuple[str, int, dict[str, str], bytes, bool]:
         """Drive the manual, re-validating redirect loop and return the final hop.
 
@@ -516,10 +525,22 @@ class WebFetchService:
             # this check and the socket open (M1). Re-run on EVERY hop: each
             # redirect target is validated AND pinned independently, or a 302 to
             # a rebinding host would reopen the window.
-            pinned_ip = validate_public_url(current, allow_private=self.settings.allow_private)
-            status, headers, body, complete = await self._stream_once(
-                client, current, ceiling, pinned_ip
+            # DNS can block even before HTTP starts. Validation still runs for
+            # EVERY request/hop, including reused connections and enrichment.
+            pinned_ip = await asyncio.to_thread(
+                validate_public_url, current, allow_private=self.settings.allow_private
             )
+            origin = httpx.URL(current)
+            async with owner.client(
+                ("fetch", origin.scheme, origin.host, origin.port, timeout, id(self.transport)),
+                transport=self.transport,
+                follow_redirects=False,
+                timeout=timeout,
+                headers={"User-Agent": USER_AGENT},
+            ) as client:
+                status, headers, body, complete = await self._stream_once(
+                    client, current, ceiling, pinned_ip
+                )
             location = headers.get("location")
             if status in (301, 302, 303, 307, 308) and location:
                 current = urljoin(current, location)
@@ -530,7 +551,7 @@ class WebFetchService:
         )
 
     async def _try_enrichment(
-        self, client: httpx.AsyncClient, url: str, ceiling: int
+        self, owner: WebReadIO, url: str, ceiling: int, timeout: float
     ) -> FetchResult | None:
         """Attempt the cheap enrichment candidates; return a result or ``None``.
 
@@ -553,7 +574,7 @@ class WebFetchService:
         for candidate in _enrichment_candidates(url):
             try:
                 final_url, status, headers, body, complete = await self._follow(
-                    client, candidate, ceiling
+                    owner, candidate, ceiling, timeout
                 )
             except FetchError:
                 # A blocked/failed probe must not sink the primary fetch; a

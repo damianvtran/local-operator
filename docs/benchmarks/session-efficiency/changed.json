@@ -1,0 +1,59 @@
+{
+  "checkout": "lo-harness-efficiency",
+  "source_sha256": {
+    "local_operator/session/session.py": "ce8bf95470bc538f4fcb71e0600510c46feab112d4d80b33f5308b720d8797cf",
+    "local_operator/session/transcript.py": "d6484530149e8897b8ab4b228011033250ddbe2562b7744d9239d27e055eed60",
+    "local_operator/session_factory.py": "2fbada67af5fe891816fbfb6c4b30c04ce924ce79d69353a60cfbff7e014f29c",
+    "local_operator/prompts_api.py": "df89dd29f3f3f5997e71ff4b7735363c0ef56f3056fbde6abf99d8bd81b075cb",
+    "local_operator/harness/loop.py": "e559a7e27daa981a078beba81f560d4cfa72f28acaa580accbe06ce144db1e65",
+    "local_operator/providers/clients.py": "a854c066e2e2ab82699be16df72dde0ff64e486f55aa7a8b0664ce2dbc200842"
+  },
+  "paired_flush_48_messages": {
+    "median_ms": 1.3452079147100449,
+    "samples_ms": [
+      2.8564579552039504,
+      1.1626670602709055,
+      1.2396249221637845,
+      1.1230000527575612,
+      1.6755409305915236,
+      1.3452079147100449,
+      1.420708023943007
+    ],
+    "fsync_counts": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "event_loop_fsync_counts": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "prompt_prepare_100_calls_5000_rows": {
+    "median_thread_cpu_ms": 0.25645800000001495,
+    "samples_thread_cpu_ms": [
+      0.2723330000000135,
+      0.25645800000001495,
+      0.23558299999998367,
+      0.2526669999999842,
+      0.547084000000031,
+      0.4682500000000034,
+      0.23570800000000114
+    ]
+  },
+  "goal_change_real_anthropic_wire": {
+    "initial_chars": 260365,
+    "matching_prefix_chars": 260324,
+    "matching_prefix_ratio": 0.9998425287577055,
+    "system_blocks_unchanged": true
+  }
+}

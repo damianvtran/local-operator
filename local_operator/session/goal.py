@@ -7,10 +7,11 @@ reference each other directly. Both are handed the same ``GoalState``, which
 makes a ``/goal`` change visible to the very next turn's prompt without
 rebuilding the session or reaching through private attributes.
 
-The goal rides the VOLATILE TAIL of the system blocks (see
-``prompts_api.build_system_blocks``). That placement is a cache decision:
-editing the goal invalidates only the tail, never the stable instruction /
-tool-inventory / env prefix that keeps the provider cache warm.
+The goal is part of the desired session-state section. Production sessions
+retain their first system-prefix snapshot and append subsequent goal changes
+as host-state records before the next model request. This preserves history's
+cache prefix while keeping the newest goal authoritative.
+
 """
 
 from __future__ import annotations

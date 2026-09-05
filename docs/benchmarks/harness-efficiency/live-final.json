@@ -1,0 +1,5165 @@
+{
+  "design": {
+    "date": "2026-09-04",
+    "baseline": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+    "candidate": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+    "model": "openai/gpt-5.6-sol",
+    "effort": "low",
+    "repeats_per_arm_task": 5,
+    "tasks": [
+      "repair",
+      "aggregate"
+    ],
+    "cache_isolation": "Fresh config/transcripts/task files; intentionally shared native home catalogue/cache outside prompt timing; remote cache/load/sampling uncontrolled.",
+    "sampling_seed": "No provider sampling seed; synthetic fixture inputs seeded by paired repeat.",
+    "source_validation": "Each own venv verified from outside repo; exact HEAD and clean runtime required before launch; runtime semantic/content hashes stable before/after every cell."
+  },
+  "analysis": {
+    "rows": [
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "repeat": 1,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 32.987025292008184,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 32.10468858294189,
+        "non_provider_elapsed_s": 0.8823367090662941,
+        "input_tokens": 36775,
+        "output_tokens": 1242,
+        "reasoning_tokens": 165,
+        "cache_read_tokens": 16640,
+        "context_admission_errors": [
+          -369,
+          -410,
+          -552
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "repeat": 2,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 37.37589737505186,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 36.86173245916143,
+        "non_provider_elapsed_s": 0.5141649158904329,
+        "input_tokens": 49752,
+        "output_tokens": 1173,
+        "reasoning_tokens": 136,
+        "cache_read_tokens": 24960,
+        "context_admission_errors": [
+          -4489,
+          -884,
+          -221
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "repeat": 3,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 40.359668124932796,
+        "model_calls": 5,
+        "tool_calls": 8,
+        "provider_elapsed_s": 38.928577915998176,
+        "non_provider_elapsed_s": 1.43109020893462,
+        "input_tokens": 50650,
+        "output_tokens": 1465,
+        "reasoning_tokens": 117,
+        "cache_read_tokens": 33280,
+        "context_admission_errors": [
+          -1141,
+          -402,
+          -915,
+          -180
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "repeat": 4,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 34.97006299998611,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 33.27273249998689,
+        "non_provider_elapsed_s": 1.6973304999992251,
+        "input_tokens": 49509,
+        "output_tokens": 1237,
+        "reasoning_tokens": 82,
+        "cache_read_tokens": 24960,
+        "context_admission_errors": [
+          -4514,
+          -576,
+          -519
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "repeat": 5,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 32.1746129168896,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 31.13896812486928,
+        "non_provider_elapsed_s": 1.035644792020321,
+        "input_tokens": 50188,
+        "output_tokens": 1205,
+        "reasoning_tokens": 72,
+        "cache_read_tokens": 24960,
+        "context_admission_errors": [
+          -4492,
+          -560,
+          -1296
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "repeat": 1,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 36.463694209000096,
+        "model_calls": 6,
+        "tool_calls": 7,
+        "provider_elapsed_s": 35.69859804119915,
+        "non_provider_elapsed_s": 0.765096167800948,
+        "input_tokens": 56717,
+        "output_tokens": 1352,
+        "reasoning_tokens": 86,
+        "cache_read_tokens": 8320,
+        "context_admission_errors": [
+          -238,
+          -311,
+          -464,
+          -614,
+          -219
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "repeat": 2,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 44.43847549997736,
+        "model_calls": 7,
+        "tool_calls": 9,
+        "provider_elapsed_s": 43.55609616602305,
+        "non_provider_elapsed_s": 0.8823793339543045,
+        "input_tokens": 68779,
+        "output_tokens": 1441,
+        "reasoning_tokens": 75,
+        "cache_read_tokens": 25088,
+        "context_admission_errors": [
+          -181,
+          -453,
+          -648,
+          -457,
+          -619,
+          -209
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "repeat": 3,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 39.95060724997893,
+        "model_calls": 6,
+        "tool_calls": 7,
+        "provider_elapsed_s": 39.41851841798052,
+        "non_provider_elapsed_s": 0.5320888319984078,
+        "input_tokens": 56858,
+        "output_tokens": 1430,
+        "reasoning_tokens": 119,
+        "cache_read_tokens": 24960,
+        "context_admission_errors": [
+          -238,
+          -310,
+          -468,
+          -668,
+          -244
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "repeat": 4,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 40.88019166595768,
+        "model_calls": 6,
+        "tool_calls": 6,
+        "provider_elapsed_s": 39.92945216631051,
+        "non_provider_elapsed_s": 0.9507394996471703,
+        "input_tokens": 56683,
+        "output_tokens": 1470,
+        "reasoning_tokens": 159,
+        "cache_read_tokens": 33280,
+        "context_admission_errors": [
+          -191,
+          -308,
+          -469,
+          -697,
+          -251
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "repeat": 5,
+        "accepted": true,
+        "failure": null,
+        "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+        "source_stable": true,
+        "elapsed_s": 41.57093529193662,
+        "model_calls": 6,
+        "tool_calls": 10,
+        "provider_elapsed_s": 39.91786820802372,
+        "non_provider_elapsed_s": 1.6530670839129016,
+        "input_tokens": 68518,
+        "output_tokens": 1510,
+        "reasoning_tokens": 105,
+        "cache_read_tokens": 37632,
+        "context_admission_errors": [
+          -1955,
+          -1099,
+          -483,
+          -581,
+          -292
+        ],
+        "bound_measured_errors": [],
+        "source_hash": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700"
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "repeat": 1,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 54.13494683406316,
+        "model_calls": 4,
+        "tool_calls": 5,
+        "provider_elapsed_s": 53.237042458029464,
+        "non_provider_elapsed_s": 0.8979043760336936,
+        "input_tokens": 52115,
+        "output_tokens": 1358,
+        "reasoning_tokens": 99,
+        "cache_read_tokens": 17024,
+        "context_admission_errors": [
+          -57,
+          -27,
+          -57
+        ],
+        "bound_measured_errors": [
+          -57,
+          -27,
+          -57
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "repeat": 2,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 29.23298670805525,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 28.83391149993986,
+        "non_provider_elapsed_s": 0.39907520811539143,
+        "input_tokens": 52063,
+        "output_tokens": 1137,
+        "reasoning_tokens": 108,
+        "cache_read_tokens": 16896,
+        "context_admission_errors": [
+          -57,
+          -25,
+          -28
+        ],
+        "bound_measured_errors": [
+          -57,
+          -25,
+          -28
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "repeat": 3,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 32.48401195905171,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 31.94972633384168,
+        "non_provider_elapsed_s": 0.5342856252100319,
+        "input_tokens": 51194,
+        "output_tokens": 1264,
+        "reasoning_tokens": 184,
+        "cache_read_tokens": 17024,
+        "context_admission_errors": [
+          -57,
+          -25,
+          -28
+        ],
+        "bound_measured_errors": [
+          -57,
+          -25,
+          -28
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "repeat": 4,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 32.36735799990129,
+        "model_calls": 4,
+        "tool_calls": 4,
+        "provider_elapsed_s": 31.3032707918901,
+        "non_provider_elapsed_s": 1.0640872080111876,
+        "input_tokens": 42300,
+        "output_tokens": 1285,
+        "reasoning_tokens": 130,
+        "cache_read_tokens": 0,
+        "context_admission_errors": [
+          -54,
+          -24,
+          -27
+        ],
+        "bound_measured_errors": [
+          -54,
+          -24,
+          -27
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "repeat": 5,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 33.08392541704234,
+        "model_calls": 4,
+        "tool_calls": 7,
+        "provider_elapsed_s": 32.19619295804296,
+        "non_provider_elapsed_s": 0.8877324589993805,
+        "input_tokens": 39601,
+        "output_tokens": 1370,
+        "reasoning_tokens": 85,
+        "cache_read_tokens": 16896,
+        "context_admission_errors": [
+          -71,
+          -26,
+          -73
+        ],
+        "bound_measured_errors": [
+          -71,
+          -26,
+          -73
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "repeat": 1,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 45.3360694590956,
+        "model_calls": 7,
+        "tool_calls": 8,
+        "provider_elapsed_s": 44.56279399979394,
+        "non_provider_elapsed_s": 0.773275459301658,
+        "input_tokens": 68975,
+        "output_tokens": 1470,
+        "reasoning_tokens": 132,
+        "cache_read_tokens": 8448,
+        "context_admission_errors": [
+          -54,
+          -55,
+          -29,
+          -36,
+          -25,
+          -23
+        ],
+        "bound_measured_errors": [
+          -54,
+          -55,
+          -29,
+          -36,
+          -25,
+          -23
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "repeat": 2,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 33.90181833400857,
+        "model_calls": 6,
+        "tool_calls": 7,
+        "provider_elapsed_s": 33.37012029089965,
+        "non_provider_elapsed_s": 0.5316980431089178,
+        "input_tokens": 57883,
+        "output_tokens": 1238,
+        "reasoning_tokens": 118,
+        "cache_read_tokens": 25344,
+        "context_admission_errors": [
+          -69,
+          -24,
+          -29,
+          -34,
+          -23
+        ],
+        "bound_measured_errors": [
+          -69,
+          -24,
+          -29,
+          -34,
+          -23
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "repeat": 3,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 37.00627145799808,
+        "model_calls": 6,
+        "tool_calls": 6,
+        "provider_elapsed_s": 36.53920762508642,
+        "non_provider_elapsed_s": 0.46706383291166276,
+        "input_tokens": 57709,
+        "output_tokens": 1252,
+        "reasoning_tokens": 60,
+        "cache_read_tokens": 42624,
+        "context_admission_errors": [
+          -54,
+          -24,
+          -30,
+          -34,
+          -23
+        ],
+        "bound_measured_errors": [
+          -54,
+          -24,
+          -30,
+          -34,
+          -23
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "repeat": 4,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 37.37533829198219,
+        "model_calls": 6,
+        "tool_calls": 6,
+        "provider_elapsed_s": 36.72686129203066,
+        "non_provider_elapsed_s": 0.6484769999515265,
+        "input_tokens": 57996,
+        "output_tokens": 1379,
+        "reasoning_tokens": 111,
+        "cache_read_tokens": 42368,
+        "context_admission_errors": [
+          -54,
+          -24,
+          -29,
+          -39,
+          -27
+        ],
+        "bound_measured_errors": [
+          -54,
+          -24,
+          -29,
+          -39,
+          -27
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "repeat": 5,
+        "accepted": true,
+        "failure": null,
+        "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+        "source_stable": true,
+        "elapsed_s": 44.856863083085045,
+        "model_calls": 6,
+        "tool_calls": 7,
+        "provider_elapsed_s": 43.965042833122425,
+        "non_provider_elapsed_s": 0.8918202499626204,
+        "input_tokens": 58200,
+        "output_tokens": 1423,
+        "reasoning_tokens": 96,
+        "cache_read_tokens": 25472,
+        "context_admission_errors": [
+          -69,
+          -24,
+          -28,
+          -36,
+          -25
+        ],
+        "bound_measured_errors": [
+          -69,
+          -24,
+          -28,
+          -36,
+          -25
+        ],
+        "source_hash": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7"
+      }
+    ],
+    "groups": [
+      {
+        "arm": "baseline",
+        "task": "repair",
+        "n": 5,
+        "accepted": 5,
+        "elapsed_s": {
+          "mean": 40.660780783370136,
+          "median": 40.88019166595768,
+          "min": 36.463694209000096,
+          "max": 44.43847549997736
+        },
+        "model_calls": {
+          "mean": 6.2,
+          "median": 6,
+          "min": 6,
+          "max": 7
+        },
+        "tool_calls": {
+          "mean": 7.8,
+          "median": 7,
+          "min": 6,
+          "max": 10
+        },
+        "provider_elapsed_s": {
+          "mean": 39.70410659990739,
+          "median": 39.91786820802372,
+          "min": 35.69859804119915,
+          "max": 43.55609616602305
+        },
+        "non_provider_elapsed_s": {
+          "mean": 0.9566741834627465,
+          "median": 0.8823793339543045,
+          "min": 0.5320888319984078,
+          "max": 1.6530670839129016
+        },
+        "input_tokens": {
+          "mean": 61511,
+          "median": 56858,
+          "min": 56683,
+          "max": 68779
+        },
+        "output_tokens": {
+          "mean": 1440.6,
+          "median": 1441,
+          "min": 1352,
+          "max": 1510
+        },
+        "reasoning_tokens": {
+          "mean": 108.8,
+          "median": 105,
+          "min": 75,
+          "max": 159
+        },
+        "cache_read_fraction": 0.420347580107623,
+        "next_input_absolute_error": {
+          "median": 455.0,
+          "max": 1955,
+          "n": 26
+        }
+      },
+      {
+        "arm": "baseline",
+        "task": "aggregate",
+        "n": 5,
+        "accepted": 5,
+        "elapsed_s": {
+          "mean": 35.573453341773714,
+          "median": 34.97006299998611,
+          "min": 32.1746129168896,
+          "max": 40.359668124932796
+        },
+        "model_calls": {
+          "mean": 4.2,
+          "median": 4,
+          "min": 4,
+          "max": 5
+        },
+        "tool_calls": {
+          "mean": 4.8,
+          "median": 4,
+          "min": 4,
+          "max": 8
+        },
+        "provider_elapsed_s": {
+          "mean": 34.461339916591534,
+          "median": 33.27273249998689,
+          "min": 31.13896812486928,
+          "max": 38.928577915998176
+        },
+        "non_provider_elapsed_s": {
+          "mean": 1.1121134251821787,
+          "median": 1.035644792020321,
+          "min": 0.5141649158904329,
+          "max": 1.6973304999992251
+        },
+        "input_tokens": {
+          "mean": 47374.8,
+          "median": 49752,
+          "min": 36775,
+          "max": 50650
+        },
+        "output_tokens": {
+          "mean": 1264.4,
+          "median": 1237,
+          "min": 1173,
+          "max": 1465
+        },
+        "reasoning_tokens": {
+          "mean": 114.4,
+          "median": 117,
+          "min": 72,
+          "max": 165
+        },
+        "cache_read_fraction": 0.5268623825324856,
+        "next_input_absolute_error": {
+          "median": 568.0,
+          "max": 4514,
+          "n": 16
+        }
+      },
+      {
+        "arm": "candidate",
+        "task": "repair",
+        "n": 5,
+        "accepted": 5,
+        "elapsed_s": {
+          "mean": 39.6952721252339,
+          "median": 37.37533829198219,
+          "min": 33.90181833400857,
+          "max": 45.3360694590956
+        },
+        "model_calls": {
+          "mean": 6.2,
+          "median": 6,
+          "min": 6,
+          "max": 7
+        },
+        "tool_calls": {
+          "mean": 6.8,
+          "median": 7,
+          "min": 6,
+          "max": 8
+        },
+        "provider_elapsed_s": {
+          "mean": 39.032805208186616,
+          "median": 36.72686129203066,
+          "min": 33.37012029089965,
+          "max": 44.56279399979394
+        },
+        "non_provider_elapsed_s": {
+          "mean": 0.6624669170472771,
+          "median": 0.6484769999515265,
+          "min": 0.46706383291166276,
+          "max": 0.8918202499626204
+        },
+        "input_tokens": {
+          "mean": 60152.6,
+          "median": 57996,
+          "min": 57709,
+          "max": 68975
+        },
+        "output_tokens": {
+          "mean": 1352.4,
+          "median": 1379,
+          "min": 1238,
+          "max": 1470
+        },
+        "reasoning_tokens": {
+          "mean": 103.4,
+          "median": 111,
+          "min": 60,
+          "max": 132
+        },
+        "cache_read_fraction": 0.4796334655526112,
+        "next_input_absolute_error": {
+          "median": 29.0,
+          "max": 69,
+          "n": 26
+        }
+      },
+      {
+        "arm": "candidate",
+        "task": "aggregate",
+        "n": 5,
+        "accepted": 5,
+        "elapsed_s": {
+          "mean": 36.26064578362275,
+          "median": 32.48401195905171,
+          "min": 29.23298670805525,
+          "max": 54.13494683406316
+        },
+        "model_calls": {
+          "mean": 4,
+          "median": 4,
+          "min": 4,
+          "max": 4
+        },
+        "tool_calls": {
+          "mean": 4.8,
+          "median": 4,
+          "min": 4,
+          "max": 7
+        },
+        "provider_elapsed_s": {
+          "mean": 35.504028808348814,
+          "median": 31.94972633384168,
+          "min": 28.83391149993986,
+          "max": 53.237042458029464
+        },
+        "non_provider_elapsed_s": {
+          "mean": 0.756616975273937,
+          "median": 0.8877324589993805,
+          "min": 0.39907520811539143,
+          "max": 1.0640872080111876
+        },
+        "input_tokens": {
+          "mean": 47454.6,
+          "median": 51194,
+          "min": 39601,
+          "max": 52115
+        },
+        "output_tokens": {
+          "mean": 1282.8,
+          "median": 1285,
+          "min": 1137,
+          "max": 1370
+        },
+        "reasoning_tokens": {
+          "mean": 121.2,
+          "median": 108,
+          "min": 85,
+          "max": 184
+        },
+        "cache_read_fraction": 0.2859153801738925,
+        "next_input_absolute_error": {
+          "median": 28,
+          "max": 73,
+          "n": 15
+        }
+      }
+    ],
+    "pairs": [
+      {
+        "task": "repair",
+        "repeat": 1,
+        "delta_s": 8.872375250095502,
+        "delta_calls": 1,
+        "delta_output": 118
+      },
+      {
+        "task": "repair",
+        "repeat": 2,
+        "delta_s": -10.53665716596879,
+        "delta_calls": -1,
+        "delta_output": -203
+      },
+      {
+        "task": "repair",
+        "repeat": 3,
+        "delta_s": -2.9443357919808477,
+        "delta_calls": 0,
+        "delta_output": -178
+      },
+      {
+        "task": "repair",
+        "repeat": 4,
+        "delta_s": -3.504853373975493,
+        "delta_calls": 0,
+        "delta_output": -91
+      },
+      {
+        "task": "repair",
+        "repeat": 5,
+        "delta_s": 3.285927791148424,
+        "delta_calls": 0,
+        "delta_output": -87
+      },
+      {
+        "task": "aggregate",
+        "repeat": 1,
+        "delta_s": 21.147921542054974,
+        "delta_calls": 0,
+        "delta_output": 116
+      },
+      {
+        "task": "aggregate",
+        "repeat": 2,
+        "delta_s": -8.142910666996613,
+        "delta_calls": 0,
+        "delta_output": -36
+      },
+      {
+        "task": "aggregate",
+        "repeat": 3,
+        "delta_s": -7.875656165881082,
+        "delta_calls": -1,
+        "delta_output": -201
+      },
+      {
+        "task": "aggregate",
+        "repeat": 4,
+        "delta_s": -2.602705000084825,
+        "delta_calls": 0,
+        "delta_output": 48
+      },
+      {
+        "task": "aggregate",
+        "repeat": 5,
+        "delta_s": 0.9093125001527369,
+        "delta_calls": 0,
+        "delta_output": 165
+      }
+    ],
+    "caveat": "Descriptive fixed-source paired observations, not a causal performance estimate; remote sampling/load/cache and local scheduling remain uncontrolled."
+  },
+  "raw_scalar_results": [
+    {
+      "arm": "baseline",
+      "task": "aggregate",
+      "repeat": 1,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 32.987025292008184,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 32,
+        "actual_rows": 32
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0816380840260535,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.507310000015423,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 135,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 51,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.7662091670790687,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.094662958057597,
+          "usage": {
+            "input_tokens": 8943,
+            "output_tokens": 422,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 41,
+            "context_tokens": 8943
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8943,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8943,
+            8943
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9408449589973316,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.962242916924879,
+          "usage": {
+            "input_tokens": 9353,
+            "output_tokens": 580,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 73,
+            "context_tokens": 9353
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9353,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9353,
+            9353
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1086084579583257,
+          "stop_reason": "stop",
+          "elapsed_s": 3.540472707943991,
+          "usage": {
+            "input_tokens": 9905,
+            "output_tokens": 105,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9905
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "aggregate",
+      "repeat": 2,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 37.37589737505186,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 29,
+        "actual_rows": 29
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0024301660014316,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.336701082997024,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 129,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 49,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0544631250668317,
+          "stop_reason": "toolUse",
+          "elapsed_s": 18.4549944170285,
+          "usage": {
+            "input_tokens": 13063,
+            "output_tokens": 933,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 87,
+            "context_tokens": 13063
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13063,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13063,
+            13063
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.2265603750711307,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.839792084065266,
+          "usage": {
+            "input_tokens": 13947,
+            "output_tokens": 36,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 13947
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13947,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13947,
+            13947
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1890539170708507,
+          "stop_reason": "stop",
+          "elapsed_s": 11.230244875070639,
+          "usage": {
+            "input_tokens": 14168,
+            "output_tokens": 75,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 14168
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "aggregate",
+      "repeat": 3,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 40.359668124932796,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 28,
+        "actual_rows": 28
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.7400817499728873,
+          "stop_reason": "toolUse",
+          "elapsed_s": 6.4044175000162795,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 160,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 41,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 2.251447124988772,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.134378624963574,
+          "usage": {
+            "input_tokens": 9715,
+            "output_tokens": 418,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 45,
+            "context_tokens": 9715
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9715,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9715,
+            9715
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9982149159768596,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.39210779091809,
+          "usage": {
+            "input_tokens": 10117,
+            "output_tokens": 593,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10117
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10117,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10117,
+            10117
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.142365040956065,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.308948416030034,
+          "usage": {
+            "input_tokens": 11032,
+            "output_tokens": 185,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 31,
+            "context_tokens": 11032
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 11032,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            11032,
+            11032
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.2664244590559974,
+          "stop_reason": "stop",
+          "elapsed_s": 4.688725584070198,
+          "usage": {
+            "input_tokens": 11212,
+            "output_tokens": 109,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 11212
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "aggregate",
+      "repeat": 4,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 34.97006299998611,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 29,
+        "actual_rows": 29
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 2.995913124992512,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.062743291957304,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 92,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 12,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0316356669645756,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.354142499971204,
+          "usage": {
+            "input_tokens": 13088,
+            "output_tokens": 612,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 70,
+            "context_tokens": 13088
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13088,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13088,
+            13088
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9360935420263559,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.678171875071712,
+          "usage": {
+            "input_tokens": 13664,
+            "output_tokens": 423,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 13664
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13664,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13664,
+            13664
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.144284916925244,
+          "stop_reason": "stop",
+          "elapsed_s": 4.177674832986668,
+          "usage": {
+            "input_tokens": 14183,
+            "output_tokens": 110,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 14183
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "aggregate",
+      "repeat": 5,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 32.1746129168896,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 26,
+        "actual_rows": 26
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.066231874981895,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.28247987490613,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 89,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 9,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.2224764169659466,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.244809082942083,
+          "usage": {
+            "input_tokens": 13066,
+            "output_tokens": 590,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 63,
+            "context_tokens": 13066
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13066,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13066,
+            13066
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 2.5866864999989048,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.65628429199569,
+          "usage": {
+            "input_tokens": 13626,
+            "output_tokens": 427,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 13626
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13626,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            13626,
+            13626
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9748826670693234,
+          "stop_reason": "stop",
+          "elapsed_s": 4.955394875025377,
+          "usage": {
+            "input_tokens": 14922,
+            "output_tokens": 99,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 14922
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "repair",
+      "repeat": 1,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 36.463694209000096,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.9471720840083435,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.359363959054463,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 105,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9460034579969943,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.127866208087653,
+          "usage": {
+            "input_tokens": 8812,
+            "output_tokens": 38,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8812
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8812,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8812,
+            8812
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9822407499887049,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.168586792075075,
+          "usage": {
+            "input_tokens": 9123,
+            "output_tokens": 475,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 78,
+            "context_tokens": 9123
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9123,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9123,
+            9123
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.8538966659689322,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.190879666013643,
+          "usage": {
+            "input_tokens": 9587,
+            "output_tokens": 544,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9587
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9587,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9587,
+            9587
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0302334579173476,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.1977578329388052,
+          "usage": {
+            "input_tokens": 10201,
+            "output_tokens": 39,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10201
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10201,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10201,
+            10201
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.4316396249923855,
+          "stop_reason": "stop",
+          "elapsed_s": 4.654143583029509,
+          "usage": {
+            "input_tokens": 10420,
+            "output_tokens": 151,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10420
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "repair",
+      "repeat": 2,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 44.43847549997736,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.884495708043687,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.539473833050579,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 115,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.8344039579387754,
+          "stop_reason": "toolUse",
+          "elapsed_s": 6.108889666036703,
+          "usage": {
+            "input_tokens": 8755,
+            "output_tokens": 84,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8755
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8755,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8755,
+            8755
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0395561669720337,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.746776166954078,
+          "usage": {
+            "input_tokens": 9208,
+            "output_tokens": 58,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 16,
+            "context_tokens": 9208
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9208,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9208,
+            9208
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1769244170282036,
+          "stop_reason": "toolUse",
+          "elapsed_s": 9.64516591699794,
+          "usage": {
+            "input_tokens": 9856,
+            "output_tokens": 442,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 51,
+            "context_tokens": 9856
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9856,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9856,
+            9856
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.284229375072755,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.147493333090097,
+          "usage": {
+            "input_tokens": 10313,
+            "output_tokens": 550,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10313
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10313,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10313,
+            10313
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.7156227090163156,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.131409249966964,
+          "usage": {
+            "input_tokens": 10932,
+            "output_tokens": 39,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10932
+          }
+        },
+        {
+          "index": 7,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10932,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10932,
+            10932
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0989579999586567,
+          "stop_reason": "stop",
+          "elapsed_s": 4.236887999926694,
+          "usage": {
+            "input_tokens": 11141,
+            "output_tokens": 153,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 11141
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "repair",
+      "repeat": 3,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 39.95060724997893,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.5247703329659998,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.222240041941404,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 105,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 3.2631611669203267,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.295146459015086,
+          "usage": {
+            "input_tokens": 8812,
+            "output_tokens": 37,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8812
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8812,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8812,
+            8812
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 2.0534194589126855,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.39526995900087,
+          "usage": {
+            "input_tokens": 9122,
+            "output_tokens": 513,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 111,
+            "context_tokens": 9122
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9122,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9122,
+            9122
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.8916914579458535,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.111264207982458,
+          "usage": {
+            "input_tokens": 9590,
+            "output_tokens": 599,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9590
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9590,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9590,
+            9590
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9481422919780016,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.1323362089460716,
+          "usage": {
+            "input_tokens": 10258,
+            "output_tokens": 38,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10258
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10258,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10258,
+            10258
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.119883791077882,
+          "stop_reason": "stop",
+          "elapsed_s": 4.262261541094631,
+          "usage": {
+            "input_tokens": 10502,
+            "output_tokens": 138,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10502
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "repair",
+      "repeat": 4,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 40.88019166595768,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1487426250241697,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.388154917047359,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 80,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.051715958979912,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.1891393340192735,
+          "usage": {
+            "input_tokens": 8765,
+            "output_tokens": 35,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8765
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8765,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8765,
+            8765
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.8982495419913903,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.897092458093539,
+          "usage": {
+            "input_tokens": 9073,
+            "output_tokens": 553,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 151,
+            "context_tokens": 9073
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9073,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9073,
+            9073
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.2012471250491217,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.344087333069183,
+          "usage": {
+            "input_tokens": 9542,
+            "output_tokens": 627,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9542
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9542,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            9542,
+            9542
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.178748083068058,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.983264583046548,
+          "usage": {
+            "input_tokens": 10239,
+            "output_tokens": 39,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10239
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10239,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10239,
+            10239
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1851893330458552,
+          "stop_reason": "stop",
+          "elapsed_s": 4.127713541034609,
+          "usage": {
+            "input_tokens": 10490,
+            "output_tokens": 136,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10490
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "baseline",
+      "task": "repair",
+      "repeat": 5,
+      "source_head": "765c619bd9c7603241dc0bcdc2773ffbb2e9c9fa",
+      "source_hash_start": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "source_hash_end": "8e79a36d6d45d3612b20cbe22121ae5b26dde3bbe7b14b8f65245d995a1f8700",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "707df09927a3b4cf2535e2c916c71649ce3cf56d8e875d4c0740913c73177867",
+      "tool_schemas_sha256": "5d2a056c72697ff01129d6e9f0fad6192145420a6e229f3b8cfed90ef3d1ef24",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 41.57093529193662,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12685,
+            10148
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.1193127079168335,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.15860604098998,
+          "usage": {
+            "input_tokens": 8574,
+            "output_tokens": 111,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8574
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8574,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            8574,
+            8574
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.8099547910969704,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.316374332993291,
+          "usage": {
+            "input_tokens": 10529,
+            "output_tokens": 118,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10529
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10529,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            10529,
+            10529
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0206430000253022,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.827462750021368,
+          "usage": {
+            "input_tokens": 11628,
+            "output_tokens": 485,
+            "cache_read_tokens": 8320,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 71,
+            "context_tokens": 11628
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 11628,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            11628,
+            11628
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 0.9244100420037284,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.638878208003007,
+          "usage": {
+            "input_tokens": 12111,
+            "output_tokens": 509,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 12111
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 12111,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12111,
+            12111
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0183407500153407,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.8210219589527696,
+          "usage": {
+            "input_tokens": 12692,
+            "output_tokens": 119,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 26,
+            "context_tokens": 12692
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 12692,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12692,
+            12692
+          ],
+          "native_input_messages": 0,
+          "first_event_s": 1.0914524170802906,
+          "stop_reason": "stop",
+          "elapsed_s": 5.155524917063303,
+          "usage": {
+            "input_tokens": 12984,
+            "output_tokens": 168,
+            "cache_read_tokens": 12544,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 12984
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "aggregate",
+      "repeat": 1,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 54.13494683406316,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 32,
+        "actual_rows": 32
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.3662559579825029,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.5681068749399856,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 92,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 12,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 14299,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 13192,
+          "admission_estimate": [
+            14299,
+            13192
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 12,
+          "first_event_s": 1.0769389580236748,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.386010042042471,
+          "usage": {
+            "input_tokens": 13249,
+            "output_tokens": 638,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 66,
+            "context_tokens": 13249
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 14145,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 13979,
+          "admission_estimate": [
+            14145,
+            13979
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 78,
+          "first_event_s": 1.1698965829564258,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.095881666056812,
+          "usage": {
+            "input_tokens": 14006,
+            "output_tokens": 551,
+            "cache_read_tokens": 8576,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 21,
+            "context_tokens": 14006
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 16558,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 16052,
+          "admission_estimate": [
+            16558,
+            16052
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 99,
+          "first_event_s": 1.1394282080000266,
+          "stop_reason": "stop",
+          "elapsed_s": 23.187043874990195,
+          "usage": {
+            "input_tokens": 16109,
+            "output_tokens": 77,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 16109
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "aggregate",
+      "repeat": 2,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 29.23298670805525,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 29,
+        "actual_rows": 29
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.044165208004415,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.749156291014515,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 117,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 37,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 14330,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 13222,
+          "admission_estimate": [
+            14330,
+            13222
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 37,
+          "first_event_s": 1.02391304099001,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.790796875022352,
+          "usage": {
+            "input_tokens": 13279,
+            "output_tokens": 437,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 35,
+            "context_tokens": 13279
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 15082,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 14729,
+          "admission_estimate": [
+            15082,
+            14729
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 72,
+          "first_event_s": 1.5397254169220105,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.022492041927762,
+          "usage": {
+            "input_tokens": 14754,
+            "output_tokens": 481,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 36,
+            "context_tokens": 14754
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 15366,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 15251,
+          "admission_estimate": [
+            15366,
+            15251
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 108,
+          "first_event_s": 0.8737689579138532,
+          "stop_reason": "stop",
+          "elapsed_s": 3.27146629197523,
+          "usage": {
+            "input_tokens": 15279,
+            "output_tokens": 102,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 15279
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "aggregate",
+      "repeat": 3,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 32.48401195905171,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 28,
+        "actual_rows": 28
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.4932644589571282,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.541051208972931,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 127,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 47,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 14325,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 13220,
+          "admission_estimate": [
+            14325,
+            13220
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 47,
+          "first_event_s": 1.659529707976617,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.265029624919407,
+          "usage": {
+            "input_tokens": 13277,
+            "output_tokens": 453,
+            "cache_read_tokens": 8576,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 81,
+            "context_tokens": 13277
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 13830,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 13736,
+          "admission_estimate": [
+            13830,
+            13736
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 128,
+          "first_event_s": 1.3493705000728369,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.246060749981552,
+          "usage": {
+            "input_tokens": 13761,
+            "output_tokens": 610,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 56,
+            "context_tokens": 13761
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 15767,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 15377,
+          "admission_estimate": [
+            15767,
+            15377
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 184,
+          "first_event_s": 0.8840385420480743,
+          "stop_reason": "stop",
+          "elapsed_s": 3.897584749967791,
+          "usage": {
+            "input_tokens": 15405,
+            "output_tokens": 74,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 15405
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "aggregate",
+      "repeat": 4,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 32.36735799990129,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 29,
+        "actual_rows": 29
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.0468965419568121,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.143414916936308,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 105,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 21,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10222,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9932,
+          "admission_estimate": [
+            10222,
+            9932
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 21,
+          "first_event_s": 1.114457790972665,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.66124420799315,
+          "usage": {
+            "input_tokens": 9986,
+            "output_tokens": 505,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 53,
+            "context_tokens": 9986
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 11802,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 11450,
+          "admission_estimate": [
+            11802,
+            11450
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 74,
+          "first_event_s": 1.0946346670389175,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.889347083983012,
+          "usage": {
+            "input_tokens": 11474,
+            "output_tokens": 571,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 56,
+            "context_tokens": 11474
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 12195,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 12062,
+          "admission_estimate": [
+            12195,
+            12062
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 130,
+          "first_event_s": 1.1221635000547394,
+          "stop_reason": "stop",
+          "elapsed_s": 3.60926458297763,
+          "usage": {
+            "input_tokens": 12089,
+            "output_tokens": 104,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 12089
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "aggregate",
+      "repeat": 5,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "5227277a0e66a77064aacd02ef6551af23b106307c8545ac5431e51bc580abfd",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 33.08392541704234,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "output_matches": true,
+        "inputs_unchanged": true,
+        "expected_rows": 26,
+        "actual_rows": 26
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.4320934159914032,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.821002000011504,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 225,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 63,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9782,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9589,
+          "admission_estimate": [
+            9782,
+            9589
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 63,
+          "first_event_s": 1.1546909579774365,
+          "stop_reason": "toolUse",
+          "elapsed_s": 9.268436125013977,
+          "usage": {
+            "input_tokens": 9660,
+            "output_tokens": 397,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 22,
+            "context_tokens": 9660
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10157,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10062,
+          "admission_estimate": [
+            10157,
+            10062
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 85,
+          "first_event_s": 0.818263916997239,
+          "stop_reason": "toolUse",
+          "elapsed_s": 13.501340207993053,
+          "usage": {
+            "input_tokens": 10088,
+            "output_tokens": 680,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10088
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 11264,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 11029,
+          "admission_estimate": [
+            11264,
+            11029
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 85,
+          "first_event_s": 1.9556883750483394,
+          "stop_reason": "stop",
+          "elapsed_s": 3.605414625024423,
+          "usage": {
+            "input_tokens": 11102,
+            "output_tokens": 68,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 11102
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "repair",
+      "repeat": 1,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 45.3360694590956,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 2.7032348749926314,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.022676166961901,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 77,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8840,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 8824,
+          "admission_estimate": [
+            8840,
+            8824
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 8,
+          "first_event_s": 1.225291833980009,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.724990583956242,
+          "usage": {
+            "input_tokens": 8878,
+            "output_tokens": 84,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8878
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9375,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9276,
+          "admission_estimate": [
+            9375,
+            9276
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 8,
+          "first_event_s": 1.0272777079371735,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.278302165912464,
+          "usage": {
+            "input_tokens": 9331,
+            "output_tokens": 487,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 85,
+            "context_tokens": 9331
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9967,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9857,
+          "admission_estimate": [
+            9967,
+            9857
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 93,
+          "first_event_s": 1.3142709999810904,
+          "stop_reason": "toolUse",
+          "elapsed_s": 15.059166957973503,
+          "usage": {
+            "input_tokens": 9886,
+            "output_tokens": 585,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 39,
+            "context_tokens": 9886
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10648,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10504,
+          "admission_estimate": [
+            10648,
+            10504
+          ],
+          "native_input_messages": 4,
+          "native_context_tokens": 132,
+          "first_event_s": 0.9947472909698263,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.966624250053428,
+          "usage": {
+            "input_tokens": 10540,
+            "output_tokens": 80,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10540
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10693,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10663,
+          "admission_estimate": [
+            10693,
+            10663
+          ],
+          "native_input_messages": 5,
+          "native_context_tokens": 132,
+          "first_event_s": 2.2547172920312732,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.509575375006534,
+          "usage": {
+            "input_tokens": 10688,
+            "output_tokens": 39,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10688
+          }
+        },
+        {
+          "index": 7,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10925,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10878,
+          "admission_estimate": [
+            10925,
+            10878
+          ],
+          "native_input_messages": 6,
+          "native_context_tokens": 132,
+          "first_event_s": 1.2793214159319177,
+          "stop_reason": "stop",
+          "elapsed_s": 4.001458499929868,
+          "usage": {
+            "input_tokens": 10901,
+            "output_tokens": 118,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10901
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "repair",
+      "repeat": 2,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 33.90181833400857,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.2574164998950437,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.609798624995165,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 105,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8972,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 8930,
+          "admission_estimate": [
+            8972,
+            8930
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 8,
+          "first_event_s": 1.349171958048828,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.563671833020635,
+          "usage": {
+            "input_tokens": 8999,
+            "output_tokens": 38,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8999
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9357,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9286,
+          "admission_estimate": [
+            9357,
+            9286
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 8,
+          "first_event_s": 1.1444352079415694,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.505606541992165,
+          "usage": {
+            "input_tokens": 9310,
+            "output_tokens": 492,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 110,
+            "context_tokens": 9310
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9946,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9841,
+          "admission_estimate": [
+            9946,
+            9841
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 118,
+          "first_event_s": 0.9188229169230908,
+          "stop_reason": "toolUse",
+          "elapsed_s": 9.280773457954638,
+          "usage": {
+            "input_tokens": 9870,
+            "output_tokens": 439,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9870
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10462,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10344,
+          "admission_estimate": [
+            10462,
+            10344
+          ],
+          "native_input_messages": 4,
+          "native_context_tokens": 118,
+          "first_event_s": 1.03992562496569,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.2788116249721497,
+          "usage": {
+            "input_tokens": 10378,
+            "output_tokens": 39,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10378
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10595,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10552,
+          "admission_estimate": [
+            10595,
+            10552
+          ],
+          "native_input_messages": 5,
+          "native_context_tokens": 118,
+          "first_event_s": 1.0725042499834672,
+          "stop_reason": "stop",
+          "elapsed_s": 4.131458207964897,
+          "usage": {
+            "input_tokens": 10575,
+            "output_tokens": 125,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10575
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "repair",
+      "repeat": 3,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 37.00627145799808,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.6140476668952033,
+          "stop_reason": "toolUse",
+          "elapsed_s": 4.14077804191038,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 82,
+            "cache_read_tokens": 8576,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8935,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 8900,
+          "admission_estimate": [
+            8935,
+            8900
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 8,
+          "first_event_s": 3.8187388750957325,
+          "stop_reason": "toolUse",
+          "elapsed_s": 5.443935167044401,
+          "usage": {
+            "input_tokens": 8954,
+            "output_tokens": 37,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8954
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9311,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9240,
+          "admission_estimate": [
+            9311,
+            9240
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 8,
+          "first_event_s": 1.138296166085638,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.268644208088517,
+          "usage": {
+            "input_tokens": 9264,
+            "output_tokens": 449,
+            "cache_read_tokens": 8704,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 52,
+            "context_tokens": 9264
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9862,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9753,
+          "admission_estimate": [
+            9862,
+            9753
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 60,
+          "first_event_s": 0.8507269580150023,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.839710875065066,
+          "usage": {
+            "input_tokens": 9783,
+            "output_tokens": 520,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9783
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10479,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10340,
+          "admission_estimate": [
+            10479,
+            10340
+          ],
+          "native_input_messages": 4,
+          "native_context_tokens": 60,
+          "first_event_s": 0.958996000001207,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.01020520797465,
+          "usage": {
+            "input_tokens": 10374,
+            "output_tokens": 39,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10374
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10606,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10560,
+          "admission_estimate": [
+            10606,
+            10560
+          ],
+          "native_input_messages": 5,
+          "native_context_tokens": 60,
+          "first_event_s": 1.099989541922696,
+          "stop_reason": "stop",
+          "elapsed_s": 3.835934125003405,
+          "usage": {
+            "input_tokens": 10583,
+            "output_tokens": 125,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10583
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "repair",
+      "repeat": 4,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 37.37533829198219,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.099599916022271,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.868593458086252,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 80,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8932,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 8898,
+          "admission_estimate": [
+            8932,
+            8898
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 8,
+          "first_event_s": 1.1368073750054464,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.4215654579456896,
+          "usage": {
+            "input_tokens": 8952,
+            "output_tokens": 35,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8952
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9307,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9236,
+          "admission_estimate": [
+            9307,
+            9236
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 8,
+          "first_event_s": 1.271041625062935,
+          "stop_reason": "toolUse",
+          "elapsed_s": 10.517171832965687,
+          "usage": {
+            "input_tokens": 9260,
+            "output_tokens": 492,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 103,
+            "context_tokens": 9260
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9898,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9791,
+          "admission_estimate": [
+            9898,
+            9791
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 111,
+          "first_event_s": 1.4852687499951571,
+          "stop_reason": "toolUse",
+          "elapsed_s": 12.960792500060052,
+          "usage": {
+            "input_tokens": 9820,
+            "output_tokens": 594,
+            "cache_read_tokens": 8576,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9820
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10600,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10444,
+          "admission_estimate": [
+            10600,
+            10444
+          ],
+          "native_input_messages": 4,
+          "native_context_tokens": 111,
+          "first_event_s": 0.9547226249706,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.266378583968617,
+          "usage": {
+            "input_tokens": 10483,
+            "output_tokens": 39,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10483
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10758,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10703,
+          "admission_estimate": [
+            10758,
+            10703
+          ],
+          "native_input_messages": 5,
+          "native_context_tokens": 111,
+          "first_event_s": 1.0738216249737889,
+          "stop_reason": "stop",
+          "elapsed_s": 4.692359459004365,
+          "usage": {
+            "input_tokens": 10730,
+            "output_tokens": 139,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10730
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "task": "repair",
+      "repeat": 5,
+      "source_head": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+      "source_hash_start": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "source_hash_end": "cbd706216c5d989d71b2a46e43f11dc1fa3cb679d711983c8bda2bf69f4a66a7",
+      "script_sha256": "78337f7492267e94ee97ca02e8300a04dadac9ea535db0c2acaad975ed136e48",
+      "system_sha256": "f789280775acd1e073d649b107aa143a9653706369b1afad30541c23909e53f9",
+      "tool_schemas_sha256": "75a30a04f21ad3d50ba3b87b6998ae276f773cd0e7a95a91984a99f100027f78",
+      "prompt_sha256": "25418f946e68578dfa7f99c96a3039ae99f07796e828e613afafd13b429d29d2",
+      "effort": "low",
+      "model": "openai/gpt-5.6-sol",
+      "elapsed_s": 44.856863083085045,
+      "failure": null,
+      "verdict": {
+        "accepted": true,
+        "hidden_checks_passed": 4,
+        "hidden_checks": 4
+      },
+      "calls": [
+        {
+          "index": 1,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": null,
+          "hint_owner": null,
+          "hint_measured": null,
+          "admission_estimate": [
+            12992,
+            10394
+          ],
+          "native_input_messages": 0,
+          "native_context_tokens": 0,
+          "first_event_s": 1.1267832920420915,
+          "stop_reason": "toolUse",
+          "elapsed_s": 3.6876796249998733,
+          "usage": {
+            "input_tokens": 8751,
+            "output_tokens": 102,
+            "cache_read_tokens": 8576,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 8,
+            "context_tokens": 8751
+          }
+        },
+        {
+          "index": 2,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 8969,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 8927,
+          "admission_estimate": [
+            8969,
+            8927
+          ],
+          "native_input_messages": 1,
+          "native_context_tokens": 8,
+          "first_event_s": 1.0785330830840394,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.2150140000740066,
+          "usage": {
+            "input_tokens": 8996,
+            "output_tokens": 35,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 8996
+          }
+        },
+        {
+          "index": 3,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9351,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9280,
+          "admission_estimate": [
+            9351,
+            9280
+          ],
+          "native_input_messages": 2,
+          "native_context_tokens": 8,
+          "first_event_s": 1.677320042042993,
+          "stop_reason": "toolUse",
+          "elapsed_s": 11.307156458031386,
+          "usage": {
+            "input_tokens": 9304,
+            "output_tokens": 501,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 88,
+            "context_tokens": 9304
+          }
+        },
+        {
+          "index": 4,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 9954,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 9842,
+          "admission_estimate": [
+            9954,
+            9842
+          ],
+          "native_input_messages": 3,
+          "native_context_tokens": 96,
+          "first_event_s": 1.1340000830823556,
+          "stop_reason": "toolUse",
+          "elapsed_s": 18.79463650006801,
+          "usage": {
+            "input_tokens": 9870,
+            "output_tokens": 588,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 9870
+          }
+        },
+        {
+          "index": 5,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10642,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10488,
+          "admission_estimate": [
+            10642,
+            10488
+          ],
+          "native_input_messages": 4,
+          "native_context_tokens": 96,
+          "first_event_s": 1.5531307499622926,
+          "stop_reason": "toolUse",
+          "elapsed_s": 2.997971458011307,
+          "usage": {
+            "input_tokens": 10524,
+            "output_tokens": 39,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10524
+          }
+        },
+        {
+          "index": 6,
+          "model": "gpt-5.6-sol",
+          "purpose": "turn",
+          "hint": 10781,
+          "hint_owner": "openai/gpt-5.6-sol",
+          "hint_measured": 10730,
+          "admission_estimate": [
+            10781,
+            10730
+          ],
+          "native_input_messages": 5,
+          "native_context_tokens": 96,
+          "first_event_s": 1.0660182499559596,
+          "stop_reason": "stop",
+          "elapsed_s": 4.962584791937843,
+          "usage": {
+            "input_tokens": 10755,
+            "output_tokens": 158,
+            "cache_read_tokens": 8448,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 10755
+          }
+        }
+      ],
+      "tool_events": [
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "glob",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "read",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "edit",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_start",
+          "tool": "bash",
+          "is_error": false
+        },
+        {
+          "type": "tool_execution_end",
+          "tool": "bash",
+          "is_error": false
+        }
+      ]
+    }
+  ]
+}

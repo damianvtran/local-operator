@@ -6,13 +6,13 @@ performance contract in docs/REWRITE.md (>= 90% target; omp runs ~95%).
 
 Two measurements:
   1. Structural prefix stability (always, no network): for each turn, the
-     serialized (system_blocks, messages) body of request N must be a byte
-     prefix of request N+1. The ratio of stable bytes to total bytes is the
-     cache rate our design guarantees regardless of provider.
+     actual Anthropic content is serialized in cache hierarchy order. Matching
+     bytes measure prefix eligibility, not provider cache hits: tokenization,
+     expiry, account routing and server policy are not simulated.
   2. Live cache rate (when OPENROUTER_API_KEY is available): sum of
      cache_read_tokens / prompt-side tokens across turns from provider usage.
 
-The structural number is the contract; the live number is evidence.
+The structural number is a regression aid; only provider usage measures hits.
 
 Run: .venv/bin/python scripts/bench_cache_rate.py [--turns N]
 """
@@ -41,6 +41,7 @@ from local_operator.harness.types import (  # noqa: E402
     Usage,
 )
 from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.providers.clients import AnthropicClient  # noqa: E402
 from local_operator.tools.registry import create_tools  # noqa: E402
 
 TASK_PROMPTS = [
@@ -51,16 +52,29 @@ TASK_PROMPTS = [
 ]
 
 
-def _serialize_request(req: ChatRequest) -> bytes:
-    # Wire order matters: providers cache the (system, tools, messages...) prefix,
-    # so serialize in that order (insertion-ordered dump, NOT sort_keys) — an
-    # appended message must EXTEND the prefix, not break it.
-    body = {
-        "system": req.system_blocks,
-        "tools": [{"name": t.name, "parameters": t.parameters} for t in req.tools],
-        "messages": [m.model_dump(exclude_none=True) for m in req.messages],
-    }
-    return json.dumps(body).encode()
+def _serialize_request(req: ChatRequest, client: AnthropicClient) -> bytes:
+    wire = client._build_body(req)
+
+    def content(value):
+        # Breakpoint placement is cache policy, not model input. Preserve real
+        # schemas, descriptions, images and function-call ordering; omit only
+        # cache markers so moving the write boundary doesn't look like changed
+        # conversation content. Separate live usage validates actual reuse.
+        if isinstance(value, dict):
+            return {key: content(item) for key, item in value.items() if key != "cache_control"}
+        if isinstance(value, list):
+            return [content(item) for item in value]
+        return value
+
+    body = {key: content(wire.get(key, [])) for key in ("tools", "system", "messages")}
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _prompt_tokens(provider: str, usage: Usage) -> int:
+    """Count input once under each wire's documented usage convention."""
+    if provider == "anthropic":
+        return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    return usage.input_tokens
 
 
 def _common_prefix_len(a: bytes, b: bytes) -> int:
@@ -100,9 +114,10 @@ async def run_structural(turns: int) -> float:
     from local_operator.session.transcript import Transcript
 
     requests: list[bytes] = []
+    wire_client = AnthropicClient()
 
     async def capturing_stream(req: ChatRequest, signal: AbortSignal | None):
-        requests.append(_serialize_request(req))
+        requests.append(_serialize_request(req, wire_client))
         async for ev in _mock_stream(req, signal):
             yield ev
 
@@ -135,6 +150,7 @@ async def run_structural(turns: int) -> float:
     for prompt in TASK_PROMPTS[:turns]:
         await session.prompt(prompt)
     await session.dispose()
+    await wire_client.aclose()
     return _prefix_stability(requests)
 
 
@@ -144,8 +160,6 @@ async def run_live(turns: int) -> float | None:
     # direct key and note the limitation otherwise.
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
-        from local_operator.providers.clients import AnthropicClient
-
         spec = ModelSpec(
             provider="anthropic",
             model_id="claude-sonnet-4-20250514",
@@ -181,41 +195,36 @@ async def run_live(turns: int) -> float | None:
                 last_usage = ev.usage
         if last_usage:
             cache_read += last_usage.cache_read_tokens
-            prompt_total += (
-                last_usage.input_tokens
-                + last_usage.cache_read_tokens
-                + last_usage.cache_write_tokens
-            )
+            prompt_total += _prompt_tokens(spec.provider, last_usage)
         messages.append(Message.assistant("ok"))
+    await client.aclose()
     return (cache_read / prompt_total) if prompt_total else None
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--turns", type=int, default=4)
+    parser.add_argument(
+        "--live", action="store_true", help="Also make billable cache-probe requests"
+    )
     args = parser.parse_args()
 
     stability = await run_structural(args.turns)
-    print(f"structural prefix stability: {stability:.1%} (contract: >= 90%)")
+    print(f"structural prefix eligibility: {stability:.1%} (not a measured hit rate)")
 
     try:
-        live = await run_live(args.turns)
+        live = await run_live(args.turns) if args.live else None
     except Exception as exc:  # live path is evidence, not the contract
         print(f"live cache rate: skipped ({type(exc).__name__}: {exc})")
         live = None
     if live is not None:
-        print(f"live cache rate (openrouter):  {live:.1%}")
+        print(f"live cache rate: {live:.1%}")
     else:
-        print("live cache rate: skipped (no OPENROUTER_API_KEY)")
+        print("live cache rate: skipped (--live and a supported credential required)")
 
-    # The structural number is the contract: it is the cache rate our request
-    # shaping guarantees against any provider that honors prefix caching.
-    # Live >=90% is only enforceable against direct Anthropic (OpenRouter's
-    # shared pool reports cache stats unreliably — verified 2026-08-04).
-    live_gate = live is None or live >= 0.90 or os.environ.get("ANTHROPIC_API_KEY") is None
-    ok = stability >= 0.90 and live_gate
-    if live is not None and live < 0.90 and os.environ.get("ANTHROPIC_API_KEY") is None:
-        print("note: live rate informational (provider pool does not reliably report cache)")
+    # A small cold-start sample cannot guarantee a fleet cache target. Gate
+    # local prefix regressions, and report observed cache usage independently.
+    ok = stability >= 0.90
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

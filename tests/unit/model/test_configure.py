@@ -3665,6 +3665,7 @@ def _ttl_stream(tmp_path, handler):
     settings = {"providers": {"anthropic": {"cache_ttl_1h_min_context_tokens": 150_000}}}
     stream = create_stream_fn(store, settings, session_id="session-ttl")
     stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream._transport.http = stream._http
     return store, stream
 
 
@@ -3741,19 +3742,11 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
 async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
     tmp_path,
 ) -> None:
-    """A parent and a subagent share ONE stream fn but not ONE hint (F1/F8).
+    """Parent and child share a transport, with independent counted boundaries.
 
-    Subagents are built with ``stream_fn=parent_session._stream_fn``, so any
-    memory — or registered reader — on the stream fn is last-writer-wins
-    between the two conversations. Two real ``Session`` objects drive the
-    same stream fn here exactly as the harness does, with NO manual hint
-    handling anywhere: the parent works up a 300k context, a child is then
-    constructed on the same stream fn and runs its own turn (10k), and the
-    parent works again. Both directions of the contamination are asserted:
-    the child's first request stays 5m on its own small body, and the
-    parent's post-child request goes 1h on its own large hint — the round-2
-    reproduction was exactly that request dropping to 5m because the child's
-    construction had overwritten the parent's reader for good.
+    A child's first call cannot inherit its parent's 300k calibration and its
+    completion cannot overwrite that calibration. Real Session requests drive
+    both owners, without manually supplying corrected hints.
     """
     bodies: list[dict[str, Any]] = []
 
@@ -3769,16 +3762,18 @@ async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
         tmp_path, "parent", stream, blocks=["instructions", "inventory", "skills", "env"]
     )
     child = None
+    child_stream = None
     try:
         await parent.prompt("parent turn")
-        # The child is constructed AFTER the parent has a hint, the way a
-        # ``task`` call builds it mid-conversation, and runs on the same pipe.
-        child = _anthropic_session(tmp_path, "child", stream, blocks=["child instructions"])
+        child_stream = stream.fork("child")
+        child = _anthropic_session(tmp_path, "child", child_stream, blocks=["child instructions"])
         await child.prompt("child errand")
         await parent.prompt("parent again")
     finally:
         if child is not None:
             await child.dispose()
+            if child_stream is not None:
+                await child_stream.close()
         await parent.dispose()
         await stream.close()
         store.close()

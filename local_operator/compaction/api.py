@@ -159,8 +159,9 @@ ARCHIVE_EDGES_MAX_CHARS = 8000
 
 
 #: Hard cap on a generated summary (``MAX_SUMMARY_TOKENS``). The
-#: complete_fn has no max-tokens knob yet, so the cap is enforced post-hoc:
-#: summaries above it are truncated by tokens with a
+#: session completion helper also sends this as its generation budget. Keep
+#: post-hoc enforcement for alternate hosts and providers: larger summaries
+#: are truncated by tokens with a
 #: ``[summary truncated]`` marker (see :func:`summarize_messages`).
 MAX_SUMMARY_TOKENS = 16384
 

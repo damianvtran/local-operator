@@ -318,7 +318,9 @@ class SpillStore:
 
     # -- write -------------------------------------------------------------
 
-    def write(self, text: str, *, tool_name: str = "", session_id: str = "") -> SpillMeta | None:
+    def write(
+        self, text: str, *, tool_name: str = "", session_id: str = "", source_complete: bool = True
+    ) -> SpillMeta | None:
         """Store one output as an install+evict transaction.
 
         The lock covers both atomic entry files and the eviction sweep: a
@@ -326,10 +328,12 @@ class SpillStore:
         content-before-sidecar interval or immediately after installation.
         """
         with self._write_lock:
-            return self._write_locked(text, tool_name=tool_name, session_id=session_id)
+            return self._write_locked(
+                text, tool_name=tool_name, session_id=session_id, source_complete=source_complete
+            )
 
     def _write_locked(
-        self, text: str, *, tool_name: str = "", session_id: str = ""
+        self, text: str, *, tool_name: str = "", session_id: str = "", source_complete: bool = True
     ) -> SpillMeta | None:
         """Store ``text`` and return its metadata, or ``None`` on failure.
 
@@ -359,7 +363,9 @@ class SpillStore:
                 digest=digest,
                 bytes=len(data),
                 lines=clipped.count("\n") + 1,
-                complete=complete,
+                # Streaming producers may have already bounded retention. A
+                # second write cap cannot make their missing middle complete.
+                complete=complete and source_complete,
                 tool_name=tool_name,
                 session_id=session_id,
                 created_ms=now,

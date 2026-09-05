@@ -98,22 +98,25 @@ def run_task(workdir: Path, slug: str, prompt: str) -> dict[str, Any]:
         "exit": proc.returncode,
         "wall_s": round(wall, 2),
         "tokens": tokens,
-        "cost_usd": round(cost, 4),
+        "cost_usd": round(cost, 4) if cost is not None else None,
         "capture": str(capture),
     }
 
 
-def tally_cost(capture: Path) -> tuple[dict[str, int], float]:
-    """Sum usage across turn_end/agent_end events and price the tokens.
+def tally_cost(capture: Path) -> tuple[dict[str, int], float | None]:
+    """Count final usage once and price cache-aware provider buckets.
 
-    Pricing comes from the model registry when it has the model, else from a
-    live OpenRouter /models lookup (OpenRouter reports per-TRITON token; we
-    scale to per-1M). Falls back to 0.0 rather than failing the report."""
-    from local_operator.model.configure import calculate_cost
+    Unknown pricing is null, never a fabricated free run. A live listing with
+    only base input/output prices cannot honestly price cached work, so this
+    report uses the shared registry/accounting path or provider-reported cost.
+    """
+    from local_operator.harness.types import Usage
+    from local_operator.model.configure import cost_for_usage
     from local_operator.model.registry import get_model_info
 
     in_tok = out_tok = 0
     context_tok = 0
+    events = []
     for line in capture.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -122,54 +125,37 @@ def tally_cost(capture: Path) -> tuple[dict[str, int], float]:
             event = json.loads(line)
         except ValueError:
             continue
+        events.append(event)
+    # Both message_end and turn_end carry the same final Message. Choose one
+    # canonical event family before summing; older captures without message_end
+    # still work. Replayed messages are deduplicated by their durable ID.
+    kind = "message_end" if any(e.get("type") == "message_end" for e in events) else "turn_end"
+    seen = set()
+    usages = []
+    for event in events:
+        if event.get("type") != kind:
+            continue
+        message = event.get("message") or {}
+        identity = message.get("id")
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
         usage = (event.get("message") or {}).get("usage")
         if not usage:
             continue
+        usages.append(Usage.model_validate(usage))
         in_tok += int(usage.get("input_tokens") or 0)
         out_tok += int(usage.get("output_tokens") or 0)
         context_tok = max(context_tok, int(usage.get("context_tokens") or 0))
     try:
         info = get_model_info(HOSTING, MODEL)
-        cost = calculate_cost(info, in_tok, out_tok)
+        cost = sum(cost_for_usage(HOSTING, info, usage) for usage in usages)
         if cost:
             return {"input": in_tok, "output": out_tok, "max_context": context_tok}, cost
     except Exception:
         pass
-    in_price, out_price = _live_pricing()
-    cost = (in_tok / 1_000_000) * in_price + (out_tok / 1_000_000) * out_price
-    return {"input": in_tok, "output": out_tok, "max_context": context_tok}, cost
-
-
-_PRICING_CACHE: tuple[float, float] | None = None
-
-
-def _live_pricing() -> tuple[float, float]:
-    """OpenRouter per-1M price for MODEL, cached. (None-safe -> 0,0)."""
-    global _PRICING_CACHE
-    if _PRICING_CACHE is not None:
-        return _PRICING_CACHE
-    try:
-        import httpx
-
-        key = os.environ.get("OPENROUTER_API_KEY")
-        resp = httpx.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {key}"} if key else {},
-            timeout=20,
-        )
-        for m in resp.json().get("data", []):
-            if m["id"] == MODEL:
-                p = m.get("pricing", {})
-                # OpenRouter prices are per-token; scale to per-1M-token.
-                _PRICING_CACHE = (
-                    float(p.get("prompt") or 0.0) * 1_000_000,
-                    float(p.get("completion") or 0.0) * 1_000_000,
-                )
-                return _PRICING_CACHE
-    except Exception:
-        pass
-    _PRICING_CACHE = (0.0, 0.0)
-    return _PRICING_CACHE
+    return {"input": in_tok, "output": out_tok, "max_context": context_tok}, None
 
 
 def measure_base_overhead(workdir: Path) -> dict[str, float]:

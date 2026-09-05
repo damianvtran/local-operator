@@ -1167,7 +1167,7 @@ class TestStdioStopIsEventDriven:
         assert elapsed < 0.09, f"teardown took {elapsed:.3f}s; polling tick is back"
 
     @pytest.mark.asyncio
-    async def test_stubborn_child_is_killed_on_cancellation(self) -> None:
+    async def test_stubborn_child_is_killed_on_cancellation(self, monkeypatch) -> None:
         """Cancelling a bounded teardown must not leak the child process.
 
         ``_teardown_connection`` cancels the stack close at its bound; the
@@ -1175,16 +1175,19 @@ class TestStdioStopIsEventDriven:
         kill would leave the server running past the session.
 
         TWO cancels, deliberately. The first is consumed at the parked
-        ``sleep(3600)`` — after it, the transport's ``finally`` runs ``_stop``
+        application wait — after it, the transport's ``finally`` runs ``_stop``
         UNcancelled, and the ordinary kill rung would reap the child even if
         the ``except CancelledError`` handler were deleted (review round 1,
         F1: the single-cancel version of this test passed with the handler
-        removed). The second cancel is timed to land while ``_stop`` sits in
-        its EOF-rung wait, which is the state a bounded dispose actually
-        delivers: only the handler reaps the child from there, so this is
-        the arrangement that fails when the handler is gone.
+        removed). A proxy over the REAL process publishes entry into the
+        EOF-rung wait; the second cancel is sent at that event. Assert the
+        handler sent kill BEFORE the test waits for actual process exit.
+        Sending SIGKILL is synchronous; the OS finishing it is not, so an
+        immediate ps probe was a race even when the kill correctly happened.
         """
         import sys
+
+        import anyio
 
         import local_operator.mcp.manager as manager_mod
         from local_operator.mcp.config import MCPStdioServerConfig
@@ -1201,32 +1204,76 @@ class TestStdioStopIsEventDriven:
         )
         cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
         stderr_log = McpServerStderr("stubborn")
+        ready = asyncio.Event()
+        stop_waiting = asyncio.Event()
+        kill_calls = []
+        processes: list[Any] = []
+        original_feed = stderr_log.feed
+
+        def feed(line: str) -> None:
+            original_feed(line)
+            if line.startswith("pid="):
+                ready.set()
+
+        monkeypatch.setattr(stderr_log, "feed", feed)
+        original_open = anyio.open_process
+
+        class ObservedProcess:
+            def __init__(self, process: Any) -> None:
+                self.process = process
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.process, name)
+
+            async def wait(self) -> int:
+                stop_waiting.set()
+                return await self.process.wait()
+
+            def kill(self) -> None:
+                kill_calls.append(self.process.pid)
+                self.process.kill()
+
+        async def open_process(*args: Any, **kwargs: Any) -> Any:
+            process = await original_open(*args, **kwargs)
+            processes.append(process)
+            return ObservedProcess(process)
+
+        monkeypatch.setattr(anyio, "open_process", open_process)
 
         async def run() -> None:
             cm = _stdio_transport(cfg, lambda: None, stderr_log)
             async with cm:
                 # Park until cancelled; teardown then runs under cancellation,
                 # which is the state a bounded dispose delivers it in.
-                await asyncio.sleep(3600)
+                await asyncio.Event().wait()
 
-        original = manager_mod.STDIO_EXIT_GRACE_S
-        manager_mod.STDIO_EXIT_GRACE_S = 0.2  # keep the ladder fast in CI
+        # No grace timeout should win this test: only the observed cancellation
+        # may reach kill. The deadline is a hang backstop, never a timing target.
+        monkeypatch.setattr(manager_mod, "STDIO_EXIT_GRACE_S", 60.0)
+        task = asyncio.get_running_loop().create_task(run())
         try:
-            task = asyncio.get_running_loop().create_task(run())
-            pid = await _pid_from_stderr(stderr_log)
+            await asyncio.wait_for(ready.wait(), 10)
+            process = processes[0]
+            pid = process.pid
             task.cancel()
-            # Let the first cancel unwind the park and start ``_stop``; well
-            # under the 0.2 s grace, so the second cancel lands inside the
-            # EOF-rung wait rather than after the ladder has finished.
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(stop_waiting.wait(), 10)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await task
+                await asyncio.wait_for(task, 10)
+            assert kill_calls == [pid], "cancelling _stop did not kill the stubborn child"
+            await asyncio.wait_for(process.wait(), 10)
+            assert not _process_is_alive(pid), f"stubborn child leaked: pid {pid}"
         finally:
-            manager_mod.STDIO_EXIT_GRACE_S = original
-        # The kill-on-cancel path does not wait on the child, so it may be a
-        # zombie — which is dead for this purpose. Alive means leaked.
-        assert not _process_is_alive(pid), f"stubborn child leaked: pid {pid}"
+            # A deliberately broken kill handler must fail without leaking the
+            # actual process used to prove it. Bypass the spy for test cleanup.
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await asyncio.wait_for(process.wait(), 10)
+                await process.aclose()
+            if not task.done():
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
 
     @pytest.mark.asyncio
     async def test_sigterm_rung_still_reaps_a_deaf_reader(self) -> None:

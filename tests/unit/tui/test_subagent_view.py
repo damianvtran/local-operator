@@ -3931,9 +3931,12 @@ def _landing_owner_top(view: SubagentView) -> tuple[float, float | None]:
     return offset, owner_top
 
 
+@pytest.mark.parametrize("late_batch_landing", [False, True])
 @pytest.mark.asyncio
 async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    late_batch_landing: bool,
 ) -> None:
     """At 62x24 the first visible transcript line must be a row HEAD.
 
@@ -3947,7 +3950,21 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
     history page grew the extent and sticky-follow put the fragment back
     (review round 1, F1). Mutation: keep the one-shot burning on the
     pre-history body and this assertion dies with ``into > 0``.
+
+    Hold the batch's deferred landing in the second case, then deliver it
+    after the page has snapped. This forces the callback ordering that used
+    to undo the correct landing under suite contention; no clock or workload
+    is needed to reproduce it. Removing the release-revision check makes
+    this case land three rows into the notice again.
     """
+    delayed: list[tuple[TranscriptView, bool, int]] = []
+    land_on_tail = TranscriptView._land_on_tail
+    if late_batch_landing:
+
+        def hold_landing(body: TranscriptView, was_at_tail: bool, revision: int) -> None:
+            delayed.append((body, was_at_tail, revision))
+
+        monkeypatch.setattr(TranscriptView, "_land_on_tail", hold_landing)
     transcript = Transcript(tmp_path / "child")
     for index in range(20):
         await transcript.append_message(
@@ -3982,6 +3999,11 @@ async def test_a_narrow_viewport_opens_on_a_row_head_not_a_wrap_fragment(
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
         await _wait_landing_settled(pilot, view)
+        if late_batch_landing:
+            assert any(body is view._body and was_at_tail for body, was_at_tail, _ in delayed)
+            for body, was_at_tail, revision in delayed:
+                land_on_tail(body, was_at_tail, revision)
+            await _wait_geometry_settled(pilot, view._body)
         offset, owner_top = _landing_owner_top(view)
         assert owner_top is not None, (
             f"no block owns the landing offset {offset}; "

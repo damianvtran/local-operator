@@ -43,7 +43,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -335,6 +335,12 @@ class Transcript:
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
+        # Derived indexes only describe durable rows. They are updated after
+        # fsync, rebuilt after a file fold, and never published from a worker.
+        self._entry_ids: set[str] = set()
+        self._latest_by_type: dict[str, TranscriptEntry] = {}
+        self._latest_custom_entries: dict[str, TranscriptEntry] = {}
+        self._latest_user: TranscriptEntry | None = None
         # Command identities live beside the append-only rows that prove their
         # admission.  Replay builds this once; hot-path lookups must not scan a
         # transcript whose model-facing window may also have been compacted.
@@ -353,6 +359,7 @@ class Transcript:
                     entry = TranscriptEntry.from_json(line)
                     if entry is not None:
                         self._entries.append(entry)
+                        self._index_entry(entry)
                         command_id = _admitted_command_id(entry)
                         if command_id is not None:
                             self._admitted_command_ids.add(command_id)
@@ -378,14 +385,38 @@ class Transcript:
         the transcript envelope, where replay preserves it without exposing
         transport bookkeeping to either model-facing history or the UI.
         """
-        kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
-        payload: dict[str, Any] = {
-            "kind": kind,
-            **encode_message_payload(message, self._attachments),
-        }
-        if producer_command_id is not None:
-            payload["producer_command_id"] = producer_command_id
-        return await self._append(ENTRY_MESSAGE, payload, message.id)
+        entries = await self.append_messages([message], producer_command_id=producer_command_id)
+        return entries[0]
+
+    async def append_messages(
+        self,
+        messages: Sequence[Message | CustomMessage],
+        *,
+        producer_command_id: str | None = None,
+    ) -> list[TranscriptEntry]:
+        """Durably commit an ordered message batch with one fsync.
+
+        The caller owns the safe pairing boundary (assistant plus all tool
+        results). Admission markers are only meaningful for a single user row;
+        ordinary batches do not invent producer identities. Serialization and
+        attachment writes run with the journal write off the event loop.
+        """
+        if producer_command_id is not None and len(messages) != 1:
+            raise ValueError("producer admission requires exactly one message")
+        if not messages:
+            return []
+
+        def build() -> list[TranscriptEntry]:
+            rows = []
+            for message in messages:
+                kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
+                payload = {"kind": kind, **encode_message_payload(message, self._attachments)}
+                if producer_command_id is not None:
+                    payload["producer_command_id"] = producer_command_id
+                rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            return rows
+
+        return await self._commit(build)
 
     async def append_compaction(
         self,
@@ -445,107 +476,114 @@ class Transcript:
     async def _append(
         self, type: str, payload: dict[str, Any], entry_id: str | None = None
     ) -> TranscriptEntry:
-        entry = TranscriptEntry(
-            id=entry_id or uuid.uuid4().hex,
-            ts=time.time(),
-            type=type,
-            payload=payload,
-        )
+        entry = TranscriptEntry(entry_id or uuid.uuid4().hex, time.time(), type, payload)
+        return (await self._commit(lambda: [entry]))[0]
+
+    async def _commit(self, build: Callable[[], list[TranscriptEntry]]) -> list[TranscriptEntry]:
+        """Serialize writes and acknowledge only after durable publication.
+
+        A cancelled coroutine cannot cancel a running filesystem syscall.
+        Shield the worker and KEEP the ordering lock until it settles, then
+        publish its committed rows before propagating cancellation. Otherwise
+        a successor can race a still-running write, or a retry can omit rows
+        that reached disk. Callers must await this boundary before exposing a
+        message to a model/fork; notably Session's aside drain does so too.
+        """
         async with self._lock:
-            # DELIBERATELY SYNCHRONOUS, and not an oversight — do not "fix"
-            # this into a to_thread the way :meth:`compact_file` legitimately
-            # is. This append has callers that never await it:
-            # ``Session.queue_aside`` persists a materialized aside through
-            # ``_spawn_background``, i.e. fire-and-forget. Every await inside
-            # this method widens the window between "the message reached the
-            # model" and "the message is on disk", and a reader that opens the
-            # transcript in that window sees a child's context missing a
-            # message it has already acted on.
-            #
-            # Measured, because the tradeoff was real: offloading this cut the
-            # worst loop stall at one workload (56 ms -> 22 ms) and made it
-            # WORSE at a larger one (298 ms -> 655 ms), while CI caught the
-            # visibility regression it introduced. The tokenizer offload in
-            # ``Session._offloaded`` is where the loop-responsiveness win
-            # actually comes from (1360 ms -> 56 ms); this write is a few
-            # hundred microseconds and is not worth a correctness hazard.
-            #
-            # Self-healing against a vanished directory: another process's
-            # startup sweep (or a user tidying by hand) can remove a session
-            # directory while it still looks empty — the gap between Session
-            # construction and the first turn is as long as the user takes to
-            # type their first message, and the retention sweep's ``live_dir``
-            # only protects the sweeping process's OWN session. Dying on
-            # FileNotFoundError here costs the whole session for a directory
-            # one mkdir restores; the candidate joins ``self._entries`` only
-            # after the rebuilt file reaches its durability boundary, so a
-            # failed rebuild cannot resurrect a row on the next append.
-            #
-            # The FILE alone vanishing (directory intact) is the same wound
-            # with a quieter symptom: ``"a"`` mode recreates the file without
-            # raising, so the append succeeds and the transcript silently
-            # holds one row while memory holds the whole session — a resume
-            # would then replay a single message as if the rest never
-            # happened. Checked BEFORE the append because that path never
-            # raises; both cases rebuild from the committed rows plus this
-            # unpublished candidate under the same lock.
-            rebuild = not self.path.exists()
-            if not rebuild:
+
+            def write() -> list[TranscriptEntry]:
+                rows = build()
+                self._write_entries(rows)
+                return rows
+
+            worker = asyncio.create_task(asyncio.to_thread(write))
+            cancelled = False
+            while True:
                 try:
-                    previous_size = self.path.stat().st_size
-                except FileNotFoundError:
-                    rebuild = True
-                else:
-                    try:
-                        with self.path.open("a", encoding="utf-8") as handle:
-                            handle.write(entry.to_json() + "\n")
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                    except FileNotFoundError:
-                        # Directory removed between the exists() check and the
-                        # open — the race is real, so the window is too.
-                        rebuild = True
-                    except BaseException:
-                        # write/flush/fsync may raise after changing the file.
-                        # The append-only framing makes its old byte boundary
-                        # the only safe rollback point; the lock prevents a
-                        # successor from being truncated with this candidate.
+                    rows = await asyncio.shield(worker)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if worker.done():
+                        rows = worker.result()
+                        break
+            for entry in rows:
+                self._entries.append(entry)
+                self._index_entry(entry)
+                command_id = _admitted_command_id(entry)
+                if command_id is not None:
+                    self._admitted_command_ids.add(command_id)
+                    for handler in list(self._admission_handlers):
                         try:
-                            os.truncate(self.path, previous_size)
-                        except FileNotFoundError:
-                            pass
-                        raise
-            if rebuild:
-                self.directory.mkdir(parents=True, exist_ok=True)
+                            handler(command_id)
+                        except Exception:  # noqa: BLE001 - observers cannot undo durability
+                            logger.exception("transcript admission handler failed")
+            if cancelled:
+                raise asyncio.CancelledError
+            return rows
+
+    def _write_entries(self, entries: list[TranscriptEntry]) -> None:
+        """Worker-only durable write; no in-memory index changes before fsync.
+
+        A vanished file must be rebuilt from committed memory, even when its
+        directory still exists (append mode would silently create one row).
+        A failed append rolls back to its old byte boundary; a failed rebuild
+        removes its partial journal so a restart cannot admit rejected rows.
+        """
+        rebuild = not self.path.exists()
+        if not rebuild:
+            try:
+                previous_size = self.path.stat().st_size
+            except FileNotFoundError:
+                rebuild = True
+            else:
                 try:
-                    with self.path.open("w", encoding="utf-8") as handle:
-                        for row in (*self._entries, entry):
-                            handle.write(row.to_json() + "\n")
+                    with self.path.open("a", encoding="utf-8") as handle:
+                        for entry in entries:
+                            handle.write(entry.to_json() + "\n")
                         handle.flush()
                         os.fsync(handle.fileno())
+                except FileNotFoundError:
+                    rebuild = True
                 except BaseException:
-                    # A failed rebuild started from a missing file. Removing
-                    # its partial journal preserves that pre-call state and
-                    # prevents a parseable prefix from becoming admitted after
-                    # restart even though this call failed.
                     try:
-                        self.path.unlink()
+                        os.truncate(self.path, previous_size)
                     except FileNotFoundError:
                         pass
                     raise
-            self._entries.append(entry)
-            command_id = _admitted_command_id(entry)
-            if command_id is not None:
-                # Update only after the append's flush boundary.  A crash after
-                # this point can replay the row; an ACK or callback before it
-                # would claim durability the transcript did not yet have.
-                self._admitted_command_ids.add(command_id)
-                for handler in list(self._admission_handlers):
-                    try:
-                        handler(command_id)
-                    except Exception:  # noqa: BLE001 - observers cannot undo durability
-                        logger.exception("transcript admission handler failed")
-        return entry
+        if rebuild:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            try:
+                with self.path.open("w", encoding="utf-8") as handle:
+                    for row in (*self._entries, *entries):
+                        handle.write(row.to_json() + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
+
+    def _index_entry(self, entry: TranscriptEntry) -> None:
+        self._entry_ids.add(entry.id)
+        self._latest_by_type[entry.type] = entry
+        if entry.type == ENTRY_CUSTOM:
+            self._latest_custom_entries[str(entry.payload.get("custom_type", ""))] = entry
+        if entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "user":
+            self._latest_user = entry
+
+    def has_entry(self, entry_id: str) -> bool:
+        """Constant-time durable identity check for repeated turn flushes."""
+        return entry_id in self._entry_ids
+
+    def latest_entry(self, entry_type: str) -> TranscriptEntry | None:
+        """Newest durable row of a journal type, without copying history."""
+        return self._latest_by_type.get(entry_type)
+
+    def latest_user_entry(self) -> TranscriptEntry | None:
+        return self._latest_user
 
     def has_admitted_command(self, command_id: str) -> bool:
         """Return whether an append-only user row already owns ``command_id``."""
@@ -586,10 +624,7 @@ class Transcript:
         case still gets the details mapping and cannot accidentally depend on
         entry internals.
         """
-        for entry in reversed(self._entries):
-            if entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == custom_type:
-                return entry
-        return None
+        return self._latest_custom_entries.get(custom_type)
 
     def usages_since_compaction(self) -> list[dict[str, Any]]:
         """Every message entry's ``usage`` payload recorded AFTER the newest
@@ -946,8 +981,30 @@ class Transcript:
             payload, reclaimed = await asyncio.to_thread(self._render_folded, folded, before)
             if reclaimed < min_reclaim_bytes:
                 return 0
-            await asyncio.to_thread(self._replace_file, payload)
+            # The replace is a filesystem side effect too. A cancellation
+            # cannot release the ordering lock until it finishes and the new
+            # in-memory index is published, or a later append may be erased
+            # by the still-running replace worker.
+            worker = asyncio.create_task(asyncio.to_thread(self._replace_file, payload))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(worker)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if worker.done():
+                        worker.result()
+                        break
             self._entries = folded
+            self._entry_ids.clear()
+            self._latest_by_type.clear()
+            self._latest_custom_entries.clear()
+            self._latest_user = None
+            for entry in folded:
+                self._index_entry(entry)
+            if cancelled:
+                raise asyncio.CancelledError
             return reclaimed
 
     @staticmethod

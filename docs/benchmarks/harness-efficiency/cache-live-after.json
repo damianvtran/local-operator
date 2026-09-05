@@ -1,0 +1,59 @@
+{
+  "arm": "candidate",
+  "source": "/Users/damian/workspace/repos/lo-harness-efficiency",
+  "accepted": true,
+  "source_sha": "1a7bd26b61414cdfdb1efc6ba7ef43879e40ee3a",
+  "credential_stable": true,
+  "purpose": "Actual Anthropic cache reuse across a goal change; synthetic fixture",
+  "catalogue_cache": "Shared native home; not a cold catalogue benchmark",
+  "calls": [
+    {
+      "index": 0,
+      "model": "claude-sonnet-4-6",
+      "phase": "seed",
+      "credential_scope": "e7f6c011776e8db7",
+      "append_only_state": true,
+      "usage": {
+        "input_tokens": 3,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 43435,
+        "output_tokens": 5,
+        "context_tokens": 43438
+      },
+      "stop_reason": "stop",
+      "wall_s": 2.426
+    },
+    {
+      "index": 1,
+      "model": "claude-sonnet-4-6",
+      "phase": "unchanged_goal",
+      "credential_scope": "e7f6c011776e8db7",
+      "append_only_state": true,
+      "usage": {
+        "input_tokens": 3,
+        "cache_read_tokens": 43435,
+        "cache_write_tokens": 13,
+        "output_tokens": 5,
+        "context_tokens": 43451
+      },
+      "stop_reason": "stop",
+      "wall_s": 1.317
+    },
+    {
+      "index": 2,
+      "model": "claude-sonnet-4-6",
+      "phase": "changed_goal",
+      "credential_scope": "e7f6c011776e8db7",
+      "append_only_state": true,
+      "usage": {
+        "input_tokens": 3,
+        "cache_read_tokens": 43448,
+        "cache_write_tokens": 59,
+        "output_tokens": 5,
+        "context_tokens": 43510
+      },
+      "stop_reason": "stop",
+      "wall_s": 1.493
+    }
+  ]
+}
