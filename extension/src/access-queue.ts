@@ -125,11 +125,16 @@ export function newEntry(
   now: number,
   sequence: number,
   commandId?: string,
-  entryId: string = crypto.randomUUID().replaceAll("-", ""),
+  entryId?: string,
   broad?: BroadGrant | null,
 ): AccessQueueEntry {
   return {
-    entryId,
+    // `||`, not a default parameter: a default fires only on `undefined`, so a
+    // legacy pendingOrigin record carrying `promptId: ""` would mint a live
+    // entry with an empty id. An empty id reads as "no generation" in the ack
+    // latch and would be swallowed as the previous decision's own echo.
+    // Unreachable today (every writer minted a UUID) and defensive only (A12).
+    entryId: entryId || crypto.randomUUID().replaceAll("-", ""),
     origin,
     displayAuthority,
     requester,

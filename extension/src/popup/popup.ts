@@ -9,9 +9,9 @@ import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
-  isRepeatAsk,
   noticeForRejectedDecision,
   originPromptView,
+  repeatAskNotice,
   preselectedScope,
   scopeLatchKey,
   scopeOptions,
@@ -84,14 +84,17 @@ let shownBroadKey: string | undefined;
 // the next click would grant the whole registrable domain (A1/U1). Options
 // are rebuilt only when the entry they describe actually changes.
 let scopeBuiltForEntryId: string | undefined;
-// Whether the option list currently on screen was built for a REPEAT ask.
-// Latched beside the option list rather than recomputed per render: the
-// decision that identifies a repeat is consumed by the render that first
-// shows the new generation, and a second storage event lands a render later
-// with nothing left to compare. Recomputing there cleared the banner while
-// the rebuild guard kept the preselected scope, so the card silently lost
-// half of the U9 fix.
-let scopeBuiltAsRepeatAsk = false;
+// The decision the user last made FOR THE ORIGIN still being asked about.
+//
+// Keyed by origin and held until that origin leaves the queue, deliberately
+// NOT consumed by the render that reads it. `decidedOrigin` is spent by the
+// first re-ask render, so anything derived per-render is gone by the next one:
+// a storage event, or a Previous/Next move that legitimately rebuilds the
+// option list, recomputed "is this a repeat" as false and reset the scope to
+// the widest option, handing over a whole domain to a user who chose `once`
+// (U9/U10). Cleared in one place, the `!pendingOriginValue` branch, which is
+// the moment the request the decision belonged to is genuinely gone.
+let repeatAskFor: DecidedOrigin | null = null;
 
 interface Health {
   extension_connected: boolean;
@@ -156,8 +159,8 @@ async function render(): Promise<void> {
     shownPromptOrigin = undefined;
     shownPromptId = "";
     decidedOrigin = null;
+    repeatAskFor = null;
     scopeBuiltForEntryId = undefined;
-    scopeBuiltAsRepeatAsk = false;
   }
   // Hold the acknowledgement while session storage and /health still echo the
   // GENERATION the user just decided. Without this the echo redraws the full
@@ -175,7 +178,12 @@ async function render(): Promise<void> {
   // preselect the scope the user just chose, and to mark the card as a repeat
   // ask (U9). Captured here, then cleared, so no later render can treat it as
   // a live echo.
-  const justDecided = decidedOrigin;
+  // Promote the spent echo latch to the origin-keyed one, which survives the
+  // later renders that need it (U10). A decision for a DIFFERENT origin does
+  // not carry over: the guards in preselectedScope/isRepeatAsk reject it, and
+  // holding it would only risk a cross-origin read.
+  if (decidedOrigin) repeatAskFor = decidedOrigin;
+  const justDecided = repeatAskFor;
   decidedOrigin = null;
   if (pendingHost) {
     // The heading is fixed prose; the host — the string the user must verify
@@ -208,10 +216,18 @@ async function render(): Promise<void> {
     );
     // A repeat ask for a just-decided origin is otherwise indistinguishable
     // from the request the user answered, and the ack that would confirm the
-    // first click is gone within a frame or two (U9). Read from the latch
-    // renderScopeSelect just set, so it survives the follow-up render exactly
-    // as the preselected scope does.
-    document.getElementById("origin-again")?.classList.toggle("hidden", !scopeBuiltAsRepeatAsk);
+    // first click is gone within a frame or two (U9). Computed from the
+    // origin-keyed latch on EVERY render, not cached beside the option list:
+    // the card must say the same thing after a queue move that rebuilt the
+    // options as it did on the render that first showed the re-ask (U10).
+    const againNotice = repeatAskNotice(pendingOriginValue, justDecided);
+    const again = document.getElementById("origin-again");
+    if (again) {
+      // Guarded: this is a role="status" region, so an unconditional write
+      // re-announces the same sentence on every re-render (the D10 class).
+      if (again.textContent !== againNotice) again.textContent = againNotice;
+      again.classList.toggle("hidden", againNotice === "");
+    }
     shownBroadScope = selected?.broad?.scope;
     shownBroadKey = selected?.broad?.key;
     // A fresh prompt must arrive with live buttons even if a previous
@@ -457,7 +473,6 @@ function renderScopeSelect(
     return;
   }
   const built = scopeOptions(entry);
-  scopeBuiltAsRepeatAsk = isRepeatAsk(pendingOrigin, justDecided);
   select.replaceChildren(
     ...built.options.map((option) => {
       const element = document.createElement("option");
@@ -583,7 +598,7 @@ async function decide(decision: OriginDecision): Promise<void> {
     // no sign the click worked — the same race as pairing success. The latch
     // holds the ack through stale echoes; render() takes over to Connected
     // once the echo clears.
-    decidedOrigin = { origin, decision, entryId: promptId };
+    decidedOrigin = { origin, decision, entryId: promptId, decidedAt: Date.now() };
     showOriginAck(decision);
     const response = (await chrome.runtime.sendMessage({
       event: "origin_decision",

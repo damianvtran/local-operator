@@ -28,6 +28,8 @@ export type { OriginDecision } from "../access-queue";
 export interface DecidedOrigin {
   origin: string;
   decision: OriginDecision;
+  /** When the click happened. Bounds the echo-only ack (A11). */
+  decidedAt?: number;
   /** The entry id the decision answered. Empty on the /health-only fallback,
    * which has no generation to compare and falls back to origin equality. */
   entryId: string;
@@ -158,10 +160,17 @@ export function scopeOptions(entry: Pick<AccessQueueEntry, "origin" | "broad"> |
  * The /health-only fallback carries no entry id. There is no generation to
  * compare there, so both sides being empty falls back to origin equality,
  * which is exactly the U1 behaviour that path had before. */
+/** How long an EMPTY pending generation still reads as the decision's own
+ * echo. The echo clears on one websocket round-trip; this is a wide margin
+ * over that, because acking a live request briefly is a smaller harm than
+ * resurrecting a prompt over a click that worked (U1). */
+export const ECHO_ACK_WINDOW_MS = 10_000;
+
 export function originPromptView(
   pendingOrigin: string | undefined,
   decided: DecidedOrigin | null,
   pendingEntryId = "",
+  now = Date.now(),
 ): "prompt" | "ack" | "none" {
   if (!pendingOrigin) return "none";
   if (!decided || decided.origin !== pendingOrigin) return "prompt";
@@ -176,7 +185,18 @@ export function originPromptView(
   // lands in the same state. Only a DIFFERENT, present generation is a live
   // request that must be shown (A6).
   const pending = pendingEntryId ?? "";
-  return pending === "" || pending === (decided.entryId ?? "") ? "ack" : "prompt";
+  if (pending === (decided.entryId ?? "")) return "ack";
+  // An ABSENT pending generation is normally this decision's own echo, but it
+  // carries no evidence of WHICH request it belongs to. Against a legacy
+  // daemon that reports pending_origin without populating the queue, a second
+  // live request for the same origin looks identical to the first one's echo,
+  // and an unbounded ack would hold "Site allowed." over it until its TTL
+  // (A11). The echo is a single websocket round-trip, so anything still
+  // empty long after the click is a new request: prompt instead. Fails
+  // closed either way, since the ack grants nothing.
+  if (pending !== "") return "prompt";
+  const decidedAt = decided.decidedAt;
+  return decidedAt === undefined || now - decidedAt < ECHO_ACK_WINDOW_MS ? "ack" : "prompt";
 }
 
 /** The scope to preselect when a prompt is rendered.
@@ -218,6 +238,23 @@ export function isRepeatAsk(
   decided: DecidedOrigin | null,
 ): boolean {
   return !!decided && !!pendingOrigin && decided.origin === pendingOrigin;
+}
+
+/** The repeat-ask line, or "" when this is not a repeat ask.
+ *
+ * Branches on the decision because a denial used nothing: the agent did not
+ * visit the site, and "your last answer has already been used" reads to a user
+ * who just refused as though the visit went through (U11). Deny is also the
+ * one decision that carries no scope forward, so this line is the only
+ * confirmation on the card that the refusal registered. */
+export function repeatAskNotice(
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): string {
+  if (!isRepeatAsk(pendingOrigin, decided)) return "";
+  return decided?.decision === "deny"
+    ? "You denied this site a moment ago. It is asking again."
+    : "This site is asking again. Your last answer has already been used.";
 }
 
 /** The identity the scope select's option list is cached against.

@@ -371,7 +371,15 @@ test("render() keys the ack latch on the generation and the scope cache on a non
   assert.match(call[1], /pendingEntryId/);
   // The decision recorded for that comparison must carry the id it answered,
   // or every comparison degrades to the origin-only behaviour above.
-  assert.match(popup, /decidedOrigin = \{ origin, decision, entryId: promptId \}/);
+  // Field-wise, not a literal object match: this assertion broke when a
+  // `decidedAt` bound was added (A11), which is exactly the kind of harmless
+  // change a source scan should not fail on. What must hold is that the
+  // recorded decision carries the generation it answered.
+  const latch = popup.match(/decidedOrigin = \{([^}]*)\}/);
+  assert.ok(latch, "decide() must record the decision it made");
+  assert.match(latch[1], /origin/);
+  assert.match(latch[1], /decision/);
+  assert.match(latch[1], /entryId: promptId/);
   // A7: the scope cache key must not be the raw entry id, which is "" for
   // every origin on the /health-only path.
   assert.match(popup, /scopeLatchKey\(nextPromptId, pendingOriginValue\)/);
