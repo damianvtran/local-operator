@@ -46,11 +46,19 @@ def profile_clients(region: str) -> Any:
     from boto3.session import Session  # type: ignore[import-not-found]
     from lop_osworld_v2_adapter.providers.aws import _Clients
 
+    def _no_guest(_url: str, _payload: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        # The audit is teardown-only: it resolves tagged resources through EC2
+        # and never talks to a guest. Raising rather than returning an empty
+        # body means a future audit path that DID reach for the guest fails
+        # here, where it is obvious, rather than silently reading a stub.
+        raise RuntimeError("the tag audit does not talk to a guest control server")
+
     session = Session(region_name=region)
     return _Clients(
         ec2=session.client("ec2", region_name=region),
         scheduler=session.client("scheduler", region_name=region),
         http_get=lambda _url, _timeout: 0,
+        http_post_json=_no_guest,
     )
 
 

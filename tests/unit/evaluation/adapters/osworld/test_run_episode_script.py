@@ -442,8 +442,9 @@ def test_a_root_volume_override_is_disclosed_in_the_sealed_manifest(
     """A run on a resized disk must be disclosable from the bundle alone.
 
     Comparability is the whole point. An episode on a larger root volume
-    survives past the ~t+383s exhaustion wall where the guest's x11grab
-    recorder fills the default 2.2 GB of free space, so its score is not
+    survives past the ~t+383s exhaustion wall where the guest's own snapd fills
+    the default 2.2 GB of free space (NOT the x11grab recorder an earlier
+    revision blamed -- no ffmpeg process was ever found), so its score is not
     comparable to a truncated default run -- and a reader has no other way to
     learn that, since ``ObservationPayload`` carries no metadata and nothing
     the worker resolves reaches the bundle except through the manifest the

@@ -229,7 +229,7 @@ Seeing that error means the workspace and selector need rebuilding against the
 current adapter source (§ the build recipe in
 `benchmarks/osworld_v2_adapter/README.md`), not that the flag is wrong.
 
-### Disk exhaustion by the screen recorder, and `AWS_ROOT_VOLUME_SIZE`
+### Disk exhaustion by the guest's own snapd, and `AWS_ROOT_VOLUME_SIZE`
 
 `AWS_INSTANCE_TYPE` fixed a *starved* guest. A second failure presents
 **identically** — `ObservationPhaseError: environment returned no screenshot
@@ -248,13 +248,26 @@ filling on a clock rather than on workload:
 | t+383s | **100% used, 0 bytes free** |
 | t+424s | first `ObservationPhaseError` |
 
-OSWorld starts an `x11grab` **ffmpeg screen recorder** in the guest on reset.
-Its measured fill rate is **~6.8 MB/s (~410 MB/min)** against only ~2.2 GB free
-at launch, so the disk exhausts in **~330s on every run**. A disk at 0 bytes
-cannot write a screenshot, which is exactly the observed failure — and the rate
-is constant regardless of agent activity, which is why the wall is a clock
-rather than a workload. The volume is identical on either instance type, which
-is why changing the hardware family did not move it.
+> **Correction.** This was first diagnosed as OSWorld's `x11grab` **ffmpeg
+> screen recorder**, and that was **wrong**. `pgrep -af ffmpeg` on a failing
+> guest showed **no ffmpeg process at all** — the only match was the probe's own
+> `pgrep` command line, which is what made the theory look confirmed from
+> outside. The `~6.8 MB/s` fill rate quoted in the 0.46.11 release notes was
+> inferred from the disk series, not measured at a process. Do not re-derive it.
+
+The measured consumer is **snapd**, inside the guest:
+
+- `/var` is 15G of the 29G disk, and `/var/lib/snapd/cache` **alone is 9.7 GB**
+- `snap changes` shows `Auto-refresh 9 snaps` and `Pre-download novnc`, both
+  fired at boot
+- the AMI ships ~93% full, so a few GB of snap downloads exhausts it
+
+A disk at 0 bytes cannot write a screenshot, which is exactly the observed
+failure. Snapd's auto-refresh starts at boot and downloads at its own pace,
+entirely independent of what the agent is doing — which is precisely why the
+wall looked like a clock rather than a workload, and why the volume being
+identical on either instance type meant changing the hardware family did not
+move it.
 
 The escape hatch is the optional infra value `AWS_ROOT_VOLUME_SIZE`, a whole
 number of GiB:
@@ -263,8 +276,17 @@ number of GiB:
 --infra AWS_ROOT_VOLUME_SIZE=120
 ```
 
-At ~410 MB/min, each extra GiB buys roughly 2.5 minutes of recording, so size
-it against the wall budget rather than against disk cost.
+Measured effect: a 100 GiB volume moved the first failure from t+424s to
+**t+1936s**. It does not fully fix the problem, and the reason is geometry —
+the root **partition** stays 29.5G inside that 100 GiB disk, with ~70 GiB
+unallocated, because the AMI carries no `growpart` and
+`apt-get install cloud-guest-utils` cannot run on a disk with no free space to
+download into. The extra GiB bought time only because a larger volume's
+filesystem happens to start with more slack, not because the partition grew.
+
+Since 0.46.12 the adapter reclaims the space itself at episode start, which
+addresses the cause rather than the symptom — see below. `AWS_ROOT_VOLUME_SIZE`
+remains available as an independent lever.
 
 It is infra rather than a task field for the same reason as the instance type:
 task files are **content-hash verified**, so editing `volume_size` invalidates
@@ -297,6 +319,84 @@ disclosure is a false statement sealed in a `verify_bundle`-valid bundle. Both
 the gate and the stamp derive from a single table
 (`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
 so a future third value cannot be gated without being disclosed or vice versa.
+
+### Guest disk reclamation at episode start
+
+Growing the volume treats the symptom; the cause is that snapd downloads
+gigabytes into a disk that ships ~93% full. So `AwsProvider.allocate` runs one
+**guest preparation** step between guest readiness and upstream's `reset` —
+before the episode's first observation, because hygiene that ran after the
+reset would be too late for the frame that reset captures.
+
+It drives the guest's own HTTP control server (`POST /execute`, argv with
+`shell: false` — the same endpoint and contract upstream's `SetupController`
+uses), and does three things, in an order that is load-bearing:
+
+1. **Abort the in-flight auto-refresh** — `snap changes` showed
+   `Auto-refresh 9 snaps` and `Pre-download novnc` already running at boot.
+   Only `Doing` changes with those two summaries are aborted; a seeding hook or
+   any other change is left alone. Abort goes first because it is immediate,
+   whereas a hold is a `configure core` hook change the CLI waits on, and snapd
+   runs one hook per snap at a time — behind a live refresh of core/snapd the
+   hold could queue past the per-command ceiling. Snapd's 20-minute retry delay
+   means no new refresh can start in the gap before the hold lands. Aborting a
+   partly-done change undoes its completed tasks, which returns those snaps to
+   the revision the AMI shipped — the benchmark's own baseline.
+2. **Hold snap auto-refresh** (`snap refresh --hold=forever`, falling back to
+   `snap set system refresh.hold=<far future>` on snapd older than 2.58). This
+   stops a *new* refresh starting.
+3. **Clear `/var/lib/snapd/cache`** — pure download scratch, documented by
+   Canonical as "the working cache … used to minimise download size and speed-up
+   refreshes". Deleting it costs a re-download and nothing else.
+
+Every privileged step is exactly one `echo <password> | sudo -S bash -c
+'<fragment>'`, with all of the work — the `snap changes` loop, the
+`find /var/lib/snapd/cache -mindepth 1 -delete` — inside the privileged inner
+shell. That shape is not cosmetic: the control server runs as an unprivileged
+user, so a glob like `/var/lib/snapd/cache/*` expanded by the *outer* shell
+matches nothing against a `drwx------ root:root` directory and `rm -rf` of the
+literal name exits 0, and an `xargs … echo pw | sudo -S snap abort` pipeline
+parses as `xargs echo` piped into one id-less `sudo`. Both were real defects
+that reported `ok` while doing nothing, caught only by re-running the E2E with
+the cache directory genuinely owned by root.
+
+The design constraints are worth stating explicitly, because each is a line a
+future change could cross without noticing:
+
+- **It is environment preparation, not benchmark semantics.** Nothing here
+  changes the task, the scoring, the applications available, or anything the
+  model observes. Clearing a package manager's download cache is housekeeping;
+  **uninstalling** an application a task might need is not, so no command may
+  ever `snap remove` or `apt-get purge` anything. A test asserts that.
+- **It fails soft, per step.** A missing binary, a denied `sudo`, an
+  unreachable control server, or a guest that answers slowly are each recorded
+  and stepped over. An episode that would otherwise have worked must never be
+  destroyed by a hygiene step, and a whole-pass budget keeps a wedged guest from
+  eating the reset timeout.
+- **It is conditional.** Free space is measured on every episode, but the
+  reclamation only runs below **12 GiB free** — set above snapd's largest
+  measured appetite (the 9.7 GB cache), so a guest that can already absorb a
+  full auto-refresh is left untouched. A guest whose free space cannot be
+  measured *is* reclaimed: the protection must not go missing exactly when the
+  guest is least healthy.
+- **It is observable.** Free space before and after, the filesystem and
+  whole-disk sizes, and every step's outcome are written to
+  `<run-root>/osworld-cache/<episode-id>/guest-preparation.json`. "The guest had
+  N bytes free at the start" is the fact a later
+  `environment returned no screenshot frame` has to be read against, and it must
+  not depend on anyone having probed the guest by hand. It sits in the episode's
+  own cache root rather than the artifact root because the bundle verifier
+  refuses any artifact-root entry that is not a digest-named artifact; it is not
+  on the observation because `Observation.metadata` feeds
+  `observation_content_id`, and a content-addressed observation id must be a
+  function of what the model saw, not of the guest's filesystem.
+
+**Growing the partition is deliberately not done.** `growpart` is absent, and
+the in-place `sfdisk` alternative rewrites the root partition table where a
+wrong start sector destroys the guest. A hygiene step that can fail *hard* is
+exactly what this must not be. The disk-vs-filesystem geometry is **reported**
+instead, read-only, since that pair of numbers is what tells the next reader
+whether `AWS_ROOT_VOLUME_SIZE` bought anything.
 
 ### Upstream is sealed after the first reset
 

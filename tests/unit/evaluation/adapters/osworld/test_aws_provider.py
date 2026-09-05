@@ -101,7 +101,14 @@ def _cache_root(tmp_path: Path) -> Path:
 
 
 class _Stubs:
-    """Two stubbed clients plus a scripted HTTP prober and a virtual clock."""
+    """Two stubbed clients plus scripted HTTP probers and a virtual clock.
+
+    ``guest_posts`` records every ``/execute`` body the provider sent, which is
+    how the disk-preparation tests assert on what ran in the guest without a
+    network. ``guest_responses`` scripts the replies: a mapping from a substring
+    of the posted command to the body to return, so a test names only the step
+    it cares about and every other step gets the benign default.
+    """
 
     def __init__(self, *, http_codes: list[int] | None = None) -> None:
         self.ec2 = boto3.client(
@@ -121,7 +128,34 @@ class _Stubs:
             self.http_calls.append(url)
             return self._http_codes.pop(0) if len(self._http_codes) > 1 else self._http_codes[0]
 
-        self.clients = _Clients(ec2=self.ec2, scheduler=self.scheduler, http_get=http_get)
+        self.guest_posts: list[dict[str, Any]] = []
+        self.guest_responses: list[tuple[str, dict[str, Any] | Exception]] = []
+        # Enough free space that preparation is a no-op unless a test says
+        # otherwise: every pre-existing allocate test wants the old behaviour.
+        self.guest_default: dict[str, Any] | Exception = {
+            "returncode": 0,
+            "output": str(64 * 1024**3),
+            "error": "",
+        }
+
+        def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            self.guest_posts.append(payload)
+            script = " ".join(payload.get("command", []))
+            for needle, response in self.guest_responses:
+                if needle in script:
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
+            if isinstance(self.guest_default, Exception):
+                raise self.guest_default
+            return self.guest_default
+
+        self.clients = _Clients(
+            ec2=self.ec2,
+            scheduler=self.scheduler,
+            http_get=http_get,
+            http_post_json=http_post_json,
+        )
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
@@ -476,6 +510,179 @@ async def test_allocate_refuses_without_a_cache_root(monkeypatch: pytest.MonkeyP
         provider = _provider(stubs, monkeypatch, desktop_env_factory=_FakeEnv)
         with pytest.raises(AllocationError, match="cache root"):
             await provider.allocate(_plan(), _task(), cache_root=None)  # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------------------
+# Guest disk preparation (see ``guest_disk`` for the measurements)
+# ----------------------------------------------------------------------
+
+
+async def _allocate_with_guest(
+    stubs: _Stubs, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """Drive a full allocate and return the episode cache root it wrote into."""
+
+    _expect_describe_images(stubs)
+    _expect_run_instances(stubs)
+    _expect_create_schedule(stubs)
+    _expect_running(stubs)
+    provider = _provider(
+        stubs,
+        monkeypatch,
+        desktop_env_factory=_FakeEnv,
+        task_factory=lambda t: {"id": t.task_id},
+    )
+    root = _cache_root(tmp_path)
+    await provider.allocate(_plan(), _task(), cache_root=root)
+    return root
+
+
+class _ResetRecordingEnv(_FakeEnv):
+    """A ``_FakeEnv`` that records how many guest posts preceded its reset.
+
+    Ordering is only assertable against a shared timeline, so the env samples
+    the guest's post log at the moment upstream's ``reset`` runs. Comparing that
+    count with the final one is what distinguishes "prepared the disk, then
+    reset" from "reset, then prepared" -- two orderings that otherwise produce
+    identical reports and identical call sets.
+    """
+
+    posts_at_reset: int | None = None
+    stubs: _Stubs | None = None
+
+    def reset(self, task_config: Any) -> None:
+        assert _ResetRecordingEnv.stubs is not None
+        _ResetRecordingEnv.posts_at_reset = len(_ResetRecordingEnv.stubs.guest_posts)
+        super().reset(task_config)
+
+
+@pytest.mark.asyncio
+async def test_allocate_reclaims_a_tight_guest_before_upstream_resets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The disk is reclaimed BEFORE the first observation, and it is recorded.
+
+    Ordering is the whole point: the released AMI ships ~93% full and its own
+    snapd fills the rest on a clock (100% used / 0 bytes free at t+383s, first
+    ``ObservationPhaseError`` at t+424s), so hygiene that ran after upstream's
+    reset would already be too late for the frame that reset captures.
+    """
+
+    _ResetRecordingEnv.posts_at_reset = None
+    with _Stubs() as stubs:
+        _ResetRecordingEnv.stubs = stubs
+        stubs.guest_default = {"returncode": 0, "output": str(2_200_000_000), "error": ""}
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_ResetRecordingEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        root = _cache_root(tmp_path)
+        await provider.allocate(_plan(), _task(), cache_root=root)
+
+    scripts = [" ".join(post["command"]) for post in stubs.guest_posts]
+    assert any("snap refresh --hold=forever" in script for script in scripts)
+    assert any("/var/lib/snapd/cache" in script for script in scripts)
+
+    # EVERY hygiene post landed before upstream's reset captured the first
+    # frame. Preparation that ran afterwards would leave that frame -- and the
+    # setup writes preceding it -- on the disk this step exists to protect.
+    posts_at_reset = _ResetRecordingEnv.posts_at_reset
+    assert posts_at_reset is not None, "upstream reset never ran"
+    assert posts_at_reset == len(stubs.guest_posts)
+    assert posts_at_reset > 0
+    # Every post uses the endpoint contract upstream itself uses: an argv list
+    # with ``shell: false``, so the server execs it directly.
+    assert all(post["shell"] is False for post in stubs.guest_posts)
+    assert all(isinstance(post["command"], list) for post in stubs.guest_posts)
+
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    assert report["reclamation_attempted"] is True
+    assert report["free_bytes_before"] == 2_200_000_000
+
+
+@pytest.mark.asyncio
+async def test_allocate_leaves_a_roomy_guest_alone_but_still_records_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _Stubs() as stubs:
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+
+    scripts = [" ".join(post["command"]) for post in stubs.guest_posts]
+    assert not any("snap refresh" in script for script in scripts)
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    assert report["reclamation_attempted"] is False
+    assert report["reason"] == "above-threshold"
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_guest_control_server_does_not_fail_the_allocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FAIL SOFT, at the provider boundary this time.
+
+    The readiness probe already passed, so the guest is up; a control server
+    that then refuses the hygiene posts must cost the episode nothing. An
+    allocation that raised here would destroy an episode that would have run.
+    """
+
+    with _Stubs() as stubs:
+        stubs.guest_default = ConnectionError("connection refused")
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+        stubs.ec2_stub.assert_no_pending_responses()
+        stubs.sched_stub.assert_no_pending_responses()
+
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    assert report["free_bytes_before"] is None
+    assert all(step["status"] == "unreachable" for step in report["steps"])
+
+
+@pytest.mark.asyncio
+async def test_a_guest_returning_a_body_without_a_returncode_reads_as_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A server that did not say the command succeeded did not say it succeeded.
+
+    Defaulting a missing ``returncode`` to 0 would let a malformed reply be
+    recorded as a successful reclamation, which is the one thing the evidence
+    must not be able to claim falsely.
+    """
+
+    with _Stubs() as stubs:
+        stubs.guest_default = {"output": "", "error": "no returncode field"}
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    assert report["free_bytes_before"] is None
+    assert all(step["status"] == "failed" for step in report["steps"])
+
+
+@pytest.mark.asyncio
+async def test_the_preparation_report_never_carries_the_client_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The password reaches the guest through ``sudo -S`` and stops there.
+
+    Same discipline as every other secret on this boundary: it may cross the
+    wire to the guest, and it may not be written to the operator's disk.
+    """
+
+    with _Stubs() as stubs:
+        stubs.guest_default = {"returncode": 0, "output": str(2_200_000_000), "error": ""}
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+
+    # ``_plan()``'s OSWORLD_CLIENT_PASSWORD is "pw" -- too short to search for
+    # without false positives, so assert on the pipeline shape that carries it.
+    scripts = [" ".join(post["command"]) for post in stubs.guest_posts]
+    assert any("| sudo -S" in script for script in scripts)
+    report = (root / "guest-preparation.json").read_text()
+    assert "sudo -S" not in report
+    assert "snap refresh" not in report
 
 
 @pytest.mark.asyncio
