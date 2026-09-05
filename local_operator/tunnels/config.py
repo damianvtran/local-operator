@@ -11,7 +11,9 @@ from typing import Any
 
 from local_operator.paths import config_dir
 
-DEFAULT_GATEWAY_PORT = 4099
+# The browser bridge already owns 4099 and the mobile relay owns 4098. Keep
+# this separate listener available when both existing local services are up.
+DEFAULT_GATEWAY_PORT = 4100
 DEFAULT_API_URL = "https://api.radienthq.com"
 HARNESS_PORTS = {"local-operator": 4098, "opencode": 4096}
 ORIGIN_ISSUER = "https://tunnels.radienthq.com"

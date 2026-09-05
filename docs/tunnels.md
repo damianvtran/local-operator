@@ -60,8 +60,9 @@ lop tunnel restart
 ```
 
 Use `--mobile-port`, `--opencode-port`, `--no-mobile`, or `--no-opencode` to
-configure the harness set. The gateway listens on loopback port 4099 by
-default; `--gateway-port` selects it at creation. It must differ from every
+configure the harness set. The gateway listens on loopback port 4100 by
+default, leaving 4099 for the browser bridge and 4098 for the mobile relay.
+`--gateway-port` selects it at creation. It must differ from every
 harness port and remains fixed for that tunnel. Revoke and recreate to change
 it, so a running connector never targets a port before the proof gateway owns
 its listener. Ports below 1024 and arbitrary upstream URLs are

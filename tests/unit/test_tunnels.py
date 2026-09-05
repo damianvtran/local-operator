@@ -445,11 +445,19 @@ def test_billing_and_suspension_receipts_link_to_console_management_route():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_gateway", [None, 4099])
 async def test_create_retry_reuses_intent_and_does_not_persist_connector_token(
-    tmp_path, monkeypatch, connection
+    tmp_path, monkeypatch, connection, explicit_gateway
 ):
+    from local_operator.browser_bridge.daemon import DEFAULT_PORT as BROWSER_PORT
+    from local_operator.mobile.daemon import DEFAULT_PORT as MOBILE_PORT
     from local_operator.tunnels import cli
 
+    # Default creation must coexist with both already-installed local services.
+    # Explicit ports from earlier configurations remain supported unchanged.
+    assert config.DEFAULT_GATEWAY_PORT == 4100
+    assert config.DEFAULT_GATEWAY_PORT not in {BROWSER_PORT, MOBILE_PORT}
+    expected_gateway = explicit_gateway or config.DEFAULT_GATEWAY_PORT
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "credential_id", lambda value=None: 7)
     api = AsyncMock()
@@ -458,16 +466,18 @@ async def test_create_retry_reuses_intent_and_does_not_persist_connector_token(
     async def request(method, path="", **kwargs):
         if path == "/billing":
             return {"eligible": True}
+        assert kwargs["body"]["gateway_port"] == expected_gateway
         attempts.append(kwargs["idempotency_key"])
         if len(attempts) == 1:
             raise httpx.ConnectError("lost create response")
-        return copy.deepcopy(connection["tunnel"])
+        return {**copy.deepcopy(connection["tunnel"]), "gateway_port": expected_gateway}
 
     api.request.side_effect = request
     monkeypatch.setattr(cli, "RadientTunnels", lambda *args: api)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
-    args = parser.parse_args(["tunnel", "create", "--name", "device"])
+    options = ["--gateway-port", str(explicit_gateway)] if explicit_gateway else []
+    args = parser.parse_args(["tunnel", "create", "--name", "device", *options])
     with pytest.raises(httpx.ConnectError):
         await dispatch(args)
     assert "https://" + HOST in await dispatch(args)
@@ -476,6 +486,7 @@ async def test_create_retry_reuses_intent_and_does_not_persist_connector_token(
     assert stored.stat().st_mode & 0o777 == 0o600
     assert "cloudflared_token" not in stored.read_text()
     assert config.load()["credential_id"] == 7
+    assert config.load()["gateway_port"] == expected_gateway
 
 
 @pytest.mark.asyncio
@@ -599,6 +610,7 @@ async def test_configuration_edit_preserves_private_origin_and_explicit_stop(
     add_parser(parser.add_subparsers())
     receipt = await dispatch(parser.parse_args(["tunnel", "configure", "--name", "Renamed"]))
     stored = config.load()
+    assert stored["gateway_port"] == 4099
     assert stored["stopped"] is True
     assert stored["mobile_password"] == "private-origin"
     assert stored["cloudflared_path"] == "/trusted/cloudflared"
