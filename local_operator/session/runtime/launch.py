@@ -204,7 +204,8 @@ def _spawn_runtime(
 
     The path rides on the Popen rather than widening the return type, so every
     existing caller and test double keeps working with a plain process object.
-    The file is small, per-candidate, and unlinked as soon as it is read.
+    The file is small, per-candidate, created 0600, and unlinked as soon as it
+    is read.
 
     Only routing data enters the environment — prompt text, images and command
     identity travel over the authenticated loopback socket, never through
@@ -221,8 +222,16 @@ def _spawn_runtime(
         # A parent that set this for an earlier speculative engage must not
         # leak it into a runtime that has real work to do.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
-    capture = Path(tempfile.gettempdir()) / f"lop-runtime-{session_id}-{uuid.uuid4().hex[:8]}.log"
-    handle = capture.open("wb")
+    # 0600 at CREATION, via mkstemp. `Path.open("wb")` takes the process umask
+    # (measured 0o644 here), leaving the child's entire stdout+stderr --
+    # tracebacks, provider error bodies, config echoes -- world-readable in a
+    # shared /tmp. mkstemp also generates the random suffix itself, so the
+    # session id no longer has to carry the uniqueness and a directory listing
+    # stops disclosing live session ids to other local users. The prefix keeps
+    # these recognisable as this project's spawn captures.
+    handle_fd, capture_path = tempfile.mkstemp(prefix="lop-runtime-", suffix=".log")
+    capture = Path(capture_path)
+    handle = os.fdopen(handle_fd, "wb")
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             [sys.executable, "-m", "local_operator.session.runtime.process"],
@@ -279,6 +288,31 @@ class RuntimeStartupError(RuntimeError):
         #: A vetted, user-facing sentence, or "" when the cause was not one of
         #: the known configuration conditions.
         self.actionable = actionable
+
+
+class ActionableConnectionError(ConnectionError):
+    """A ``ConnectionError`` whose MESSAGE is a vetted, user-facing sentence.
+
+    The type is the permission slip. Callers that relay owner failures to a user
+    surface (the desktop HTTP routes) may echo ``str(error)`` for this class and
+    must fall back to a generic sentence for every other ``ConnectionError``.
+
+    That distinction cannot be recovered from the message text, and the previous
+    round proved it: the relay echoed EVERY ``ConnectionError`` verbatim on the
+    strength of a docstring claiming they were limited to the vetted set, and
+    shipped ``owner socket unreachable: [Errno 61] Connect call failed
+    ('127.0.0.1', 54321)`` (an internal control port) and ``owner moved to
+    another conversation (abc123secretsession)`` (another session's id) into the
+    renderer. ``attach_client`` raises bare ``ConnectionError`` from a dozen
+    places carrying socket errors, peer ids and provider text; only the
+    configuration reasons curated in :data:`_ACTIONABLE_STARTUP_REASONS` are
+    fit to show, so only they get this type.
+    """
+
+    #: Marks this error's message as vetted for display. An attribute rather
+    #: than a bare `isinstance` so a caller reads as "is this actionable?"
+    #: rather than having to know the class hierarchy.
+    actionable = True
 
 
 def _spawn_failure_reason(capture: Path) -> tuple[str, str]:

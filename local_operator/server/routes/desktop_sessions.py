@@ -157,12 +157,18 @@ async def errors() -> AsyncIterator[None]:
     except (ReceiptConflict, ValueError) as error:
         raise HTTPException(409, str(error)) from None
     except ConnectionError as error:
-        # A cold session that cannot start an owner reports WHY, when the cause
-        # was one of the vetted configuration conditions
-        # (`launch._ACTIONABLE_STARTUP_REASONS`). Everything else keeps the
-        # generic sentence: owner/provider errors can otherwise carry endpoint
-        # bodies and credentials into a user-visible surface.
-        detail = str(error).strip()
+        # A cold session that cannot start an owner reports WHY -- but only when
+        # the reason arrives as an `ActionableConnectionError`, whose TYPE is
+        # what certifies the message as one of the vetted configuration
+        # sentences (`launch._ACTIONABLE_STARTUP_REASONS`).
+        #
+        # Vettedness is deliberately NOT inferred from the text. Echoing every
+        # ConnectionError leaked `owner socket unreachable: [Errno 61] Connect
+        # call failed ('127.0.0.1', 54321)` and `owner moved to another
+        # conversation (<session id>)` straight to the renderer: `attach_client`
+        # raises bare ConnectionErrors carrying socket errors, internal control
+        # ports and other sessions' ids. Those keep the generic sentence.
+        detail = str(error).strip() if getattr(error, "actionable", False) else ""
         raise HTTPException(
             503,
             detail or "Session owner is unavailable. Reconnect and reconcile before retrying.",
