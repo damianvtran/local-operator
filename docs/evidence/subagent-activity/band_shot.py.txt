@@ -1,7 +1,7 @@
 """Render the Subagents band with a child whose model call is in flight.
 
 Usage: cd <worktree> && env -u NO_COLOR TERM=xterm-256color \
-    .venv/bin/python /tmp/lop-sa-evidence/band_shot.py out.svg
+    .venv/bin/python docs/evidence/subagent-activity/band_shot.py.txt out.svg
 
 The child's row text is produced by the REAL relay (`_make_relay`), fed the
 exact event the harness loop yields at the start of every provider call

@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
     TextContent,
     ToolCall,
+    ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
@@ -741,11 +742,17 @@ def test_working_line_says_thinking_until_text_actually_streams() -> None:
     fold = make_fold()
     fold.fold_event(AgentStartEvent(generation=1))
 
-    # A tool-only call: placeholder, then the tool, with no text between.
+    # A tool-only call in the loop's real order: placeholder, the call being
+    # dictated, message_end closing the model call, then (after the approval
+    # gate's wait) the tool starting. The composed intent must hold across
+    # message_end — that boundary ends prose, not a call still being composed.
     first = Message.assistant()
     fold.fold_event(MessageStartEvent(message=first))
     assert fold.projection.activity == "thinking"
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="c1", tool_name="bash", intent="probing"))
+    assert fold.projection.activity == "probing"
     fold.fold_event(MessageEndEvent(message=first))
+    assert fold.projection.activity == "probing"
     fold.fold_event(
         ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
     )

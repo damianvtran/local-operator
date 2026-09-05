@@ -1239,11 +1239,20 @@ class ProjectionFold:
             if event.delta and p.activity in ("thinking", ""):
                 self._set_activity("responding")
         elif isinstance(event, MessageEndEvent):
-            # The prose is settled, so "responding" is over: whatever comes
-            # next (another model call, a tool batch, the run's end) the line
-            # must stop claiming text is arriving — the TUI drops its streaming
-            # block here for the same reason.
-            if isinstance(event.message, Message) and event.message.role == "assistant":
+            # Ends the PROSE phase only. `message_end` closes the model call,
+            # but for a tool-calling turn it arrives AFTER the compose events
+            # and BEFORE `tool_execution_start` — with the approval gate's wait
+            # in between for a write/exec-tier call. The composed intent set
+            # above must survive that window: the TUI's `_composing_cards` are
+            # only adopted on tool start or cleared at turn settle, so its
+            # working line keeps saying `composing …` across `message_end`
+            # while only the streaming block unmounts. Downgrading anything but
+            # "responding" here said "thinking" for the whole approval wait.
+            if (
+                isinstance(event.message, Message)
+                and event.message.role == "assistant"
+                and p.activity == "responding"
+            ):
                 self._set_activity("thinking")
 
     # -- todos / pending / state -------------------------------------------

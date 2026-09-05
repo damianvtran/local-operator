@@ -30,3 +30,23 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
 The trajectory printed above each sequence is the child's own event list from
 the same run, so a reader can line each progress word up with the event that
 produced it.
+
+## Round 2: a composed tool intent survives `message_end` on the phone
+
+Round-1 review (F1) caught a regression in the mobile `ProjectionFold`: the new
+`message_end → thinking` branch fired unconditionally, so for a tool-calling
+turn — whose real order is `message_start → tool_call_compose → message_end →
+[approval wait] → tool_execution_start` — the phone's working line dropped from
+the composed intent to `thinking` for the whole approval wait. The fix
+downgrades only when the line was actually `responding`, mirroring the TUI
+where `_composing_cards` outlive `message_end` and only the streaming block
+unmounts.
+
+```sh
+# Activity after each event of the compose gap, on the tree you stand in.
+.venv/bin/python docs/evidence/subagent-activity/round2-fold_compose_gap.py.txt
+```
+
+| artifact | what it shows |
+|---|---|
+| `round2-compose-gap-sequence.txt` | The same seven-event sequence on three trees. Round-1 head `c83c46c5`: `probing → thinking → probing` across `message_end` (the F1 regression). Fixed head: `probing → probing → probing`. Base `e0c27ea9`: intent survives but `message_start` still reads `responding`. |

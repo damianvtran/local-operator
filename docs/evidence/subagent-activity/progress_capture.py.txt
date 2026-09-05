@@ -1,6 +1,6 @@
 """Capture the sequence of SubagentProgressEvent.progress values a real child emits.
 
-Usage: cd <worktree> && .venv/bin/python /tmp/lop-sa-evidence/progress_capture.py <label>
+Usage: cd <worktree> && .venv/bin/python docs/evidence/subagent-activity/progress_capture.py.txt <label>
 
 Stands up a real parent Session (production subagent wiring: run_subagent,
 _make_relay, AsyncJobManager) with a scripted provider stream. The child does:
