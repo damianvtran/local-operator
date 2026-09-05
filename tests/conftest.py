@@ -199,6 +199,29 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_implicit_local_discovery(monkeypatch):
+    """Keyless discovery must not read a developer's default-port runtimes.
+
+    Activation now refreshes live capacity, unlike a hosted catalogue cache.
+    Explicit test clients and configured random-port HTTP fixtures remain real;
+    an implicit preset lookup gets the ordinary unavailable-server fallback.
+    """
+    from local_operator.model import discovery
+    from local_operator.providers.local import LOCAL_PRESETS, resolve_base_url
+
+    fetch = discovery.fetch_models
+
+    def isolated(provider_id, **kwargs):
+        if provider_id in LOCAL_PRESETS and kwargs.get("client") is None:
+            endpoint = resolve_base_url(provider_id, override=kwargs.get("base_url"))
+            if endpoint == LOCAL_PRESETS[provider_id][1]:
+                return None
+        return fetch(provider_id, **kwargs)
+
+    monkeypatch.setattr(discovery, "fetch_models", isolated)
+
+
+@pytest.fixture(autouse=True)
 def reset_store_maintenance() -> Iterator[None]:
     """Give every test a process that has not yet swept the session store.
 

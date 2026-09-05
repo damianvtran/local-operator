@@ -1705,6 +1705,9 @@ COMPOSER_COPY = object()
 #: holding `[Image #1, 1568x200]`, several seconds later, with no keypress to
 #: explain it.
 COMPOSER_PASTE_NOTICE = object()
+# A fast local setup can finish before the old setup toast times out. Retire
+# only that session's notice on reload, never an unrelated actionable card.
+SPLASH_NOTICE = object()
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
 #: :data:`COMPOSER_PASTE_NOTICE`.
@@ -2155,6 +2158,8 @@ class OperatorApp(App[None]):
         #: `/login` that resolves it. While set, a successful login reloads the
         #: session (there is none yet) rather than only re-polling the splash.
         self._setup_state = False
+        self._model_activation_generation = 0
+        self._model_activation_pending: int | None = None
         #: The unknown provider id that put us in the setup state, when that is
         #: why we are here (``None`` for the nothing-configured case).
         #:
@@ -5378,6 +5383,8 @@ class OperatorApp(App[None]):
         # The splash notice describes the session being replaced. Left
         # standing, a `/new` would open on the dead session's quota warning.
         self._splash_notice = None
+        for toast in self.query(Toast):
+            toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -6107,7 +6114,7 @@ class OperatorApp(App[None]):
 
     def composer_submission_blocked(self) -> bool:
         """Whether Editor must retain rather than submit its current draft."""
-        return self._session_transition_pending
+        return self._session_transition_pending or self._model_activation_pending is not None
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -9083,7 +9090,7 @@ class OperatorApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
-        if self._session_transition_pending:
+        if self.composer_submission_blocked():
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
             # already have been posted, so return the draft rather than routing
@@ -15762,11 +15769,67 @@ class OperatorApp(App[None]):
         if self._providers.provider(provider) is None:
             self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
+        if getattr(self._providers.provider(provider), "local_setup", False):
+            self._model_activation_pending = generation
+            # This is a user-command receipt, not background infrastructure.
+            # Retire the splash before the wait so completion cannot move the
+            # composer underneath a draft typed while capacity is being checked.
+            notice(f"Checking active capacity for {provider}/{model_id}…", "info")
+            self.run_worker(
+                self._resolve_local_model_activation(
+                    session, provider, model_id, persist_default, notice, generation
+                ),
+                group="local-model-resolution",
+                exclusive=True,
+            )
+            return
         try:
             spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:  # unresolvable hosting/model pair
             self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
+        self._activate_resolved_model(session, provider, model_id, spec, persist_default, notice)
+
+    async def _resolve_local_model_activation(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        persist_default: bool,
+        notice: NoticeFn,
+        generation: int,
+    ) -> None:
+        providers = self._providers
+        if providers is None:
+            return
+        try:
+            spec = await asyncio.to_thread(providers.resolve_model, provider, model_id)
+            # A slow probe cannot overtake a newer choice or apply to a different
+            # session. Enter stays behind the existing composer boundary until
+            # selection settles, so a fast next prompt cannot reach the old model.
+            if self._session is session and generation == self._model_activation_generation:
+                self._activate_resolved_model(
+                    session, provider, model_id, spec, persist_default, notice
+                )
+        except Exception as error:
+            self._system_notice(f"cannot resolve {provider}: {error}", "error")
+        finally:
+            if self._model_activation_pending == generation:
+                self._model_activation_pending = None
+
+    def _activate_resolved_model(
+        self,
+        session: Any,
+        provider: str,
+        model_id: str,
+        spec: Any,
+        persist_default: bool,
+        notice: NoticeFn,
+    ) -> None:
         old_label = session.model_label
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
@@ -19627,6 +19690,14 @@ class OperatorApp(App[None]):
         """
         providers = self._providers
         assert providers is not None
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, provider_settings
+
+        if provider_id in LOCAL_PROVIDER_IDS:
+            return (
+                "configured server"
+                if provider_settings(provider_id).get("base_url")
+                else "configure server"
+            )
         if stored:
             return "logged in"
         return "env key" if providers.is_usable(provider_id) else "needs login"
@@ -19692,10 +19763,16 @@ class OperatorApp(App[None]):
             self._system_notice(f"unknown provider: {provider}", "warning")
             return
         definition = self._providers.provider(provider)
-        if getattr(definition, "login", None) is None:
+        if getattr(definition, "login", None) is None and not getattr(
+            definition, "local_setup", False
+        ):
             self._system_notice(f"provider '{provider}' has no interactive login.", "warning")
             return
-        notice(f"logging in to {provider}…")
+        notice(
+            f"configuring {provider}…"
+            if getattr(definition, "local_setup", False)
+            else f"logging in to {provider}…"
+        )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
@@ -20017,6 +20094,19 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "local_setup", False):
+
+            async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+                return await self._request_login_key(
+                    str(getattr(definition, "name", "Server")),
+                    secret=secret,
+                    field_label=field,
+                    default=default,
+                )
+
+            return LoginCallbacks(
+                on_progress=on_progress, on_warning=on_warning, on_setup_input=on_setup_input
+            )
         if not getattr(definition, "accepts_paste_prompt", False):
             return LoginCallbacks(
                 on_auth_url=on_auth_url, on_progress=on_progress, on_warning=on_warning
@@ -20053,6 +20143,8 @@ class OperatorApp(App[None]):
         *,
         secret: bool = True,
         sole_path: bool = True,
+        field_label: str | None = None,
+        default: str | None = None,
         credential: bool = False,
     ) -> str | None:
         """Put a paste prompt in the transcript and await the key.
@@ -20077,8 +20169,23 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         self._close_aside()
+        instructions = None
+        if field_label:
+            instructions = (
+                f"Enter keeps {default}"
+                if default and not secret
+                else "Enter continues without a new value; Esc cancels setup."
+            )
+        if field_label and secret:
+            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
         block = KeyPromptBlock(
-            provider_label, secret=secret, sole_path=sole_path, credential=credential
+            provider_label,
+            secret=secret,
+            sole_path=sole_path,
+            field_label=field_label,
+            default=default,
+            instructions=instructions,
+            credential=credential,
         )
         self._key_prompt = block
         # Kept BEYOND the `finally` that clears `_key_prompt`, because the flow
@@ -20228,6 +20335,10 @@ class OperatorApp(App[None]):
                     self._on_config_changed()
                 await notice("starting session…", "info")
                 await self._reload_session()
+            elif getattr(self._providers.provider(provider), "local_setup", False):
+                if self._on_config_changed is not None:
+                    self._on_config_changed()
+                self._cmd_model_saved(self._notice)
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -20236,9 +20347,14 @@ class OperatorApp(App[None]):
             # painted its own "cancelled" receipt, so this stays quiet about the
             # detail and only closes the sentence the "logging in to …" notice
             # opened.
-            await notice("login cancelled.", "info")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(
+                "setup cancelled; previous configuration kept." if local else "login cancelled.",
+                "info",
+            )
         except Exception as error:
-            await notice(f"login failed: {error}", "error")
+            local = getattr(self._providers.provider(provider), "local_setup", False)
+            await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
         finally:
             self._login_lock.release()
 
@@ -20789,7 +20905,7 @@ class OperatorApp(App[None]):
         the standard vocabulary. ``kind`` is ``notice`` for a printed line,
         ``block`` for a renderable payload, ``noop`` when the follower opens
         its own picker. Async because the MCP grant path starts a browser
-        round trip; every other producer is synchronous work.
+        round trip, and local model activation refreshes capacity off the UI loop.
 
         ``locality`` is the invoking client's declared position (see
         ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
@@ -20830,7 +20946,7 @@ class OperatorApp(App[None]):
                 # follower hosts the widget. A selector is a mutation: it is
                 # applied here, on the authoritative session.
                 return SlashResult(kind="noop")
-            return self._model_slash_result(args, SlashResult)
+            return await self._model_slash_result(args, SlashResult)
         if command == "loop":
             return self._loop_slash_result(args, SlashResult)
         if command == "compact":
@@ -21274,7 +21390,7 @@ class OperatorApp(App[None]):
             data={"type": "agent_attached", "agent": resolved, "request": request},
         )
 
-    def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _model_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """The routed, non-bare ``/model``: a REAL switch on the owner session.
 
         ``_cmd_model`` cannot be reused here — it prints through the local
@@ -21320,8 +21436,31 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice", text=f"unknown provider: {provider} — see /provider", style="warning"
             )
+        self._model_activation_generation += 1
+        generation = self._model_activation_generation
+        self._model_activation_pending = None
+        self.workers.cancel_group(self, "local-model-resolution")
         try:
-            spec = self._providers.resolve_model(provider, model_id)
+            if getattr(self._providers.provider(provider), "local_setup", False):
+                self._model_activation_pending = generation
+                try:
+                    spec = await asyncio.to_thread(
+                        self._providers.resolve_model, provider, model_id
+                    )
+                finally:
+                    if self._model_activation_pending == generation:
+                        self._model_activation_pending = None
+                if self._session is not session or generation != self._model_activation_generation:
+                    return SlashResult(
+                        kind="notice",
+                        text=(
+                            "The session or model choice changed during lookup. "
+                            "Select the model again."
+                        ),
+                        style="warning",
+                    )
+            else:
+                spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:
             return SlashResult(
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
@@ -23376,7 +23515,9 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(_splash_toast_headline(text, headline), duration_ms=duration)
+        toast.show(
+            _splash_toast_headline(text, headline), duration_ms=duration, owner=SPLASH_NOTICE
+        )
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.

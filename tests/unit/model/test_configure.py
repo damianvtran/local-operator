@@ -2531,12 +2531,12 @@ async def test_recovery_probe_failure_leaves_the_block_standing(tmp_path) -> Non
             "ollama",
             "test_model",
             200,
-            {"models": [{"name": "test_model"}]},
+            {"data": [{"id": "test_model"}]},
             True,
-            "http://localhost:11434/api/tags",
+            "http://localhost:11434/v1/models",
             None,
         ),
-        ("ollama", "test_model", 404, {}, False, "http://localhost:11434/api/tags", None),
+        ("ollama", "test_model", 404, {}, False, "http://localhost:11434/v1/models", None),
         (
             "deepseek",
             "test_model",
@@ -2654,7 +2654,14 @@ def test_validate_model(
     result = validate_model(hosting, model, api_key)
     assert result == expected_result
 
-    if expected_headers:
+    if hosting == "ollama":
+        mock_requests_get.assert_called_once_with(
+            expected_url,
+            headers={"Authorization": "Bearer test_key"},
+            timeout=10,
+            allow_redirects=False,
+        )
+    elif expected_headers:
         mock_requests_get.assert_called_once_with(expected_url, headers=expected_headers)
     else:
         mock_requests_get.assert_called_once_with(expected_url)
@@ -2693,7 +2700,7 @@ def test_validate_model_no_model_found(mock_get):
 def test_validate_model_ollama_success(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.json.return_value = {"models": [{"name": "test_model"}]}
+    mock_response.json.return_value = {"data": [{"id": "test_model"}]}
     mock_get.return_value = mock_response
     assert validate_model("ollama", "test_model", SecretStr("test_key")) is True
 

@@ -18,6 +18,7 @@ import os
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from local_operator.harness.types import AbortSignal
+from local_operator.providers.local import LOCAL_PRESETS
 
 if TYPE_CHECKING:
     from local_operator.providers.oauth.callback_server import LoginCallbacks
@@ -84,6 +85,8 @@ class ProviderDefinition:
     name: str
     env_keys: EnvKeys = None
     allows_missing_api_key: bool = False
+    #: Endpoint setup shares the login surface, but does not mint an OAuth grant.
+    local_setup: bool = False
     login: LoginFn | None = None
     refresh_token: RefreshFn | None = None
     get_api_key: GetApiKeyFn | None = None
@@ -443,13 +446,17 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         login=create_api_key_login("Mistral", "https://console.mistral.ai/api-keys"),
         base_url="https://api.mistral.ai/v1",
     ),
-    ProviderDefinition(
-        id="ollama",
-        search_aliases=("local",),
-        name="Ollama (local)",
-        allows_missing_api_key=True,
-        base_url="http://localhost:11434/v1",
-    ),
+    *[
+        ProviderDefinition(
+            id=provider_id,
+            name=name,
+            search_aliases=("local", "self-hosted"),
+            allows_missing_api_key=True,
+            local_setup=True,
+            base_url=base_url,
+        )
+        for provider_id, (name, base_url, _url) in LOCAL_PRESETS.items()
+    ],
     ProviderDefinition(
         id="openrouter",
         search_aliases=(
@@ -555,8 +562,8 @@ def get_provider_definition(provider_id: str) -> ProviderDefinition | None:
 
 
 def list_login_providers() -> list[ProviderDefinition]:
-    """Providers offering an interactive login, in registry order."""
-    return [p for p in PROVIDER_REGISTRY if p.login is not None]
+    """Providers offering interactive login or server setup, in registry order."""
+    return [p for p in PROVIDER_REGISTRY if p.login is not None or p.local_setup]
 
 
 #: Providers that RESELL other providers' models rather than serving their own.

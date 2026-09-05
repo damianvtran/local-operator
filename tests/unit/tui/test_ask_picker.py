@@ -2920,7 +2920,9 @@ async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> None:
+async def test_a_held_key_never_answers_a_question_the_card_moved_on_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A key aimed at one question must not answer the next one.
 
     The `ask` picker walks several questions inside ONE widget, so guarding a
@@ -2934,19 +2936,14 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
     Reachable by one ordinary mouse click, since a single-select click both
     answers and advances.
 
-    The property under test is the ``still_aimed_at`` guard in
-    ``_commit_held_answer_key``, NOT the length of the hold window — so the
-    window is stretched here and the commit is fired by hand at the point the
-    test cares about. Racing the real 180 ms timer was the flake: under CPU
-    contention the timer fired BEFORE ``action_accept()`` advanced the card,
-    the key committed while still legitimately aimed at question 1, and the
-    test failed reporting the very bug it exists to catch
-    (``{'drop_table': ['Keep it'], 'rollout': ['Canary']}``) when nothing was
-    wrong. Stretching the hold makes "the key is still parked when the card
-    advances" a fact rather than a bet; calling the timer's own callback
-    afterwards exercises the identical guard the real timer would reach.
+    The property under test is ``still_aimed_at``, not the hold duration.
+    Parking the timer AFTER ``await pilot.press`` still raced its 180 ms
+    deadline: a busy compositor could finish the hold before the await returned.
+    This reproduced on unchanged main by delaying that return by 250 ms. Seed
+    the hold through its real helper and start only that timer paused: key/focus
+    delivery has separate tests and must not race this question-identity guard.
+    Invoke the real commit callback below; no product behavior is weakened.
     """
-    from local_operator.tui.widgets.editor import Editor
 
     questions = [
         _question(
@@ -2966,16 +2963,15 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
         card = app._ask_screen
         assert card is not None
 
-        await pilot.click(Editor)
-        # Wait for the click's focus/routing to settle, so the press below is
-        # HELD by the composer rather than dropped, instead of betting a fixed
-        # 0.1s that it has.
-        for _ in range(100):
-            if isinstance(app.screen.focused, Editor):
-                break
-            await pilot.pause()
+        set_timer = app.set_timer
 
-        await pilot.press("2")  # aimed at question 1: "Canary"
+        def park_answer_timer(delay, callback, *args, **kwargs):
+            if callback == app._commit_held_answer_key:
+                kwargs["pause"] = True
+            return set_timer(delay, callback, *args, **kwargs)
+
+        monkeypatch.setattr(app, "set_timer", park_answer_timer)
+        app._hold_answer_key(card, "2")  # aimed at question 1: "Canary"
         held = app._held_answer_key
         assert held is not None, "the key was not held"
         # Take the real timer out of the race entirely. Stopping it cannot mask

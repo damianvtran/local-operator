@@ -315,6 +315,9 @@ class LoginCallbacks:
     on_warning: Callable[[str], Awaitable[None] | None] | None = None
     on_input_rejected: Callable[[], Awaitable[None] | None] | None = None
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
+    # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
+    # host decides how to capture them; the controller never touches stdin.
+    on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
 
 
 _T = TypeVar("_T")

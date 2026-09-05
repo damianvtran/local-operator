@@ -21,6 +21,7 @@ import yaml
 
 from local_operator import settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
 
 
@@ -115,6 +116,11 @@ def _consumer_defaults() -> dict[str, object]:
     for key, value in DEFAULT_CONFIG.values.items():
         if not isinstance(value, dict):
             consumers.setdefault(key, value)
+    from local_operator.providers.local import DEFAULT_MODEL_OVERRIDES, LOCAL_PRESETS
+
+    for provider, (_name, endpoint, _url) in LOCAL_PRESETS.items():
+        consumers[f"providers.{provider}.base_url"] = endpoint
+        consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     return consumers
 
 
@@ -247,8 +253,21 @@ def _sample_value(setting: settings_io.Setting) -> object:
     if setting.kind is Kind.LIST:
         return list(setting.members[:1]) or []
     if setting.kind is Kind.TEXT:
+        if setting.validate_value is not None:
+            # A validated TEXT setting rejects an arbitrary probe by design
+            # (a typo must not disable a working endpoint). Each validator
+            # needs a valid, non-default sample here; a new validator without
+            # one fails loudly on KeyError rather than silently skipping the
+            # round trip.
+            return _VALID_TEXT_SAMPLES[setting.validate_value]
         return "round-trip-probe"
     return setting.default
+
+
+_VALID_TEXT_SAMPLES: dict[object, str] = {
+    local_providers.validate_endpoint_setting: "http://127.0.0.1:9/v1",
+    local_providers.model_overrides: '{"round-trip-probe":{"context_window":8192}}',
+}
 
 
 _ROUND_TRIPPABLE = [
