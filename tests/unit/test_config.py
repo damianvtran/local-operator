@@ -383,7 +383,7 @@ def test_loading_a_config_is_read_only(tmp_path):
     un-isolated probe script, while the change was under review. A load is
     a read. Every retired key present, nothing may change: not the file, not
     the store, no backup, no stamp."""
-    from local_operator.config_migrations import MIGRATIONS_STAMP_NAME
+    from local_operator.config_migrations import LEGACY_STAMP_NAME
     from local_operator.session.cleanup import STORE_MARKER_NAME
 
     (tmp_path / "sessions" / "abc").mkdir(parents=True)
@@ -396,7 +396,7 @@ def test_loading_a_config_is_read_only(tmp_path):
     assert path.read_bytes() == before, "loading rewrote config.yml"
     assert not (tmp_path / "sessions" / STORE_MARKER_NAME).exists(), "loading marked the store"
     assert not list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
-    assert not (tmp_path / MIGRATIONS_STAMP_NAME).exists()
+    assert not (tmp_path / LEGACY_STAMP_NAME).exists()
 
 
 def test_migration_pins_the_old_reapers_off_in_both_spellings(tmp_path, caplog):
@@ -469,21 +469,64 @@ def test_migration_is_a_no_op_on_a_final_shape_config(tmp_path):
     assert not list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
 
 
-def test_startup_seam_runs_once_per_config_dir(tmp_path, monkeypatch):
-    """``run_startup_migrations`` is gated by the stamp: the second launch
-    does not even construct a ConfigManager."""
+def test_startup_seam_is_gated_by_the_config_not_a_stamp(tmp_path, monkeypatch):
+    """Round 5 R5-4: a config restored from its backup (retired keys back,
+    opt-out gone) must be migrated AGAIN. There is no stamp to say "done";
+    the migration's own no-op path is the gate."""
     from local_operator import config_migrations
 
     _write_config(tmp_path, {"session": {"reap_unused": True}})
     config_migrations.run_startup_migrations(tmp_path)
-    stamp = tmp_path / config_migrations.MIGRATIONS_STAMP_NAME
-    assert config_migrations.SESSION_CLEANUP_MIGRATION in stamp.read_text()
-
-    def boom(_config_dir):
-        raise AssertionError("migration re-ran despite the stamp")
-
-    monkeypatch.setattr(config_migrations, "migrate_session_cleanup", boom)
+    assert not (tmp_path / config_migrations.LEGACY_STAMP_NAME).exists()
+    after = (tmp_path / "config.yml").read_bytes()
     config_migrations.run_startup_migrations(tmp_path)
+    assert (tmp_path / "config.yml").read_bytes() == after, "second launch rewrote"
+    # Restore the backup by hand: the belt must be fastened again next launch.
+    backup = next(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
+    (tmp_path / "config.yml").write_bytes(backup.read_bytes())
+    config_migrations.run_startup_migrations(tmp_path)
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["session.reap_unused"] is False and stored["session"]["reap_unused"] is False
+
+
+def test_a_corrupt_legacy_stamp_cannot_stop_lop(tmp_path):
+    """Round 5 R5-2: the round-5 candidate read a ``.migrations`` stamp and a
+    non-UTF-8 one raised on the start path. Nothing reads it now; it must be
+    inert whatever its bytes, and the migration must still run."""
+    from local_operator import config_migrations
+
+    _write_config(tmp_path, {"session": {"reap_unused": True}})
+    (tmp_path / config_migrations.LEGACY_STAMP_NAME).write_bytes(b"\xff\xfe\x00garbage")
+    config_migrations.run_startup_migrations(tmp_path)  # must not raise
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["session.reap_unused"] is False
+
+
+def test_a_failed_backup_leaves_the_config_alone_and_retries(tmp_path, monkeypatch, caplog):
+    """Round 5 R5-3: a backup that cannot be written must not rewrite the
+    file AND must not be recorded as done — the next launch retries and,
+    once the backup succeeds, fastens the belt."""
+    from local_operator import config_migrations
+
+    path = _write_config(tmp_path, {"session": {"reap_unused": True}})
+    before = path.read_bytes()
+    real_write_bytes = Path.write_bytes
+
+    def refuse(self, data):  # noqa: ANN001, ANN202
+        if ".pre-cleanup-migration." in self.name:
+            raise PermissionError("read-only")
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", refuse)
+    with caplog.at_level(logging.WARNING, logger="local_operator.config_migrations"):
+        config_migrations.run_startup_migrations(tmp_path)
+    assert path.read_bytes() == before, "rewrote without a backup"
+    assert any("could not back up" in r.message for r in caplog.records)
+    monkeypatch.undo()
+    config_migrations.run_startup_migrations(tmp_path)
+    stored = yaml.safe_load(path.read_text())["values"]
+    assert stored["session.reap_unused"] is False, "the retry did not fasten the belt"
+    assert len(list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))) == 1
 
 
 def test_startup_seam_never_stops_lop_from_starting(tmp_path, monkeypatch):
@@ -496,7 +539,16 @@ def test_startup_seam_never_stops_lop_from_starting(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config_migrations, "migrate_session_cleanup", boom)
     config_migrations.run_startup_migrations(tmp_path)  # must not raise
-    assert not (tmp_path / config_migrations.MIGRATIONS_STAMP_NAME).exists(), "retried next launch"
+
+
+def test_a_corrupt_config_cannot_stop_the_seam(tmp_path):
+    """Whatever ``ConfigManager`` does with an unreadable config, the seam
+    must return: the start path handles that file the same way moments
+    later, and a traceback here would be a second, earlier failure."""
+    from local_operator import config_migrations
+
+    (tmp_path / "config.yml").write_bytes(b"\xff\xfe: [not yaml")
+    config_migrations.run_startup_migrations(tmp_path)  # must not raise
 
 
 def test_migration_merges_into_an_existing_cleanup_block(tmp_path):

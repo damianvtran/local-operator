@@ -26,9 +26,14 @@ So, two rules, both enforced here and by tests:
 1. **A migration runs from :func:`run_startup_migrations` and nowhere
    else.** ``cli.main`` calls it once, for the config dir the command is
    about to use. Construction of ``ConfigManager`` never triggers it;
-   ``settings_io`` never triggers it; the TUI never triggers it. It is
-   gated once per config-dir per migration id by a stamp file, so a second
-   launch costs one ``stat``.
+   ``settings_io`` never triggers it; the TUI never triggers it. There is
+   NO stamp file: the gate is the migration's own "would this change
+   anything?" predicate, evaluated against the config every launch. A stamp
+   was tried and had three defects for one benefit — a corrupt stamp raised
+   on the start path, a failed backup got stamped and left the belt
+   unfastened for good, and a config restored from a backup was skipped as
+   "done" (review round 5, R5-2/3/4). The benefit was one ``stat`` saved on
+   a config ``lop`` is about to read anyway.
 
 2. **Retired opt-out keys are WRITTEN, never removed.** The migration sets
    ``values["session.reap_unused"] = False`` (the flat-dotted key the #576
@@ -48,15 +53,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: The stamp file that records which migrations have run for a config dir.
-#: One line per migration id. Lives beside ``config.yml`` rather than inside
-#: it so a hand-restored config from a backup re-runs the migration (which is
-#: idempotent) instead of being skipped because the stamp says "done".
-MIGRATIONS_STAMP_NAME = ".migrations"
-
-#: Id of the session-cleanup migration. Bump the suffix if the migration's
-#: effect ever changes in a way that already-migrated configs need again.
-SESSION_CLEANUP_MIGRATION = "session-cleanup-v1"
+#: Left behind by the one release candidate that stamped (PR #645 round 5,
+#: never shipped). Harmless and ignored; named so a reader of a config dir
+#: knows what it is. Nothing writes it any more.
+LEGACY_STAMP_NAME = ".migrations"
 
 #: The retired ceilings of the first eviction policy. Removed: nothing reads
 #: them at any version that also carries this module, and an older runtime
@@ -74,37 +74,19 @@ _RETIRED_CEILINGS = (
 _REAP_UNUSED_FLAT = "session.reap_unused"
 
 
-def _stamp_path(config_dir: Path) -> Path:
-    return config_dir / MIGRATIONS_STAMP_NAME
-
-
-def _already_ran(config_dir: Path, migration_id: str) -> bool:
-    try:
-        return migration_id in _stamp_path(config_dir).read_text(encoding="utf-8").split()
-    except OSError:
-        return False
-
-
-def _record_ran(config_dir: Path, migration_id: str) -> None:
-    try:
-        with _stamp_path(config_dir).open("a", encoding="utf-8") as handle:
-            handle.write(migration_id + "\n")
-    except OSError as exc:
-        # Not fatal: the migration is idempotent, so running it again next
-        # launch costs a config read and a no-op.
-        logger.debug("config migration: cannot record %s: %s", migration_id, exc)
-
-
 def migrate_session_cleanup(config_dir: Path) -> list[str]:
     """Pin the old reapers OFF and opt the user out of the new cleanup policy.
 
     Returns the list of changes made (empty when the config already had the
     final shape), so the caller and the tests can see exactly what moved.
     Idempotent: a second run on the migrated file changes nothing and writes
-    nothing. Backs ``config.yml`` up beside itself before any rewrite; if the
-    backup cannot be written the file is left alone (the keys it would add are
-    protective, but a user losing the record of what they had set is the
-    worse outcome, and the next launch retries).
+    nothing — and that no-op IS the startup gate, so a config restored from
+    a backup (retired keys back, opt-out gone) is migrated again on the next
+    launch. Backs ``config.yml`` up beside itself before any rewrite; if the
+    backup cannot be written the file is left alone (the keys it would add
+    are protective, but a user losing the record of what they had set is the
+    worse outcome) and the next launch retries, because nothing records the
+    attempt as done.
 
     Changes, in order:
 
@@ -164,12 +146,19 @@ def migrate_session_cleanup(config_dir: Path) -> list[str]:
         backup.write_bytes(config_file.read_bytes())
     except OSError as exc:
         logger.warning(
-            "config migration: could not back up %s (%s); leaving it as is", config_file, exc
+            "config migration: could not back up %s (%s); leaving it as is and "
+            "retrying at the next launch",
+            config_file,
+            exc,
         )
         return []
     # ``values`` IS the manager's live dict (mutated in place above, including
     # the deletions), so the write is the manager's own serialisation of it;
     # ``update_config`` would merge key-by-key and could not express a delete.
+    # That serialisation is the manager's FULL view: ``_load_config`` filled
+    # every absent top-level default in, so the rewritten file carries keys
+    # (``compaction``, ``web_fetch``, …) the original omitted. Same values,
+    # spelled out — the backup keeps the user's original spelling.
     manager._write_config(vars(manager.config))
 
     from local_operator.session.cleanup import SESSIONS_DIRNAME, mark_store
@@ -191,15 +180,19 @@ def migrate_session_cleanup(config_dir: Path) -> list[str]:
 def run_startup_migrations(config_dir: Path) -> None:
     """THE seam. Called once by ``cli.main`` for the config dir it will use.
 
-    Best-effort in the strongest sense: a migration that raises must never
-    stop ``lop`` from starting — the config it would have touched is still
-    readable by the code that ships with it.
+    Best-effort in the strongest sense: a migration that raises — for ANY
+    reason, a corrupt file included — must never stop ``lop`` from starting;
+    the config it would have touched is still readable by the code that
+    ships with it, or is handled by ``ConfigManager`` the same way it would
+    have been moments later. No state is recorded: the migration's own
+    no-op path is the gate (see the module docstring).
     """
-    if _already_ran(config_dir, SESSION_CLEANUP_MIGRATION):
-        return
     try:
         migrate_session_cleanup(config_dir)
-    except Exception:  # noqa: BLE001 — never a reason not to start
-        logger.warning("config migration: %s failed", SESSION_CLEANUP_MIGRATION, exc_info=True)
-        return
-    _record_ran(config_dir, SESSION_CLEANUP_MIGRATION)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        # One line at WARNING, the traceback at DEBUG: the usual cause is a
+        # config ``ConfigManager`` itself cannot read, and the command about
+        # to run reports THAT with its own message; a second traceback here
+        # would bury it.
+        logger.warning("config migration: session-cleanup migration skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
