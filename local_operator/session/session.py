@@ -1356,7 +1356,7 @@ def _write_roster_sidecar_if_changed(
     across writes.
     """
     fingerprint = json.dumps(
-        {key: payload[key] for key in ("version", "jobs", "records")},
+        {key: value for key, value in payload.items() if key != "generation"},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1373,7 +1373,12 @@ def _write_roster_sidecar_if_changed(
     # Gated on ``previous_fingerprint is None`` \u2014 never written \u2014 rather than
     # on emptiness alone, because a roster that goes from populated back to
     # empty MUST persist that transition to clear the stale sidecar.
-    if previous_fingerprint is None and not payload.get("jobs") and not payload.get("records"):
+    if (
+        previous_fingerprint is None
+        and not payload.get("jobs")
+        and not payload.get("records")
+        and not payload.get("accounting")
+    ):
         return fingerprint, False
     _write_roster_sidecar(path, payload)
     return fingerprint, True
@@ -9285,6 +9290,12 @@ class Session:
                     "generation": generation,
                     "jobs": rows,
                     "records": compact_records,
+                    # Retention may erase every visible row; the ledger still
+                    # owns their spend. Restore replaces row-derived accounting
+                    # with this snapshot so retained rows never bill twice.
+                    "accounting": [
+                        item.model_dump(mode="json") for item in self.jobs.accounting_components()
+                    ],
                 }
                 # The O(roster) fingerprint computation rides the SAME worker
                 # hop as the write: #308's invariant is that everything that
@@ -9427,6 +9438,14 @@ class Session:
                 self.jobs.restore(rows)
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent job rows", exc_info=True)
+        if isinstance(details.get("accounting"), list):
+            try:
+                self.jobs.restore_accounting(
+                    [Usage.model_validate(item) for item in details["accounting"]]
+                )
+            except Exception:
+                # A malformed checkpoint must not erase valid legacy row usage.
+                logger.warning("could not restore subagent accounting", exc_info=True)
 
     # -- todo list (resume) --------------------------------------------------
 

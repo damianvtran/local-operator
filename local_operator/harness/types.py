@@ -268,6 +268,10 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # A record-time table estimate is durable money, but NOT a provider receipt.
+    # Keeping the provenance separate lets offline viewers/resumes retain known
+    # spend without pretending the provider reported a bill or repricing history.
+    estimated_usd_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Aggregate-only copies of the calls behind this usage. Token buckets alone
     # cannot preserve which calls carried authoritative provider receipts and
     # which still need a table estimate; keeping the components lets money be

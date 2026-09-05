@@ -599,6 +599,8 @@ class RemoteSession:
                 # ``_restore_reported_usage`` on the old owner path).
                 "cumulative_parent_cost": durable.cumulative_parent_cost,
                 "child_costs": dict(durable.child_costs),
+                "subagent_cost": durable.subagent_cost,
+                "subagent_cost_knowledge": durable.subagent_cost_knowledge,
                 "cost_knowledge": durable.cost_knowledge,
                 "last_usage": durable.last_usage,
                 **self._consistent_context(state, durable),

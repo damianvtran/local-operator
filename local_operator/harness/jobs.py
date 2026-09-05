@@ -117,11 +117,16 @@ def _usage_components(usage: Usage | None, model_label: str | None) -> list[Usag
 
 
 def _merge_accounting_component(
-    grouped: dict[tuple[str | None, str | None, bool], Usage], component: Usage
+    grouped: dict[tuple[str | None, str | None, str], Usage], component: Usage
 ) -> None:
     """Bound a subtree summary without erasing receipt-vs-estimate provenance."""
-    has_receipt = component.usd_cost is not None
-    key = (component.provider, component.model_id, has_receipt)
+    from local_operator.model.configure import _usage_cost
+
+    receipt = _usage_cost(component)
+    estimate = _usage_cost({"usd_cost": component.estimated_usd_cost})
+    mode = "reported" if receipt is not None else "estimated" if estimate is not None else "unknown"
+    component = component.model_copy(update={"usd_cost": receipt, "estimated_usd_cost": estimate})
+    key = (component.provider, component.model_id, mode)
     total = grouped.get(key)
     if total is None:
         total = component.model_copy(deep=True)
@@ -137,9 +142,10 @@ def _merge_accounting_component(
     total.reasoning_tokens += component.reasoning_tokens
     if component.context_tokens is not None:
         total.context_tokens = component.context_tokens
-    if has_receipt:
-        # The key prevents a receipt-backed call from absorbing estimated calls.
-        total.usd_cost = (total.usd_cost or 0.0) + (component.usd_cost or 0.0)
+    if mode == "reported":
+        total.usd_cost = (total.usd_cost or 0.0) + (receipt or 0.0)
+    elif mode == "estimated":
+        total.estimated_usd_cost = (total.estimated_usd_cost or 0.0) + (estimate or 0.0)
 
 
 class AsyncJob(BaseModel):
@@ -354,7 +360,7 @@ class AsyncJobManager:
         # Terminal rows hand their subtree into this bounded accumulator before
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
-        self._settled_accounting: dict[tuple[str | None, str | None, bool], Usage] = {}
+        self._settled_accounting: dict[tuple[str | None, str | None, str], Usage] = {}
         # The status band reads this ledger every second. Cache the bounded
         # aggregate and propagate invalidations through live manager edges so
         # unchanged reads never recurse through the subagent tree.
@@ -446,6 +452,21 @@ class AsyncJobManager:
             self._accounting_cache = tuple(component.model_copy(deep=True) for component in rebuilt)
             self._accounting_cache_revision = self._accounting_revision
         return [component.model_copy(deep=True) for component in self._accounting_cache]
+
+    def restore_accounting(self, components: list[Usage]) -> None:
+        """Replace reconstructed row accounting with the authoritative checkpoint.
+
+        The checkpoint includes running work (interrupted on restore), retained
+        rows and swept rows. Adding it to restored rows would bill them twice.
+        Only a fresh manager may adopt it, before any new work is registered.
+        """
+        if self._tasks:
+            raise RuntimeError("accounting restore requires a fresh job manager")
+        grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+        for component in components:
+            _merge_accounting_component(grouped, component)
+        self._settled_accounting = grouped
+        self._invalidate_accounting()
 
     def _collect_accounting_components(self, seen: set[int]) -> list[Usage]:
         identity = id(self)
@@ -615,7 +636,7 @@ class AsyncJobManager:
                     f"logical task {logical_id!r} is already running as job {prior.id}"
                 )
             inherited = [*prior.attempt_aliases, prior.id, *inherited]
-            grouped: dict[tuple[str | None, str | None, bool], Usage] = {}
+            grouped: dict[tuple[str | None, str | None, str], Usage] = {}
             for component in [
                 *current.prior_attempt_usage,
                 *prior.prior_attempt_usage,

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["turn_cost", "job_cost"]
+__all__ = ["turn_cost", "job_cost", "cost_summary"]
 
 
 def _resolve_for_paint(provider: str, model_id: str):
@@ -99,7 +99,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         # estimate, not render an upside-down credit or degrade the whole turn to
         # unpriceable while a table price exists. (The wire client already drops
         # these to ``None``, but ``turn_cost`` also serves rehydrated mappings.)
-        from local_operator.model.configure import _usage_cost, cost_for_usage
+        from local_operator.model.configure import cost_for_usage
 
         provider, _, model_id = model_label.partition("/")
         components = getattr(usage, "cost_components", None)
@@ -111,7 +111,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
             for component in components:
                 component_provider = getattr(component, "provider", None) or provider
                 component_model = getattr(component, "model_id", None) or model_id
-                reported = _usage_cost(component)
+                reported = _recorded_cost(component)
                 if reported is not None:
                     total += reported
                     continue
@@ -121,7 +121,7 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
                 total += cost_for_usage(component_provider, info, component)
             return total
 
-        reported = _usage_cost(usage)
+        reported = _recorded_cost(usage)
         if reported is not None:
             return reported
 
@@ -131,6 +131,36 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         return cost_for_usage(provider, info, usage)
     except Exception:  # noqa: BLE001 — an unpriceable model is not a render error
         return None
+
+
+def _recorded_cost(usage: Any) -> float | None:
+    from local_operator.model.configure import _usage_cost
+
+    receipt = _usage_cost(usage)
+    if receipt is not None:
+        return receipt
+    return _usage_cost({"usd_cost": getattr(usage, "estimated_usd_cost", None)})
+
+
+def cost_summary(components: Any, *, model_label: str = "") -> tuple[float | None, bool]:
+    """Known spend and whether any component is unknown; never lose a lower bound.
+
+    Components, not aggregate tokens, own price provenance. A failed or offline
+    lookup must not erase already-priced siblings, and an empty ledger must not
+    masquerade as a provider-reported zero.
+    """
+    total: float | None = None
+    unknown = False
+    for component in components:
+        provider = getattr(component, "provider", None)
+        model_id = getattr(component, "model_id", None)
+        label = f"{provider}/{model_id}" if provider and model_id else model_label
+        cost = turn_cost(label, component)
+        if cost is None:
+            unknown = True
+        else:
+            total = (total or 0.0) + cost
+    return total, unknown
 
 
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
