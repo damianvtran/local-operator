@@ -40,6 +40,13 @@ a dead end that keeps being re-billed, `/new` and rebuilding from scratch, or
    Normal reattachment does not replay that opening instruction. This does not
    promise exactly-once delivery across a crash while consuming its sidecar.
 
+Navigating to another conversation while copying does not discard the result.
+The outgoing viewer keeps only the response connection until that one request
+settles; it does not retry creation or redirect the newly chosen conversation.
+The saved-fork receipt is delivered after the incoming transcript is installed,
+including a failed or cancelled transition, so its `/resume` command is not
+lost in the ledger reset. The original is not stopped to perform this navigation.
+
 Press **Esc while copying** to stay in the original. A filesystem copy already
 in progress must settle before its writer lock is released; the resulting saved
 fork is reported with a `/resume` command and is not automatically opened.
@@ -53,7 +60,11 @@ until you send it something.
 
 While a `/compact` is running, `/fork` refuses rather than defers: compaction
 rewrites the head of the transcript, and a copy taken mid-rewrite can capture a
-half-written file. Wait for it to finish.
+half-written file. Wait for it to finish. A snapshot also refuses before creating
+any fork if omitting an unfinished tool batch would remove the latest compaction
+marker’s retained-history anchor. Wait for that original batch to finish, then
+retry. Keeping a marker without its anchor would replay already summarized old
+context; the fork does not rewrite marker metadata to conceal that mismatch.
 
 ## What the fork inherits
 

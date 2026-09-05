@@ -82,6 +82,44 @@ async def test_snapshot_omits_only_incomplete_suffix_and_preserves_raw_rows(tmp_
 
 
 @pytest.mark.asyncio
+async def test_snapshot_refuses_removing_compaction_anchor(tmp_path: Path) -> None:
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    call = message(
+        "assistant",
+        "",
+        tool_calls=[
+            ToolCall(id="a", name="bash", arguments={}),
+            ToolCall(id="b", name="bash", arguments={}),
+        ],
+    )
+    await parent.append_messages(
+        [
+            message("user", "OLD SUMMARIZED CONTENT"),
+            call,
+            message("tool", "first finished", tool_call_id="a"),
+        ]
+    )
+    await parent.append_compaction(
+        summary="summary",
+        first_kept_entry_id=call.id,
+        tokens_before=100,
+    )
+    before = parent.path.read_bytes()
+    with pytest.raises(ValueError, match="compaction boundary.*unfinished tool batch"):
+        await parent.fork_snapshot()
+    assert parent.path.read_bytes() == before
+    assert len(list(parent.directory.parent.iterdir())) == 1
+    # Refusal is temporary, not a damaged-history dead end: the original's
+    # missing result completes the same anchored batch without any repair.
+    await parent.append_message(message("tool", "second finished", tool_call_id="b"))
+    fork_id, omitted = await parent.fork_snapshot()
+    assert not omitted
+    fork = Transcript(parent.directory.parent / fork_id)
+    assert fork.path.read_bytes() == parent.path.read_bytes()
+    assert "OLD SUMMARIZED CONTENT" not in str(fork.build_llm_history())
+
+
+@pytest.mark.asyncio
 async def test_snapshot_refuses_malformed_interior_and_active_compaction(tmp_path: Path) -> None:
     parent = Transcript(tmp_path / "sessions" / "parent000001")
     await parent.append_messages(

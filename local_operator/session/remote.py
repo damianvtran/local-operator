@@ -295,6 +295,9 @@ class RemoteSession:
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
+        # Snapshot creation is not retryable: navigation must retire the UI,
+        # not close the response channel after the owner has begun a copy.
+        self._snapshot_clients: dict[AttachClient, int] = {}
         # One ask card keeps its request id while advancing through questions.
         # The question index is therefore part of the gate identity: request id
         # alone made Q2 look like a duplicate of Q1 and stranded the owner gate.
@@ -2019,12 +2022,21 @@ class RemoteSession:
         client = self._client
         if client is None or self._recovering or not client.connected:
             raise ConnectionError("session is reconnecting; retry /fork when it is ready")
+        self._snapshot_clients[client] = self._snapshot_clients.get(client, 0) + 1
         try:
             return await client.fork_snapshot(message)
         except RuntimeError as error:
             if "unknown op" in str(error):
                 raise RuntimeError("this owner cannot fork; update it and retry /fork") from error
             raise
+        finally:
+            remaining = self._snapshot_clients[client] - 1
+            if remaining:
+                self._snapshot_clients[client] = remaining
+            else:
+                del self._snapshot_clients[client]
+                if self._disposed or self._client is not client:
+                    client.close()
 
     async def detach_viewer_gates(self) -> None:
         """Withdraw this UI's waiters without answering the owner's questions.
@@ -2353,6 +2365,12 @@ class RemoteSession:
         client = self._client
         if client is None or not client.connected:
             return "no runtime attached"
+        if self._snapshot_clients:
+            # The connection dispatches requests serially. Waiting for a retire
+            # reply behind a held copy blocks navigation until BOTH RPCs time
+            # out, losing the very result its socket lease protects. A copy is
+            # ongoing work, never evidence of an unused runtime; keep it alive.
+            return "fork snapshot is still in progress"
         ask = getattr(client, "retire_if_pristine", None)
         if not callable(ask):
             return "client cannot ask for retirement"
@@ -2372,7 +2390,10 @@ class RemoteSession:
             # interrupts adoption halfway through and strands the lease winner.
             self._recovery_task.cancel()
         if self._client is not None:
-            self._client.close()
+            if self._client not in self._snapshot_clients:
+                self._client.close()
+            # A pending snapshot owns the final close, including failure and
+            # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
 
 

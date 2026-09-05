@@ -825,7 +825,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Where a fork opens",
         kind=Kind.ENUM,
         default="switch",
-        help="The original keeps working; choose where its fork opens.",
+        help="Choose where the fork opens; unfinished work stays in the original.",
         choices=(
             Choice(
                 "window",

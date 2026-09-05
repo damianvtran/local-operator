@@ -44,7 +44,9 @@ async def _capture(app, pilot, name: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     for frame in range(2):
         await pilot.pause()
-        app.save_screenshot(str(root / f"{name}-{frame}.svg"))
+        from scripts.visual_capture import save_capture
+
+        save_capture(app, root / f"{name}-{frame}.svg")
         screen = app.screen
         print(
             json.dumps(

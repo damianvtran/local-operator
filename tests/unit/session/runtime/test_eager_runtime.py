@@ -305,6 +305,7 @@ async def test_leaving_a_session_offers_its_runtime_back(tmp_path: Path) -> None
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
 
     class _Client:
         connected = True
@@ -329,6 +330,7 @@ async def test_a_cold_viewer_has_no_runtime_to_offer_back() -> None:
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
     viewer._client = None  # type: ignore[attr-defined]
 
     assert await viewer.retire_if_unused() == "no runtime attached"
@@ -340,6 +342,7 @@ async def test_a_failed_offer_is_swallowed_on_the_way_out() -> None:
     from local_operator.session.remote import RemoteSession
 
     viewer = object.__new__(RemoteSession)
+    viewer._snapshot_clients = {}
 
     class _Client:
         connected = True

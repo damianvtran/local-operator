@@ -547,6 +547,20 @@ class Transcript:
                 paired = _paired_prefix(history, strict=True)
                 retained = {item.id for item in paired}
                 excluded = frozenset(item.id for item in history if item.id not in retained)
+                compaction = next(
+                    (row for row in reversed(self._entries) if row.type == ENTRY_COMPACTION), None
+                )
+                if (
+                    compaction is not None
+                    and compaction.payload.get("first_kept_entry_id") in excluded
+                ):
+                    # Canonical replay falls back to full history if its latest
+                    # anchor disappears. Refuse BEFORE allocating a fork rather
+                    # than resurrect summarized context or rewrite marker bytes.
+                    raise ValueError(
+                        "compaction boundary is in an unfinished tool batch; "
+                        "retry /fork after the original finishes that batch"
+                    )
                 fork_id = fork_session(
                     self.directory.parent.parent,
                     self.directory.name,

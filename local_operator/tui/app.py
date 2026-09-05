@@ -2556,7 +2556,11 @@ class OperatorApp(App[None]):
         #: the adopted session IS the fork makes that unconstructable rather
         #: than relying on every adoption path remembering to clear it.
         self._pending_fork_receipt: tuple[str, str] | None = None
+        # Unlike a destination-scoped switch receipt, a completed create must
+        # remain discoverable wherever the user navigated while it was copying.
+        self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
         self._fork_in_progress = False
+        self._fork_source_session: Any = None
         self._fork_cancelled = False
         # The opener-derived label the band and the tab wear until the
         # generated title lands. Latched to the FIRST substantive message on
@@ -4939,6 +4943,9 @@ class OperatorApp(App[None]):
         """
         previous_id = self._conversation_id()
         previous_len = self._history_length()
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
         if preserve_outgoing:
             detach_gates = getattr(self._session, "detach_viewer_gates", None)
             if callable(detach_gates):
@@ -5756,6 +5763,12 @@ class OperatorApp(App[None]):
                 # when the record is in hand.
                 self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
                 return
+        # A navigation entered during /fork must not queue a stop behind its
+        # snapshot RPC. The original's ownership guarantee lasts through that
+        # create, even when the ordinary resume preference would stop it.
+        preserve_outgoing = preserve_outgoing or (
+            self._session is not None and self._session is self._fork_source_session
+        )
         left_running = preserve_outgoing or self._detach_or_stop_outgoing()
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         # Name what happened to the session being LEFT (round 1, D5). This is
@@ -5980,6 +5993,9 @@ class OperatorApp(App[None]):
             # Both success and refusal/failure reopen the same ordinary composer:
             # either the new session is now authoritative or the old one remains.
             self._session_transition_pending = False
+            outcome, self._pending_fork_outcome = self._pending_fork_outcome, None
+            if outcome is not None:
+                self._notice(*outcome)
             # If the settled session has an authoritative EMPTY roster, retire
             # the one-row transition reserve now. Waiting for another keystroke
             # would leave a blank/loading hole indefinitely after a refused
@@ -6233,6 +6249,7 @@ class OperatorApp(App[None]):
             if self._turn_is_live()
             else "forking… (esc to stay here)"
         )
+        self._fork_source_session = session
         self.run_worker(
             self._fork_snapshot_worker(session, parent_id, message, mode), exclusive=False
         )
@@ -6258,7 +6275,9 @@ class OperatorApp(App[None]):
                 or self._session is not session
                 or self._session_transition_pending
             ):
-                self._notice(f"fork saved: {fork_id}. Open it with /resume {fork_id}", "note")
+                self._report_fork_outcome(
+                    f"fork saved: {fork_id}. Open it with /resume {fork_id}", "note"
+                )
                 return
             await self._on_fork_complete(
                 fork_id,
@@ -6268,9 +6287,19 @@ class OperatorApp(App[None]):
                 incomplete=bool(result.get("incomplete")) if callable(snapshot) else False,
             )
         except Exception as error:  # noqa: BLE001 — a failed fork never stops the original
-            self._notice(f"fork failed: {error}", "warning")
+            self._report_fork_outcome(f"fork failed: {error}", "warning")
         finally:
+            self._fork_source_session = None
             self._fork_in_progress = False
+
+    def _report_fork_outcome(self, body: str, kind: NoticeKind) -> None:
+        # An incoming ledger reset would erase a notice emitted on the outgoing
+        # transcript. Publish after the common transition boundary on success,
+        # failure or cancellation; never switch away from the user's new target.
+        if self._session_transition_pending:
+            self._pending_fork_outcome = (body, kind)
+        else:
+            self._notice(body, kind)
 
     def _sync_fork_pending(self) -> None:
         """Push ``session.has_pending_fork()`` at the band's fork indicator.
@@ -6369,7 +6398,12 @@ class OperatorApp(App[None]):
                 fork_id,
                 (
                     f"now in fork {fork_id}. "
-                    + ("Original work continues in the background. " if original_busy else "")
+                    + (
+                        "Original work stays in the background. "
+                        "Pending approvals still need your response. "
+                        if original_busy
+                        else ""
+                    )
                     + ("Work still in progress was not copied. " if incomplete else "")
                     + f"Return to original: /resume {parent_id}. Preferences: /settings, then Fork."
                     if parent_id
