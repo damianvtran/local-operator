@@ -416,6 +416,21 @@ it must print `[]`.**
   reads the instruction text (OSWorld's live object supplies the real one at
   `reset`). `id` and `user_simulator` must resolve completely or the task is
   refused with the field named.
+- **Guest disk reclamation runs before every episode's first observation.**
+  The released AMI ships ~93% full and the guest's own snapd fills the rest from
+  boot (a 9.7 GB `/var/lib/snapd/cache` plus an `Auto-refresh 9 snaps`), which
+  took the root filesystem to 0 bytes at ~t+383s and destroyed 7 of 8 episodes
+  in a 424-466s window. `allocate` therefore aborts the in-flight auto-refresh,
+  holds snap auto-refresh, and clears the snapd download cache between guest
+  readiness and upstream's `reset` — each privileged step as one
+  `sudo -S bash -c '<fragment>'`, because the guest's control server is not
+  root and anything the outer shell does itself happens unprivileged. It is conditional (below 12 GiB free), it
+  fails soft step by step, it never removes an installed snap or anything a task
+  could need, and it writes `guest-preparation.json` — free space before and
+  after, the disk geometry, every step's outcome — into the episode's cache
+  root. See "Guest disk reclamation at episode start" in
+  `docs/benchmarks/osworld_2/README.md`, which also records that the earlier
+  `x11grab`/ffmpeg diagnosis was wrong.
 - **Screenshot-only observations.** The a11y tree is not shipped as a frame
   (a geometry for an XML document is a fiction). Its presence is recorded in
   observation metadata; shipping it is a protocol addition, not a fake frame.
