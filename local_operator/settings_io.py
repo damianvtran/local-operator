@@ -367,6 +367,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Limits and rendering for the fetch tool.",
     ),
+    # LIVE for the same reason as the two web sections: ``execute_bash`` reads
+    # ``bash.shell`` through a fresh ``ConfigManager(config_dir())`` on EVERY
+    # call (``tools/builtin.py::_configured_bash_shell``), so an edit lands on
+    # the very next command. Its own section rather than a row under "Session"
+    # or "Runtime": scope is uniform within a section by construction, and
+    # this is about how a tool executes, not how sessions behave.
+    Section(
+        "tools",
+        "Tools",
+        Scope.LIVE,
+        "How the built-in tools execute.",
+    ),
     Section(
         "local_providers",
         "Local servers",
@@ -1202,6 +1214,21 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
+    ),
+    # -- tools --------------------------------------------------------------
+    # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
+    # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
+    # imported, because this module must stay cheap for the CLI and
+    # ``tools.builtin`` is not (see the module docstring on Textual).
+    Setting(
+        key="bash.shell",
+        path=("bash", "shell"),
+        section="tools",
+        label="Bash interpreter",
+        kind=Kind.TEXT,
+        default="",
+        help="Path the bash tool runs commands with. Empty: bash on PATH, else /bin/sh.",
+        empty_unsets=True,
     ),
     *[
         setting

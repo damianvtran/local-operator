@@ -51,6 +51,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import signal as signal_module
 import threading
 import time
@@ -73,6 +74,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
     AbortSignal,
@@ -102,6 +104,7 @@ from local_operator.imaging import (
     bound_image_for_model,
 )
 from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.paths import config_dir
 from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -149,6 +152,17 @@ BASH_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: Hard cap on the per-command timeout; longer runs are a session bug, not a
 #: tool feature.
 BASH_MAX_TIMEOUT_SECONDS = 3600.0
+#: Where ``bash.shell`` lives under ``values``, spelled ONCE and shared with
+#: the ``settings_io`` row so the reader and the writer cannot disagree about
+#: the path (the flat-vs-nested mismatch that silenced the #576 opt-out).
+BASH_SHELL_PATH: tuple[str, ...] = ("bash", "shell")
+#: The registry default for ``bash.shell``: empty means "auto-resolve" via
+#: :func:`resolve_bash_shell`, never a literal interpreter, so a config that
+#: says nothing tracks whatever bash the host has rather than freezing a path.
+BASH_SHELL_DEFAULT = ""
+#: Last-resort interpreter when the host has no ``bash`` on PATH at all. The
+#: tool keeps working (POSIX syntax only) instead of failing every call.
+BASH_SHELL_FALLBACK = "/bin/sh"
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
@@ -1146,10 +1160,49 @@ async def _run_with_abort(
 # ---------------------------------------------------------------------------
 
 
+def resolve_bash_shell(configured: str | None) -> str:
+    """Pick the interpreter the ``bash`` tool spawns (#629).
+
+    Order: the ``bash.shell`` config value when set and non-blank; else the
+    first ``bash`` on PATH (Homebrew's bash 5 when installed, else
+    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else ``/bin/sh`` so a
+    host with no bash still runs POSIX commands rather than nothing.
+
+    Deliberately NOT ``$SHELL``: the login shell is zsh on macOS, and zsh's
+    word-splitting and globbing differ from what a tool named ``bash``
+    promises, so a model writing bash would get a third dialect. Pure and
+    cheap (one ``which`` per call) so the config edit is LIVE and the order is
+    unit-testable without spawning anything.
+    """
+    chosen = (configured or "").strip() or shutil.which("bash") or BASH_SHELL_FALLBACK
+    logger.debug("bash tool interpreter: %s", chosen)
+    return chosen
+
+
+def _configured_bash_shell() -> str | None:
+    """Read ``bash.shell`` from config at CALL time, the way web_fetch does.
+
+    A fresh ``ConfigManager(config_dir())`` per call is what makes the key
+    honestly LIVE in ``/settings``: an edit takes effect on the very next
+    command with no session rebuild. Any read failure means "unset" — the
+    command must run even when config.yml is unreadable.
+    """
+    try:
+        value = ConfigManager(config_dir()).get_nested_value(BASH_SHELL_PATH, None)
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        return None
+    return value if isinstance(value, str) else None
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    command: str = Field(description="Shell command to run (executed via /bin/sh -c).")
+    command: str = Field(
+        description=(
+            "Shell command to run, executed via `bash -c` (falls back to /bin/sh only "
+            "when no bash exists), so bash syntax such as <(...), arrays and [[ ]] works."
+        )
+    )
     timeout: float = Field(
         default=BASH_DEFAULT_TIMEOUT_SECONDS,
         gt=0,
@@ -1422,8 +1475,15 @@ async def execute_bash(
         extra = {str(name): str(value) for name, value in extra.items()}
         env.update(extra)
 
+    # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
+    # mode, which rejects process substitution and other bashisms at parse
+    # time — and because this tool is NAMED bash, models write bash: 37 of 43
+    # `<(...)` commands in a week of transcripts died on `syntax error near
+    # unexpected token '('`. Resolution order: the configured `bash.shell`,
+    # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
+    # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
     process = await asyncio.create_subprocess_exec(
-        "/bin/sh",
+        resolve_bash_shell(_configured_bash_shell()),
         "-c",
         params.command,
         stdout=asyncio.subprocess.PIPE,
@@ -1973,7 +2033,7 @@ def build_bash_tool() -> AgentTool:
         name="bash",
         label="Shell",
         describe_approval=_describe_shell_approval,
-        description=("Run a shell command and return its exit code, stdout and stderr."),
+        description=("Run a bash command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # bash runs shared when non-pty; models batch independent

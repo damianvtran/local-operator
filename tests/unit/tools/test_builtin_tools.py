@@ -333,6 +333,76 @@ async def test_bash_empty_command_is_error(tools, context) -> None:
     assert result.is_error is True
 
 
+# -- interpreter resolution (#629) ------------------------------------------
+#
+# The tool is NAMED bash, so models write bash; /bin/sh on macOS is bash 3.2 in
+# POSIX mode and rejects `<(...)` at parse time. These pin the resolution order
+# and prove the real spawn path runs bash syntax.
+
+
+def test_resolve_bash_shell_prefers_the_configured_value(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    assert builtin.resolve_bash_shell("/opt/custom/bash") == "/opt/custom/bash"
+    # Surrounding whitespace is a typo, not an interpreter.
+    assert builtin.resolve_bash_shell("  /opt/custom/bash \n") == "/opt/custom/bash"
+
+
+def test_resolve_bash_shell_falls_back_to_bash_on_path(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: "/path/which/bash")
+    assert builtin.resolve_bash_shell(None) == "/path/which/bash"
+    # Empty and blank both mean "unset": the registry's empty_unsets row and a
+    # hand-edited `shell: "  "` must resolve the same way.
+    assert builtin.resolve_bash_shell("") == "/path/which/bash"
+    assert builtin.resolve_bash_shell("   ") == "/path/which/bash"
+
+
+def test_resolve_bash_shell_last_resort_is_sh(monkeypatch) -> None:
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK == "/bin/sh"
+
+
+_HOST_BASH = builtin.shutil.which("bash")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_HOST_BASH is None, reason="no bash on this host")
+async def test_bash_runs_process_substitution(tools, context) -> None:
+    """The issue's own reproduction: `comm -12 <(echo a) <(echo a)` must print
+    `a` and exit 0 under the default (auto-resolved) interpreter."""
+    result = await _call(tools, "bash", {"command": "comm -12 <(echo a) <(echo a)"}, context)
+    assert result.is_error is False
+    assert "exit code: 0" in result.text
+    assert "--- stdout ---\na\n" in result.text
+    assert "syntax error" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_honours_configured_shell(tools, context, tmp_path, monkeypatch) -> None:
+    """`bash.shell` from config is what gets spawned, read at CALL time.
+
+    Pointed at a tiny script rather than /bin/sh so the assertion is a
+    positive marker rather than "process substitution failed", which would
+    also be true of a broken default."""
+    from local_operator.config import ConfigManager
+
+    marker = tmp_path / "marker-shell"
+    marker.write_text('#!/bin/sh\necho MARKER-SHELL "$@"\n')
+    marker.chmod(0o755)
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_home))
+    ConfigManager(config_home).set_config_value("bash", {"shell": str(marker)})
+
+    result = await _call(tools, "bash", {"command": "ignored"}, context)
+    assert result.is_error is False
+    assert "MARKER-SHELL -c ignored" in result.text
+
+    # Clearing the key on disk takes effect on the very next call: no cache.
+    ConfigManager(config_home).set_config_value("bash", {"shell": ""})
+    result = await _call(tools, "bash", {"command": "echo plain"}, context)
+    assert "MARKER-SHELL" not in result.text
+    assert "plain" in result.text
+
+
 @pytest.mark.asyncio
 async def test_bash_executes_without_tool_level_prompt(tmp_path) -> None:
     # The write/exec approval gate is the LOOP's (it fires after
