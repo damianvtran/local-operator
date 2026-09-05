@@ -100,6 +100,7 @@ from local_operator.evaluation.lifecycle import (
 )
 from local_operator.evaluation.protocol import (
     ActionBatch,
+    ArtifactRef,
     AskUserAction,
     FinishAction,
     Observation,
@@ -1229,26 +1230,33 @@ class EpisodeRunner:
                 ),
                 timeout=self._config.score_timeout,
             )
-        except _EvidenceFailure:
-            raise
+            score = result.score
+            details_source = None
+            if score.details is not None:
+                reference = ArtifactRef.model_validate(score.details.model_dump(mode="json"))
+                # Staged worker bytes are not durable evidence. Reopen with the
+                # bounded verifier; the receipt writer scans and publishes before
+                # committing the score. None of these bytes enter model context.
+                details_source = verify_artifact(self._config.artifact_root, reference)
+            self._append_receipt(
+                "scoring_result",
+                ScoringResultPayload(
+                    finalization_id=self._finalization_id,
+                    scoring_operation_id=self._scoring_operation_id,
+                    score=score,
+                ),
+                details_source=details_source,
+            )
         except BaseException as error:
             # ADAPTER CONTRACT: ``score()`` returns a SCORED artifact or raises.
             # "Unscored" is a harness decision expressed through the
             # finalization intent, never an adapter return value.
             #
             # ``scoring_start`` is already durable and a scored-intent
-            # finalization cannot seal unscored, so no legal terminal remains.
-            # Rescue first (the worker may be poisoned), then abandon.
+            # finalization cannot seal unscored, including when its detail bytes
+            # fail verification/publication. Rescue first, then abandon with the
+            # existing finalization authority; ordinary failure intent is too late.
             return await self._abandon_after_scoring_failure(error)
-        score = result.score
-        self._append_receipt(
-            "scoring_result",
-            ScoringResultPayload(
-                finalization_id=self._finalization_id,
-                scoring_operation_id=self._scoring_operation_id,
-                score=score,
-            ),
-        )
         return await self._close_out(score, failure_kind=None, cancelled=False)
 
     async def _finalize_failure(self, error: BaseException) -> EpisodeOutcome:
@@ -1609,7 +1617,9 @@ class EpisodeRunner:
         except EvidenceError as error:
             raise _EvidenceFailure(_diagnostic(error, None)) from error
 
-    def _append_receipt(self, kind: str, payload: Any) -> None:
+    def _append_receipt(
+        self, kind: str, payload: Any, *, details_source: bytes | None = None
+    ) -> None:
         writer = self._require_writer()
         try:
             if kind == "reconciliation":
@@ -1617,7 +1627,7 @@ class EpisodeRunner:
             elif kind == "cleanup":
                 writer.record_cleanup(payload)
             else:
-                writer.record_scoring_result(payload)
+                writer.record_scoring_result(payload, details_source=details_source)
         except EvidenceError as error:
             raise _EvidenceFailure(_diagnostic(error, None)) from error
 
@@ -1724,14 +1734,26 @@ class EpisodeRunner:
         writer = self._require_writer()
         rescue_complete = await self._attempt_rescue()
         await self._emergency_teardown()
-        record = writer.abandon("ambiguous_finalization", _diagnostic_code(error))
+        status: EpisodeStatus = "abandoned"
+        detail = _diagnostic_code(error)
+        try:
+            record = writer.abandon("ambiguous_finalization", detail)
+            detail = record.diagnostic_code
+        except (EvidenceError, OSError) as abandonment_error:
+            # A detail or receipt fsync can poison the writer after evaluation.
+            # Like _abandon_for_evidence, report the actual unsealed disk state;
+            # recovery requires a fresh writer, never a second evaluator call.
+            status = "abandonment_failed"
+            detail = (
+                f"{detail}; abandonment refused: {_diagnostic(abandonment_error, self._redactions)}"
+            )
         return EpisodeOutcome(
-            status="abandoned",
+            status=status,
             episode_id=self._spec.episode_id,
             bundle_root=Path(writer.root),
             rescue_required=True,
             rescue_complete=rescue_complete,
-            diagnostic=record.diagnostic_code,
+            diagnostic=detail,
         )
 
     async def _abandon_for_evidence(self, detail: str) -> EpisodeOutcome:
