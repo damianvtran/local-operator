@@ -5,6 +5,7 @@ It provides default configurations and methods to update them.
 """
 
 import argparse
+import logging
 import os
 import sys
 import tempfile
@@ -18,6 +19,8 @@ import yaml
 
 from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
 from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
+
+logger = logging.getLogger(__name__)
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -203,17 +206,28 @@ DEFAULT_CONFIG = Config(
             # Set it when the machine or the models in use want a different
             # ceiling than the built-in one.
             "subagents": {},
-            # RETIRED session-store ceilings (see
-            # local_operator.session.retention). Session transcripts are never
-            # deleted automatically — a running session whose transcript was
-            # evicted out from under it lost all of its work — so the only
-            # correct value for each of these is 0 ("disabled"). The keys stay
-            # readable so a config file carrying the old defaults gets an
-            # honest warning instead of a silent no-op; they no longer cause
-            # any eviction at any value.
-            "session_retention_max_sessions": 0,
-            "session_retention_max_bytes": 0,
-            "session_retention_max_age_days": 0,
+            # Session-store cleanup policy, OFF by default. Every automatic
+            # deleter that ever lived under ``sessions/`` — the age/count/byte
+            # ceilings, the empty-directory reaper, the #576 "unused session"
+            # backfill, the #622 exit-path rmdir — has been removed after the
+            # last of them deleted 225 of an operator's 244 named sessions.
+            # ``session.cleanup`` is the ONE remaining policy and it does
+            # nothing at all unless ``enabled`` is true; the limits below are
+            # inert without it. Read and written through ``settings_io``'s
+            # nested path (``("session", "cleanup", ...)``) and consumed via
+            # ``ConfigManager.get_nested_value`` on the same path, so the
+            # flat-vs-nested key mismatch that made the #576 opt-out a no-op
+            # cannot recur. Semantics are documented on the settings rows and
+            # in ``local_operator.session.cleanup``.
+            "session": {
+                "cleanup": {
+                    "enabled": False,
+                    "max_sessions": 0,
+                    "max_inactive_days": 0,
+                    "max_total_bytes": 0,
+                    "remove_empty": False,
+                },
+            },
         },
     }
 )
@@ -377,6 +391,16 @@ class ConfigManager:
 
             return Config(config_dict)
 
+    # LOADING IS READ-ONLY. A migration used to live here, run from
+    # ``_load_config`` on every load that found a retired key — so ANY process
+    # that merely constructed a ConfigManager on a config dir with this code
+    # rewrote the file: an un-isolated probe script did exactly that to the
+    # operator's live config while this change was still under review, and
+    # an older runtime then read the rewritten file unguarded (PR #645,
+    # round 5). Migrations live in ``local_operator.config_migrations`` and
+    # run from ONE explicit startup seam (``cli.main``); a library caller
+    # constructing this class cannot trigger them.
+
     def _write_config(self, config: Dict[str, Any]) -> None:
         """Write configuration to YAML file.
 
@@ -529,6 +553,15 @@ class ConfigManager:
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration variable.
 
+        ``key`` is a TOP-LEVEL key of ``values`` and is looked up verbatim: a
+        dotted string such as ``"session.cleanup.enabled"`` is NOT split into
+        a nested walk, it is looked up as the literal key ``"session.cleanup.
+        enabled"`` (which is how the ``display.*`` flags are stored). Code
+        that consumes a genuinely nested setting must use
+        :meth:`get_nested_value` with the same path tuple ``settings_io``
+        writes, or it reads a key nothing ever writes — that mismatch is what
+        turned the #576 reaper's opt-out toggle into a silent no-op.
+
         Args:
             key (str): The configuration key to retrieve
             default (Any, optional): Default value if key doesn't exist. Defaults to None.
@@ -537,6 +570,23 @@ class ConfigManager:
             Any: The configuration value for the key, or default if not found
         """
         return self.config.get_value(key, default)
+
+    def get_nested_value(self, path: tuple[str, ...], default: Any = None) -> Any:
+        """Walk ``path`` through nested mappings under ``values``.
+
+        The reader that pairs with ``settings_io.write_setting`` for a
+        ``Setting`` whose ``path`` has more than one element. Both sides take
+        the same tuple, so a consumer that spells its path as the registry
+        does cannot disagree with the writer about where the value lives.
+        A non-mapping partway down (a hand-edited ``session: "yes"``) reads
+        as absent rather than raising, matching ``settings_io.read_setting``.
+        """
+        current: Any = self.config.values
+        for part in path:
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        return current
 
     def set_config_value(self, key: str, value: Any) -> None:
         """Set a specific configuration variable.

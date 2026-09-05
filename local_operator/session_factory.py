@@ -1311,8 +1311,8 @@ async def await_store_maintenance_for_tests() -> None:
     """Wait for this process's maintenance pass, if one was dispatched.
 
     Production never waits — that is the entire point of the change — so this
-    exists for tests that assert on what the passes DID (a directory reaped, a
-    sidecar stamped). Without it such a test races the background task and
+    exists for tests that assert on what the passes DID (a sidecar stamped, a
+    dead process group reaped). Without it such a test races the background task and
     fails intermittently, which is a worse outcome than the latency it is
     guarding. Swallows the task's failure because every pass is best-effort:
     the caller is asserting on effects, not on the task's success.
@@ -1356,18 +1356,22 @@ async def _run_store_maintenance(
     await _wait_for_store_maintenance_idle_window()
 
     from local_operator.resume import backfill_session_origins, backfill_session_titles
-    from local_operator.session.retention import sweep_from_config
+    from local_operator.session.cleanup import cleanup_from_config
     from local_operator.tools.group_reaper import sweep_orphan_groups
 
-    # Reap EMPTY session directories left by runs that exited before writing a
-    # turn. This is the only automated cleanup of sessions/ that exists and the
-    # only one that is safe to run automatically: a transcript — any directory
-    # holding content — is never deleted by the harness, only by an explicit
-    # user action.
+    # NO pass here deletes a session directory on its own judgement. The
+    # "retention sweep" that used to lead this list — and the unused-session
+    # reaper it grew in #576 — removed 225 of an operator's 244 named sessions
+    # in one night, behind an opt-out toggle that wrote a key nothing read.
+    # The only thing that can remove a session directory now is the cleanup
+    # policy in ``session/cleanup.py``, which is OFF unless the user turned
+    # ``session.cleanup.enabled`` on in /settings; ``cleanup_from_config``
+    # returns without touching the disk otherwise. ``live_dir`` is passed so
+    # that even an enabled policy never considers the session being built.
     passes: list[tuple[str, Callable[[], Any]]] = [
         (
-            "retention sweep",
-            lambda: sweep_from_config(config_manager, config_dir, live_dir),
+            "session cleanup policy",
+            lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
         ),
         # Hard-death process-group reaper (tools/group_reaper.py): reaps a bash
         # process group only when the lop process that spawned it is provably
@@ -1451,9 +1455,9 @@ def _start_store_maintenance(
     on origin — filtering delegated runs out by default, say — stamp origins
     eagerly here (it is the cheap pass) and background only the other three.
 
-    A crash before first paint means the sweeps do not run this launch. That is
-    acceptable by design: the cost is an unreaped empty directory, which is
-    bytes rather than correctness, and the next launch reaps it. Every pass is
+    A crash before first paint means the passes do not run this launch. That is
+    acceptable by design: the cost is an unstamped sidecar, which is
+    bytes rather than correctness, and the next launch stamps it. Every pass is
     idempotent for exactly this reason.
 
     Silently does nothing when called with no running loop (a synchronous test
@@ -1504,19 +1508,29 @@ async def _prepare(
     )
 
     # CLAIM BEFORE creating the directory, and in that order. The claim marker
-    # is what tells every OTHER session's startup sweep that this directory
-    # belongs to a live run; ``claim_session`` creates the directory itself and
-    # writes the marker in one step, so there is no instant at which this
-    # directory exists empty-and-unclaimed for a concurrent sweep to reap. A
-    # plain ``mkdir`` here followed by a later claim would reopen exactly that
-    # window — the FileNotFoundError kill this fix exists to close.
+    # is what tells anything scanning the store (the user-enabled cleanup
+    # policy, the picker, the mobile daemon) that this directory belongs to a
+    # live run; ``claim_session`` creates the directory itself and writes the
+    # marker in one step, so there is no instant at which this directory
+    # exists empty-and-unclaimed. Nothing deletes on that signal by default,
+    # but the ordering is what makes the claim guard airtight when cleanup IS
+    # enabled, and it costs nothing to keep.
     #
     # ``claim_session`` refuses agent directories itself (the gate lives with
     # the marker, not here), so the explicit ``mkdir`` below is what creates
     # the directory in the ``--train``/named-agent case, which is deliberately
-    # never claimed and never swept.
+    # never claimed and never scanned.
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
+    if transcript_dir.parent.name == "sessions":
+        # Stamp the store as ours. The cleanup policy refuses to remove
+        # anything from an unmarked ``sessions/`` directory, and this is the
+        # one place the harness knows it is writing into its own store —
+        # cleanup itself never marks, so it can never authorise its own
+        # target. Idempotent and best-effort.
+        from local_operator.session.cleanup import mark_store
+
+        mark_store(transcript_dir.parent)
 
     # The lease/claim above stay synchronous and on the loop — sole-writer
     # ordering (lease before transcript creation) is an invariant, and putting a

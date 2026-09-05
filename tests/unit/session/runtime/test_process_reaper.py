@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -288,67 +286,22 @@ def test_grace_env_override_and_defaults(monkeypatch) -> None:
 
 
 class TestSpeculativeSessionCleanup:
-    """The deferral's last step: a warm runtime that never worked leaves nothing.
+    """The exit path no longer removes a session directory — ever.
 
-    Round 1 (R2/Q1) found `LOP_RUNTIME_DEFER_MATERIALISE` written and read
-    nowhere, so a viewer's first keystroke created a directory that every
-    abandoned draft then left behind. The transcript and roster sidecar now
-    hold off, but the LEASE cannot — it arbitrates "at most one runtime per
-    session, ever" and must exist before construction — so the directory is
-    removed on the way out instead.
+    #622 added `_remove_unwritten_session_dir` here to tidy the lease-only
+    directory a warm-but-unused runtime leaves behind. It fired on the
+    operator's real store (`removed unwritten speculative session directory
+    <id>` in the runtime logs) during the incident that lost 225 sessions,
+    and the rule since is that no exit hook removes a session directory on
+    its own judgement. The lease-only directory is what the user-enabled
+    `session.cleanup.remove_empty` policy is for.
     """
 
-    def _handle(self, directory: Path) -> Any:
-        class _Transcript:
-            def __init__(self, d: Path) -> None:
-                self.directory = d
+    def test_the_exit_path_has_no_directory_remover(self) -> None:
+        import inspect
 
-        class _Session:
-            def __init__(self, d: Path) -> None:
-                self._transcript = _Transcript(d)
+        from local_operator.session.runtime import process
 
-        class _Handle:
-            def __init__(self, d: Path) -> None:
-                self._session = _Session(d)
-
-        return _Handle(directory)
-
-    def test_an_unwritten_speculative_directory_is_removed(self, tmp_path: Path) -> None:
-        from local_operator.session.runtime.process import _remove_unwritten_session_dir
-        from local_operator.session_lease import LEASE_NAME, MIRROR_NAME
-
-        directory = tmp_path / "sessions" / "warmonly0001"
-        directory.mkdir(parents=True)
-        (directory / LEASE_NAME).write_text("{}", encoding="utf-8")
-        (directory / MIRROR_NAME).write_text("123", encoding="utf-8")
-
-        _remove_unwritten_session_dir(self._handle(directory))
-
-        assert not directory.exists(), "an abandoned draft must leave nothing on disk"
-
-    def test_a_directory_with_a_transcript_is_never_removed(self, tmp_path: Path) -> None:
-        """The guard that matters: real work is never deleted by the tidy-up."""
-        from local_operator.session.runtime.process import _remove_unwritten_session_dir
-        from local_operator.session_lease import LEASE_NAME
-
-        directory = tmp_path / "sessions" / "realwork0001"
-        directory.mkdir(parents=True)
-        (directory / LEASE_NAME).write_text("{}", encoding="utf-8")
-        (directory / "transcript.jsonl").write_text('{"id":"x"}\n', encoding="utf-8")
-
-        _remove_unwritten_session_dir(self._handle(directory))
-
-        assert directory.exists()
-        assert (directory / "transcript.jsonl").exists()
-
-    def test_an_unrecognised_file_keeps_the_directory(self, tmp_path: Path) -> None:
-        """`rmdir`, never `rmtree`: anything unexpected makes the OS refuse."""
-        from local_operator.session.runtime.process import _remove_unwritten_session_dir
-
-        directory = tmp_path / "sessions" / "surprise0001"
-        directory.mkdir(parents=True)
-        (directory / "something-we-did-not-write.json").write_text("{}", encoding="utf-8")
-
-        _remove_unwritten_session_dir(self._handle(directory))
-
-        assert directory.exists()
+        assert not hasattr(process, "_remove_unwritten_session_dir")
+        source = inspect.getsource(process)
+        assert "rmdir(" not in source and "rmtree(" not in source
