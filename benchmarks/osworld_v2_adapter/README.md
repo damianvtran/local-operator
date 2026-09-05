@@ -420,9 +420,11 @@ it must print `[]`.**
   The released AMI ships ~93% full and the guest's own snapd fills the rest from
   boot (a 9.7 GB `/var/lib/snapd/cache` plus an `Auto-refresh 9 snaps`), which
   took the root filesystem to 0 bytes at ~t+383s and destroyed 7 of 8 episodes
-  in a 424-466s window. `allocate` therefore holds snap auto-refresh, aborts
-  in-flight snap changes, and clears the snapd download cache between guest
-  readiness and upstream's `reset`. It is conditional (below 12 GiB free), it
+  in a 424-466s window. `allocate` therefore aborts the in-flight auto-refresh,
+  holds snap auto-refresh, and clears the snapd download cache between guest
+  readiness and upstream's `reset` — each privileged step as one
+  `sudo -S bash -c '<fragment>'`, because the guest's control server is not
+  root and anything the outer shell does itself happens unprivileged. It is conditional (below 12 GiB free), it
   fails soft step by step, it never removes an installed snap or anything a task
   could need, and it writes `guest-preparation.json` — free space before and
   after, the disk geometry, every step's outcome — into the episode's cache

@@ -287,10 +287,14 @@ def prepare_guest_disk(
     disk_bytes = None
 
     size_result = session.step("measure-geometry", _GEOMETRY_SCRIPT)
-    if size_result is not None and size_result.returncode == 0:
+    # Parsed whenever a number is present, NOT only on exit 0: the script
+    # prints the filesystem size first and the whole-disk size second, so a
+    # partial answer (an image without ``lsblk``, a ``df`` that printed and
+    # then something else failed) still yields what was measured. Gating on the
+    # exit code discarded a real ``df`` figure over a missing block-device
+    # tool, which is observability lost for no safety gained.
+    if size_result is not None:
         numbers = [int(line) for line in size_result.stdout.split() if line.strip().isdigit()]
-        # The script prints filesystem size then whole-disk size, so a partial
-        # answer (an image without lsblk) still yields the first number.
         if numbers:
             filesystem_bytes = numbers[0]
         if len(numbers) > 1:
@@ -329,53 +333,112 @@ def prepare_guest_disk(
 
 # Filesystem size, then the size of the whole block device the root filesystem
 # sits on. Read-only: nothing here alters the partition table (see the module
-# docstring for why growing it is deliberately out of scope). Each half is
-# independently allowed to fail, so an image without ``lsblk`` still reports the
-# filesystem size rather than nothing.
+# docstring for why growing it is deliberately out of scope). The block-device
+# half is best-effort (``|| true``): without it a guest lacking ``findmnt`` or
+# ``lsblk`` exits 127 from the ``&&`` chain and the ``df`` figure that WAS
+# printed arrives under a non-zero status. Its own stderr is dropped so the
+# step's detail is the numbers, not a tool's usage text.
 _GEOMETRY_SCRIPT = (
     "df -B1 --output=size / | tail -1; "
-    'source=$(findmnt -no SOURCE / 2>/dev/null) && parent=$(lsblk -no PKNAME "$source" '
-    '2>/dev/null | head -1) && lsblk -bdno SIZE "/dev/$parent" 2>/dev/null'
+    '{ source=$(findmnt -no SOURCE /) && parent=$(lsblk -no PKNAME "$source" | head -1) '
+    '&& lsblk -bdno SIZE "/dev/$parent"; } 2>/dev/null || true'
+)
+
+# Everything privileged runs INSIDE ``sudo -S bash -c '<fragment>'``, and the
+# fragments below are what that inner shell executes. Two hard-won rules:
+#
+# * Nothing that depends on privilege may happen in the outer shell. The guest's
+#   control server runs as an unprivileged user, so a glob like
+#   ``"/var/lib/snapd/cache"/*`` expanded OUT there matches nothing -- the
+#   directory is ``drwx------ root:root`` -- and ``rm -rf`` of the literal,
+#   non-existent name exits 0. That was a reclaim that deleted nothing and
+#   reported ``ok``. ``find -mindepth 1 -delete`` inside the privileged shell
+#   has no glob to expand anywhere.
+# * Nothing may be exec'd through ``xargs`` (or any other splitter) with the
+#   password pipeline as its command: ``xargs ... echo 'pw' | sudo -S snap abort``
+#   parses as ``xargs echo 'pw'`` PIPED INTO one ``sudo -S snap abort`` -- the
+#   password line becomes ``pw <id>`` (rejected), abort receives no id, and the
+#   exec'd ``/bin/echo pw`` is visible in ``ps``. The loop lives inside the
+#   privileged shell instead, and the fragments avoid single quotes so the one
+#   quoting layer (``_shell_quote``) stays readable.
+
+# Only the two change kinds that fill the disk are aborted (snapd's own
+# summaries are ``Auto-refresh ...`` and ``Pre-download ... for auto-refresh``),
+# matched CASE-SENSITIVELY so this module's own ``Hold auto-refreshes for all
+# snaps`` change is never a candidate, and so a seeding change or a hook that
+# happens to be ``Doing`` is left alone. ``snap changes`` failing (no snapd,
+# denied) is surfaced as the step's exit status rather than read as "nothing
+# in flight"; a failed abort of any one change fails the step, with the
+# remaining ids still attempted.
+_ABORT_REFRESH_FRAGMENT = (
+    "changes=$(snap changes) || exit $?; rc=0; "
+    "while read -r id status rest; do "
+    'case "$status $rest" in "Doing "*Auto-refresh*|"Doing "*Pre-download*) '
+    'snap abort "$id" || rc=1;; esac; '
+    'done <<<"$changes"; exit $rc'
 )
 
 
 def _reclaim(session: _Session, client_password: str) -> None:
-    """Stop snapd re-filling the disk, then delete what it already downloaded.
+    """Stop snapd filling the disk, then delete what it already downloaded.
 
-    ORDER IS LOAD-BEARING. Holding first stops a NEW auto-refresh from starting;
-    aborting second stops the one that ``snap changes`` showed already running
-    at boot -- a hold does not touch a change that is already in flight;
-    clearing last means the abort has stopped writing before the delete runs.
-    Clearing first would race a live download and reclaim nothing.
+    ORDER IS LOAD-BEARING: abort, then hold, then clear.
+
+    Abort FIRST because it is the only step that is immediate. ``snap abort``
+    flips the change's state and returns. ``snap refresh --hold`` is a
+    ``configure core`` hook change that the CLI WAITS on (``cmd_snap_op.go``
+    ``holdRefreshes``), and snapd runs one hook task per snap at a time
+    (``hookmgr.go`` ``snapIsRunningHook``), so while the boot-time auto-refresh
+    is still ``Doing`` a core/snapd hook of its own the hold queues behind it --
+    long enough to outlast the per-command ceiling and be recorded as
+    unreachable, after which the fallback joins the same queue. With nothing in
+    flight, the hold completes at once. Snapd cannot launch a fresh auto-refresh
+    in the gap: it enforces a 20-minute ``refreshRetryDelay`` between launches
+    (``autorefresh.go``), so the hold lands long before a retry is considered.
+
+    Hold SECOND so no NEW refresh starts once the in-flight one is gone.
+
+    Clear LAST so nothing is still writing into the directory being emptied;
+    clearing first would race a live download and reclaim nothing.
+
+    What abort does to installed snaps, stated accurately: a change that had
+    already finished refreshing some of its snaps has those tasks UNDONE, which
+    returns each such snap to the revision the AMI shipped -- the benchmark's
+    own baseline, and the state every other episode starts from. It is not an
+    uninstall, which is the line this module does not cross.
     """
 
-    sudo = f"echo {_shell_quote(client_password)} | sudo -S"
+    def privileged(fragment: str) -> str:
+        # ONE ``sudo -S`` per step, the password appearing exactly once, as the
+        # stdin of that one sudo. ``echo`` is a bash builtin in the outer shell,
+        # so nothing is exec'd with the password in its argv; the outer
+        # ``bash -c`` script itself necessarily carries it, which is the
+        # endpoint's contract (argv only, no stdin, no env) and upstream's own
+        # pattern (setup.py:609).
+        return (
+            f"echo {_shell_quote(client_password)} | sudo -S bash -c "
+            f"{_shell_quote(fragment)} 2>&1"
+        )
+
+    session.step("abort-in-flight-snap-changes", privileged(_ABORT_REFRESH_FRAGMENT))
+
     # ``snap refresh --hold`` needs snapd 2.58+. On anything older it exits
     # non-zero with an unknown-flag error, which is recorded and then covered by
     # the ``refresh.hold`` fallback below -- the pre-2.58 way of saying the same
     # thing. Running the fallback unconditionally would be a second write to the
     # same setting on every modern guest, so it is conditional on the first
     # failing.
-    held = session.step("hold-snap-auto-refresh", f"{sudo} snap refresh --hold=forever 2>&1")
+    held = session.step("hold-snap-auto-refresh", privileged("snap refresh --hold=forever"))
     if held is None or held.returncode != 0:
         session.step(
             "hold-snap-auto-refresh-fallback",
-            f"{sudo} snap set system refresh.hold={_FALLBACK_HOLD_UNTIL} 2>&1",
+            privileged(f"snap set system refresh.hold={_FALLBACK_HOLD_UNTIL}"),
         )
 
-    # ``snap changes`` lists in-flight changes as ``Doing``; the boot-time
-    # "Auto-refresh 9 snaps" is one of them. Aborting cancels the download and
-    # leaves every INSTALLED snap exactly as it was -- it is not an uninstall,
-    # which is the line this module does not cross. No ``Doing`` row means the
-    # awk prints nothing and xargs runs nothing, so the step is a clean no-op.
-    session.step(
-        "abort-in-flight-snap-changes",
-        f"{sudo} snap changes 2>/dev/null | awk '$2==\"Doing\"{{print $1}}' "
-        f"| xargs -r -n1 {sudo} snap abort 2>&1 || true",
-    )
-
     # The contents, not the directory: snapd expects the directory to exist.
-    session.step("clear-snapd-cache", f'{sudo} rm -rf -- "{_SNAPD_CACHE}"/* 2>&1')
+    # ``-mindepth 1`` is what keeps the directory; ``-delete`` implies
+    # depth-first so nested entries go before their parents.
+    session.step("clear-snapd-cache", privileged(f"find {_SNAPD_CACHE} -mindepth 1 -delete"))
 
 
 def _shell_quote(value: str) -> str:

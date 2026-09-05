@@ -125,13 +125,15 @@ def _status(report: guest_disk.GuestDiskReport, name: str) -> str | None:
 # ----------------------------------------------------------------------
 
 
-def test_a_tight_guest_holds_snap_refresh_aborts_downloads_and_clears_the_cache() -> None:
+def test_a_tight_guest_aborts_downloads_holds_snap_refresh_and_clears_the_cache() -> None:
     """The three measured consumers, in the order that makes them stick.
 
-    Holding first stops a NEW auto-refresh; aborting second stops the one
-    ``snap changes`` showed already running at boot (a hold does not touch an
-    in-flight change); clearing last means nothing is still writing into the
-    directory being emptied.
+    Aborting FIRST because it is immediate, while ``snap refresh --hold`` is a
+    hook change the CLI waits on and that queues behind an in-flight refresh's
+    own hooks -- long enough to outlast the per-command ceiling. Holding second
+    stops a NEW auto-refresh (snapd's 20-minute retry delay covers the gap).
+    Clearing last means nothing is still writing into the directory being
+    emptied.
     """
 
     guest = _Guest(free_bytes=TIGHT_FREE)
@@ -143,18 +145,10 @@ def test_a_tight_guest_holds_snap_refresh_aborts_downloads_and_clears_the_cache(
     assert guest.ran("snap abort")
     assert guest.ran("/var/lib/snapd/cache")
 
-    order = [
-        index
-        for index, command in enumerate(guest.commands)
-        if any(
-            needle in command for needle in ("--hold=forever", "snap abort", "/var/lib/snapd/cache")
-        )
-    ]
-    assert order == sorted(order)
-    hold = next(i for i, c in enumerate(guest.commands) if "--hold=forever" in c)
     abort = next(i for i, c in enumerate(guest.commands) if "snap abort" in c)
+    hold = next(i for i, c in enumerate(guest.commands) if "--hold=forever" in c)
     clear = next(i for i, c in enumerate(guest.commands) if "/var/lib/snapd/cache" in c)
-    assert hold < abort < clear
+    assert abort < hold < clear
 
 
 def test_a_roomy_guest_is_measured_and_left_alone() -> None:
@@ -203,7 +197,188 @@ def test_the_snapd_cache_is_emptied_but_no_snap_is_ever_removed() -> None:
         assert "apt-get purge" not in command
     # The cache CONTENTS, never the directory itself: snapd expects it to exist.
     clear = next(c for c in guest.commands if "/var/lib/snapd/cache" in c)
-    assert '"/var/lib/snapd/cache"/*' in clear
+    assert "find /var/lib/snapd/cache -mindepth 1 -delete" in clear
+    # And no glob anywhere near it: a ``/*`` is expanded by whichever shell
+    # holds it, and the OUTER shell is unprivileged (see the real-shell test
+    # below for what that did).
+    assert "*" not in clear
+
+
+def _privileged_scripts(guest: _Guest) -> list[str]:
+    """The ``bash -c`` scripts that reach ``sudo``, as the guest received them."""
+
+    return [c.split("bash -c ", 1)[1] for c in guest.commands if "sudo -S" in c]
+
+
+def test_every_privileged_step_is_one_sudo_running_one_inner_shell() -> None:
+    """The shape that keeps the work on the privileged side of the boundary.
+
+    The guest's control server is NOT root (upstream's server runs ``sudo -S``
+    for everything, setup.py:661), so anything the outer shell does itself --
+    expanding a glob, feeding ``xargs`` -- happens without privilege. Two real
+    defects had that shape: ``rm -rf -- /var/lib/snapd/cache/*`` expanded to
+    nothing against a ``drwx------ root:root`` directory and exited 0, and
+    ``xargs -r -n1 echo 'pw' | sudo -S snap abort`` parsed as ``xargs echo``
+    PIPED INTO one id-less ``snap abort``. Each step is therefore exactly one
+    ``echo <pw> | sudo -S bash -c '<fragment>'`` with the password appearing
+    once, and nothing else on the outer command line.
+    """
+
+    guest = _Guest(free_bytes=TIGHT_FREE)
+    _prepare(guest)
+    scripts = _privileged_scripts(guest)
+
+    assert len(scripts) == 3  # abort, hold, clear
+    for script in scripts:
+        assert script.count("sudo") == 1
+        assert script.count("'pw'") == 1
+        assert script.startswith("echo 'pw' | sudo -S bash -c '")
+        assert "xargs" not in script
+        # No PATHNAME glob (a ``case`` pattern is matched, never expanded).
+        assert "/*" not in script
+
+
+def _install_fake_sudo(bin_dir: Path, *, password: str, marker: Path) -> None:
+    """A ``sudo -S`` that regains access the way root would.
+
+    It reads the password from stdin like the real one, refuses anything else,
+    then runs the command with ``marker``'s parent tree made readable -- the
+    model for "root can see what the unprivileged shell cannot". Whatever the
+    command's stdin was is consumed by the password read, exactly as sudo's.
+    """
+
+    script = f"""#!/bin/bash
+[ "$1" = "-S" ] && shift
+IFS= read -r pw
+if [ "$pw" != {guest_disk._shell_quote(password)} ]; then
+  echo 'sudo: 1 incorrect password attempt' >&2; exit 1
+fi
+chmod -R u+rwx {guest_disk._shell_quote(str(marker))}
+"$@"
+rc=$?
+chmod 000 {guest_disk._shell_quote(str(marker))} 2>/dev/null
+exit $rc
+"""
+    (bin_dir / "sudo").write_text(script)
+    (bin_dir / "sudo").chmod(0o755)
+
+
+def test_the_cache_is_emptied_through_a_real_shell_when_only_root_can_read_it(
+    tmp_path: Path,
+) -> None:
+    """B1, replayed against a real ``bash``: the delete must run as root.
+
+    The cache directory is ``chmod 000`` -- the ``drwx------ root:root`` that
+    snapd creates, as seen from a user who is not root. The fake ``sudo``
+    restores access only for the command it runs. A glob expanded outside it
+    matches nothing, ``rm -rf`` of the literal name exits 0, and the bytes
+    stay; ``find -mindepth 1 -delete`` INSIDE it empties the directory.
+    """
+
+    cache = tmp_path / "var/lib/snapd/cache"
+    (cache / "nested").mkdir(parents=True)
+    (cache / "blob-1").write_bytes(b"x" * 4096)
+    (cache / "nested" / "inner").write_bytes(b"y" * 4096)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_fake_sudo(bin_dir, password="pw", marker=cache)
+
+    guest = _Guest(free_bytes=TIGHT_FREE)
+    _prepare(guest)
+    clear = next(s for s in _privileged_scripts(guest) if "/var/lib/snapd/cache" in s)
+    # The production path is absolute; the fixture relocates it under tmp_path.
+    clear = clear.replace("/var/lib/snapd/cache", str(cache))
+
+    cache.chmod(0o000)
+    try:
+        completed = subprocess.run(
+            ["bash", "-c", clear],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+            check=False,
+        )
+    finally:
+        cache.chmod(0o700)
+
+    assert completed.returncode == 0, completed.stdout
+    assert cache.is_dir(), "the directory itself must survive"
+    assert list(cache.iterdir()) == [], "bytes must actually be gone"
+
+
+def test_every_in_flight_refresh_is_aborted_by_id_through_a_real_shell(
+    tmp_path: Path,
+) -> None:
+    """M1, replayed against a real ``bash`` and a ``snap`` with the real CLI rules.
+
+    ``snap abort`` REQUIRES a change id ("please provide change ID or type
+    with --last"), and only ``Doing`` rows whose summary is an auto-refresh or
+    its pre-download are candidates: a seeding hook that happens to be running
+    is not the benchmark's to abort, and a COMPLETED auto-refresh must not be
+    touched at all (aborting it is an error in real snapd, and the intent it
+    would express is a revert). The fake ``snap`` records every call it
+    receives, so an id-less abort, an abort of the wrong change, or an abort
+    running as the wrong user is visible rather than masked by ``|| true``.
+    """
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "snap-calls"
+    guard = tmp_path / "root-only"
+    guard.mkdir()
+    _install_fake_sudo(bin_dir, password="pw", marker=guard)
+    (bin_dir / "snap").write_text(f"""#!/bin/bash
+echo "$*" >> {guest_disk._shell_quote(str(calls))}
+case "$1" in
+  changes)
+    printf 'ID   Status  Spawn  Ready  Summary\\n'
+    printf '10   Done    -      -      Initialize system state\\n'
+    printf '11   Done    -      -      Auto-refresh 3 snaps\\n'
+    printf '12   Doing   -      -      Auto-refresh 9 snaps\\n'
+    printf '13   Doing   -      -      Pre-download "novnc" for auto-refresh\\n'
+    printf '14   Doing   -      -      Run configure hook of "seed-thing" snap\\n'
+    printf '15   Doing   -      -      Hold auto-refreshes for all snaps\\n'
+    ;;
+  abort)
+    [ -r {guest_disk._shell_quote(str(guard))} ] || {{ echo 'error: access denied' >&2; exit 1; }}
+    [ -n "$2" ] || {{ echo 'error: please provide change ID or type with --last' >&2; exit 1; }}
+    ;;
+esac
+""")
+    (bin_dir / "snap").chmod(0o755)
+
+    guest = _Guest(free_bytes=TIGHT_FREE)
+    _prepare(guest)
+    abort = next(s for s in _privileged_scripts(guest) if "snap abort" in s)
+
+    guard.chmod(0o000)
+    try:
+        completed = subprocess.run(
+            ["bash", "-c", abort],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+            check=False,
+        )
+    finally:
+        guard.chmod(0o700)
+
+    assert completed.returncode == 0, completed.stdout
+    assert calls.read_text().splitlines() == ["changes", "abort 12", "abort 13"]
+
+
+def test_a_failed_abort_is_recorded_as_a_failed_step_rather_than_masked() -> None:
+    """``|| true`` used to turn an abort that did nothing into ``ok``."""
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"snap abort": CommandResult(1, "", "error: cannot abort change 12")},
+    )
+    report = _prepare(guest)
+
+    assert _status(report, "abort-in-flight-snap-changes") == "failed"
+    abort = next(s for s in _privileged_scripts(guest) if "snap abort" in s)
+    assert "|| true" not in abort
 
 
 def test_an_old_snapd_without_hold_falls_back_to_the_refresh_hold_setting() -> None:
@@ -266,7 +441,7 @@ def test_the_client_password_survives_a_real_shell_as_exactly_one_word(
     # pipeline at the pipe, leaving exactly the ``echo <quoted-password>`` the
     # module built.
     script = hold.split("bash -c ", 1)[1]
-    echo_half = script.split(" | ", 1)[0]
+    echo_half = script.split(" | sudo -S ", 1)[0]
     canary = tmp_path / "pwned"
     completed = subprocess.run(
         ["bash", "-c", echo_half],
@@ -442,17 +617,54 @@ def test_the_report_records_the_partition_and_whole_disk_geometry() -> None:
     assert report.disk_bytes > report.filesystem_bytes
 
 
-def test_a_partial_geometry_answer_still_reports_the_filesystem_size() -> None:
-    """An image without ``lsblk`` must still yield the first number."""
+@pytest.mark.parametrize("returncode", [0, 127])
+def test_a_partial_geometry_answer_still_reports_the_filesystem_size(returncode: int) -> None:
+    """An image without ``lsblk`` must still yield the first number.
+
+    Parametrised over the exit status because a missing tool is exactly the
+    case where the shell reports failure (127) AFTER ``df`` has already
+    printed: the number that was measured must not be discarded over a tool
+    that was not there.
+    """
 
     guest = _Guest(
         free_bytes=TIGHT_FREE,
-        script={"--output=size": CommandResult(0, "31138512896\n", "")},
+        script={"--output=size": CommandResult(returncode, "31138512896\n", "lsblk: not found")},
     )
     report = _prepare(guest)
 
     assert report.filesystem_bytes == 31138512896
     assert report.disk_bytes is None
+
+
+def test_the_geometry_script_exits_zero_through_a_real_shell_without_lsblk(
+    tmp_path: Path,
+) -> None:
+    """The block-device half is best-effort, so the step itself reports ``ok``.
+
+    Run against a real ``bash`` with a PATH holding ``df`` and nothing else:
+    the ``&&`` chain used to leak its 127 into the step status, which the
+    report then showed as a FAILED measurement beside a perfectly good
+    filesystem figure.
+    """
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "df").write_text("#!/bin/bash\nprintf '  1B-blocks\\n31138512896\\n'\n")
+    (bin_dir / "df").chmod(0o755)
+    for tool in ("tail", "head"):
+        (bin_dir / tool).symlink_to(f"/usr/bin/{tool}")
+
+    completed = subprocess.run(
+        ["/bin/bash", "-c", guest_disk._GEOMETRY_SCRIPT],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(bin_dir)},
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "31138512896\n"
 
 
 def test_the_report_serialises_to_portable_json_with_every_step() -> None:

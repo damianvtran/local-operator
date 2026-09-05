@@ -332,14 +332,33 @@ It drives the guest's own HTTP control server (`POST /execute`, argv with
 `shell: false` — the same endpoint and contract upstream's `SetupController`
 uses), and does three things, in an order that is load-bearing:
 
-1. **Hold snap auto-refresh** (`snap refresh --hold=forever`, falling back to
+1. **Abort the in-flight auto-refresh** — `snap changes` showed
+   `Auto-refresh 9 snaps` and `Pre-download novnc` already running at boot.
+   Only `Doing` changes with those two summaries are aborted; a seeding hook or
+   any other change is left alone. Abort goes first because it is immediate,
+   whereas a hold is a `configure core` hook change the CLI waits on, and snapd
+   runs one hook per snap at a time — behind a live refresh of core/snapd the
+   hold could queue past the per-command ceiling. Snapd's 20-minute retry delay
+   means no new refresh can start in the gap before the hold lands. Aborting a
+   partly-done change undoes its completed tasks, which returns those snaps to
+   the revision the AMI shipped — the benchmark's own baseline.
+2. **Hold snap auto-refresh** (`snap refresh --hold=forever`, falling back to
    `snap set system refresh.hold=<far future>` on snapd older than 2.58). This
    stops a *new* refresh starting.
-2. **Abort in-flight snap changes** — a hold does not touch a change that is
-   already running, and `snap changes` showed one already running at boot.
 3. **Clear `/var/lib/snapd/cache`** — pure download scratch, documented by
    Canonical as "the working cache … used to minimise download size and speed-up
    refreshes". Deleting it costs a re-download and nothing else.
+
+Every privileged step is exactly one `echo <password> | sudo -S bash -c
+'<fragment>'`, with all of the work — the `snap changes` loop, the
+`find /var/lib/snapd/cache -mindepth 1 -delete` — inside the privileged inner
+shell. That shape is not cosmetic: the control server runs as an unprivileged
+user, so a glob like `/var/lib/snapd/cache/*` expanded by the *outer* shell
+matches nothing against a `drwx------ root:root` directory and `rm -rf` of the
+literal name exits 0, and an `xargs … echo pw | sudo -S snap abort` pipeline
+parses as `xargs echo` piped into one id-less `sudo`. Both were real defects
+that reported `ok` while doing nothing, caught only by re-running the E2E with
+the cache directory genuinely owned by root.
 
 The design constraints are worth stating explicitly, because each is a line a
 future change could cross without noticing:
