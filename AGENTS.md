@@ -351,6 +351,18 @@ takes about a minute.
 
 ### 1. Render the screen to an SVG still
 
+**Use the faithful developer capture helper**, not a default Rich presentation
+as a terminal-size measurement. All current shot scripts use
+`scripts.visual_capture.save_capture(app, path)`: native 8x17px cells, system
+monospace fonts, no fake window chrome or network font, plus `.geometry.json`
+with screen/widget sizes and resolved font provenance. The grid and displayed
+image scale are separate: a 150-column frame shrunk to a thumbnail cannot be
+compared to a native 100-column terminal. See `docs/VISUAL_CAPTURE.md` for
+calibration, explicit reference estimates, the finite gallery matrix, and
+font/rasterization limits. Run `scripts/visual_gallery.py --list` before making
+another sample script. Existing `app.save_screenshot` remains unchanged for
+compatibility, but its default Rich geometry is not faithful visual evidence.
+
 Four of these already exist and are worth reusing before writing a new one.
 They capture the `ask` picker and the tool-approval prompt over a seeded
 conversation, at any terminal size:
@@ -384,10 +396,11 @@ screenshot of an empty app. `approval_shot.py` takes a third argument, `focus`,
 which puts focus in the composer before the shot — the state that used to send
 the prompt's answer keys into the prompt buffer.
 
-**Note that both force the approval gate on** (`app._set_approve_all(False)`).
-The app reads the developer's own `tool_approval_mode` from `~/.local-operator`,
-so on a machine set to `auto` a naive capture shows a frame with no prompt in it
-at all, and it looks like the surface is broken rather than skipped.
+**The scripts isolate HOME/config before app imports** and approval-specific
+fixtures force the approval gate on (`app._set_approve_all(False)`). Without
+that isolation, the app reads the developer's own `tool_approval_mode`, so a
+machine set to `auto` can capture no prompt at all. A new sample must call
+`isolate_capture()` before importing app modules, not merely before the export.
 
 For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:
@@ -399,6 +412,9 @@ import sys
 
 sys.path.insert(0, "/path/to/local-operator")  # repo root, so `tests.` imports resolve
 
+from scripts.visual_capture import isolate_capture, save_capture
+isolate_capture()  # BEFORE app imports: isolate HOME, config and caches
+
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from local_operator.tui.app import OperatorApp
 
@@ -409,7 +425,7 @@ async def main() -> None:
         # ... put the app in the state under test: press keys, push a screen,
         # call a widget's show_*() directly ...
         await pilot.pause()
-        app.save_screenshot(sys.argv[1])
+        save_capture(app, sys.argv[1])
 
 asyncio.run(main())
 ```

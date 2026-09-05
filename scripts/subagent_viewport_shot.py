@@ -9,6 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.subagent_panel import SubagentPanel  # noqa: E402
 from local_operator.tui.widgets.subagent_view import SubagentView  # noqa: E402
@@ -42,7 +46,7 @@ async def capture(output: Path, size: tuple[int, int]) -> None:
             await pilot.pause()
         panel = app.query_one(SubagentPanel)
         view = app.query_one(SubagentView)
-        app.save_screenshot(str(output))
+        save_capture(app, str(output))
         print(
             f"size={size[0]}x{size[1]} roster_expanded={panel._expanded} "
             f"view={view.size} body={view._body.size} body_virtual={view._body.virtual_size} "

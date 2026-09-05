@@ -10,6 +10,10 @@ from pathlib import Path
 # Resolve the checkout from the script rather than requiring the caller's cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+
+isolate_capture()
+
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import (  # noqa: E402
@@ -40,7 +44,7 @@ async def _capture(output: Path) -> None:
         await pilot.pause()
         view.scroll_end(animate=False)
         await pilot.pause()
-        app.save_screenshot(str(output))
+        save_capture(app, str(output))
         print(
             f"blocks={len(view.blocks())} content_size={view.size} "
             f"virtual_size={view.virtual_size} screen_size={app.screen.size} "
