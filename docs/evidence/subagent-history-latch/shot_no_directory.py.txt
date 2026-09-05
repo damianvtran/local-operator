@@ -1,0 +1,49 @@
+"""The honest-negative frame: a child that never started a durable session.
+
+The fix must not buy a self-correcting note at the cost of a note that lies the
+other way. This child's ``session_dir_of`` returns ``None``, so there is
+nothing to read now and nothing to read later, and the footer must keep saying
+so across many refreshes. Consecutive frames are compared to prove the note
+does not flap between "history unavailable" and anything else while the 1 Hz
+poll runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+
+ROOT = sys.argv[1]
+OUT = sys.argv[2]
+sys.path.insert(0, ROOT)
+
+from local_operator.tui.app import OperatorApp  # noqa: E402
+
+from tests.unit.tui.test_band_panels import FakeSession, _async_factory, _fake_jobs  # noqa: E402
+from tests.unit.tui.test_subagent_view import TRAJECTORY, _job_with, _open, _wait_history  # noqa: E402
+
+
+async def main() -> None:
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type("Comms", (), {"session_dir_of": lambda self, _j: None})()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        seen = []
+        for _ in range(12):
+            await asyncio.sleep(0.15)
+            app._refresh_subagent_view(view.job_id)
+            await pilot.pause()
+            seen.append(view._history_state_text())
+
+        print("distinct footer texts across 12 polls:", sorted(set(seen)))
+        print("absent_final:", view._history_absent_final, "unavailable:", view._history_unavailable)
+        app.save_screenshot(OUT)
+
+
+asyncio.run(main())
