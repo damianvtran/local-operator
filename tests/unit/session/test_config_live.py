@@ -37,6 +37,7 @@ from local_operator.model.configure import (
     SessionStreamFn,
     _anthropic_cache_ttl_1h_min_context_tokens,
     _openai_api_mode,
+    _openai_use_max_context_window,
 )
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
@@ -206,6 +207,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # Observed through the same function the client builder calls, not through
     # the raw mapping: what makes this key live is that ``_openai_api_mode``
     # reads the REBOUND settings, so that is what must move.
+    "providers.openai.use_max_context_window": (
+        False,
+        lambda s, w: _openai_use_max_context_window(s.routing_settings),
+    ),
     "providers.openai.api": (
         "chat_completions",
         lambda s, w: _openai_api_mode(s.routing_settings),

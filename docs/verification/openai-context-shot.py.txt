@@ -1,0 +1,115 @@
+import asyncio, sys, os, subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from dataclasses import replace
+
+# Usage: python docs/verification/openai-context-shot.py.txt OUT_DIR WIDTH WINDOW
+# CONTEXT_BASELINE=1 restores original picker methods from the pre-feature base.
+sys.path.insert(0, str(Path.cwd()))
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from local_operator.harness.types import ModelSpec, Usage
+from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.transcript import UserBlock
+from tests.unit.tui.test_subagent_stats import Job
+
+if os.environ.get("CONTEXT_BASELINE"):
+    import local_operator.tui.widgets.model_picker as picker_module
+
+    mounted_picker = picker_module.ModelPicker
+    exec(
+        compile(
+            subprocess.check_output(
+                ["git", "show", "765c619b:local_operator/tui/widgets/model_picker.py"]
+            ),
+            "baseline-model-picker.py",
+            "exec",
+        ),
+        picker_module.__dict__,
+    )
+    for method in ("_row", "_numbers"):
+        setattr(mounted_picker, method, getattr(picker_module.ModelPicker, method))
+    picker_module.ModelPicker = mounted_picker
+from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
+from local_operator.tui.app import OperatorApp
+
+
+class Session(FakeSession):
+    @property
+    def model(self):
+        return ModelSpec(provider="openai", model_id="gpt-6-astra", context_window=int(sys.argv[3]))
+
+    @property
+    def model_label(self):
+        return "openai/gpt-6-astra"
+
+
+async def main():
+    root = Path(sys.argv[1])
+    root.mkdir(parents=True, exist_ok=True)
+    session = Session()
+    job = Job(
+        label="Context verification",
+        model_label="openai/gpt-6-astra",
+        context_window=int(sys.argv[3]),
+        usage=Usage(input_tokens=300000, output_tokens=5),
+        progress="checking context",
+        age=20,
+    )
+    session.jobs = SimpleNamespace(list=lambda: [job])
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(int(sys.argv[2]), 34)) as pilot:
+        await pilot.pause(2)
+        app._append_block(UserBlock("Check the provider default and supported maximum."))
+        prose = AssistantBlock()
+        prose.update_text(
+            "The catalogue keeps both limits. Existing compaction settings remain unchanged."
+        )
+        app._append_block(prose)
+        app._subagent_panel.sync(session)
+        app._status.update(
+            context_tokens=300000, context_is_estimate=False, context_window=int(sys.argv[3])
+        )
+        await pilot.pause()
+        app.save_screenshot(str(root / "composer.svg"))
+        app._open_model_picker()
+        await pilot.pause(1)
+        picker = app.query_one(ModelPicker)
+        kwargs = {}
+        if "default_context_window" in ModelRow.__dataclass_fields__:
+            kwargs = {"default_context_window": 272000, "max_context_window": 872000}
+        picker.set_rows(
+            [
+                ModelRow(
+                    provider="openai",
+                    model_id="gpt-6-astra",
+                    label="GPT-6 Astra",
+                    context_window=int(sys.argv[3]),
+                    input_price=10,
+                    output_price=50,
+                    **kwargs,
+                ),
+                ModelRow(
+                    provider="openai",
+                    model_id="gpt-5.4-mini",
+                    label="GPT-5.4 mini",
+                    context_window=272000,
+                    input_price=0.75,
+                    output_price=4.5,
+                ),
+            ],
+            current="openai/gpt-6-astra",
+        )
+        picker.set_query("")
+        await pilot.pause()
+        app.save_screenshot(str(root / "picker.svg"))
+        print("geometry", picker.region, picker.virtual_size, picker.scrollbar_size_vertical)
+        await pilot.pause(0.4)
+        app.save_screenshot(str(root / "picker-settled.svg"))
+        print("settled", picker.region, picker.virtual_size, picker.scrollbar_size_vertical)
+        picker.move(1)
+        await pilot.pause()
+        app.save_screenshot(str(root / "picker-selection.svg"))
+        print("selection", picker.region, picker.virtual_size, picker.scrollbar_size_vertical)
+
+
+asyncio.run(main())

@@ -1432,9 +1432,11 @@ def test_an_unscoped_oauth_run_never_prunes_from_the_api_key_document(tmp_path) 
         cache_dir=tmp_path,
     )
 
-    assert status == "cached"
+    assert status == "static"
     listed = {model.id for model in models}
     assert set(static_models("openai")) <= listed, "an unscoped run pruned the registry"
+    assert "api-only" not in listed
+    assert all(model.context_window == 0 for model in models)
     assert len(client.calls) == 1, "the second run must not issue a request"
 
 

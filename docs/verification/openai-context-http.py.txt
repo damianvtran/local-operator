@@ -1,0 +1,182 @@
+"""Exercise HTTP catalogue -> auth -> session -> Codex wire without paid inference."""
+
+import asyncio, json, sys, threading, time, os, tempfile
+
+# Run with the candidate's own editable interpreter; all local state is temporary.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HOME = Path(tempfile.mkdtemp(prefix="lop-context-wire-"))
+os.environ["HOME"] = str(HOME)
+os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(HOME / ".local-operator")
+from local_operator.model import configure, discovery
+from local_operator.providers import clients
+from local_operator.providers.auth_store import AuthStore
+from local_operator.harness.types import ModelSpec
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+from local_operator.compaction.thresholds import CompactionSettings, resolve_threshold_tokens
+from local_operator.tui.widgets.status_line import context_spelling
+
+ROOT = HOME / "evidence"
+ROOT.mkdir(exist_ok=True)
+requests = []
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        account = self.headers.get("ChatGPT-Account-ID")
+        if not self.headers.get("Authorization"):
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"authorization required")
+            return
+        if account != "local-account":
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"wrong account")
+            return
+        body = json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-6-astra",
+                        "display_name": "GPT-6 Astra",
+                        "context_window": 272000,
+                        "max_context_window": 872000,
+                    }
+                ]
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        requests.append({"method": "GET", "account": account, "status": 200})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body.get("model") != "gpt-6-astra":
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"unknown model")
+            return
+        requests.append(
+            {
+                "method": "POST",
+                "model": body["model"],
+                "account": self.headers.get("chatgpt-account-id"),
+                "has_max_override_flag": "max_context_window" in body,
+                "input_characters": len(json.dumps(body.get("input"))),
+                "status": 200,
+            }
+        )
+        events = [
+            {"type": "response.created", "response": {"id": "local-response"}},
+            {"type": "response.output_text.delta", "delta": "Local wire path accepted."},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "local-response",
+                    "status": "completed",
+                    "usage": {"input_tokens": 300000, "output_tokens": 5, "total_tokens": 300005},
+                    "output": [],
+                },
+            },
+        ]
+        data = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+async def main():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    discovery.OPENAI_CHATGPT_MODELS_URL = base + "/models"
+    clients.CODEX_RESPONSES_URL = base + "/responses"
+    configure.invalidate_model_info_cache()
+    auth = AuthStore(ROOT / "auth.db")
+    auth.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "access": "local-test-token",
+            "refresh": "local-test-refresh",
+            "expires": int(time.time() * 1000) + 86400000,
+            "account_id": "local-account",
+            "org_id": "local-account",
+        },
+    )
+    settings = {
+        "providers": {"openai": {"use_max_context_window": True}},
+        "retry": {"usageAwareFallback": False, "modelFallback": False},
+    }
+    stream = configure.SessionStreamFn(auth, settings, "context-evidence")
+    session = Session(
+        model=ModelSpec(provider="openai", model_id="gpt-6-astra", context_window=272000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(ROOT / "session"),
+        system_blocks_provider=lambda: ["Local context verification."],
+        has_ui=True,
+        compaction_settings=CompactionSettings(threshold_percent=0.8, threshold_tokens=400000),
+    )
+    events = []
+    session.subscribe(lambda event: events.append(event.model_dump(mode="json")))
+    try:
+        await session.prompt("Confirm the context accounting path.")
+        spec = session.effective_model
+        import httpx
+
+        async with httpx.AsyncClient() as probe:
+            unauthorized = await probe.get(base + "/models")
+            wrong_account = await probe.get(
+                base + "/models",
+                headers={
+                    "Authorization": "Bearer local-test-token",
+                    "ChatGPT-Account-ID": "wrong-account",
+                },
+            )
+            invalid = await probe.post(base + "/responses", json={"model": "unknown"})
+            failures = {
+                "unauthorized": unauthorized.status_code,
+                "wrong_account": wrong_account.status_code,
+                "invalid_model": invalid.status_code,
+            }
+            assert failures == {"unauthorized": 401, "wrong_account": 403, "invalid_model": 400}
+            print("Local fixture error responses:", json.dumps(failures))
+        result = {
+            "source": configure.__file__,
+            "requests": requests,
+            "active": spec.context_window,
+            "default": spec.default_context_window,
+            "maximum": spec.max_context_window,
+            "display": context_spelling(300000, spec.context_window),
+            "compaction_trigger": resolve_threshold_tokens(
+                spec.context_window,
+                CompactionSettings(threshold_percent=0.8, threshold_tokens=400000),
+            ),
+            "model_events": [e for e in events if e["type"] == "model_change"],
+            "provider_usage_source": "local HTTP fixture reports 300000 input tokens; no large paid provider acceptance claimed",
+        }
+        print(json.dumps(result, indent=2))
+        (ROOT / "result.json").write_text(json.dumps(result, indent=2))
+        assert spec.context_window == 872000
+        assert any(r["method"] == "POST" for r in requests)
+    finally:
+        await session.dispose()
+        await stream.close()
+        auth.close()
+        server.shutdown()
+        server.server_close()
+
+
+asyncio.run(main())

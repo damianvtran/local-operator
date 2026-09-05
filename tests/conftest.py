@@ -37,6 +37,10 @@ import pytest
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
     "LOCAL_OPERATOR_DEBUG",
+    # Tests launched from a detached operator inherit these runtime-only flags.
+    # They turn strict --resume validation into adoption of a brand-new id.
+    "LOP_RUNTIME_ADOPT_SESSION",
+    "LOP_RUNTIME_DEFER_MATERIALISE",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this

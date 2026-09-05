@@ -264,6 +264,7 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: the only transports that quote a price at all.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     "anthropic": 2,
+    "openai": 2,
     "openrouter": 6,
     "radient": 6,
     "radient-key": 6,
@@ -351,6 +352,9 @@ class DiscoveredModel:
     id: str
     name: str = ""
     context_window: int = 0
+    # Keep the route's default distinct from its optional override ceiling.
+    default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
+    max_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     max_tokens: int = 0
     input_price: float = 0.0
     output_price: float = 0.0
@@ -1020,9 +1024,11 @@ def _row_from_openai_codex_entry(entry: Mapping[str, object]) -> DiscoveredModel
         id=model_id,
         name=_first_str(entry.get("display_name")),
         context_window=_first_positive_int(
-            entry.get("context_window"),
             entry.get("max_context_window"),
+            entry.get("context_window"),
         ),
+        default_context_window=_positive_int(entry.get("context_window")) or None,
+        max_context_window=_positive_int(entry.get("max_context_window")) or None,
         max_tokens=_first_positive_int(
             entry.get("max_tokens"),
             entry.get("max_output_tokens"),
@@ -1488,6 +1494,8 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         id=model_id,
         name=info.name,
         context_window=_positive_int(info.context_window),
+        default_context_window=info.default_context_window,
+        max_context_window=info.max_context_window,
         max_tokens=_positive_int(info.max_tokens),
         input_price=_positive_float(info.input_price),
         output_price=_positive_float(info.output_price),
@@ -1548,6 +1556,9 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # version predating ``max_input_tokens``) must not zero out the number auto
         # compaction derives its threshold from.
         context_window=_positive_int(row.context_window) or _positive_int(info.context_window),
+        # A positive route-local answer must never borrow a public API ceiling.
+        default_context_window=row.default_context_window,
+        max_context_window=row.max_context_window,
         max_tokens=max_tokens,
         # A zero or absent price means "unknown", never "free": the cost display
         # prints the literal word for a genuinely free model, so letting a silent
@@ -1707,6 +1718,8 @@ def _rows_from_payload(
                 id=model_id,
                 name=_first_str(entry.get("name")),
                 context_window=_positive_int(entry.get("context_window")),
+                default_context_window=_positive_int(entry.get("default_context_window")) or None,
+                max_context_window=_positive_int(entry.get("max_context_window")) or None,
                 max_tokens=_positive_int(entry.get("max_tokens")),
                 input_price=_positive_float(entry.get("input_price")),
                 output_price=_positive_float(entry.get("output_price")),
@@ -1845,6 +1858,19 @@ def available_models(
         listed no models).
     """
     rows = _static_rows(provider_id)
+    if is_oauth and provider_id in OPENAI_OAUTH_PROVIDERS:
+        # Scope the outer exception fallback too: a cache error is not evidence
+        # that this subscription suddenly has the public API's context limit.
+        rows = {
+            model_id: info.model_copy(
+                update={
+                    "context_window": 0,
+                    "default_context_window": None,
+                    "max_context_window": None,
+                }
+            )
+            for model_id, info in rows.items()
+        }
     try:
         return _available_models(
             provider_id,
@@ -1884,6 +1910,11 @@ def _available_models(
     definition = get_provider_definition(provider_id)
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
+        return merge_models(rows, None), "static"
+
+    if is_oauth and provider_id in OPENAI_OAUTH_PROVIDERS and not account_id:
+        # A missing account cannot authorize Codex and must not read the public
+        # API cache simply because its hashed account suffix cannot be formed.
         return merge_models(rows, None), "static"
 
     # An OAuth credential may be served by a different host than the provider's

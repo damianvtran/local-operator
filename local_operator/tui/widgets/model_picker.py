@@ -123,6 +123,8 @@ class ModelRow:
     #: caller had none; the row then shows its selector and nothing more.
     label: str = ""
     context_window: int = 0
+    default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
+    max_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     input_price: float = 0.0
     output_price: float = 0.0
     connected: bool = True
@@ -658,7 +660,9 @@ class ModelPicker(Static):
         line = Text()
         line.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
 
-        numbers = self._numbers(row) if width >= _NUMBERS_MIN_WIDTH else ""
+        numbers = (
+            self._numbers(row) if width >= _NUMBERS_MIN_WIDTH else self._window(row, compact=True)
+        )
         mark = f" {_CURRENT_MARK}" if row.selector == self._current else ""
         reserved = _GUTTER_CELLS + _EDGE_MARGIN + cell_len(numbers) + cell_len(mark)
         budget = max(4, width - reserved - (_COLUMN_GAP if numbers else 0))
@@ -752,8 +756,30 @@ class ModelPicker(Static):
         """
         if not row.connected:
             return "login required"
-        parts = [part for part in (format_window(row.context_window), self._price(row)) if part]
+        parts = [part for part in (self._window(row), self._price(row)) if part]
         return "  ".join(parts)
+
+    def _window(self, row: ModelRow, *, compact: bool = False) -> str:
+        if not row.connected:
+            return ""
+        if (
+            row.max_context_window
+            and row.default_context_window
+            and row.max_context_window != row.default_context_window
+        ):
+            maximum = f"{format_window(row.max_context_window)} max"
+            default = f"provider default {format_window(row.default_context_window)}"
+            if row.context_window == row.default_context_window:
+                return (
+                    f"{format_window(row.context_window)} active"
+                    if compact
+                    else f"{default} active · {maximum}"
+                )
+            if compact:
+                return maximum
+            return f"{maximum} · {default}"
+        # Preserve the existing narrow-row layout for models without two limits.
+        return "" if compact else format_window(row.context_window)
 
     def _price(self, row: ModelRow) -> str:
         return format_price_pair(row.input_price, row.output_price, routed=row.routed)

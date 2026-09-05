@@ -433,6 +433,18 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- providers ----------------------------------------------------------
     Setting(
+        key="providers.openai.use_max_context_window",
+        path=("providers", "openai", "use_max_context_window"),
+        section="providers",
+        label="Use maximum OpenAI context",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Off: provider default. On: supported max. "
+            "Applies next request; compaction unchanged."
+        ),
+    ),
+    Setting(
         key="providers.openai.api",
         path=("providers", "openai", "api"),
         section="providers",

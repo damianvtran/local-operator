@@ -4299,6 +4299,27 @@ class Session:
         )
         if inspect.isawaitable(result):
             await result
+        await self._refresh_context_metadata()
+
+    async def _refresh_context_metadata(self) -> None:
+        resolver = getattr(self._stream_fn, "resolve_context_model", None)
+        if not callable(resolver):
+            return
+        result = resolver(self.effective_model)
+        spec = await result if inspect.isawaitable(result) else result
+        if not isinstance(spec, ModelSpec):
+            return
+        await self._emit(
+            ModelChangeEvent(
+                provider=spec.provider,
+                model_id=spec.model_id,
+                context_window=spec.context_window,
+                default_context_window=spec.default_context_window,
+                max_context_window=spec.max_context_window,
+                context_metadata=True,
+                context_metadata_resolved=spec.context_metadata_resolved,
+            )
+        )
 
     # -- driving turns --------------------------------------------------------
     async def prompt(
@@ -5366,6 +5387,37 @@ class Session:
             return None
 
     async def _emit(self, event: AgentEvent) -> None:
+        if isinstance(event, ModelChangeEvent) and event.context_metadata:
+            current = self.effective_model
+            primary = (self._model.provider, self._model.model_id) == (
+                event.provider,
+                event.model_id,
+            )
+            if primary:
+                # A recovering primary reports metadata before failover clears
+                # its old pin. Save it on selection so recovery cannot revive
+                # the pre-rotation/default window.
+                current = self._model
+            if (current.provider, current.model_id) == (event.provider, event.model_id):
+                update = {
+                    "context_window": event.context_window,
+                    "default_context_window": event.default_context_window,
+                    "max_context_window": event.max_context_window,
+                    "context_metadata_resolved": event.context_metadata_resolved,
+                }
+                if all(getattr(current, key) == value for key, value in update.items()):
+                    return
+                refreshed = current.model_copy(update=update)
+                if primary:
+                    self._model = refreshed
+                else:
+                    self._active_fallback = refreshed
+                event = event.model_copy(
+                    update={
+                        "is_fallback": self._active_fallback is not None,
+                        "effort": current.reasoning_effort,
+                    }
+                )
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         store = getattr(self, "_frontend_state_store", None)
@@ -5431,6 +5483,7 @@ class Session:
         The generation stamp on the emitted end is the one from the start that
         opened the run, so the TUI's supersede guard still pairs them.
         """
+        await self._refresh_context_metadata()
         # Re-arm the todo guardrail: a fresh user message may well be the answer
         # a stalled list was waiting for, so the latch must not carry over. It is
         # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
@@ -5707,6 +5760,7 @@ class Session:
             if pending_incident:
                 await self.journal_incident(pending_incident)
 
+            await self._refresh_context_metadata()
             await self._maybe_compact()
         finally:
             # LAST-RESORT durability. The persistence above runs only on the

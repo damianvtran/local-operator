@@ -110,6 +110,8 @@ class CatalogueEntry:
     input_price: float
     output_price: float
     connected: bool
+    default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
+    max_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     #: This provider RESELLS the model rather than serving it. The picker ranks
     #: the direct route first when the same model is reachable both ways.
     aggregated: bool = False
@@ -1162,6 +1164,8 @@ class ProviderController:
                         model_id=model_id,
                         label=model_label(definition.id, model_id, info.name or "").full,
                         context_window=max(0, info.context_window or 0),
+                        default_context_window=info.default_context_window,
+                        max_context_window=info.max_context_window,
                         input_price=_price(info.input_price, definition),
                         output_price=_price(info.output_price, definition),
                         connected=connected,
@@ -1194,6 +1198,8 @@ class ProviderController:
                             model_id=model.id,
                             label=model_label(definition.id, model.id, model.name or "").full,
                             context_window=max(0, model.context_window),
+                            default_context_window=model.default_context_window,
+                            max_context_window=model.max_context_window,
                             input_price=_price(model.input_price, definition, free=model.free),
                             output_price=_price(model.output_price, definition, free=model.free),
                             connected=connected,
@@ -1209,6 +1215,8 @@ class ProviderController:
                             model_id=model_id,
                             label=model_label(definition.id, model_id, info.name or "").full,
                             context_window=max(0, info.context_window or 0),
+                            default_context_window=info.default_context_window,
+                            max_context_window=info.max_context_window,
                             input_price=_price(info.input_price, definition),
                             output_price=_price(info.output_price, definition),
                             connected=connected,
@@ -1264,12 +1272,22 @@ class ProviderController:
             output_price = -1.0
         else:
             return None
+        default_window = info.default_context_window if info is not None else None
+        maximum_window = info.max_context_window if info is not None else None
+        if spec is not None and (spec.provider, spec.model_id) == (definition.id, model_id):
+            # The serving route beats public registry limits even for a fully
+            # described model; the registry still supplies its known prices.
+            context_window = max(0, spec.context_window)
+            default_window = spec.default_context_window
+            maximum_window = spec.max_context_window
         usable = self.usable_providers()
         return CatalogueEntry(
             provider=definition.id,
             model_id=model_id,
             label=model_label(definition.id, model_id, name).full,
             context_window=context_window,
+            default_context_window=default_window,
+            max_context_window=maximum_window,
             input_price=input_price,
             output_price=output_price,
             connected=usable is None or definition.id in usable,
@@ -1310,6 +1328,7 @@ class ProviderController:
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
         usable = self.usable_providers()
+        oauth_context: dict[str, dict[str, int]] = {}
 
         async def _fetch_provider(
             definition: ProviderDefinition,
@@ -1334,6 +1353,10 @@ class ProviderController:
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            if definition.id == "openai" and is_oauth:
+                # Price enrichment may know the API model, but not this route's
+                # limits. Preserve even an unknown OAuth window through it.
+                oauth_context[definition.id] = {row.id: row.context_window for row in models}
             return definition, connected, models, status
 
         results = await asyncio.gather(*[_fetch_provider(defn) for defn in PROVIDER_REGISTRY])
@@ -1352,12 +1375,18 @@ class ProviderController:
         )
         for definition, connected, _models in listed:
             for model in rows_by_provider[definition.id]:
+                if definition.id in oauth_context:
+                    model = dataclasses.replace(
+                        model, context_window=oauth_context[definition.id].get(model.id, 0)
+                    )
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
                         model_id=model.id,
                         label=model_label(definition.id, model.id, model.name or "").full,
                         context_window=max(0, model.context_window),
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
                         # ``free`` is consumed HERE and goes no further: a
                         # stated zero survives ``_price`` as ``0.0``, which is
                         # already the entry's way of saying free (an unknown is
