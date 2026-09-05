@@ -195,6 +195,40 @@ async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_r
 
 
 @pytest.mark.asyncio
+async def test_live_empty_child_plan_fetch_never_reads_transcript(tmp_path, monkeypatch) -> None:
+    import asyncio
+
+    from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.runtime import owned
+    from local_operator.tools.builtin import TODO_STORE
+    from tests.unit.harness.test_comms import ScriptedProvider, make_parent
+
+    root = make_parent(tmp_path / "root", ScriptedProvider())
+    child = make_parent(tmp_path / "child", ScriptedProvider())
+    job = AsyncJob(id="live-child", type="task", label="Live child", start_time=1.0)
+    root.jobs._jobs[job.id] = job
+    root.subagent_comms.record_launch(job.id, job.label)
+    root.subagent_comms.attach(job.id, child, child._transcript.directory)
+    monkeypatch.delitem(TODO_STORE, child.session_id, raising=False)
+
+    def forbid_read(*args):  # noqa: ANN002, ANN202
+        raise AssertionError("a live empty plan must not trigger historical disk I/O")
+
+    monkeypatch.setattr(owned, "_read_child_todo_snapshot", forbid_read)
+    handle = owned.OwnedSessionHandle(root, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        page = await handle.job_trajectory(job.id, 0, 100)
+        assert page["known"] is True
+        assert page["todos"] == []
+        assert child.session_id not in TODO_STORE
+    finally:
+        root.subagent_comms.detach(job.id)
+        job.status = "completed"
+        await child.dispose()
+        await root.dispose()
+
+
+@pytest.mark.asyncio
 async def test_parent_checkpoint_does_not_duplicate_child_plans() -> None:
     saved = []
 

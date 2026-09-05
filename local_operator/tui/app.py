@@ -13267,7 +13267,10 @@ class OperatorApp(App[None]):
                 return jobs, job_for(view.job_id) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
-            return (manager.list() if manager is not None and view is None else []), None
+            return (
+                manager.list() if manager is not None and view is None else [],
+                self._subagent_job(view.job_id) if view is not None else None,
+            )
         except Exception:
             return [], None
 

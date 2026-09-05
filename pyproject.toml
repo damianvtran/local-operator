@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.48.0"
+version = "0.48.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
@@ -60,9 +60,6 @@ dependencies = [
     "starlette",
     "uvicorn",
     "python-multipart",
-    # The personal tunnel gateway verifies the edge's RSA proof locally;
-    # declare this directly rather than relying on the MCP transitive copy.
-    "pyjwt[crypto]>=2.10,<3",
     "websockets>=15.0.1",
     "apscheduler",
     "dill",

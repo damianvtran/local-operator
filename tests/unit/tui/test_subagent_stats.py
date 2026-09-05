@@ -1219,15 +1219,23 @@ async def test_an_open_page_does_not_reinstate_the_per_event_repaint() -> None:
         Job("j2", "docs sweep", progress="running 3 tools"),
         Job("j3", "flaky test triage", progress="thinking"),
     ]
+    from local_operator.harness.comms import SubagentComms
+
     session = FakeSession()
-    session.jobs = _fake_jobs(*jobs)
+    owner = Job("owner", "manager")
+    session.jobs = _fake_jobs(owner, *jobs)
+    comms = SubagentComms(session)  # type: ignore[arg-type]
+    comms.record_launch("owner", "manager")
+    for job in jobs:
+        comms.record_launch(job.id, job.label, parent_job_id="owner")
+    session._subagent_comms = comms
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _booted(app)
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
         panel._tick()
-        app._open_subagent_view("j1")
+        app._open_subagent_view("owner")
         await pilot.pause()
         panel._tick()
 
@@ -1237,9 +1245,9 @@ async def test_an_open_page_does_not_reinstate_the_per_event_repaint() -> None:
             app._refresh_band()  # what on_subagent_progress does
         assert painted == [], "an open page repainted rows per relayed event"
         panel._tick()
-        # All three, once each — the burst of twelve collapsed into one paint
-        # per row. j1 is the current row and repaints too, because a RUNNING
-        # child keeps its activity even while its page is open.
+        # All three direct children, once each: the viewed manager is not a
+        # child row, but its whole visible roster must stay fresh without a
+        # per-event repaint while the manager's transcript is being read.
         assert sorted(painted) == ["j1", "j2", "j3"]
 
 

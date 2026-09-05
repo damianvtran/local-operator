@@ -1257,6 +1257,7 @@ class SubagentPanel(Container):
         #: spinner tick repaints from it between refreshes rather than
         #: re-querying the manager eight times a second.
         self._jobs_by_id: dict[str, Any] = {}
+        self._selected_job_id = ""
         self._spinner_index = 0
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
@@ -1533,6 +1534,7 @@ class SubagentPanel(Container):
         self._model_label = str(getattr(session, "model_label", "") or "")
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
         selected_id = str(getattr(selected_job, "id", "") or "")
+        self._selected_job_id = selected_id
         if selected_id:
             # The viewed manager is not its own child row, but its status band
             # still needs the same off-thread stats cache as visible children.
@@ -1626,7 +1628,10 @@ class SubagentPanel(Container):
             if job_id not in seen:
                 changed = True
                 self._rows.pop(job_id).remove()
-                self._stats.pop(job_id, None)
+                # The selected reader still consumes its owner's band stats
+                # after that job stops being a visible child-list row.
+                if job_id != self._selected_job_id:
+                    self._stats.pop(job_id, None)
         # The manager hands jobs back in start order; keep the DOM in the
         # same order so a stable ledger paints a stable list.
         #

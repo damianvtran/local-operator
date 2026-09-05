@@ -2492,6 +2492,7 @@ class OwnedSessionHandle(SessionHandle):
             and node is not None
             and node.session_id
             and node.session_dir is not None
+            and not getattr(node, "live", False)
         ):
             from local_operator.tools.builtin import TODO_STORE, restore_todos
 
