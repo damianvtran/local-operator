@@ -53,7 +53,7 @@ jobs:
       # the environment's main-only deployment branch policy is what refuses
       # that, verified live (probe run 33794252670 was rejected with
       # `Branch "dev-store-verify-403" is not allowed to deploy`).
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require release variables to be environment-scoped only
         env:
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
@@ -79,7 +79,7 @@ jobs:
     # only reviewed commits on main may reach the token-bearing upload client.
     environment: chrome-web-store
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
