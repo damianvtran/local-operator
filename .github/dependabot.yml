@@ -1,0 +1,20 @@
+# Inbound dependency alerts for this repository's own dependencies.
+#
+# This is the consumer side of the picture: it tells us when something WE depend
+# on has an advisory, and keeps our Actions pins current. It publishes nothing
+# about local-operator itself — outbound advisory propagation (so that OUR users'
+# scanners warn them) is the manual procedure in docs/security-advisory-runbook.md.
+# The `pip-audit` job in workflows/ci.yml covers the same inbound surface at PR
+# time; Dependabot adds the between-PR alerting and the upgrade PRs.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
