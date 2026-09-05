@@ -6,9 +6,7 @@ from scripts import run_episode
 
 
 def test_legacy_global_scope_and_value_bytes_are_preserved() -> None:
-    values = run_episode._parse_infra(
-        ["NAME=https://example.test/a=b"], "benchmark_storage"
-    )
+    values = run_episode._parse_infra(["NAME=https://example.test/a=b"], "benchmark_storage")
     assert [(v.name, v.purpose, v.value) for v in values] == [
         ("NAME", "benchmark_storage", "https://example.test/a=b")
     ]
@@ -52,9 +50,7 @@ def test_identical_scoped_and_legacy_duplicates_coalesce() -> None:
         ),
     ],
 )
-def test_invalid_or_conflicting_entries_never_echo_input(
-    items: list[str], purpose: str
-) -> None:
+def test_invalid_or_conflicting_entries_never_echo_input(items: list[str], purpose: str) -> None:
     with pytest.raises(ValueError) as error:
         run_episode._parse_infra(items, purpose)
     assert "secret-canary" not in str(error.value)
@@ -62,9 +58,9 @@ def test_invalid_or_conflicting_entries_never_echo_input(
 
 @pytest.mark.parametrize("prefix", ["", "benchmark_compute:"])
 def test_scope_normalization_cannot_bypass_policy_disclosure(prefix: str) -> None:
-    assert run_episode._infra_disclosure_metadata(
-        [f"{prefix}OSWORLD_ENABLE_PROXY=false"]
-    ) == {"osworld_enable_proxy_override": "false"}
+    assert run_episode._infra_disclosure_metadata([f"{prefix}OSWORLD_ENABLE_PROXY=false"]) == {
+        "osworld_enable_proxy_override": "false"
+    }
     assert run_episode._infra_disclosure_metadata(
         [
             "benchmark_compute:OSWORLD_ENABLE_PROXY=false",
@@ -77,9 +73,7 @@ def test_scope_normalization_cannot_bypass_policy_disclosure(prefix: str) -> Non
     }
 
 
-def test_actual_cli_rejects_invalid_infra_before_reading_selector(
-    capsys, tmp_path
-) -> None:
+def test_actual_cli_rejects_invalid_infra_before_reading_selector(capsys, tmp_path) -> None:
     status = run_episode.main(
         [
             "--selector",

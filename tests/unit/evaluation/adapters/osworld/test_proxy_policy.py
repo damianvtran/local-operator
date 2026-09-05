@@ -33,10 +33,7 @@ def test_policy_plan_and_requirements_agree(hint: bool, value: str | None) -> No
     plan = provisioning.resolve(_task(hint), episode_id="ep-policy", infra_values=infra)
     expected = hint if value is None else value == "true"
     assert plan.enable_proxy is expected
-    reqs = {
-        r.name: r
-        for r in requirements.derive_requirements(_task(hint), infra_values=infra)
-    }
+    reqs = {r.name: r for r in requirements.derive_requirements(_task(hint), infra_values=infra)}
     assert reqs["OSWORLD_ENABLE_PROXY"].required is False
     assert reqs["OSWORLD_ENABLE_PROXY"].kind == "infra"
     for name in ("OSWORLD_PROXY_CREDENTIALS", "OSWORLD_PROXY_ENDPOINT"):
@@ -45,18 +42,14 @@ def test_policy_plan_and_requirements_agree(hint: bool, value: str | None) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("task_known", [False, True])
-@pytest.mark.parametrize(
-    "bad", ["False", "TRUE", "0", "1", " false", "false ", "secret-canary"]
-)
+@pytest.mark.parametrize("bad", ["False", "TRUE", "0", "1", " false", "false ", "secret-canary"])
 async def test_malformed_policy_fails_before_allocation(
     tmp_path: Path, task_known: bool, bad: str
 ) -> None:
     def forbidden_provider():
         pytest.fail("policy validation must precede provider construction")
 
-    adapter = OSWorldV2Adapter(
-        provider_factory=forbidden_provider, workspace_root=tmp_path
-    )
+    adapter = OSWorldV2Adapter(provider_factory=forbidden_provider, workspace_root=tmp_path)
     if task_known:
         adapter._task = _task(True)
     with pytest.raises(provisioning.ProvisioningError) as error:
@@ -91,10 +84,7 @@ async def test_post_prepare_requirements_respect_disabled_policy(
 ) -> None:
     adapter = OSWorldV2Adapter(workspace_root=tmp_path)
     baseline = await adapter.inspect_requirements(InspectRequirementsParams())
-    assert any(
-        r.name == "OSWORLD_ENABLE_PROXY" and not r.required
-        for r in baseline.requirements
-    )
+    assert any(r.name == "OSWORLD_ENABLE_PROXY" and not r.required for r in baseline.requirements)
     await adapter.prepare(
         PrepareParams(
             operation_id="prepare-policy",

@@ -466,9 +466,15 @@ async def test_proxy_policy_reaches_desktop_env_construction(
     task = taskfile.TaskDescriptor(
         task_id="synthetic", instruction="", source_sha256="0" * 64, proxy=hint
     )
-    infra = _infra() + (() if policy is None else (
-        ScopedInfraValue(name="OSWORLD_ENABLE_PROXY", purpose="benchmark_compute", value=policy),
-    ))
+    infra = _infra() + (
+        ()
+        if policy is None
+        else (
+            ScopedInfraValue(
+                name="OSWORLD_ENABLE_PROXY", purpose="benchmark_compute", value=policy
+            ),
+        )
+    )
     plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=infra)
     captured: list[_FakeEnv] = []
 
@@ -482,8 +488,12 @@ async def test_proxy_policy_reaches_desktop_env_construction(
         _expect_run_instances(stubs, plan=plan)
         _expect_create_schedule(stubs)
         _expect_running(stubs)
-        provider = _provider(stubs, monkeypatch, desktop_env_factory=factory,
-                             task_factory=lambda t: {"id": t.task_id, "proxy": t.proxy})
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {"id": t.task_id, "proxy": t.proxy},
+        )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
     assert len(captured) == 1

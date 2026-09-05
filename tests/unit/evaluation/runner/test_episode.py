@@ -1310,7 +1310,8 @@ def _spec_with_infra(episode_id: str, *names: str) -> Any:
         "infra_values",
         tuple(
             ScopedInfraValue(
-                name=name, purpose="benchmark_compute",
+                name=name,
+                purpose="benchmark_compute",
                 value="false" if name == "OSWORLD_ENABLE_PROXY" else "m5.xlarge",
             )
             for name in names

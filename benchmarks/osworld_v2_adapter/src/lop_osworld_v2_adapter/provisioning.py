@@ -174,10 +174,13 @@ def resolve_proxy_policy(
     policies = [item for item in infra_values if item.name == "OSWORLD_ENABLE_PROXY"]
     if not policies:
         return task_proxy
-    if any(
-        item.purpose != "benchmark_compute" or item.value not in {"true", "false"}
-        for item in policies
-    ) or len({item.value for item in policies}) != 1:
+    if (
+        any(
+            item.purpose != "benchmark_compute" or item.value not in {"true", "false"}
+            for item in policies
+        )
+        or len({item.value for item in policies}) != 1
+    ):
         # Infra can be mistyped secret material; never echo rejected values.
         raise ProvisioningError(
             "OSWORLD_ENABLE_PROXY requires benchmark_compute scope and exactly true or false"
