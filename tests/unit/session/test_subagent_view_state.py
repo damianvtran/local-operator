@@ -3,21 +3,33 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator.harness.comms import SubagentComms
 from local_operator.session.frontend_state import (
+    JOB_LAUNCH_PROMPT_WIRE_CHARS,
+    JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS,
+    JOB_LAUNCH_PROMPTS_MAX,
     JOB_TODOS_WIRE_BYTES,
+    LAUNCH_PROMPT_ELIDED_PLACEHOLDER,
     FrontendSessionState,
     FrontendStateStore,
     FrontendUpdate,
     JobState,
+    SnapshotJobs,
     SnapshotSubagentComms,
+    _with_lineage,
     filter_update_trajectories,
     job_todos_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
+from local_operator.tui.widgets.subagent_view import strip_control_sequences
+from tests.unit.harness.test_comms import FakeChild, FakeJobs, FakeParent
 
 
 def _todos(text: str) -> list[dict[str, Any]]:
@@ -519,3 +531,461 @@ async def test_parent_checkpoint_does_not_duplicate_child_plans() -> None:
     assert saved
     assert saved[-1]["state"]["jobs"][0]["todos"] is None
     assert store.state.jobs[0].todos == _todos("Private child plan")
+
+
+def _launched_comms(tmp_path: Path, *, resumed: bool = False) -> tuple[SubagentComms, FakeJobs]:
+    """A real owner-side comms holding one launched child, optionally resumed.
+
+    The production registry rather than a stand-in node: the fields under test
+    are produced by ``record_launch``/the #314 attempt fold, so a hand-rolled
+    namespace would pin this test to the shape it invented instead of to the
+    shape the owner actually stamps (a specific review criterion on #669).
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    session_dir = tmp_path / "child"
+    session_dir.mkdir(exist_ok=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n", encoding="utf-8")
+    jobs.add("attempt-1", status="running")
+    comms.record_launch(
+        "attempt-1",
+        "reviewer",
+        prompt="Original task.",
+        effective_prompt="[role: reviewer]\nSYSTEM PREAMBLE\nOriginal task.",
+        launch_message_id="subagent-launch:attempt-1",
+        agent_role="reviewer",
+    )
+    comms.attach("attempt-1", FakeChild(), session_dir)  # type: ignore[arg-type]
+    if not resumed:
+        return comms, jobs
+    comms.record_outcome("attempt-1", "cancelled")
+    comms.detach("attempt-1")
+    jobs.jobs["attempt-1"].status = "cancelled"
+    jobs.add("attempt-2", status="running")
+    comms.record_launch(
+        "attempt-2",
+        "reviewer",
+        prompt="Wrap up.",
+        effective_prompt="[role: reviewer]\nSYSTEM PREAMBLE\nWrap up.",
+        launch_message_id="subagent-launch:attempt-2",
+        agent_role="reviewer",
+    )
+    comms.attach("attempt-2", FakeChild(), session_dir)  # type: ignore[arg-type]
+    return comms, jobs
+
+
+def test_launch_identity_rides_the_wire_and_rebuilds_the_follower_node(tmp_path) -> None:
+    """The fold inputs reach a follower on BOTH frame kinds.
+
+    Without them the follower cannot correlate the durable launch turn with its
+    synthetic prompt head and renders the delegated brief twice — the full
+    role/team/system preamble, not a short line. Inert until #669 gave followers
+    durable history at all, which is why it is fixed here (#669 Q1 / round-1
+    item 6).
+    """
+    comms, _jobs = _launched_comms(tmp_path, resumed=True)
+    job = _with_lineage(JobState(id="attempt-2", type="task", prompt="Wrap up."), comms)
+    assert job.launch_message_id == "subagent-launch:attempt-2"
+    # Every collapsed attempt, not just the newest: reconciling only the current
+    # launch leaks the earlier attempt's preamble as a plain user row.
+    assert job.launch_prompts == {
+        "subagent-launch:attempt-1": "Original task.",
+        "subagent-launch:attempt-2": "Wrap up.",
+    }
+
+    owner = FrontendStateStore(_state(job))
+    snapshot = sync_wire_payload(owner.subscribe(lambda _: None).sync)
+    wire_job = snapshot["snapshot"]["jobs"][0]
+    # The identity is DERIVABLE from the job id, so it is flagged rather than
+    # spelled out — 46.7 B a row was the round-1 blocker. The follower rebuilds
+    # the identical string below.
+    assert "launch_message_id" not in wire_job
+    # No marker rides in its place: the job TYPE already says a task row can
+    # have a launch turn, so the follower re-derives without being told.
+    assert "launch_id_derived" not in wire_job
+    assert wire_job["launch_prompts"] == job.launch_prompts
+
+    # DELTA rebuild, not only the attach snapshot: job rows are re-serialized
+    # per update through ``_job_summary``, which never sees ``sync_wire_payload``.
+    update = owner.mutate(jobs=[job.model_copy(update={"status": "completed"})])
+    assert update is not None
+    delta_job = update.model_dump(mode="json")["changes"]["jobs"][0]
+    assert "launch_message_id" not in delta_job
+    assert "launch_id_derived" not in delta_job
+    assert delta_job["launch_prompts"] == job.launch_prompts
+
+    # The production follower facade, fed the wire snapshot as a follower is.
+    follower = FrontendStateStore(FrontendSessionState.model_validate(snapshot["snapshot"]))
+    rows = list(follower.state.jobs)
+    node = SnapshotSubagentComms(rows).node("attempt-2")
+    assert node is not None
+    assert node.launch_message_id == "subagent-launch:attempt-2"
+    assert node.launch_prompts == job.launch_prompts
+    # A plain dict the view may index and iterate, never canonical state.
+    assert isinstance(node.launch_prompts, dict)
+    # The ROW itself carries the flag rather than the string; the app reads the
+    # identity off the job first and falls back to the node
+    # (``_refresh_subagent_view``), so the node answer above is the one the view
+    # actually consumes on a follower.
+    follower_job = SnapshotJobs(rows).get("attempt-2")
+    assert follower_job is not None
+    assert follower_job.launch_message_id == ""
+
+
+def test_a_never_resumed_child_carries_its_launch_row_without_a_comms_record(tmp_path) -> None:
+    """A swept comms record still leaves the job row's own launch identity.
+
+    ``_with_lineage`` stamps nothing when the node is gone, and the view derives
+    ``{launch_message_id: prompt}`` itself, so the current launch still folds.
+    """
+    job = JobState.from_job(
+        SimpleNamespace(
+            id="j1",
+            type="task",
+            label="reviewer",
+            prompt="Do the thing.",
+            launch_message_id="subagent-launch:j1",
+        )
+    )
+    assert job.launch_message_id == "subagent-launch:j1"
+    node = SnapshotSubagentComms([job]).node("j1")
+    assert node is not None and node.launch_message_id == "subagent-launch:j1"
+
+
+def test_an_older_owner_without_launch_fields_degrades_rather_than_crashing() -> None:
+    """``extra='allow'``: a pre-fix owner simply sends neither field.
+
+    The node still builds. Its identity is DERIVED for a task row, which is
+    correct rather than a guess: a v0.49.2 owner minted the launch id with the
+    same deterministic ``subagent-launch:<job_id>`` rule, so the derived value
+    is exactly what its durable transcript carries — such a follower gains
+    reconciliation instead of merely not crashing. A wrong-shaped id could only
+    match no durable row, which is the pre-#681 behaviour anyway.
+
+    A BASH row has no launch turn on any version and must stay empty: the type
+    is what distinguishes "elided because derivable" from "never had one".
+    """
+    old = JobState.model_validate({"id": "j1", "type": "task", "label": "reviewer"})
+    node = SnapshotSubagentComms([old]).node("j1")
+    assert node is not None
+    assert node.launch_message_id == "subagent-launch:j1"
+    assert node.launch_prompts == {}
+
+    bash = JobState.model_validate({"id": "b1", "type": "bash", "label": "bash: ls"})
+    bash_node = SnapshotSubagentComms([bash]).node("b1")
+    assert bash_node is not None
+    assert bash_node.launch_message_id == ""
+
+
+def test_launch_prompts_cannot_grow_the_frame_with_resume_depth(tmp_path) -> None:
+    """The fourth unbounded-field instance, closed before it ships.
+
+    ``launch_prompts`` is free text keyed by attempt, so a deeply resumed roster
+    would push the attach frame past the socket's line limit exactly as
+    trajectories, receipts and job text each did.
+    """
+    huge = {f"subagent-launch:a{index}": "X" * 40_000 for index in range(40)}
+    node = SimpleNamespace(
+        job_id="j",
+        label="reviewer",
+        parent_job_id=None,
+        session_id=None,
+        session_dir=None,
+        prompt="p",
+        launch_message_id="subagent-launch:a39",
+        agent_role="reviewer",
+        effort="",
+        launch_prompts=huge,
+        attempt_aliases=(),
+        live=True,
+        status="running",
+    )
+    bounded = _with_lineage(
+        JobState(id="j", type="task"), SimpleNamespace(node=lambda _job_id: node)
+    ).launch_prompts
+    assert len(bounded) == JOB_LAUNCH_PROMPTS_MAX
+    assert all(len(text) <= JOB_LAUNCH_PROMPT_WIRE_CHARS + 1 for text in bounded.values())
+    # The NEWEST attempts survive: durable history pages from the tail.
+    assert "subagent-launch:a39" in bounded
+    assert "subagent-launch:a0" not in bounded
+    # A clipped prompt is marked, so a reader can tell it from a short brief.
+    assert all(text.endswith("…") for text in bounded.values())
+
+    jobs = [
+        JobState(id=f"child-{index}", type="task", launch_prompts=bounded) for index in range(200)
+    ]
+    owner = FrontendStateStore(_state(*jobs))
+    snapshot = sync_wire_payload(owner.subscribe(lambda _: None).sync)
+    assert len(json.dumps(snapshot).encode()) < 1_048_576
+    update = owner.mutate(jobs=[job.model_copy(update={"status": "completed"}) for job in jobs])
+    assert update is not None
+    assert len(json.dumps(update.model_dump(mode="json")).encode()) < 1_048_576
+
+
+def test_launch_prompt_text_is_shared_across_the_roster_not_per_row() -> None:
+    """A per-row cap alone leaves the FRAME growing with roster depth.
+
+    Measured before the shared budget existed: 200 resumed rows at the per-row
+    cap added 392 KB to a 1 MiB frame and 1,000 rows added 1.9 MB, which is the
+    same "bounded per row, unbounded in total" defect
+    ``JOB_TEXT_FRAME_BUDGET_CHARS`` exists to close one level up.
+
+    Rows past the budget keep their launch IDENTITY and lose only the prior
+    attempts' text, so the duplicate-preamble fix still holds at any depth.
+    """
+    prompts = {
+        f"subagent-launch:a{index}": "X" * JOB_LAUNCH_PROMPT_WIRE_CHARS
+        for index in range(JOB_LAUNCH_PROMPTS_MAX)
+    }
+    jobs = [
+        JobState(
+            id=f"child-{index}",
+            type="task",
+            launch_message_id=f"subagent-launch:child-{index}",
+            launch_prompts=prompts,
+        )
+        for index in range(1_000)
+    ]
+    owner = FrontendStateStore(_state(*jobs))
+    served = [
+        job
+        for job in sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+        if job.get("launch_prompts")
+    ]
+    assert served, "the budget starved every row; the fix would not hold anywhere"
+    spent = sum(
+        len(key) + len(value) for job in served for key, value in job["launch_prompts"].items()
+    )
+    assert spent <= JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS
+    assert len(served) < len(jobs), "the fixture no longer exceeds the shared budget"
+
+    snapshot = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+    # Identity is what suppresses the duplicate, and EVERY row keeps it — as a
+    # derivation flag here, since these ids all derive from their job ids.
+    assert all("launch_message_id" not in job for job in snapshot)
+    follower_rows = FrontendStateStore(
+        FrontendSessionState.model_validate(
+            {"session_id": "root", "epoch": "epoch", "jobs": snapshot}
+        )
+    ).state.jobs
+    comms = SnapshotSubagentComms(list(follower_rows))
+    follower_nodes = [comms.node(f"child-{index}") for index in range(len(snapshot))]
+    assert all(node is not None for node in follower_nodes)
+    assert [node.launch_message_id for node in follower_nodes if node is not None] == [
+        f"subagent-launch:child-{index}" for index in range(len(snapshot))
+    ]
+
+    # The delta stream is serialized by its own route and is bounded too.
+    fresh = FrontendStateStore(_state())
+    fresh.subscribe(lambda _: None)
+    update = fresh.mutate(jobs=jobs)
+    assert update is not None
+    delta_rows = update.model_dump(mode="json")["changes"]["jobs"]
+    delta_spent = sum(
+        len(key) + len(value)
+        for job in delta_rows
+        for key, value in (job.get("launch_prompts") or {}).items()
+    )
+    assert delta_spent <= JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS
+
+
+def test_a_row_with_no_launch_facts_spends_no_wire_bytes_on_them() -> None:
+    """Empty values are omitted, not sent: an absent fact buys nothing.
+
+    At roster scale the empty keys alone measured ~9 KB of the 1 MiB budget and
+    pushed the ``ran all year`` class guard over the limit with no information
+    in them. Omission is equivalent to sending the defaults — a delta
+    revalidates each raw row rather than merging onto the prior one.
+    """
+    owner = FrontendStateStore(_state(JobState(id="bash-1", type="bash")))
+    row = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"][0]
+    assert "launch_message_id" not in row and "launch_prompts" not in row
+    update = owner.mutate(jobs=[JobState(id="bash-1", type="bash", status="completed")])
+    assert update is not None
+    delta_row = update.model_dump(mode="json")["changes"]["jobs"][0]
+    assert "launch_message_id" not in delta_row and "launch_prompts" not in delta_row
+    # And the follower rebuilt from those rows behaves exactly as before.
+    follower = FrontendStateStore(_state())
+    follower.apply_update(FrontendUpdate.model_validate(update.model_dump(mode="json")))
+    node = SnapshotSubagentComms(list(follower.state.jobs)).node("bash-1")
+    # Absence stays absence: a bash job never had a launch turn, and the
+    # follower must not invent an identity that matches no durable row.
+    assert node is not None and node.launch_message_id == "" and node.launch_prompts == {}
+
+
+def _resumed_row(job_id: str, *, aliases: list[str], prompts: dict[str, str]) -> JobState:
+    """One resumed child: a current launch plus its collapsed predecessors."""
+    return JobState(
+        id=job_id,
+        type="task",
+        prompt="Current brief.",
+        launch_message_id=f"subagent-launch:{job_id}",
+        attempt_aliases=aliases,
+        launch_prompts=prompts,
+    )
+
+
+def test_a_starved_row_keeps_its_keys_so_collapsed_attempts_still_reconcile() -> None:
+    """Round-1 MAJOR: emptying a starved map re-introduced the preamble leak.
+
+    Reconciliation matches a durable launch row BY KEY. The original bound
+    dropped a starved row's whole map, arguing the view re-derives the current
+    launch from the job's own ``prompt`` — true, but a COLLAPSED PRIOR attempt
+    has no other source, so its durable row fell back to a plain user row
+    carrying the full role/team/system preamble. Reproduced independently by
+    review and QA on a realistic roster.
+
+    The keys now survive with a placeholder value, which must stay VISIBLE:
+    ``SubagentView.show`` drops an entry whose text strips to falsy, so an empty
+    placeholder would leak exactly as before.
+    """
+    filler = [
+        _resumed_row(
+            f"filler{index}",
+            aliases=[],
+            prompts={f"subagent-launch:filler{index}-a{a}": "F" * 200 for a in range(8)},
+        )
+        for index in range(60)
+    ]
+    target = _resumed_row(
+        "target",
+        aliases=["target-prior"],
+        prompts={
+            "subagent-launch:target-prior": "First attempt.",
+            "subagent-launch:target": "Current brief.",
+        },
+    )
+    owner = FrontendStateStore(_state(*filler, target))
+    rows = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+    wire_target = next(row for row in rows if row["id"] == "target")
+
+    served = wire_target.get("launch_prompts") or {}
+    assert served, "the target row was dropped entirely; the fixture no longer starves it"
+    assert set(served.values()) == {
+        LAUNCH_PROMPT_ELIDED_PLACEHOLDER
+    }, "the fixture no longer exercises the starved tier"
+    # EVERY key survives — that is what keeps the durable rows reconcilable.
+    assert set(served) == {"subagent-launch:target-prior", "subagent-launch:target"}
+    assert strip_control_sequences(
+        LAUNCH_PROMPT_ELIDED_PLACEHOLDER
+    ).strip(), "the placeholder must survive the view's own strip or the entry is dropped"
+
+
+def test_budget_degradation_is_monotonic_across_the_roster() -> None:
+    """A cheap late row must not out-rank an expensive earlier one.
+
+    Deciding each row independently let a small row past the budget render at
+    full text while its predecessors were elided, so two children with the same
+    history looked different purely by roster position — and a dropped row frees
+    no budget, so a starved row could be followed by an unstarved one.
+    """
+    heavy = [
+        _resumed_row(
+            f"heavy{index}",
+            aliases=[],
+            prompts={f"subagent-launch:heavy{index}-a{a}": "H" * 200 for a in range(8)},
+        )
+        for index in range(200)
+    ]
+    light = _resumed_row(
+        "light",
+        aliases=[],
+        prompts={"subagent-launch:light-a0": "tiny"},
+    )
+    owner = FrontendStateStore(_state(*heavy, light))
+    rows = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+    tail = next(row for row in rows if row["id"] == "light")
+    served = tail.get("launch_prompts") or {}
+    assert served, "the tail row lost its keys and can no longer reconcile"
+    assert set(served.values()) == {
+        LAUNCH_PROMPT_ELIDED_PLACEHOLDER
+    }, "a late cheap row rendered at full text after earlier rows were starved"
+
+
+def test_a_derivable_launch_identity_is_omitted_and_rebuilt_by_the_follower() -> None:
+    """Round-1 BLOCKER: the identity was a per-row scalar bounded by nothing.
+
+    At 46.7 B on every task child it cut the maximum attachable roster from 812
+    rows on v0.49.2 to 769 — a session that attaches on the shipped release and
+    does not attach here. An identity cannot be truncated (a clipped key matches
+    no durable row), so it is OMITTED where it is reconstructible instead:
+    ``run_subagent`` mints it as ``subagent-launch:<job_id>``, so the follower
+    rebuilds the identical string.
+    """
+    row = _resumed_row("child-1", aliases=[], prompts={})
+    owner = FrontendStateStore(_state(row))
+    wire = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"][0]
+    assert "launch_message_id" not in wire, "the derivable identity still rides the wire"
+    assert "launch_id_derived" not in wire, "a marker field replaced the string it saved"
+
+    follower = FrontendStateStore(
+        FrontendSessionState.model_validate(
+            {"session_id": "root", "epoch": "epoch", "jobs": [wire]}
+        )
+    )
+    node = SnapshotSubagentComms(list(follower.state.jobs)).node("child-1")
+    assert node is not None
+    assert node.launch_message_id == "subagent-launch:child-1"
+
+    # A NON-derivable identity is information the job id does not carry — a
+    # resumed child rebuilt from a persisted row — and must ride verbatim.
+    literal = JobState(id="child-2", type="task", launch_message_id="subagent-launch:older-attempt")
+    owner2 = FrontendStateStore(_state(literal))
+    wire2 = sync_wire_payload(owner2.subscribe(lambda _: None).sync)["snapshot"]["jobs"][0]
+    assert wire2["launch_message_id"] == "subagent-launch:older-attempt"
+
+
+def test_a_dropped_map_is_rebuilt_from_attempt_aliases() -> None:
+    """Even the cheapest tier keeps every collapsed attempt reconcilable.
+
+    When the budget cannot afford a row's KEYS either, the map is dropped — but
+    the keys are themselves derivable: an attempt's identity is
+    ``subagent-launch:<its job id>`` and ``attempt_aliases`` already lists those
+    ids on the same row, bounded at one short id each. The follower rebuilds
+    them, so no tier of this bound can resurrect the duplicate.
+    """
+    heavy = [
+        _resumed_row(
+            f"heavy{index}",
+            aliases=[],
+            prompts={f"subagent-launch:heavy{index}-a{a}": "H" * 200 for a in range(8)},
+        )
+        for index in range(400)
+    ]
+    target = _resumed_row(
+        "target",
+        aliases=["prior-1", "prior-2"],
+        prompts={
+            "subagent-launch:prior-1": "First.",
+            "subagent-launch:prior-2": "Second.",
+            "subagent-launch:target": "Current brief.",
+        },
+    )
+    owner = FrontendStateStore(_state(*heavy, target))
+    rows = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"]
+    follower = FrontendStateStore(
+        FrontendSessionState.model_validate({"session_id": "root", "epoch": "epoch", "jobs": rows})
+    )
+    node = SnapshotSubagentComms(list(follower.state.jobs)).node("target")
+    assert node is not None
+    # Whatever tier the target landed on, BOTH collapsed attempts reconcile.
+    for alias in ("prior-1", "prior-2"):
+        assert (
+            f"subagent-launch:{alias}" in node.launch_prompts
+        ), f"{alias} lost its identity and would render its full preamble"
+
+
+def test_a_whitespace_only_prompt_never_reaches_the_wire() -> None:
+    """Round-1 finding 3: it bought bytes and could never reconcile.
+
+    The view strips the value and drops the entry, so the outcome was already
+    correct — but the bytes were spent and the key silently failed to fold.
+    """
+    row = JobState(
+        id="child-1",
+        type="task",
+        launch_prompts={"subagent-launch:a": "   ", "subagent-launch:b": " real "},
+    )
+    owner = FrontendStateStore(_state(row))
+    wire = sync_wire_payload(owner.subscribe(lambda _: None).sync)["snapshot"]["jobs"][0]
+    assert wire.get("launch_prompts") == {"subagent-launch:b": "real"}

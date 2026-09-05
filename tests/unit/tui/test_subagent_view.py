@@ -93,6 +93,7 @@ from local_operator.tui.widgets.transcript import (
     WorkingBlock,
 )
 
+from ..harness.test_comms import FakeChild
 from .test_band_panels import FakeSession, _async_factory, _fake_jobs, _Job
 
 
@@ -5001,3 +5002,93 @@ async def test_a_swept_child_with_no_directory_anywhere_keeps_the_note(tmp_path)
         await _wait_history(pilot, view)
         assert view._history_absent_final
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+
+@pytest.mark.asyncio
+async def test_a_follower_renders_the_delegated_brief_once_not_twice(tmp_path, monkeypatch) -> None:
+    """The launch turn folds into the synthetic head ON A FOLLOWER too.
+
+    #669 gave followers durable history, which made a pre-existing wire gap
+    VISIBLE: ``launch_message_id``/``launch_prompts`` did not ride the
+    frontend-state wire, so ``SnapshotSubagentComms`` rebuilt a node with
+    neither, the view could not correlate the durable launch row with the
+    synthetic prompt head it renders from job metadata, and it painted BOTH.
+    Not a short line either — the durable copy is the full role/team/system
+    preamble (#669 review round-1 item 6, QA's Q1, deferred to this change).
+
+    Driven through the production facades over a real transcript, and asserting
+    the ABSENCE of the duplicate: "the prompt row is present" passed for the
+    whole life of the defect, because two rows are also one row.
+    """
+    from local_operator.session.frontend_state import (
+        JobState,
+        SnapshotJobs,
+        SnapshotSubagentComms,
+        _with_lineage,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_id = "cccccccccccc"
+    directory = tmp_path / "sessions" / session_id
+    transcript = Transcript(directory)
+    preamble = "[role: coder]\nSYSTEM PREAMBLE THE READER MUST NOT SEE TWICE"
+    concise = "Audit the ingest path."
+    # The durable launch turn, written with the deterministic id the owner
+    # prompts the child under (``harness/subagent.py``), then ordinary work.
+    launch = await transcript.append_message(Message.user(f"{preamble}\n{concise}"))
+    for index in range(3):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+
+    # An OWNER-side comms registry, so the projection under test reads the same
+    # node production stamps from rather than a shape invented here.
+    jobs = AsyncJobManager()
+    owner_comms = SubagentComms(SimpleNamespace(jobs=jobs))  # type: ignore[arg-type]
+    owner_comms.record_launch(
+        "sub-1",
+        "audit the ingest path",
+        prompt=concise,
+        effective_prompt=f"{preamble}\n{concise}",
+        launch_message_id=launch.id,
+        agent_role="coder",
+    )
+    owner_comms.attach("sub-1", cast(Any, FakeChild()), directory)
+
+    row = _with_lineage(
+        JobState(
+            id="sub-1",
+            type="task",
+            status="completed",
+            label="audit the ingest path",
+            agent_role="coder",
+            prompt=concise,
+            trajectory=[],
+            session_id=session_id,
+            session_dir=str(directory),
+        ),
+        owner_comms,
+    )
+    # The wire round trip a follower really sees, not the owner's own model.
+    row = JobState.model_validate(json.loads(row.model_dump_json()))
+
+    session = FakeSession()
+    session.is_remote = True  # type: ignore[attr-defined]
+    session.jobs = SnapshotJobs([row])
+    session._subagent_comms = SnapshotSubagentComms([row])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, row)
+        await _wait_history(pilot, view)
+        entries = [entry for entry in view._pending if entry.key != "__working__"]
+        # ONE prompt row, and it is the durable launch turn reconciled in place
+        # — not the synthetic head sitting above an unreconciled user row.
+        assert sum(entry.kind == "prompt" for entry in entries) == 1
+        assert not any(entry.key == "__prompt__" for entry in entries)
+        prompt_row = next(entry for entry in entries if entry.kind == "prompt")
+        assert prompt_row.key == launch.id
+        assert prompt_row.text == concise
+        # The preamble is gone from the model AND from the painted frame.
+        assert not any(entry.kind == "user" for entry in entries)
+        assert "SYSTEM PREAMBLE" not in " ".join(entry.text for entry in entries)
+        page = " ".join(view.rendered_rows())
+        assert "SYSTEM PREAMBLE" not in page
+        assert page.count(concise) == 1
