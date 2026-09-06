@@ -673,6 +673,57 @@ def test_unattributed_residual_gets_no_bar():
     assert row.split()[-1] == "400"  # 900 context − 500 attributed
 
 
+def test_unattributed_residual_is_measured_with_its_peers():
+    """It was appended AFTER measurement, so it was the one row off the grid.
+
+    Review M2: with short component labels its own 28-char label ellipsised
+    while the frame had ~30 cells free, and a residual wider than any measured
+    value pushed its number off the shared column the screen exists to create.
+    """
+    # Short peer labels, so nothing else widens the label column for it.
+    aggregate = _agg(6, 6, 280000, 5000, components={"conversation": 140000, "tool_results": 60000})
+    text = build_session_report(SessionReport("sess", aggregate=aggregate), runtime(), 88).plain
+    rows = _section(text, "Where input went")
+    residual = next(r for r in rows if "Unattributed" in r)
+    assert "…" not in residual, "label ellipsised while the frame had room"
+    assert residual.rstrip().endswith("80k")
+
+    # A residual WIDER than every measured value must still land in the shared
+    # number column rather than pushing its own.
+    wide = _agg(6, 6, 500900, 5000, components={"conversation": 400, "tool_results": 100})
+    text = build_session_report(SessionReport("sess", aggregate=wide), runtime(), 88).plain
+    rows = _section(text, "Where input went")
+    residual = next(r for r in rows if "Unattributed" in r)
+    peer = next(r for r in rows if "Conversation" in r)
+    # Both values end in the same column: one number column, whole section.
+    assert residual.index("500.4k") + len("500.4k") == peer.index("400") + len("400")
+
+
+def test_full_share_row_does_not_crop_its_failure_count():
+    """`format_percent(1.0)` is 4 chars; a 3-char cell cropped `2 failed`.
+
+    Design D1: the overflowing cell pushed every 100% row one cell past the
+    frame and `truncate(crop)` ate the rightmost column — the warning-coloured
+    failure tally, rendering `2 faile`. Any single-model or single-purpose
+    session is 100% by construction, so this was not an edge case.
+    """
+    one = _agg(18, 16, 460000, 14100, 49000, 18)
+    report = SessionReport(
+        "sess",
+        aggregate=one,
+        by_model={("anthropic", "claude-sonnet-4-6"): one},
+        by_purpose={"turn": one},
+        by_purpose_outcome={("turn", "ok"): 16, ("turn", "error"): 2},
+    )
+    # 84 is the real card width of a 100-column terminal, where this reproduced.
+    for width in (84, 88, 100):
+        text = build_session_report(report, runtime(), width).plain
+        row = next(r for r in _rows(text, "By purpose") if "turn" in r)
+        assert "100%" in row
+        assert row.rstrip().endswith("2 failed"), f"cropped at {width}: {row!r}"
+        assert len(row) <= width
+
+
 @pytest.mark.parametrize("width,note,pct", [(88, True, True), (60, True, True), (50, False, False)])
 def test_responsive_ladder_sheds_qualifiers_but_never_the_value(width, note, pct):
     """Below the ladder's steps the note and percentage shed; the number stays."""
@@ -748,3 +799,85 @@ async def test_toggle_is_not_advertised_when_there_is_nothing_to_plot():
         await pilot.press("t")
         await pilot.pause()
         assert str(screen._body.render()) == before
+
+
+def test_unpriced_group_in_cost_mode_shows_no_share_not_a_zero_share():
+    """QA Q1 / design D2: `cost_micro == 0` because the price is UNKNOWN.
+
+    Dividing it by the session total yields a 0% that reads as a measured zero
+    share, beside another row's real 100%, in the same column. QA's case: a
+    local model taking 9 of 10 requests and 99% of the tokens rendered an empty
+    track at 0% while a single priced call read as the entire spend.
+    """
+    priced = _agg(1, 1, 8000, 200, 3000, 1)
+    unpriced = _agg(9, 9, 810000, 9000, 0, 0)
+    total = _agg(10, 10, 818000, 9200, 3000, 1)
+    report = SessionReport(
+        "sess",
+        aggregate=total,
+        by_model={
+            ("anthropic", "claude-sonnet-4-6"): priced,
+            ("meta", "llama-4-scout"): unpriced,
+        },
+    )
+    cost = build_session_report(report, runtime(), 88, metric=METRIC_COST).plain
+    row = next(r for r in _section(cost, "By model") if "llama-4-scout" in r)
+    assert "$—" in row, "the honest figure stays"
+    assert "0%" not in row, "an unknown price is not a measured zero share"
+    assert "█" not in row and "·" not in row, "no track for an uncomputed share"
+    # The priced row is unaffected and still carries its real measurement.
+    priced_row = next(r for r in _section(cost, "By model") if "claude" in r)
+    assert "100%" in priced_row and "█" in priced_row
+    # In TOKEN mode both rows are measured, so both keep their bars: the
+    # suppression is about unknown COST, not about the model.
+    tokens = build_session_report(report, runtime(), 88).plain
+    assert all("█" in r for r in _rows(tokens, "By model"))
+    assert "99%" in "".join(_rows(tokens, "By model"))
+
+
+def test_sequence_chart_never_renders_an_absent_duration_as_zero():
+    """Review M1: the store keeps `None` distinct from a value; so must the row.
+
+    A legacy ledger has no `duration_ms`, and `or 0.0` printed a full-strength
+    `0 ms` beside an empty track — `$0.00` for time. Same rule as `_timing_rows`
+    ("an absent sample is not a fast one") and `_gauge_row`.
+    """
+    recent = tuple(
+        SessionRequest(
+            f"r{i}",
+            1788602400000 + i * 10000,
+            "p",
+            "m",
+            "unknown",
+            "unknown",
+            None,
+            1000,
+            100,
+            None,
+            None,
+            None,
+        )
+        for i in range(3, -1, -1)
+    )
+    report = SessionReport("sess", aggregate=_agg(4, 4, 4000, 400), recent=recent)
+    cost = build_session_report(report, runtime(), 88, metric=METRIC_COST).plain
+    rows = _section(cost, "Last 4 requests")
+    assert rows and all("unknown" in r for r in rows)
+    assert not any("0 ms" in r for r in rows), "an absent sample rendered as measured zero"
+    assert not any("█" in r for r in rows), "no bar for an unmeasured request"
+    # A MIXED tail keeps the measured rows drawn and scales them among
+    # themselves: an unmeasured request must not define the window max either.
+    mixed = (
+        SessionRequest(
+            "b", 1788602400000 + 10000, "p", "m", "turn", "ok", True, 1000, 100, 4000.0, None, None
+        ),
+        SessionRequest(
+            "a", 1788602400000, "p", "m", "turn", "ok", True, 1000, 100, None, None, None
+        ),
+    )
+    report = SessionReport("sess", aggregate=_agg(2, 2, 2000, 200), recent=mixed)
+    rows = _section(
+        build_session_report(report, runtime(), 88, metric=METRIC_COST).plain, "Last 2 requests"
+    )
+    assert sum("█" in r for r in rows) == 1
+    assert any("4,000 ms" in r for r in rows) and any("unknown" in r for r in rows)
