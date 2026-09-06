@@ -214,6 +214,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     Marked,
     ModelQueryOpened,
+    RecallState,
     RefreshArgumentChoices,
     ShellModeChanged,
     SkillQueryOpened,
@@ -991,6 +992,15 @@ ASIDE_LAYOUT_CLASS = "aside"
 #: `local_operator/` binds and `TextArea` does not claim.
 ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"
 ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
+
+#: Parked sidebar presentations kept beside the active one, LRU-evicted. One
+#: made every non-adjacent click cold; four covers the handful of live
+#: conversations a user alternates between, at ~1.2 MiB RSS per parked view
+#: and no measurable per-frame cost (six parked: frame 16–17 ms, unchanged).
+RETAINED_PRESENTATIONS = 4
+#: Ranked entries warmed per catalog poll. Two is the top of the list — the
+#: rows the eye lands on — without turning every poll into a prepare storm.
+PREWARM_PER_REFRESH = 2
 
 #: The chord that lifts the aside's full text to the clipboard.
 #:
@@ -2555,7 +2565,6 @@ class OperatorApp(App[None]):
         self._sidebar_refresh_pending = False
         self._sidebar_prefetch: Any = None
         self._sidebar_prior_workers: set[Any] = set()
-        self._sidebar_last_prefetch = ""
         self._sidebar_settings_applied = False
         self._sidebar_ready_frame: tuple[SessionInteraction, int, asyncio.Future[None]] | None = (
             None
@@ -2563,6 +2572,13 @@ class OperatorApp(App[None]):
         self._sidebar_frame_pending = False
         self._sidebar_focus_restore: ReferenceType[Widget] | None = None
         self._sidebar_presentations: dict[str, SessionPresentation] = {}
+        #: The source whose draft was snapshotted at ``pending(id)`` and whose
+        #: editor buffer was handed to the transition. ``None`` outside a
+        #: switch. Commit consumes it (buffer appended to the target's draft);
+        #: failure or cancel restores it (buffer appended back to the outgoing
+        #: draft). Its presence is what distinguishes the two ``pending("")``
+        #: callers — the navigation makes both — without a second flag.
+        self._sidebar_transition_from: SessionInteraction | None = None
         self._sidebar_sources: dict[str, SessionInteraction] = {}
         self._sidebar_drafts = SessionDraftStore()
         self._sidebar_navigation = SessionNavigation(
@@ -3060,6 +3076,46 @@ class OperatorApp(App[None]):
         self.post_message(message)
 
     @staticmethod
+    def _sidebar_presentation_current(
+        cached: SessionPresentation, source: SessionInteraction, gate: Any
+    ) -> bool:
+        """Whether a parked presentation can be revealed without rebuilding.
+
+        The strict form — every stamp equal — made nearly every click cold:
+        ANY event on a hidden session bumps ``presentation_revision`` (see
+        ``_on_message``), so a session that received a single durable row
+        while parked was rebuilt from scratch on return. The reveal path
+        already projects appended rows at commit (``_commit_sidebar_session``
+        paints ``history[-(total - history_size):]``), so staleness that is
+        ONLY "more durable rows were appended" is safe to accept.
+
+        Everything else still misses, because the widgets would be wrong:
+
+        - a different ``source_token`` is a different attachment entirely;
+        - a streaming turn has a live block the cache did not capture;
+        - a changed ``replay_revision`` means compaction/prune/recovery
+          rewrote rows the cache already painted — the commit's "fewer rows"
+          branch handles a rewrite only from a rebuild;
+        - a pending ask/approval is PRESENTATION state (a gate card in the
+          view), not a durable row, so the delta projection cannot supply it.
+          A session waiting on the user must always rebuild.
+        """
+        session = source.session
+        if cached.source_token != source.token:
+            return False
+        if gate is not None:
+            return False
+        state = getattr(session, "frontend_state", None)
+        if getattr(state, "streaming", False):
+            return False
+        if cached.replay_revision != getattr(session, "display_history_revision", 0):
+            return False
+        total = getattr(session, "history_message_count", None)
+        if total is None or total < cached.history_size:
+            return False
+        return True
+
+    @staticmethod
     def _sidebar_source_stamp(source: SessionInteraction) -> tuple[Any, ...]:
         state = getattr(source.session, "frontend_state", None)
         return (
@@ -3237,12 +3293,12 @@ class OperatorApp(App[None]):
             if gate is not None and gate.kind not in {"ask", "approval"}:
                 raise RuntimeError("This viewer does not support the conversation's pending input")
             cached = self._sidebar_presentations.get(session_id)
-            if (
-                cached is not None
-                and cached.source_token == source.token
-                and cached.revision == source.presentation_revision
-                and cached.source_stamp == self._sidebar_source_stamp(source)
-            ):
+            if cached is not None and self._sidebar_presentation_current(cached, source, gate):
+                # Reinsert so dict order is recency: eviction pops the OLDEST
+                # key, and a hit must count as a use or a hot pair of sessions
+                # would evict each other the moment a third is visited.
+                self._sidebar_presentations.pop(session_id, None)
+                self._sidebar_presentations[session_id] = cached
                 if not source.draft.following_tail and source.draft.scroll_anchor_id:
                     cached.replay.view.restore_navigation_anchor(
                         source.draft.scroll_anchor_id,
@@ -3494,6 +3550,13 @@ class OperatorApp(App[None]):
                 self._suspend_sidebar_gates(self._interaction)
             else:
                 current.resume_viewer_gates()
+        if session_id:
+            self._begin_sidebar_transition()
+        elif self._sidebar_transition_from is not None:
+            # ``pending("")`` without a commit in between: the switch failed
+            # or was cancelled, and the user is still in the session they
+            # were leaving. Give them back their draft PLUS what they typed.
+            self._abandon_sidebar_transition()
         self._session_transition_pending = bool(session_id)
         self._sidebar_frame_pending = True
         if not session_id:
@@ -3514,6 +3577,65 @@ class OperatorApp(App[None]):
     def _sidebar_navigation_failed(self, session_id: str, error: Exception) -> None:
         self._session_sidebar.show_error(str(error))
         self._system_notice(f"Could not open conversation: {error}", "warning")
+
+    def _begin_sidebar_transition(self) -> None:
+        """Freeze the outgoing draft and hand the editor to the transition.
+
+        Everything typed after a click, until the target is ready, used to
+        land in the OUTGOING editor buffer and then be copied into the
+        outgoing draft at commit — shown as belonging to the session the user
+        had just left. That is the lie this fixes: from the click onward the
+        buffer is a transition buffer, and its contents are attributed at the
+        moment the outcome is known (commit → target, failure → outgoing).
+        Synchronous, before any await, so nothing can slip in between the
+        snapshot and the empty buffer. A burst of clicks re-enters here with
+        a transition already open; the snapshot is kept and only the buffer
+        is carried on.
+        """
+        if self._sidebar_transition_from is not None:
+            return
+        editor = self._editor()
+        outgoing = self._interaction
+        outgoing.draft.text = editor.text
+        outgoing.draft.attachments = editor.attachments()
+        outgoing.draft.selection = editor.selection
+        outgoing.draft.shell_mode = editor.shell_mode
+        recall = editor.recall_state()
+        outgoing.draft.history_index = recall.index
+        outgoing.draft.history_stash = recall.stash
+        outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
+        self._sidebar_transition_from = outgoing
+        # The buffer now belongs to no session. Leave recall as it was: a
+        # transition is not a prompt, and load_text must not reset the index
+        # the outgoing session will get back if this fails.
+        editor.load_text("")
+        editor.adopt_attachments({})
+
+    def _take_sidebar_transition_buffer(self) -> tuple[str, dict[int, Any]]:
+        editor = self._editor()
+        return editor.text, editor.attachments()
+
+    def _abandon_sidebar_transition(self) -> None:
+        """Failure/cancel: the user stays put, so what they typed is theirs."""
+        outgoing = self._sidebar_transition_from
+        self._sidebar_transition_from = None
+        if outgoing is None or outgoing is not self._interaction:
+            return
+        editor = self._editor()
+        typed, typed_attachments = self._take_sidebar_transition_buffer()
+        editor.load_text(outgoing.draft.text + typed)
+        merged = dict(outgoing.draft.attachments)
+        merged.update(typed_attachments)
+        editor.adopt_attachments(merged)
+        editor.set_shell_mode(outgoing.draft.shell_mode)
+        editor.restore_recall_state(
+            RecallState(
+                index=outgoing.draft.history_index,
+                stash=outgoing.draft.history_stash,
+                stash_attachments=dict(outgoing.draft.history_stash_attachments),
+            )
+        )
+        editor.move_cursor(editor._end_of_buffer())
 
     def _sidebar_source_releasable(self, source: SessionInteraction) -> bool:
         from local_operator.session.remote import RemoteSession
@@ -3637,10 +3759,24 @@ class OperatorApp(App[None]):
         self._close_org_chart_view()
         self._close_settings_view()
         editor = self._editor()
-        outgoing.draft.text = editor.text
-        outgoing.draft.attachments = editor.attachments()
-        outgoing.draft.selection = editor.selection
-        outgoing.draft.shell_mode = editor.shell_mode
+        if self._sidebar_transition_from is outgoing:
+            # The outgoing draft was frozen at ``pending``; the editor holds
+            # the transition buffer, which belongs to the TARGET. Take it now,
+            # before the incoming draft is loaded over it.
+            typed, typed_attachments = self._take_sidebar_transition_buffer()
+        else:
+            # No transition was opened (a programmatic swap); the buffer is
+            # still the outgoing draft, exactly as before.
+            typed, typed_attachments = "", {}
+            outgoing.draft.text = editor.text
+            outgoing.draft.attachments = editor.attachments()
+            outgoing.draft.selection = editor.selection
+            outgoing.draft.shell_mode = editor.shell_mode
+            recall = editor.recall_state()
+            outgoing.draft.history_index = recall.index
+            outgoing.draft.history_stash = recall.stash
+            outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
+        self._sidebar_transition_from = None
         old_view = self._transcript_view()
         outgoing.draft.following_tail = old_view.is_following_tail
         if not outgoing.draft.following_tail:
@@ -3727,11 +3863,24 @@ class OperatorApp(App[None]):
                         if isinstance(block, ToolCard)
                     }
                 )
-            editor.load_text(source.draft.text)
-            editor.adopt_attachments(source.draft.attachments)
+            editor.load_text(source.draft.text + typed)
+            merged_attachments = dict(source.draft.attachments)
+            merged_attachments.update(typed_attachments)
+            editor.adopt_attachments(merged_attachments)
             editor.set_shell_mode(source.draft.shell_mode)
-            if source.draft.selection is not None:
+            if typed:
+                # Text typed during the switch goes at the end; the caret
+                # follows it, which is where the user is.
+                editor.move_cursor(editor._end_of_buffer())
+            elif source.draft.selection is not None:
                 editor.selection = source.draft.selection
+            editor.restore_recall_state(
+                RecallState(
+                    index=source.draft.history_index,
+                    stash=source.draft.history_stash,
+                    stash_attachments=dict(source.draft.history_stash_attachments),
+                )
+            )
             self._restore_sidebar_aside(source)
             self._sync_draft_recoveries(source)
             for text, kind in source.notices:
@@ -3752,9 +3901,14 @@ class OperatorApp(App[None]):
             self.run_worker(self._release_sidebar_preparation((outgoing, outgoing_presentation)))
         if displaced is not None and displaced is not incoming:
             self.run_worker(self._release_sidebar_preparation((source, displaced)))
-        # Active + one retained presentation. Executing contexts stay alive
-        # without retaining their widgets, and drafts remain source-owned.
-        while len(self._sidebar_presentations) > 1:
+        # Retain the most recently used presentations. One was the original
+        # bound, and it made every non-adjacent click cold; four covers the
+        # two-or-three live conversations a user actually alternates between
+        # at ~1.2 MiB RSS and no per-frame cost per parked view (measured with
+        # six parked). Dict order is recency — hits reinsert — so the oldest
+        # key is the LRU victim. Executing contexts stay alive without
+        # retaining their widgets, and drafts remain source-owned.
+        while len(self._sidebar_presentations) > RETAINED_PRESENTATIONS:
             evicted_id = next(iter(self._sidebar_presentations))
             evicted = self._sidebar_presentations.pop(evicted_id)
             self.run_worker(
@@ -3823,22 +3977,39 @@ class OperatorApp(App[None]):
         Focus is untouched: the composer keeps the caret and the draft, so
         switching mid-sentence does not cost the sentence.
         """
-        entries = self._session_sidebar.entries
-        if not entries:
-            # The catalog is only polled while the list is open, so a closed
-            # list has nothing to traverse. Load it once, then switch — the
-            # shortcut is meant to work without opening the drawer first.
+        if self.screen is not self.screen_stack[0]:
+            # A pushed modal (the /resume picker, a settings sheet) owns the
+            # keyboard. A priority binding would otherwise fire through it and
+            # switch the conversation underneath the very list the user is
+            # choosing from (round 4, MINOR-2).
+            return
+        if not self._session_sidebar.display or not self._session_sidebar.entries:
+            # The catalog is polled ONLY while the list is open. A closed list
+            # keeps whatever it last showed — with four sessions created since,
+            # the "next" it computed was from a ranking that no longer exists
+            # (round 4, M2/Q8/U6). Branch on visibility, not emptiness: a
+            # closed list is stale by definition, so read fresh and then step.
             self.run_worker(self._switch_session_cold(delta), group="sidebar-switch")
             return
-        current = self._session.session_id if self._session is not None else ""
-        index = next((i for i, entry in enumerate(entries) if entry.id == current), None)
+        self._switch_session_from(self._session_sidebar.entries, delta)
+
+    def _switch_session_from(self, entries: Sequence[CatalogEntry], delta: int) -> None:
+        # Step from where the user is HEADED, not where they are: a second
+        # press before the first commits used to read ``_session`` (still the
+        # old one) and recompute the same target, so a burst of three presses
+        # collapsed into one hop (round 4, U6 / MINOR-1). The requested id is
+        # the honest origin while a switch is in flight.
+        origin = self._sidebar_navigation.requested_id or (
+            self._session.session_id if self._session is not None else ""
+        )
+        index = next((i for i, entry in enumerate(entries) if entry.id == origin), None)
         if index is None:
             # Attached to something outside the list (or nothing yet): enter at
             # the nearest end rather than refusing to move.
             target = entries[0] if delta > 0 else entries[-1]
         else:
             target = entries[(index + delta) % len(entries)]
-        if target.id == current:
+        if target.id == origin:
             return
         self._session_sidebar.cursor_id = target.id
         self.post_message(SessionSidebar.Selected(target.id))
@@ -3862,18 +4033,18 @@ class OperatorApp(App[None]):
         except Exception:
             logger.debug("sidebar switch catalog load failed", exc_info=True)
             return
-        if self._session_sidebar.entries:
-            # A concurrent refresh won the race and its entries are current;
-            # adopting this older read would step from a stale order.
-            pass
-        elif entries:
-            self._session_sidebar.current_id = str(getattr(self._session, "session_id", ""))
-            self._session_sidebar.set_entries(entries)
-        else:
-            # Nothing to traverse. Returning here is also what stops the
-            # re-entry below from recursing on an empty catalog.
+        if not entries:
             return
-        self.action_switch_session(delta)
+        if self._session_sidebar.display:
+            # The list opened while we were reading: its own poll is now the
+            # source of truth, and it will be at least as fresh as this read.
+            self._switch_session_from(self._session_sidebar.entries or entries, delta)
+            return
+        # Closed list: adopt the fresh read so the drawer, when it next opens,
+        # shows the order the switch just traversed rather than the stale one.
+        self._session_sidebar.current_id = str(getattr(self._session, "session_id", ""))
+        self._session_sidebar.set_entries(entries)
+        self._switch_session_from(self._session_sidebar.entries, delta)
 
     def action_toggle_sidebar(self) -> None:
         if not self._session_sidebar.display:
@@ -3886,7 +4057,6 @@ class OperatorApp(App[None]):
         sidebar = self._session_sidebar
         if opened and not sidebar.display:
             self._sidebar_focus_restore = ref(self.focused) if self.focused is not None else None
-            self._sidebar_last_prefetch = ""
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
         if self._sidebar_timer is not None:
@@ -3969,48 +4139,78 @@ class OperatorApp(App[None]):
         self.run_worker(refresh(), group="sidebar-catalog")
 
     def _prewarm_sidebar(self, entries: list[CatalogEntry]) -> None:
+        """Warm the top-ranked sessions the user is likeliest to click next.
+
+        Ranked order is the list's own (``rank_entries``), so what is warm is
+        what sits at the top of the list. At most ``PREWARM_PER_REFRESH`` per
+        catalog poll and one prefetch worker at a time, only while no
+        navigation is in flight, so speculation never competes with a click.
+
+        An entry with an EMPTY ``live_state`` is never warmed: preparing it
+        would resume a runtime, and speculation must not start processes the
+        user did not ask for. Already-cached and current sessions are skipped
+        rather than blocking the whole prewarm as they used to.
+        """
         if (
             not self._session_sidebar.display
             or self._sidebar_prefetch is not None
-            or self._sidebar_presentations
             or self._sidebar_navigation.requested_id
         ):
             return
         current = str(getattr(self._session, "session_id", ""))
-        candidate = next(
-            (entry for entry in entries if entry.id != current and entry.row.live_state), None
-        )
-        if candidate is None or candidate.id == self._sidebar_last_prefetch:
+        candidates = [
+            entry
+            for entry in entries
+            if entry.id != current
+            and entry.row.live_state
+            and entry.id not in self._sidebar_presentations
+        ][:PREWARM_PER_REFRESH]
+        if not candidates:
             return
-        self._sidebar_last_prefetch = candidate.id
 
         async def prepare() -> None:
-            prepared = None
-            try:
-                prepared = await self._prepare_sidebar_session(candidate.id, speculative=True)
-                if (
-                    self._session_sidebar.display
-                    and not self._sidebar_navigation.requested_id
-                    and not self._sidebar_presentations
-                    and candidate.id != str(getattr(self._session, "session_id", ""))
-                    and prepared[1].retainable()
-                ):
-                    self._sidebar_presentations[candidate.id] = prepared[1]
-                    prepared = None
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Speculation never overwrites a usable catalog with an error.
-                # An explicit selection reports the same failure normally.
-                logger.debug("sidebar prewarm failed", exc_info=True)
-            finally:
+            for candidate in candidates:
+                prepared = None
                 try:
+                    if (
+                        not self._session_sidebar.display
+                        or self._sidebar_navigation.requested_id
+                        or candidate.id in self._sidebar_presentations
+                    ):
+                        return
+                    prepared = await self._prepare_sidebar_session(candidate.id, speculative=True)
+                    if (
+                        self._session_sidebar.display
+                        and not self._sidebar_navigation.requested_id
+                        and candidate.id not in self._sidebar_presentations
+                        and candidate.id != str(getattr(self._session, "session_id", ""))
+                        and prepared[1].retainable()
+                    ):
+                        self._sidebar_presentations[candidate.id] = prepared[1]
+                        prepared = None
+                        while len(self._sidebar_presentations) > RETAINED_PRESENTATIONS:
+                            evicted_id = next(iter(self._sidebar_presentations))
+                            evicted = self._sidebar_presentations.pop(evicted_id)
+                            await self._release_sidebar_preparation(
+                                (self._sidebar_sources[evicted_id], evicted)
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Speculation never overwrites a usable catalog with an
+                    # error. An explicit selection reports the same failure.
+                    logger.debug("sidebar prewarm failed", exc_info=True)
+                finally:
                     if prepared is not None:
                         await self._release_sidebar_preparation(prepared)
-                finally:
-                    self._sidebar_prefetch = None
 
-        self._sidebar_prefetch = self.run_worker(prepare(), group="sidebar-prefetch")
+        async def run() -> None:
+            try:
+                await prepare()
+            finally:
+                self._sidebar_prefetch = None
+
+        self._sidebar_prefetch = self.run_worker(run(), group="sidebar-prefetch")
 
     def on_session_sidebar_dismissed(self, message: SessionSidebar.Dismissed) -> None:
         message.stop()
@@ -23482,6 +23682,10 @@ class OperatorApp(App[None]):
         # can now shrink to a row or go away (#525).
         lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        # Beside ctrl+b, because it is the same surface: the list is where the
+        # user learns what "next" means, and the one-press switch is otherwise
+        # undiscoverable (UX round 3, U5).
+        lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
         lines.append(_key_row("F8", "open an aside; ctrl+f forks it in"))
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits

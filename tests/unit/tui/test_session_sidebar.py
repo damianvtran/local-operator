@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from dataclasses import replace
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 from rich.cells import cell_len
+from textual.widgets import Tooltip
 
 from local_operator.resume import SessionRow
 from local_operator.tui.app import OperatorApp
@@ -140,13 +142,25 @@ def _hover_entries(ids: tuple[str, ...] = ("alpha", "sess", "gamma")) -> list[Ca
 
 
 @pytest.mark.asyncio
-async def test_tooltip_persists_while_the_pointer_rests_on_a_row():
-    """A description must stay up while the pointer rests, not blink out.
+async def test_tooltip_survives_in_row_movement_and_the_catalog_poll():
+    """The description stays up while the pointer is on the row, observed on
+    the screen's real ``Tooltip.display`` — not on the widget attribute.
 
-    Textual hides a showing tooltip on the next mouse move over the SAME
-    widget. Every row here lives inside ONE widget, so ordinary within-row
-    movement looked like that repeat and the description vanished after about
-    a second of hovering.
+    Round 4 (M1) found the previous guard vacuous: it asserted
+    ``sidebar.tooltip``, which the parent also kept stable, so it passed on
+    the very commit it claimed to test. Two distinct mechanisms hid the
+    description and both are covered here:
+
+    - ``Screen._handle_mouse_move`` hides a showing tooltip on ANY move over
+      the owning widget, before the widget sees the event, and re-arms
+      nothing. One cell of jitter dropped it and resting did not bring it
+      back. The widget now restores it on an in-row move.
+    - The 2 s catalog poll's ``set_entries`` blanked the widget attribute
+      under a perfectly still pointer. It now re-resolves instead.
+
+    The hovered row is the LAST one so the tooltip's own footprint never
+    covers a row the pointer moves to (it did, and made the previous probe
+    read the tooltip widget instead of the list).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30), tooltips=True) as pilot:
@@ -156,15 +170,37 @@ async def test_tooltip_persists_while_the_pointer_rests_on_a_row():
         assert app._sidebar_timer is not None
         app._sidebar_timer.pause()
         sidebar = app._session_sidebar
-        sidebar.set_entries(_hover_entries())
-        await pilot.hover("#session-sidebar", offset=(8, 2))
-        resting = sidebar.tooltip
-        assert resting is not None
+        sidebar.set_entries(_hover_entries(tuple(f"s{i}" for i in range(1, 7))))
+        await pilot.pause()
+        tooltip = app.screen.get_child_by_type(Tooltip)
+
+        await pilot.hover("#session-sidebar", offset=(8, 6))
+        await asyncio.sleep(float(app.TOOLTIP_DELAY) + 0.2)
+        await pilot.pause()
+        assert tooltip.display, "description never appeared after the delay"
+        shown_for = str(tooltip.render())
+
         for x in (9, 10, 11):
-            await pilot.hover("#session-sidebar", offset=(x, 2))
-        assert sidebar.tooltip == resting, "description dropped while the pointer rested"
-        await pilot.hover("#session-sidebar", offset=(8, 3))
-        assert sidebar.tooltip != resting, "description did not follow the pointer to a new row"
+            await pilot.hover("#session-sidebar", offset=(x, 6))
+            await pilot.pause()
+            assert tooltip.display, f"in-row move to x={x} dropped the description"
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        assert tooltip.display, "description did not stay up while resting after a move"
+
+        sidebar.set_entries(list(sidebar.entries))
+        await pilot.pause()
+        assert tooltip.display, "the catalog poll blanked a resting description"
+        assert str(tooltip.render()) == shown_for
+
+        # A different row is a fresh arrival: hidden until the delay passes,
+        # then THAT row's description — never the previous row's.
+        await pilot.hover("#session-sidebar", offset=(8, 1))
+        await pilot.pause()
+        assert not tooltip.display, "a row change must not pop the old description"
+        await asyncio.sleep(float(app.TOOLTIP_DELAY) + 0.2)
+        await pilot.pause()
+        assert tooltip.display and str(tooltip.render()) != shown_for
 
 
 @pytest.mark.asyncio
@@ -238,6 +274,97 @@ async def test_switch_session_attaches_from_the_composer_and_wraps(position):
         # The composer must keep both the focus and the unsent draft.
         assert app.focused is editor
         assert editor.text == "keep my draft"
+
+
+@pytest.mark.asyncio
+async def test_closed_list_switch_reads_a_fresh_ranking():
+    """A switch with the drawer closed must not step over a stale snapshot.
+
+    The catalog is polled only while the list is open, and closing it keeps
+    the last entries. Round 4 (M2/Q8/U6) created four sessions with the list
+    closed and the shortcut never called the loader — it branched on
+    "entries empty", and they were not. The branch is now on visibility.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._session_sidebar.set_entries(_hover_entries(("sess", "old")))
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert not app._session_sidebar.display
+        attached: list[str] = []
+        fresh = _hover_entries(("sess", "new1", "new2", "old"))
+        with (
+            patch.object(app._sidebar_navigation, "select", side_effect=attached.append),
+            patch("local_operator.tui.session_catalog.load_catalog", return_value=fresh) as load,
+        ):
+            await pilot.press("ctrl+shift+down")
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+        assert load.called, "a closed list must read the catalog before stepping"
+        assert attached == ["new1"], f"stepped over the stale ranking: {attached}"
+        assert [entry.id for entry in app._session_sidebar.entries][:2] == ["sess", "new1"]
+
+
+@pytest.mark.asyncio
+async def test_switch_burst_steps_from_the_requested_target():
+    """Three presses before the first commit are three hops, not one.
+
+    The origin used to be ``_session`` — still the old session until commit
+    — so every press in a burst recomputed the same target (round 4, U6 /
+    MINOR-1). While a switch is in flight the requested id is the origin.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
+        hops: list[str] = []
+
+        def select(session_id: str) -> None:
+            hops.append(session_id)
+            app._sidebar_navigation.requested_id = session_id
+
+        with patch.object(app._sidebar_navigation, "select", side_effect=select):
+            for _ in range(3):
+                await pilot.press("ctrl+shift+down")
+            await pilot.pause()
+        app._sidebar_navigation.requested_id = ""
+        assert hops == ["c", "d", "a"], hops
+
+
+@pytest.mark.asyncio
+async def test_switch_does_not_fire_under_a_pushed_modal():
+    """A priority binding must not switch the conversation beneath a picker.
+
+    ``priority=True`` is what lets the shortcut work while the composer holds
+    focus; the cost is that it also fires through a pushed screen unless the
+    action itself checks (round 4, MINOR-2).
+    """
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._session_sidebar.set_entries(_hover_entries())
+        attached: list[str] = []
+        with patch.object(app._sidebar_navigation, "select", side_effect=attached.append):
+            app.push_screen(SessionPickerScreen([], time.time()))
+            await pilot.pause()
+            await pilot.press("ctrl+shift+down")
+            await pilot.pause()
+        assert attached == []
 
 
 @pytest.mark.asyncio

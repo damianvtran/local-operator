@@ -455,6 +455,9 @@ with its title and age:
   `f9` or `/sidebar focus` opens and focuses the list without changing your
   draft. Arrow keys choose a row, Enter opens it, and Escape returns to the
   previous input surface. F9 also returns focus without hiding a pinned list.
+  `ctrl+shift+↑` / `ctrl+shift+↓` switch straight to the previous/next
+  conversation in the list's order without opening it, wrapping at the ends;
+  the caret and your unsent draft stay where they were.
   On narrow terminals, selecting a conversation dismisses the overlay drawer.
 - `f8` — open an aside (side question) without losing what you were typing;
   `ctrl+f` promotes the aside into the conversation.

@@ -324,6 +324,169 @@ def read_transcript_page(
     return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
 
 
+@dataclass(frozen=True)
+class ReplaySuffix:
+    """What :func:`read_replay_suffix` found, with the facts a caller needs.
+
+    ``entries`` is the journal suffix in append order — enough to reproduce
+    :meth:`Transcript.build_llm_history` exactly (see the reader for why a
+    suffix is sufficient). ``through_present`` tells a caller whose cursor was
+    NOT found whether it should trust the whole-file fallback semantics or
+    treat the cursor as unknown; ``checkpoint`` is the durable frontend
+    checkpoint when it was requested and is inside the suffix.
+    """
+
+    entries: tuple[TranscriptEntry, ...]
+    through_present: bool
+    checkpoint: dict[str, Any] | None
+    #: Bytes actually read, for the caller's own evidence; not a contract.
+    bytes_read: int
+
+
+#: Backward read granularity. One MiB is large enough that a compaction's kept
+#: window (355–456 messages on the reference owners) is usually inside the
+#: first or second chunk, and small enough that a whole-file fallback on a
+#: journal with no compaction costs no more than the forward parse it replaces.
+_SUFFIX_CHUNK_BYTES = 1 << 20
+
+
+def read_replay_suffix(
+    directory: str | Path,
+    *,
+    through_id: str | None = None,
+    checkpoint_type: str | None = None,
+) -> ReplaySuffix:
+    """Read only the journal suffix :func:`replay_entries` needs, from EOF.
+
+    WHY: an attach used to build a whole ``Transcript``, which JSON-decodes
+    every line — 220 ms for a 47 MB journal and 1.5 s for 204 MB on the
+    reference machine — when the replay only ever looks at rows from the
+    latest compaction's ``first_kept_entry_id`` onward (a few hundred
+    messages). Reading 1 MiB chunks backward and stopping once that boundary is
+    inside the buffer makes the cost proportional to the live window rather
+    than to the journal's history: 6.6–17 ms on the same files.
+
+    WHY a suffix is exactly sufficient: every prune that affects a replayed
+    row is appended AFTER that row (a prune targets an existing message), so
+    once the buffer holds the compaction marker and its ``first_kept`` row it
+    holds every prune those rows can carry. A ``compaction`` row itself embeds
+    its summary; nothing before ``first_kept`` is read by the replay at all.
+
+    Stop conditions, all of which must be met before returning:
+
+    - the newest ``compaction`` row AND its ``first_kept_entry_id`` row are
+      both in the buffer (or the file start is reached — no compaction means
+      today's whole-file cost, which is the correct fallback, not a shortcut);
+    - ``through_id``, when given, is in the buffer — a cursor not yet seen
+      means "read further", never "cut at the tail" (the strict-cut contract);
+    - the newest custom row of ``checkpoint_type`` is in the buffer, when one
+      is requested, so the caller does not pay a second read for it. It is a
+      parameter rather than an import: the frontend checkpoint's type constant
+      lives in ``frontend_state``, whose import graph reaches the TUI, and this
+      module must stay a leaf.
+
+    Malformed rows are skipped individually, matching forward replay. The
+    first partial line of the earliest chunk is discarded: it is the tail of a
+    row whose head is in the chunk before it, and is completed once that chunk
+    is read.
+    """
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    if not path.exists():
+        # ``Transcript(directory)`` treats an absent journal as empty history
+        # — a session that has not written yet, or whose directory a sweep
+        # removed. The attach path relies on that, so the suffix reader
+        # answers the same way rather than turning "nothing yet" into an
+        # error the whole-file parse never raised.
+        return ReplaySuffix(
+            entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
+        )
+    checkpoint: dict[str, Any] | None = None
+    compaction: TranscriptEntry | None = None
+    first_kept_id: str | None = None
+    seen_ids: set[str] = set()
+    cursor_reached = through_id is None
+    parsed: list[TranscriptEntry] = []  # newest first while reading backward
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        # Invariant: ``pending`` is the bytes after ``position`` that have NOT
+        # yet been split into rows. It only ever grows by one chunk and is
+        # split exactly once, when a row boundary lands inside it — so a row
+        # larger than a chunk (the 256 KiB bookkeeping rows in the fixtures)
+        # costs one join, not one re-split per chunk. The first version
+        # re-split the carried tail every step and the no-compaction fallback
+        # over a 100 MB file went quadratic, slower than the forward parse it
+        # is meant to match.
+        pending = b""
+        while True:
+            chunk_size = min(_SUFFIX_CHUNK_BYTES, position)
+            position -= chunk_size
+            handle.seek(position)
+            pending = handle.read(chunk_size) + pending
+            if position > 0:
+                boundary = pending.find(b"\n")
+                if boundary < 0:
+                    # No complete row yet; the whole buffer is a row's tail.
+                    continue
+                # Everything before the first newline is the tail of a row
+                # whose head is still unread; keep it for the next chunk.
+                complete = pending[boundary + 1 :].split(b"\n")
+                pending = pending[:boundary]
+            else:
+                complete = pending.split(b"\n")
+                pending = b""
+            for raw in reversed(complete):
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None:
+                    continue
+                parsed.append(entry)
+                seen_ids.add(entry.id)
+                if through_id is not None and entry.id == through_id:
+                    # Rows after the cursor are discarded by the replay, so a
+                    # compaction among them is NOT the boundary: the replay
+                    # of the cut list sees only compactions at or before the
+                    # cursor. Forget any marker met above the cut and keep
+                    # looking below it, exactly as the forward parse would
+                    # after ``entries[: index + 1]``.
+                    compaction = None
+                    first_kept_id = None
+                    cursor_reached = True
+                if (
+                    compaction is None
+                    and entry.type == ENTRY_COMPACTION
+                    and (through_id is None or cursor_reached)
+                ):
+                    compaction = entry
+                    first_kept_id = entry.payload.get("first_kept_entry_id") or None
+                if (
+                    checkpoint_type is not None
+                    and checkpoint is None
+                    and entry.type == ENTRY_CUSTOM
+                    and entry.payload.get("custom_type") == checkpoint_type
+                ):
+                    checkpoint = dict(entry.payload.get("details", {}))
+            at_start = position == 0
+            boundary_seen = compaction is not None and (
+                first_kept_id is None or first_kept_id in seen_ids
+            )
+            cursor_seen = through_id is None or through_id in seen_ids
+            checkpoint_seen = checkpoint_type is None or checkpoint is not None
+            if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
+                break
+            # A journal with no compaction has no boundary to stop at: keep
+            # reading to the start, which is the forward parse's cost and the
+            # honest one — never pretend a prefix is the whole history.
+    parsed.reverse()
+    return ReplaySuffix(
+        entries=tuple(parsed),
+        through_present=through_id is None or through_id in seen_ids,
+        checkpoint=checkpoint,
+        bytes_read=os.path.getsize(path) - position,
+    )
+
+
 class Transcript:
     """Append-only JSONL store, thread/async-safe via an asyncio lock.
 
@@ -831,107 +994,7 @@ class Transcript:
         pruned live context byte for byte rather than resurrecting the tool
         output compaction already decided was dead weight.
         """
-        entries = self._entries
-        if through_id is not None:
-            # Select the journal cut BEFORE compaction/prune interpretation.
-            # Filtering materialized message IDs afterwards resurrects future
-            # prunes and drops the compaction marker/preserved user turns.
-            for index in range(len(entries) - 1, -1, -1):
-                if entries[index].id == through_id:
-                    entries = entries[: index + 1]
-                    break
-            else:
-                raise ValueError("history cursor is no longer retained")
-        compaction_index: int | None = None
-        for i in range(len(entries) - 1, -1, -1):
-            if entries[i].type == ENTRY_COMPACTION:
-                compaction_index = i
-                break
-
-        start = 0
-        prefix: list[AgentMessage] = []
-        if compaction_index is not None:
-            compaction = entries[compaction_index]
-            details: dict[str, Any] = {"summary": compaction.payload.get("summary", "")}
-            preserve_data = compaction.payload.get("preserve_data")
-            if preserve_data is not None:
-                details["preserve_data"] = preserve_data
-            prefix.append(
-                CustomMessage(
-                    id=compaction.id,
-                    custom_type="compaction_summary",
-                    attribution="system",
-                    details=details,
-                )
-            )
-            # User-authored turns that fell into the summarized partition are
-            # re-injected VERBATIM right after the marker, so the user's own
-            # words survive the pass byte for byte instead of being paraphrased
-            # away (see :meth:`append_compaction`). They sit before the cut in
-            # the transcript, so the contiguous ``first_kept_entry_id`` suffix
-            # below never replays them — the marker payload is the only carrier
-            # that reaches a resumed session. Reusing each turn's original id is
-            # safe: those message entries live before ``start`` and are not
-            # replayed, so there is no duplicate, and the guard that expires
-            # stale asides keys on ``CustomMessage`` (a real ``user`` Message is
-            # never mistaken for one).
-            preserved_turns = compaction.payload.get("preserved_user_turns") or ()
-            if preserved_turns:
-                # Lazy import keeps this low-level store free of a hard compaction
-                # dependency (the session imports compaction lazily for the same
-                # reason). The flag marks these as already-compacted content so a
-                # post-resume pass does not re-count them as fresh history.
-                from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
-
-                for turn in preserved_turns:
-                    if not isinstance(turn, dict):
-                        continue
-                    message = Message.user(str(turn.get("text", "")))
-                    turn_id = turn.get("id")
-                    if isinstance(turn_id, str) and turn_id:
-                        message.id = turn_id
-                    message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
-                    prefix.append(message)
-            first_kept_id = compaction.payload.get("first_kept_entry_id")
-            # The first kept entry normally sits BEFORE the compaction marker
-            # (messages are persisted as they happen; the marker comes last),
-            # so scan the whole transcript. If the id no longer resolves (a
-            # dropped malformed line, a converter-minted id), replaying from
-            # compaction_index + 1 would point PAST the kept window and lose
-            # every message compaction promised to preserve. Replaying too
-            # much is recoverable at the next compaction; silent amnesia is
-            # not, so fall back to the full history with an error.
-            start = 0
-            if first_kept_id is None:
-                start = compaction_index + 1
-            else:
-                for i in range(len(entries)):
-                    if entries[i].id == first_kept_id:
-                        start = i
-                        break
-                else:
-                    logger.error(
-                        "first_kept_entry_id %s not found in transcript; " "replaying full history",
-                        first_kept_id,
-                    )
-
-        prunes = {
-            str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
-            for entry in entries
-            if entry.type == ENTRY_PRUNE and entry.payload.get("target")
-        }
-        out: list[AgentMessage] = list(prefix)
-        for entry in entries[start:]:
-            if entry.type != ENTRY_MESSAGE:
-                continue
-            message = _entry_to_message(entry, self._attachments)
-            if message is None:
-                continue
-            notice = prunes.get(entry.id)
-            if notice is not None and isinstance(message, Message):
-                _apply_prune(message, notice)
-            out.append(message)
-        return out
+        return replay_entries(self._entries, self._attachments, through_id=through_id)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1174,6 +1237,123 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
     provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+
+
+def replay_entries(
+    entries: Sequence[TranscriptEntry],
+    attachments: AttachmentStore | None,
+    *,
+    through_id: str | None = None,
+) -> list[AgentMessage]:
+    """The replay semantics behind :meth:`Transcript.build_llm_history`.
+
+    A module function rather than a method so a caller that has read ONLY a
+    suffix of the journal (:func:`read_replay_suffix`) replays it through the
+    same code path as the whole-file parse, and equivalence between the two is
+    a property of one function applied to two inputs rather than two
+    implementations kept in step by hand.
+    """
+    entries = list(entries)
+    if through_id is not None:
+        # Select the journal cut BEFORE compaction/prune interpretation.
+        # Filtering materialized message IDs afterwards resurrects future
+        # prunes and drops the compaction marker/preserved user turns.
+        for index in range(len(entries) - 1, -1, -1):
+            if entries[index].id == through_id:
+                entries = entries[: index + 1]
+                break
+        else:
+            raise ValueError("history cursor is no longer retained")
+    compaction_index: int | None = None
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].type == ENTRY_COMPACTION:
+            compaction_index = i
+            break
+
+    start = 0
+    prefix: list[AgentMessage] = []
+    if compaction_index is not None:
+        compaction = entries[compaction_index]
+        details: dict[str, Any] = {"summary": compaction.payload.get("summary", "")}
+        preserve_data = compaction.payload.get("preserve_data")
+        if preserve_data is not None:
+            details["preserve_data"] = preserve_data
+        prefix.append(
+            CustomMessage(
+                id=compaction.id,
+                custom_type="compaction_summary",
+                attribution="system",
+                details=details,
+            )
+        )
+        # User-authored turns that fell into the summarized partition are
+        # re-injected VERBATIM right after the marker, so the user's own
+        # words survive the pass byte for byte instead of being paraphrased
+        # away (see :meth:`append_compaction`). They sit before the cut in
+        # the transcript, so the contiguous ``first_kept_entry_id`` suffix
+        # below never replays them — the marker payload is the only carrier
+        # that reaches a resumed session. Reusing each turn's original id is
+        # safe: those message entries live before ``start`` and are not
+        # replayed, so there is no duplicate, and the guard that expires
+        # stale asides keys on ``CustomMessage`` (a real ``user`` Message is
+        # never mistaken for one).
+        preserved_turns = compaction.payload.get("preserved_user_turns") or ()
+        if preserved_turns:
+            # Lazy import keeps this low-level store free of a hard compaction
+            # dependency (the session imports compaction lazily for the same
+            # reason). The flag marks these as already-compacted content so a
+            # post-resume pass does not re-count them as fresh history.
+            from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+
+            for turn in preserved_turns:
+                if not isinstance(turn, dict):
+                    continue
+                message = Message.user(str(turn.get("text", "")))
+                turn_id = turn.get("id")
+                if isinstance(turn_id, str) and turn_id:
+                    message.id = turn_id
+                message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+                prefix.append(message)
+        first_kept_id = compaction.payload.get("first_kept_entry_id")
+        # The first kept entry normally sits BEFORE the compaction marker
+        # (messages are persisted as they happen; the marker comes last),
+        # so scan the whole transcript. If the id no longer resolves (a
+        # dropped malformed line, a converter-minted id), replaying from
+        # compaction_index + 1 would point PAST the kept window and lose
+        # every message compaction promised to preserve. Replaying too
+        # much is recoverable at the next compaction; silent amnesia is
+        # not, so fall back to the full history with an error.
+        start = 0
+        if first_kept_id is None:
+            start = compaction_index + 1
+        else:
+            for i in range(len(entries)):
+                if entries[i].id == first_kept_id:
+                    start = i
+                    break
+            else:
+                logger.error(
+                    "first_kept_entry_id %s not found in transcript; " "replaying full history",
+                    first_kept_id,
+                )
+
+    prunes = {
+        str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
+        for entry in entries
+        if entry.type == ENTRY_PRUNE and entry.payload.get("target")
+    }
+    out: list[AgentMessage] = list(prefix)
+    for entry in entries[start:]:
+        if entry.type != ENTRY_MESSAGE:
+            continue
+        message = _entry_to_message(entry, attachments)
+        if message is None:
+            continue
+        notice = prunes.get(entry.id)
+        if notice is not None and isinstance(message, Message):
+            _apply_prune(message, notice)
+        out.append(message)
+    return out
 
 
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:

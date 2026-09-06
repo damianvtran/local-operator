@@ -96,6 +96,13 @@ class SessionDraft:
     approve_all: bool | None = None
     recoveries: list[SessionDraft] = field(default_factory=list)
     notices: list[tuple[str, NoticeKind]] = field(default_factory=list)
+    #: Prompt-history recall position and the draft it displaced, so Up in
+    #: one session and Down after switching back lands on THAT session's
+    #: draft rather than whatever the shared editor stashed last. In-memory
+    #: only: a switch is what needs it, not a restart.
+    history_index: int | None = None
+    history_stash: str = ""
+    history_stash_attachments: dict[int, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -27,6 +27,14 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
 
+#: How long a requested row waits before its state mark becomes a spinner.
+#: The tint itself is immediate — it is the acknowledgement that the click
+#: landed. The spinner is only for a switch that is genuinely taking a while,
+#: and in practice a warm switch completes well inside this window, so the
+#: glyph should almost never be seen: a warm sample that shows it is a
+#: regression, not a feature working.
+REQUESTED_SPINNER_DELAY_S = 0.15
+
 #: Blank cells between the list and the conversation it sits beside.
 #:
 #: The list's right-hand age column ("6m", "23h", "1d") ended one cell from the
@@ -79,7 +87,8 @@ class SessionSidebar(Widget, can_focus=True):
         super().__init__(id="session-sidebar")
         self.entries: tuple[CatalogEntry, ...] = ()
         self.current_id = ""
-        self.requested_id = ""
+        self._requested_id = ""
+        self._requested_at = 0.0
         self.cursor_id = ""
         self.error = ""
         self._catalog_loading = True
@@ -95,7 +104,35 @@ class SessionSidebar(Widget, can_focus=True):
         #: order changes without the mouse moving.
         self._hover_id: str = ""
         self._hover_y: int | None = None
+        #: When the pointer entered the current row. An in-row move restores
+        #: the description only once Textual's own show delay has elapsed
+        #: since then, so it never appears earlier than Textual would show it.
+        self._hover_since: float | None = None
         self.display = False
+
+    @property
+    def requested_id(self) -> str:
+        """The row a click asked for that has not yet become ``current_id``.
+
+        Set synchronously at ``_sidebar_navigation_pending`` — before any
+        await — so the tint is on the very next frame after the click. It is
+        an acknowledgement and nothing more: it does not move ``current_id``,
+        does not touch the transcript, enables no input and acks nothing.
+        Cleared by ``pending("")`` on commit, failure or cancel.
+        """
+        return self._requested_id
+
+    @requested_id.setter
+    def requested_id(self, session_id: str) -> None:
+        if session_id != self._requested_id:
+            self._requested_at = time.monotonic() if session_id else 0.0
+        self._requested_id = session_id
+        self._sync_animation()
+
+    def _requested_spinning(self) -> bool:
+        return bool(self._requested_id) and (
+            time.monotonic() - self._requested_at >= REQUESTED_SPINNER_DELAY_S
+        )
 
     @property
     def page_size(self) -> int:
@@ -147,6 +184,7 @@ class SessionSidebar(Widget, can_focus=True):
             return
         if self.display and (
             self._catalog_loading
+            or bool(self._requested_id)
             or any(entry.row.live_state == "busy" for entry in self.visible_entries)
         ):
             self._timer.resume()
@@ -232,13 +270,18 @@ class SessionSidebar(Widget, can_focus=True):
         entry = self._entry_at(y) if y is not None else None
         hover_id = entry.id if entry is not None else ""
         description = self._describe(entry)
-        # Textual hides a showing tooltip on the next move over the SAME widget
-        # (`Screen._handle_mouse_move`), which is why it vanished after about a
-        # second of resting on a row. Rows live inside ONE widget, so every
-        # in-row move looked like that repeat. Re-arming only when the row
-        # identity actually changes keeps the description up while the pointer
-        # rests, and still swaps it the moment a different row is under it.
+        # Re-arm the widget's ``tooltip`` only when the row identity changes.
+        # This is NOT what keeps it up under pointer movement (round 4, M1:
+        # ``Screen._handle_mouse_move`` hides a showing tooltip BEFORE the
+        # event reaches this widget, so nothing set here can prevent that —
+        # see ``on_mouse_move`` for the restore). What this does fix is the
+        # OTHER way the description vanished: the 2 s catalog poll called
+        # ``set_entries``, which blanked ``tooltip`` under a perfectly still
+        # pointer. Keeping the value stable across a refresh is what lets a
+        # resting description survive the poll.
         changed = hover_id != self._hover_id
+        if changed:
+            self._hover_since = time.monotonic() if hover_id else None
         if changed or self.tooltip != description:
             self._hover_id = hover_id
             self.tooltip = description
@@ -247,6 +290,65 @@ class SessionSidebar(Widget, can_focus=True):
     def on_mouse_move(self, event: events.MouseMove) -> None:
         if self._set_hover(event.y):
             self.refresh()
+            # A NEW row: Textual's delay timer was (re)armed by this very
+            # move only if its tooltip was not showing; when it WAS showing
+            # it hid it and armed nothing, so a resting pointer on the new
+            # row would never get that row's description. Arm our own
+            # one-shot at the same delay, so a row change behaves like a
+            # first arrival rather than a dead end.
+            if self._hover_id:
+                self.set_timer(
+                    float(self.app.TOOLTIP_DELAY),
+                    self._show_tooltip_if_still_here,
+                    name="sidebar-tooltip",
+                )
+            return
+        # Same row, pointer merely moved within it. Textual has ALREADY hidden
+        # the tooltip by the time this runs (``Screen._handle_mouse_move``
+        # sets ``display = False`` on any move over the widget that owns a
+        # showing tooltip, before forwarding the event) and will not re-show
+        # it until a further move restarts its delay timer — so one cell of
+        # jitter dropped the description and resting did not bring it back.
+        # The user's ask is "stays while the mouse is hovered over the
+        # session": restore it. Only when it was showing for THIS widget, so
+        # a tooltip that was never up (first arrival, or a different widget's)
+        # still goes through Textual's normal delay rather than popping.
+        if self._hover_id and self._tooltip_due():
+            self._show_tooltip_now()
+
+    def _tooltip_due(self) -> bool:
+        """Has the description been up (or is it owed) for the hovered row?
+
+        Textual keeps no "was shown" bit a widget can read, and by the time
+        this runs it has already hidden the tooltip — so the honest signal is
+        time: the pointer entered this row at ``_hover_since`` and Textual's
+        own ``TOOLTIP_DELAY`` has elapsed, which is exactly the condition
+        under which its timer would have shown it. Using its constant means
+        the restore never pops earlier than Textual itself would.
+        """
+        if self._hover_since is None:
+            return False
+        return time.monotonic() - self._hover_since >= float(self.app.TOOLTIP_DELAY)
+
+    def _show_tooltip_if_still_here(self) -> None:
+        # The one-shot may fire after the pointer moved on or left; only the
+        # row it was armed for gets shown, and only if nothing hid it since.
+        if self._hover_id and self._tooltip_due() and self.screen.app.mouse_over is self:
+            self._show_tooltip_now()
+
+    def _show_tooltip_now(self) -> None:
+        """Re-show the description Textual just hid for an in-row move."""
+        try:
+            from textual.widgets import Tooltip
+
+            tooltip = self.screen.get_child_by_type(Tooltip)
+        except Exception:
+            return
+        if self.tooltip is None:
+            return
+        tooltip.display = True
+        tooltip.absolute_offset = self.app.mouse_position
+        tooltip.update(self.tooltip)
 
     def on_leave(self, event: events.Leave) -> None:
         # The pointer left the list: drop both the affordance and the
@@ -254,6 +356,7 @@ class SessionSidebar(Widget, can_focus=True):
         if self._hover_id or self._hover_y is not None:
             self._hover_id = ""
             self._hover_y = None
+            self._hover_since = None
             self.tooltip = None
             self.refresh()
 
@@ -290,6 +393,12 @@ class SessionSidebar(Widget, can_focus=True):
             current = entry.id == self.current_id
             cursor = self.has_focus and entry.id == self.cursor_id
             hovered = entry.id == self._hover_id and entry.id != ""
+            # The row a click asked for, until it becomes current. It shares
+            # the cursor's ground and `›` so the eye reads "this one is being
+            # opened" where it just clicked, and stays distinct from current
+            # (bold on `surface`) because it is NOT current yet — readiness
+            # is a separate, later fact that only commit may assert.
+            requested = entry.id == self._requested_id and entry.id != "" and not current
             # Three states have to stay separable, so they occupy three
             # different grounds: the keyboard cursor keeps `tint-select` (the
             # only tinted one), the attached session keeps `surface` plus bold,
@@ -300,7 +409,7 @@ class SessionSidebar(Widget, can_focus=True):
             # overpaint the identity of where you ARE or where the keyboard is.
             background = (
                 "tint-select"
-                if cursor
+                if cursor or requested
                 else "surface" if current else "overlay" if hovered else None
             )
             style = Style(
@@ -309,9 +418,16 @@ class SessionSidebar(Widget, can_focus=True):
                 bold=current,
             )
             line = Text(style=style, no_wrap=True)
-            line.append("› " if cursor else "  ")
+            line.append("› " if cursor or requested else "  ")
             mark, ink = row_state_mark(entry.row, self._frame)
-            if entry.unseen and not entry.row.pending:
+            if requested and self._requested_spinning():
+                # Same ink a busy row's spinner uses (``row_state_mark``), so one
+                # spinner means one thing everywhere in the list.
+                # Only after the delay: a switch that is taking long enough to
+                # notice gets a spinner ON THE ROW, where the eye is. The
+                # footer "Opening…" stays as the textual counterpart.
+                mark, ink = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)], "accent"
+            elif entry.unseen and not entry.row.pending:
                 mark, ink = (
                     ("✗", "danger")
                     if entry.completion_kind in ("error", "interrupted")

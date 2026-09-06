@@ -76,6 +76,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -92,7 +93,11 @@ from local_operator.session.frontend_state import (
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import (
+    Transcript,
+    read_replay_suffix,
+    replay_entries,
+)
 from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
@@ -1619,12 +1624,10 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
-        entries, history = await self._read_transcript(
+        history = await self._read_transcript(
             want_checkpoint=want_checkpoint, through_id=live_cursor, strict_cut=strict_cut
         )
-        self._bind_history(
-            entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
-        )
+        self._bind_history(history, live_cursor, drop_history_duplicates=drop_history_duplicates)
 
     async def _read_transcript(
         self,
@@ -1632,8 +1635,8 @@ class RemoteSession:
         want_checkpoint: bool = False,
         through_id: str | None = None,
         strict_cut: bool = False,
-    ) -> tuple[list[Any], list[Any]]:
-        """Parse the durable transcript off-loop, once per sync.
+    ) -> list[Any]:
+        """Replay the durable transcript off-loop, once per sync.
 
         The single threaded read shared by initial connect AND reconnect:
         review round 3 (MAJOR-2) found the reconnect path re-running this
@@ -1655,26 +1658,39 @@ class RemoteSession:
         long-lived holds a reference on any path.
         """
 
-        def _replay() -> tuple[list[Any], list[Any]]:
-            transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+        def _replay() -> list[Any]:
+            directory = self._config_dir / "sessions" / self._session_id
+            # Backward suffix read instead of ``Transcript(directory)``: the
+            # constructor JSON-decodes every row (220 ms at 47 MB, 1.5 s at
+            # 204 MB on the reference owners) when the replay only ever uses
+            # rows from the latest compaction's kept window. The suffix reader
+            # stops at that boundary and replays through the SAME module
+            # function the constructor path uses, so the result is identical
+            # by construction; a journal with no compaction reads to the
+            # start, which is today's cost, not a shortcut. The checkpoint is
+            # extracted from the same pass for the cold path so nothing
+            # re-reads the file on the loop.
+            suffix = read_replay_suffix(
+                directory,
+                through_id=through_id,
+                checkpoint_type=FRONTEND_CHECKPOINT_CUSTOM_TYPE if want_checkpoint else None,
+            )
             if want_checkpoint:
-                # Read here, on the worker, while the object is alive and
-                # already parsed: a second ``Transcript(...)`` on the loop
-                # would re-read and re-parse the whole file (0.68 s on the
-                # largest observed session).
-                self._cold_checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+                self._cold_checkpoint = suffix.checkpoint
             cut = through_id
-            if cut is not None and not transcript.has_entry(cut) and not strict_cut:
+            if cut is not None and not suffix.through_present and not strict_cut:
                 # Older owners used best-effort cursors; preserve that fallback
                 # only for legacy full replay, never the negotiated window cut.
+                # ``through_present`` is false only after the reader reached
+                # the file START without meeting the cursor, so this is the
+                # same "id is not in the journal" the whole-file parse saw.
                 cut = None
-            return transcript.entries(), transcript.build_llm_history(through_id=cut)
+            return replay_entries(suffix.entries, AttachmentStore(directory), through_id=cut)
 
         return await asyncio.to_thread(_replay)
 
     def _bind_history(
         self,
-        entries: list[Any],
         history: list[Any],
         live_cursor: str | None,
         *,
@@ -2578,14 +2594,13 @@ class RemoteSession:
                         if self._display_window_requested and frontend.display_history is not None:
                             await self._load_frontend_history(frontend)
                         else:
-                            entries, history = (
+                            history = (
                                 await self._read_transcript(through_id=frontend.live_cursor)
                                 if frontend.live_cursor is not None
                                 else await self._read_transcript()
                             )
                             self._replay_durable_suffix(history)
                             self._bind_history(
-                                entries,
                                 history,
                                 frontend.live_cursor,
                                 drop_history_duplicates=False,

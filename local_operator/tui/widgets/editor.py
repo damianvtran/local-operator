@@ -1229,6 +1229,21 @@ ASIDE_PLACEHOLDER = "Ask the aside…"
 SHELL_PLACEHOLDER = "Run a command… — esc to leave"
 
 
+@dataclass(frozen=True)
+class RecallState:
+    """Prompt-history recall position and the draft it displaced.
+
+    ``index`` is ``None`` when the user is not navigating. The stash is the
+    unsent buffer saved when Up first left it, so Down past the newest entry
+    can bring it back; it belongs to the session that was being edited, which
+    is why it rides on the session's draft across a sidebar switch.
+    """
+
+    index: int | None
+    stash: str
+    stash_attachments: dict[int, Marked]
+
+
 class Editor(TextArea):
     """Multiline prompt editor with submit-on-Enter, history, slash-completion."""
 
@@ -5228,6 +5243,48 @@ class Editor(TextArea):
             if span is not None and start < span[1] and span[0] < end:
                 touched.append(index)
         return touched
+
+    def recall_state(self) -> RecallState:
+        """Where the user is in prompt-history recall, plus the stash it hides.
+
+        Captured beside the draft when a sidebar switch parks a session.
+        Without it, Up×2 in A, switch to B, switch back and Down would
+        "restore" whatever stash B had left in the one shared editor — the
+        other session's draft — because ``_history_index``, ``_draft`` and
+        ``_draft_attachments`` all lived only on the widget. The list itself
+        (``_history``) stays editor-global: shell-history semantics, and the
+        clamp in :meth:`restore_recall_state` covers the case where more
+        prompts were submitted meanwhile and the indices shifted.
+        """
+        return RecallState(
+            index=self._history_index,
+            stash=self._draft,
+            stash_attachments=dict(self._draft_attachments),
+        )
+
+    def restore_recall_state(self, state: RecallState) -> None:
+        """Re-enter recall exactly where the parked session left it.
+
+        Called AFTER ``load_text`` has put the session's own text back, so a
+        session that was not navigating is untouched. An index past the end
+        of the (possibly shorter — the cap pops from the front) list exits
+        navigation rather than pointing at a prompt that has moved: the user
+        sees their draft, which is the honest state, instead of a recalled
+        entry that is not the one they were looking at.
+        """
+        if state.index is None:
+            self._history_index = None
+            self._draft = ""
+            self._draft_attachments = {}
+            return
+        if not self._history or state.index >= len(self._history):
+            self._history_index = None
+            self._draft = ""
+            self._draft_attachments = {}
+            return
+        self._history_index = max(0, state.index)
+        self._draft = state.stash
+        self._draft_attachments = dict(state.stash_attachments)
 
     def load_text(self, text: str) -> None:
         """Whole-buffer replacement — the OTHER mutation funnel.

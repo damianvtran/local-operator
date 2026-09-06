@@ -232,7 +232,15 @@ class SessionPresentation:
         while stack:
             value = stack.pop()
             nodes += 1
-            if nodes > 4096:
+            # The node cap guards against a pathological object graph, not
+            # memory — the 1 MiB string budget below is the memory bound. At
+            # 4096 it silently refused every real owner: a pydantic Message
+            # costs ~14 nodes, so a kept window past ~290 messages (the live
+            # owners hold 355–456) was never retained and every return click
+            # was cold (retained_views stayed at 1 with N=4 configured).
+            # 65536 admits ~4,600 plain messages, which the string budget
+            # trips long before on any real content.
+            if nodes > 65536:
                 return False
             if isinstance(value, str):
                 remaining -= len(value) * 4

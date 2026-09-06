@@ -4,6 +4,10 @@ The sidebar is an opt-in terminal view over existing session owners, not another
 owner or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
+`Ctrl+Shift+↑`/`Ctrl+Shift+↓` attach the previous/next conversation directly — the
+one-press form of F9-then-arrow-then-Enter — in the list's own ranking, wrapping
+at the ends and without moving the caret; with the list closed the catalog is read
+fresh first so "next" is what the list would show, never a stale snapshot.
 Settings control visibility and left/right placement. Narrow layouts use a drawer
 that ends above the input dock and closes after any valid selection.
 
