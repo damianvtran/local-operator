@@ -594,6 +594,18 @@ def parse_decision(
 #: an outage would be caught immediately by the parse tests.
 _NORMAL_CONTENT_STOPS = frozenset({"stop", "length", "toolUse"})
 
+#: Stands in for a terminal marker the stream never supplied -- either no ``end``
+#: event arrived at all, or one arrived carrying an empty ``stop_reason``. It is
+#: deliberately a value OUTSIDE ``_NORMAL_CONTENT_STOPS``: coercing an absent
+#: marker to ``"stop"`` would punch a fail-OPEN hole through an allow-list whose
+#: entire purpose is to fail closed, and a probe confirmed the hole was live
+#: (``stop_reason=""`` with empty text was classified as a normal stop and fell
+#: into the JSON-parse misdiagnosis this module exists to remove). It is also a
+#: valid ``StrictIdentifier``, so it can be recorded verbatim in the bundle's
+#: ``model_response`` rather than being laundered into a stop the provider never
+#: sent.
+_UNSPECIFIED_STOP = "unspecified"
+
 
 class ProviderStreamAbortedError(RuntimeError):
     """The stream ended abnormally without producing any usable content.
@@ -622,14 +634,57 @@ class ProviderStreamAbortedError(RuntimeError):
     the failure was not diagnosable from the bundle at all.
 
     The message quotes the provider's own words UNBOUNDED and UNSCANNED on
-    purpose. This client holds no ``RedactionSet``; the episode renders the
-    exception through ``_diagnostic(error, self._redactions)``, which scans the
-    whole string BEFORE applying its 500-character bound. Cutting the prose here
-    first would sever a canary and let the surviving prefix pass that scan --
-    the truncate-then-scan inversion documented on ``_diagnostic``. Retention is
-    therefore unchanged: the same bounded, scanned artifact every other fatal
-    error already produces, and nothing new held anywhere else.
+    purpose, and this class cannot promise what happens to them: it holds no
+    ``RedactionSet``, so the scan-then-bound ordering that keeps the prose safe
+    is enforced one layer away, by the raise site's handler in
+    ``episode._decide_once``, which renders it through
+    ``_diagnostic(error, self._redactions)`` -- the scan-before-truncate
+    contract documented on ``_diagnostic`` itself. Cutting the prose HERE would
+    invert that order, severing a canary and letting the surviving prefix pass
+    the later scan. Anyone changing where this exception is caught owns keeping
+    that call redaction-carrying: most ``_diagnostic`` sites in ``episode.py``
+    pass an explicit ``None`` (in-process renderings that never reach
+    evidence), so "a handler exists" is not by itself the guarantee.
+
+    The billing fields mirror :class:`DecisionRejected`'s. A refused turn is
+    still a BILLED turn -- the provider read the whole prompt before deciding
+    to refuse, and the motivating case carried a 48k input -- so the runner
+    writes this attempt's request/response/usage triple from these fields
+    before sealing. Without them a refused episode reported zero spend as a
+    MEASURED figure, which is a false claim inside evidence whose only purpose
+    is honest accounting.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        route: RouteIdentity | None = None,
+        usage: ModelUsage | None = None,
+        cost_micros: int = 0,
+        stop_reason: str = _UNSPECIFIED_STOP,
+        provider_request_id: str = "unknown",
+        tool_call_count: int = 0,
+        prompt_cache_key: str | None = None,
+        context_tokens: int | None = None,
+        compaction: CompactionRecord | None = None,
+    ) -> None:
+        super().__init__(message)
+        # ``route`` may be None for the same reason it may be on a rejection: a
+        # stream that aborted need not have reported what it served, and the
+        # runner falls back to the requested route rather than inventing one.
+        self.route = route
+        self.usage = usage or ModelUsage()
+        self.cost_micros = cost_micros
+        self.stop_reason = stop_reason
+        self.provider_request_id = provider_request_id
+        self.tool_call_count = tool_call_count
+        self.prompt_cache_key = prompt_cache_key
+        self.context_tokens = context_tokens
+        # A compaction on the way to this request already happened and was
+        # billed; it must still be declared before the triple or the verifier
+        # sees a compaction with no request to attach it to.
+        self.compaction = compaction
 
 
 class ContextUnrecoverableError(ValueError):
@@ -946,7 +1001,18 @@ class ProviderModelClient:
         # is real model output and stays on the correctable rejection path.
         if (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip():
             raise ProviderStreamAbortedError(
-                stream_error or f"provider ended the stream as '{stop_reason}' with no content"
+                stream_error or f"provider ended the stream as '{stop_reason}' with no content",
+                # The same billing provenance a rejection carries, and for the
+                # same reason: the request was sent and read, so its usage is
+                # part of the episode's bill whether or not a reply came back.
+                route=self._route,
+                usage=usage,
+                cost_micros=cost_micros,
+                stop_reason=stop_reason,
+                provider_request_id=provider_request_id,
+                prompt_cache_key=self._prompt_cache_key,
+                context_tokens=_estimate_context(messages),
+                compaction=compaction,
             )
         try:
             return parse_decision(
@@ -1055,6 +1121,15 @@ class ProviderModelClient:
 
         async def summarize(prompt: str) -> str:
             nonlocal summary_usage, summary_cost
+            # TODO(F3, review round 2): this path discards ``_err`` and
+            # ``_stop``, so a compaction summary call that the provider REFUSED
+            # returns empty text and is folded into the context as a legitimate
+            # (if useless) summary, rather than being attributed to the
+            # provider the way the decision call now is. Pre-existing and
+            # deliberately out of scope here; fixing it needs a decision about
+            # whether an unsummarizable context is a provider failure or a
+            # harness one (``ContextUnrecoverableError``), which is a different
+            # question from this change's.
             text, usage, cost, _stop, _rid, _ctx, _err = await self._stream(
                 self._summary_request(prompt)
             )
@@ -1258,7 +1333,9 @@ class ProviderModelClient:
         text = ""
         usage = ModelUsage()
         cost_micros = 0
-        stop_reason = "stop"
+        # A stream that never emits an ``end`` event never told us how it
+        # ended, so it starts abnormal and only a real marker makes it normal.
+        stop_reason = _UNSPECIFIED_STOP
         provider_request_id = "unknown"
         context_tokens: int | None = None
         stream_error: str | None = None
@@ -1269,7 +1346,11 @@ class ProviderModelClient:
                 usage, cost_micros = _usage_from(event.usage)
                 context_tokens = _context_tokens_from(event.usage)
             elif event.type == "end":
-                stop_reason = event.stop_reason or "stop"
+                # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
+                # normalizing it to a normal content stop would let a stream
+                # that said nothing about how it ended take the parse path --
+                # the exact misdiagnosis the allow-list below exists to stop.
+                stop_reason = event.stop_reason or _UNSPECIFIED_STOP
                 if event.usage is not None:
                     usage, cost_micros = _usage_from(event.usage)
                     context_tokens = _context_tokens_from(event.usage)
