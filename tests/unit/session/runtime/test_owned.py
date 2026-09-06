@@ -1333,3 +1333,60 @@ async def test_dispose_cancels_a_grant_parked_on_a_browser(
     await handle.dispose()
     await asyncio.gather(*tasks, return_exceptions=True)
     assert tasks[0].cancelled() or tasks[0].done()
+
+
+@pytest.mark.asyncio
+async def test_model_saved_adopts_the_configured_default_on_a_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """``/model saved`` WORKS on a detached runtime (QA round 2, Q49).
+
+    ``OperatorApp`` intercepts ``saved`` before routing, so a local pane always
+    honoured it while this handler — the one serving a DETACHED runtime's
+    ``/model`` — saw a bare word with no ``/`` and answered the
+    ``<provider>/<model-id>`` usage error. That made the keep notice emitted by
+    this same change ("config.yml default changed, /model saved adopts it")
+    a dead end on the phone and on any viewer of a runtime-owned session, and
+    contradicted the ``/help`` text round 1's U5 added.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session.frontend_state import SlashResult
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "openai")
+    manager.set_config_value("model_name", "gpt-5")
+
+    handle, session = make_handle()
+    switched: list[tuple[str, str]] = []
+
+    async def _set_model(provider: str, model_id: str) -> str:
+        switched.append((provider, model_id))
+        session.model_label = f"{provider}/{model_id}"
+        return f"model: {session.model_label}"
+
+    # Substituted rather than run for real: `set_model` resolves provider
+    # metadata over the network, and what this pins is the ROUTING — that
+    # `saved` reaches the same mutation a `<provider>/<id>` switch does.
+    monkeypatch.setattr(handle, "set_model", _set_model)
+
+    result = await handle._model_slash(session, "saved", SlashResult)
+
+    assert switched == [("openai", "gpt-5")], result.text
+    assert "usage:" not in result.text
+    assert "openai/gpt-5" in result.text
+
+
+@pytest.mark.asyncio
+async def test_model_saved_with_no_configured_default_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An empty config gets the app's own words, not a usage error: the two
+    surfaces must answer "there is nothing to go back to" identically."""
+    from local_operator.session.frontend_state import SlashResult
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    handle, session = make_handle()
+    result = await handle._model_slash(session, "saved", SlashResult)
+    assert "no boot default saved yet" in result.text
+    assert "/model default <provider>/<model-id>" in result.text

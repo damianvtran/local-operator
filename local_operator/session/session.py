@@ -255,6 +255,45 @@ _MAX_CONTINUATIONS = 8
 SESSION_CAPABILITY_TOOLS: tuple[str, ...] = ("task", "wait", "jobs", "wake", "hub", "ask")
 
 
+def _splice_in_registry_order(existing: Sequence[Any], fresh: Sequence[Any]) -> list[Any]:
+    """Insert ``fresh`` tools at their ``DEFAULT_TOOL_NAMES`` positions.
+
+    The tools array rides in the same prompt-cache prefix as the system prompt,
+    and ``tools/registry.py`` builds it in a stable order precisely so that
+    prefix stays cache-stable (AGENTS.md, "the tool-surface footprint ladder").
+    Appending a re-enabled tool therefore costs a prefix miss on every
+    remaining call of the session, which is why a live ``web_search.enabled``
+    flip has to put the tool BACK where it was rather than merely put it back
+    (review round 1, R4).
+
+    Each fresh tool is placed before the first existing tool that ranks after
+    it in the registry order; anything the registry does not name (an MCP tool,
+    a host extension) sorts last and is never reordered relative to its
+    neighbours, so a session whose inventory was customised keeps that shape.
+    Same-name replacement is NOT this function's job \u2014 the caller has already
+    established that these names are absent.
+    """
+    from local_operator.tools.registry import DEFAULT_TOOL_NAMES
+
+    # Unknown names rank past every known one, and stably among themselves, so
+    # the merge cannot shuffle tools the registry has no opinion about.
+    last = len(DEFAULT_TOOL_NAMES)
+
+    def rank(tool: Any) -> int:
+        name = getattr(tool, "name", "")
+        return DEFAULT_TOOL_NAMES.index(name) if name in DEFAULT_TOOL_NAMES else last
+
+    merged = list(existing)
+    for tool in sorted(fresh, key=rank):
+        position = len(merged)
+        for index, present in enumerate(merged):
+            if rank(present) > rank(tool):
+                position = index
+                break
+        merged.insert(position, tool)
+    return merged
+
+
 class _PeerArrival:
     """Session-owned :class:`PeerArrivalProtocol` behind ``ToolContext``.
 
@@ -1560,6 +1599,16 @@ class Session:
         #: tool is not advertised.
         team_registry: Any | None = None,
         conversation_name: ConversationName | None = None,
+        #: Where the BOOT model came from: ``"config"`` (the ``hosting`` /
+        #: ``model_name`` keys), ``"agent"`` (a profile), ``"flag"``
+        #: (``--hosting``/``--model``) or ``"child"`` (a subagent, whose spec
+        #: was picked at spawn). Decides whether a later ``config.yml`` edit
+        #: to those keys SWITCHES this session: only a config-sourced session
+        #: follows the file, because for the others the file was never what
+        #: chose the model. Defaults to ``"config"`` because that is the
+        #: composition root's common case and what every caller predating
+        #: this kwarg meant.
+        model_source: str = "config",
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -1687,6 +1736,30 @@ class Session:
         #: adopt that row (the changed default/flag/profile is the newer
         #: choice). See :data:`SELECTED_MODEL_CUSTOM_TYPE`.
         self._boot_selector = f"{model.provider}/{model.model_id}"
+        self._model_source = model_source
+        #: True once the user has made a deliberate model CHOICE in this
+        #: session (``/model p/id``, the phone's switch, or a restored
+        #: ``selected_model`` row). A ``hosting``/``model_name`` edit on disk
+        #: then leaves this session alone and prints a keep notice instead —
+        #: the user's explicit pick outranks the default it replaced. Cleared
+        #: only by :meth:`_adopt_configured_model` itself, so a session that
+        #: is following config keeps following it across successive edits.
+        self._explicit_model_choice = False
+        #: Bumped by :meth:`_on_configured_model_changed` on every dispatch, and
+        #: captured by :meth:`_adopt_configured_model` before its thread hop.
+        #: An adopt whose generation is stale when it returns has been
+        #: superseded by a newer ``hosting``/``model_name`` edit and abandons,
+        #: so two edits arriving inside one ``build_model_spec`` resolve in
+        #: EDIT order rather than in whichever-thread-finished-first order
+        #: (review round 1, R2).
+        self._configured_model_generation = 0
+        #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
+        #: ``web_fetch.enabled`` moved; consumed at the next TURN boundary by
+        #: :meth:`_reconcile_web_tools`. Deferred rather than applied on the
+        #: tick because a call the model already emitted against a
+        #: just-removed tool would come back "Tool not found" mid-turn; the
+        #: per-call gate inside the tools already refuses immediately.
+        self._web_tools_dirty = False
         #: True while a mid-session model selection has not reached the
         #: transcript yet; the same dispose-flush contract as the title (the
         #: write is a background task, and dispose cancels background tasks,
@@ -3265,6 +3338,13 @@ class Session:
         # and the journal stays one row per switch, not one per keystroke.
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
+        if explicit:
+            # The user chose: from here a ``hosting``/``model_name`` edit on
+            # disk keeps its hands off this session (see
+            # ``_apply_config_change``). ``_adopt_configured_model`` passes
+            # ``explicit=True`` too — for the fallback-pin withdrawal below —
+            # and resets this flag itself afterwards.
+            self._explicit_model_choice = True
         # The measured byte cap belonged to the provider that demonstrated it,
         # and that provider is gone. Keeping it would pin a session to a
         # departed connection's limit — shedding screenshots a laxer provider
@@ -5652,6 +5732,11 @@ class Session:
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
+            # Inventory changes deferred from a `web_*.enabled` edit land HERE,
+            # before the tool context and the loop config are built for this
+            # turn, so the schema the model sees is consistent for the whole
+            # turn (see ``_reconcile_web_tools`` for why not on the tick).
+            self._reconcile_web_tools()
             blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
@@ -9840,6 +9925,9 @@ class Session:
             logger.warning("dropping unresolvable persisted model selection: %r", selector)
             return
         self._model = spec
+        # A restored row IS the user's earlier explicit choice, so a config
+        # default edited after the resume must not override it either.
+        self._explicit_model_choice = True
         # Same synchronous re-fit hook `set_model` ends on. Nothing is frozen
         # this early, but a stream fn that keys caches by selector must start
         # keyed to the model that will actually serve, not the boot default.
@@ -10076,7 +10164,7 @@ class Session:
         listener per session that fans out to the session's own consumers, so
         the order in which they see a change is deterministic.
 
-        Three groups are live, each for a reason that makes the apply trivial:
+        These groups are live, each for a reason that makes the apply trivial:
 
         * ``compaction.*`` — re-coerced into a fresh ``CompactionSettings``.
           All three trigger checks read ``self._compaction_settings`` at check
@@ -10094,7 +10182,25 @@ class Session:
           the same validation the constructor applied; an unset or invalid
           value restores the manager's built-in default rather than freezing
           the last explicit one, so "reset to default" on the page means it.
-
+        * ``hosting`` / ``model_name`` — the running model FOLLOWS the file
+          iff it came from the file: ``_model_source == "config"`` and no
+          explicit ``/model`` choice since boot. Otherwise a keep notice says
+          so and names ``/model saved`` as the way to adopt the default. A
+          CHILD (``_job_id`` set) never follows: its spec was chosen at spawn
+          (tier or parent) and a review child losing its cache prefix
+          mid-task is pure cost. The switch itself is :meth:`set_model` — the
+          same operation ``/model`` performs, landing at the next provider
+          call and never splitting a response. Either key alone triggers it
+          (a bare ``model_name`` edit is the common case); the pair is
+          re-read from ``values`` as a whole.
+        * ``web_search.enabled`` / ``web_fetch.enabled`` — marked dirty here
+          and reconciled into the inventory at the next TURN boundary
+          (:meth:`_reconcile_web_tools`), top-level sessions only. The tools
+          themselves re-check ``enabled`` per call, so a disable refuses at
+          once; the inventory catching up a turn later is cosmetic. A child
+          keeps its spawn inventory: re-adding would mean re-running the
+          role allowlist and network-floor filtering for a short-lived run,
+          and the per-call gate already makes "disabled" true for it.
         * ``subagents.models.*`` — the launch path reads these per spawn, but
           the ``task``/``agent`` tool SCHEMAS bake the configured tiers in at
           build time (the enum the model picks from, and the description
@@ -10103,8 +10209,11 @@ class Session:
           who removes a tier gets a tool that stops offering it.
 
         Everything else the registry calls LIVE is already read per use
-        (``fork.*``, ``web_*`` knobs) and needs no apply here. Everything it
-        calls NEW_SESSIONS is deliberately ignored.
+        (``fork.*``, ``web_*`` knobs, ``bash.shell``) and needs no apply here.
+        ``tool_approval_mode`` is LIVE but owned by the HOST's gate
+        (``OwnedSessionHandle`` / ``OperatorApp``), not the session.
+        Everything the registry calls NEW_LAUNCH or NEW_SESSIONS is
+        deliberately ignored.
 
         Guards on ``_disposed`` because the unsubscribe runs as a dispose
         HOOK, after the session's own teardown, and a tick can land between.
@@ -10172,6 +10281,11 @@ class Session:
                 logger.warning("subagents.max_running=%r rejected by the job manager", cap)
         if any(key.startswith("subagents.models.") for key in changed):
             self._rebuild_effort_tier_tools()
+        if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
+            if self._job_id is None:
+                self._web_tools_dirty = True
+        if "hosting" in changed or "model_name" in changed:
+            self._on_configured_model_changed(values)
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -10202,6 +10316,241 @@ class Session:
         if not rebuilt:
             return
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
+
+    def _on_configured_model_changed(self, values: Mapping[str, Any]) -> None:
+        """Decide whether a ``hosting``/``model_name`` edit moves THIS session.
+
+        Sync and cheap: the decision is made here, the switch (which resolves
+        model metadata, possibly over the network) runs in the background.
+        The keep notice is emitted from here too, so a session that declines
+        still tells the user why the pane did not move — the TUI prints no
+        clause of its own for the ``model`` section precisely because only
+        this process knows the answer.
+        """
+        if self._job_id is not None:
+            return
+        if self._model_source != "config" or self._explicit_model_choice:
+            label = self.model_label
+            if self._explicit_model_choice:
+                reason = "chosen with /model"
+            elif self._model_source == "agent":
+                reason = "chosen by an agent profile"
+            else:
+                reason = "chosen by a flag"
+            self._spawn_background(
+                self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"keeping {label} — {reason}; config.yml default changed, "
+                            "/model saved adopts it"
+                        ),
+                        kind="info",
+                        # A glance for the boot toast, so it does not fall
+                        # through to a blind cut landing mid-phrase (design
+                        # round 1, D3). See ``NoticeEvent.headline``.
+                        headline="Model unchanged",
+                    )
+                )
+            )
+            return
+        # Bumped BEFORE the spawn so an adopt already parked on its thread hop
+        # sees a generation newer than the one it captured and stands down.
+        self._configured_model_generation += 1
+        self._spawn_background(self._adopt_configured_model(values))
+
+    async def _adopt_configured_model(self, values: Mapping[str, Any]) -> None:
+        """Switch onto the ``hosting``/``model_name`` pair in ``values``.
+
+        Mirrors ``resolve_hosting_model``'s config arm (an empty model falls
+        back to the provider's default) and ``_restore_selected_model``'s
+        validation (an unknown provider is a warning, never a switch onto a
+        spec that cannot serve). ``build_model_spec`` may fetch a provider
+        listing over a blocking client, so it runs on a thread exactly as the
+        runtime's ``/model`` op does. The chosen effort rides along when the
+        new model's ladder has it, as the TUI's ``/model`` carries it.
+
+        Goes through :meth:`set_model` with ``explicit=True`` so a pinned
+        fallback is withdrawn (the default the fallback was rescuing is gone),
+        then RESTORES ``_explicit_model_choice`` to what it was before the
+        call rather than assigning ``False``: adopting the file is not the user
+        choosing, so a session that was following config keeps following it —
+        but a session that had already recorded a real ``/model`` choice must
+        not have that record erased by an adopt (review round 1, R2, second
+        half). The boot selector is re-based too, so a ``selected_model``
+        journal row written for this switch is skipped on resume (the new
+        default IS the boot).
+
+        **The apply is guarded against the await.** ``build_model_spec`` may
+        fetch a provider listing, so the thread hop below is a real window in
+        which the user can type ``/model`` and a second config edit can land.
+        Reproduced in review: a ``/model`` choice made during a parked adopt
+        was silently undone AND its ``_explicit_model_choice`` reset, which
+        disabled the keep rule for every later edit. Two guards close it, both
+        re-checked AFTER the await:
+
+        * ``_explicit_model_choice`` — a user choice that landed while this was
+          in flight outranks the file, the same rule
+          :meth:`_on_configured_model_changed` applies before spawning; and
+        * ``_configured_model_generation`` — bumped by every dispatch, so a
+          NEWER adopt (a second edit while the first was resolving) wins and
+          the older task abandons rather than last-writer-wins between two
+          tasks with no ordering.
+
+        Both abandon silently: the newer decision emits its own receipt, and a
+        second line about a switch that did not happen is noise.
+
+        Reads ``values`` — the watcher's validated snapshot — never a fresh
+        ``ConfigManager`` (the module docstring of ``config_watch`` explains
+        why a listener must not construct one).
+        """
+        generation = self._configured_model_generation
+        explicit_before = self._explicit_model_choice
+        hosting = str(values.get("hosting") or "").strip().lower()
+        model_name = str(values.get("model_name") or "").strip()
+        if not hosting:
+            return
+        from local_operator.providers.registry import get_provider_definition
+
+        if get_provider_definition(hosting) is None:
+            await self._emit(
+                NoticeEvent(
+                    text=(
+                        f"config.yml names unknown provider {hosting!r}; "
+                        f"keeping {self.model_label}"
+                    ),
+                    kind="warning",
+                )
+            )
+            return
+        if not model_name:
+            from local_operator.model.defaults import default_model_for
+
+            model_name = default_model_for(hosting) or ""
+            if not model_name:
+                await self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"config.yml sets hosting {hosting} with no model_name and "
+                            f"{hosting} has no default; keeping {self.model_label}"
+                        ),
+                        kind="warning",
+                    )
+                )
+                return
+        current = self._model
+        if (current.provider, current.model_id) == (hosting, model_name):
+            # The writer's own pane: `/model default` already switched it (or
+            # it was already there). Nothing to do, and no receipt owed.
+            return
+        from local_operator.model.configure import build_model_spec
+
+        try:
+            spec = await asyncio.to_thread(build_model_spec, hosting, model_name)
+        except Exception as error:  # noqa: BLE001 — reported, never a broken session
+            await self._emit(
+                NoticeEvent(
+                    text=f"could not resolve {hosting}/{model_name} from config.yml: {error}",
+                    kind="warning",
+                )
+            )
+            return
+        if self._disposed:
+            return
+        if self._explicit_model_choice and not explicit_before:
+            # The user chose while this adopt was resolving. Their pick is
+            # newer and explicit; applying the file's spec now would undo it.
+            return
+        if self._configured_model_generation != generation:
+            # A newer config edit has already been dispatched. It resolves
+            # against the newer values and owns the receipt.
+            return
+        chosen_effort = current.reasoning_effort
+        if chosen_effort and chosen_effort in tuple(spec.reasoning_efforts or ()):
+            spec = spec.model_copy(update={"reasoning_effort": chosen_effort})
+        previous_label = self.model_label
+        self.set_model(spec, explicit=True)
+        # RESTORED, not cleared: see the docstring. ``set_model(explicit=True)``
+        # sets the flag as a side effect of withdrawing a pinned fallback, and
+        # this call is the file's decision rather than the user's — so the flag
+        # goes back to whatever the user's own history had made it.
+        self._explicit_model_choice = explicit_before
+        self._boot_selector = f"{spec.provider}/{spec.model_id}"
+        await self._emit(
+            NoticeEvent(
+                text=f"model: {previous_label} → {self.model_label} — config.yml default changed",
+                kind="info",
+                headline=f"model: {self.model_label}",
+            )
+        )
+
+    def _reconcile_web_tools(self) -> None:
+        """Bring the advertised web tools in line with ``web_*.enabled``.
+
+        Runs at the TURN boundary, only when :meth:`_apply_config_change`
+        marked the flags dirty, and only on a top-level session. Rebuilds the
+        two tools through the same createIf builders the factory used, with
+        ``web_search_settings``/``web_fetch_settings`` taken from the config
+        watcher's last-good snapshot (``existing_watcher().values``) — the
+        one source a config-driven path may read without risking the
+        move-aside a fresh ``ConfigManager`` performs on a malformed file.
+        Disabled tools are dropped through :meth:`refresh_tools`, the committed
+        inventory-swap hook; a re-enabled one is spliced back at its
+        ``DEFAULT_TOOL_NAMES`` POSITION rather than appended (review round 1,
+        R4). Order is not cosmetic here: ``tools/registry.py`` builds the array
+        in a stable order precisely so the tools array — which rides in the
+        same cache prefix as the system prompt — stays cache-stable, and an
+        appended tool costs a prompt-cache prefix miss on every later call of
+        the session (AGENTS.md, "the tool-surface footprint ladder").
+
+        Never mid-turn: the loop reads ``context.tools`` per model call, and a
+        tool removed between a model's call and its dispatch comes back "Tool
+        not found" — the per-call gate in the tool gives a better answer.
+
+        The dirty flag is cleared only once the reconcile has actually HAPPENED
+        (review round 1, R5). Cleared up front, a pass that returned early
+        (``watcher is None``) or was swallowed by the ``except`` dropped the
+        pending work, and the inventory then stayed out of line with a file
+        that had already changed until the operator edited the key a second
+        time. Left set, the next turn boundary simply tries again.
+        """
+        if not self._web_tools_dirty or self._job_id is not None:
+            return
+        try:
+            from local_operator.config_watch import existing_watcher
+            from local_operator.paths import config_dir
+            from local_operator.tools.registry import create_tools
+            from local_operator.web_fetch.service import coerce_fetch_settings
+            from local_operator.web_search.service import coerce_search_settings
+
+            watcher = existing_watcher(config_dir())
+            if watcher is None:
+                return
+            values = watcher.values
+            search_raw = values.get("web_search")
+            fetch_raw = values.get("web_fetch")
+            wanted = {
+                "web_search": coerce_search_settings(search_raw).enabled,
+                "web_fetch": coerce_fetch_settings(fetch_raw).enabled,
+            }
+            have = {tool.name for tool in self._tools}
+            to_add = [name for name, on in wanted.items() if on and name not in have]
+            to_drop = {name for name, on in wanted.items() if not on and name in have}
+            if to_drop:
+                self.refresh_tools([t for t in self._tools if t.name not in to_drop])
+            if to_add:
+                context = self._build_tool_context()
+                context.web_search_settings = (
+                    dict(search_raw) if isinstance(search_raw, Mapping) else None
+                )
+                context.web_fetch_settings = (
+                    dict(fetch_raw) if isinstance(fetch_raw, Mapping) else None
+                )
+                fresh = create_tools(context, enabled=to_add)
+                if fresh:
+                    self.refresh_tools(_splice_in_registry_order(self._tools, fresh))
+            self._web_tools_dirty = False
+        except Exception:  # noqa: BLE001 — the inventory is never worth a broken turn
+            logger.warning("web tool inventory could not be reconciled", exc_info=True)
 
     def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
         """Register teardown that runs after the session's own dispose.

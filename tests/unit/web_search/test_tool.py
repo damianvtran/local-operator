@@ -250,3 +250,34 @@ async def test_search_wrapper_closes_call_when_signal_is_already_aborted() -> No
     with pytest.raises(asyncio.CancelledError):
         await _search_or_abort(call, signal)
     assert call.cr_frame is None
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_search_refuses_per_call(tmp_path, monkeypatch) -> None:
+    """``web_search.enabled`` is LIVE: the switch is re-read on EVERY call, so
+    a tool still advertised (mid-turn, or in a subagent whose inventory is
+    fixed at spawn) refuses the moment the file says off — before any
+    provider or credential is consulted."""
+    from local_operator.config import ConfigManager
+    from local_operator.web_search import tool as search_tool
+    from local_operator.web_search.service import set_search_enabled
+
+    config_dir = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    set_search_enabled(ConfigManager(config_dir), False)
+
+    class _NoService:
+        def __init__(self, *a, **k):
+            raise AssertionError("a disabled search must not build a service")
+
+    monkeypatch.setattr(search_tool, "WebSearchService", _NoService)
+    result = await search_tool.execute_web_search("t1", {"query": "anything"}, None, None, None)
+    assert result.is_error is True
+    assert result.text == search_tool.WEB_SEARCH_DISABLED_MESSAGE
+    # The KEY, without its value (design round 1, D4) — see the twin assertion
+    # in `tests/unit/web_fetch/test_tool.py`.
+    assert "web_search.enabled" in result.text
+    assert "false" not in result.text
+    # Already correct before this round, and pinned so it stays the shape
+    # `web_fetch`'s refusal was brought into line with (UX round 1, U3).
+    assert result.details is None

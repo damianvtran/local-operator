@@ -1088,6 +1088,49 @@ class ApprovalPrompt(AskPickerScreen):
         """The future the engine awaits. Resolved exactly once."""
         return self._future
 
+    def set_note(self, note: str) -> None:
+        """Append a one-line note to the QUESTION of a still-parked card.
+
+        Written into the question rather than as a new row (UX round 1, U6).
+        The card's row budget is allocated in a strict priority order
+        (``AskPickerScreen._allocate``) in which the question ranks above the
+        option rows and below only the footer, so a note carried there can
+        never be the line that sheds at a tight size — and a note that is the
+        first thing to disappear on a 16-row terminal is a note that is not
+        there. A new chrome row would also have to be bought from that same
+        budget, which is how the footer went missing in the first place.
+
+        The case this exists for: a ``config.yml`` loosening lands while this
+        card is parked. The card is deliberately NOT auto-answered — the human
+        did not type that loosening in this pane — but the frame then said
+        "every tool runs without asking" two lines above "the agent needs your
+        approval", with a visible ``Allow all — stop asking for this session``
+        row describing a state the session was already in. The note is what
+        makes the frame stop contradicting itself.
+
+        Joined with ``·`` on ONE logical line rather than with a newline:
+        ``wrap_cells`` splits on spaces alone, so an embedded newline would
+        travel inside a "word" and reach the terminal as a literal break the
+        row budget never counted. The separator is the one this card already
+        uses between a fact and its qualifier.
+
+        Idempotent on the same note, so a second config tick delivering the
+        same transition does not stack the sentence; a settled card is left
+        alone, since its question is a historical record by then.
+        """
+        if self._answer is not None or not note:
+            return
+        question = self._questions[0]
+        if question.question.endswith(note):
+            return
+        self._questions[0] = question.model_copy(
+            update={"question": f"{question.question}  ·  {strip_control_sequences(note)}"}
+        )
+        # The wrap cache is keyed on (row, width) and the question is not in the
+        # key, so the question's own wrap has to be invalidated by repainting.
+        self._invalidate_description_wraps()
+        self._repaint()
+
     @property
     def answered(self) -> bool:
         return self._answer is not None
