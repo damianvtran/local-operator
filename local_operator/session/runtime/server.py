@@ -98,6 +98,111 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+
+
+def _frame_size_without_delta(frame: dict[str, Any]) -> int:
+    """Encoded size of ``frame`` counting its ``delta`` as empty (plus the "\\n").
+
+    Compaction needs a candidate frame's encoded length, but the expensive part
+    of a ``message_update`` is the accumulated ``message`` — hundreds of KB that
+    a merge does not change. Measuring the whole frame per merge is what made
+    compaction quadratic (67.4 MB and 152 ms for one 64-frame pass). Splitting
+    the measurement lets the caller add the delta's escaped bytes itself, which
+    is exact because JSON escaping is per-character: the encoded length of
+    ``a + b`` is the encoded length of ``a`` plus that of ``b``.
+
+    The delta is blanked rather than removed so the key, its quotes and its
+    comma are all still counted — only the VALUE's bytes are the caller's to
+    add.
+    """
+    data = frame.get("data")
+    if not isinstance(data, dict) or "delta" not in data:
+        return len(json.dumps(frame).encode()) + 1
+    probe = {**frame, "data": {**data, "delta": ""}}
+    # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
+    # real value back including its own quotes.
+    return len(json.dumps(probe).encode()) + 1 - 2
+
+
+def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
+    """Return ``frame``, or a small stand-in when it cannot be read.
+
+    WHY A FRAME THIS BIG IS NOT MERELY LARGE. The attach client dials with
+    ``limit=_READ_LIMIT_BYTES`` (the same 1 MiB as ``cap_bytes``), so an
+    oversized line makes its ``readline`` raise ``LimitOverrunError``. That is
+    unrecoverable rather than lossy: the overrun does NOT consume the buffer,
+    so every later read re-raises on the same bytes. The client's pump
+    therefore dies, and the viewer paints "owner sent a frame too large to
+    read" — the message the operator hit — losing the whole connection over one
+    delta. ``frontend_sync`` has been guarded since it caused exactly this
+    (see ``oversized_frame_report``); ``frontend_update`` and ``event`` were
+    not, and a single 1,039,374-byte transcript row produced a 1,129,319-byte
+    ``event`` frame that killed the socket.
+
+    DEGRADING ONE DELTA IS SAFE; KILLING THE SOCKET IS NOT. Both relay frame
+    types are deltas over state the viewer can recover by other means: it holds
+    durable history and re-syncs through ``frontend_sync``, which carries the
+    canonical snapshot. Dropping the payload costs one animation step that the
+    next snapshot supersedes. Killing the connection costs the session.
+
+    THE STAND-IN MUST STILL BE A VALID FRAME OF ITS OWN OP, which is why this
+    is not one generic placeholder:
+
+    * ``event`` — the payload is deserialized by ``deserialize_event``, which
+      REQUIRES ``type``. A bare marker raises there, and although the client
+      swallows callback failures (so the pump survives), the viewer would then
+      silently miss the frame with nothing said. It degrades to a ``notice``
+      instead: a real event type, rendered, and honest about what happened.
+    * ``frontend_update`` — canonical deltas are NOT replacement-safe. The
+      client checks ``epoch``/``sequence`` and closes the connection on a gap
+      by design, precisely so canonical state can never drift. A placeholder
+      that dropped the sequence would trip that check and kill the connection
+      this function exists to save, so the sequencing fields are carried
+      through and only the oversized BODY is shed. The viewer sees a
+      well-sequenced delta whose payload says it was degraded.
+
+    Cost on the hot path: one ``json.dumps`` per frame, measured at ~48µs on a
+    20 KB frame (about 41% of the send's own serialization). That is an
+    ADDITIONAL serialization, not a reused one — the send does its own — and it
+    is accepted deliberately: the alternative is a frame the viewer cannot read
+    at all, which costs the connection.
+    """
+    encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded <= cap_bytes:
+        return frame
+    op = frame.get("op", "frame")
+    logger.error(
+        "session runtime: %s frame is %d bytes, over the %d-byte socket line limit; "
+        "relaying a degraded placeholder instead of killing the connection "
+        "(the viewer recovers this state through frontend_sync + durable history)",
+        op,
+        encoded,
+        cap_bytes,
+    )
+    text = (
+        "A live update was too large to send and was dropped; "
+        "the view refreshes from the session's own history."
+    )
+    if op == "frontend_update":
+        data = frame.get("data")
+        data = data if isinstance(data, dict) else {}
+        # Sequencing preserved (see above): shed the body, never the epoch or
+        # the sequence number the client's gap check depends on.
+        return {
+            "op": op,
+            "data": {
+                "epoch": data.get("epoch"),
+                "sequence": data.get("sequence"),
+                "degraded": True,
+                "degraded_reason": text,
+            },
+        }
+    return {
+        "op": op,
+        "data": {"type": "notice", "text": text, "kind": "warning"},
+    }
+
+
 # A projection is replaceable state. If a peer cannot accept one within this
 # bound, dropping that peer is safer than blocking authority-bearing ACKs for
 # every healthy front end.
@@ -2013,6 +2118,12 @@ class RuntimeServer:
 
     def _enqueue_client_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
         """Queue one state/event frame on the connection's sole ordered FIFO."""
+        # THE chokepoint for both relay frame types: ``frontend_update`` and
+        # ``event`` both arrive here, so guarding once covers both and no
+        # future relay caller can bypass it by forgetting to check. (The
+        # ``frontend_sync`` frame does not come through here — it is written
+        # directly at connect time and carries its own report.)
+        frame = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
         try:
             conn.event_queue.put_nowait(frame)
         except asyncio.QueueFull:
@@ -2091,6 +2202,24 @@ class RuntimeServer:
         the append contract UIs rely on. Returns whether any room was freed.
         Runs synchronously on the runtime loop, so the drain task cannot
         observe a half-compacted queue.
+
+        A MERGE THAT WOULD NOT FIT IS REFUSED, and that check cannot be
+        skipped on the grounds that everything in this queue already passed
+        ``relay_frame_or_degraded``. It did — individually. Merging is the one
+        operation here that makes a frame BIGGER than anything the guard was
+        shown, so it can assemble individually-legal frames into an
+        unreadable one downstream of the only guard: 20 frames of 908,157 B
+        merged to 1,060,157 B and killed a real pump, and at 1 KiB deltas a
+        full 64-frame queue merged to 1,109,802 B — within 20 KB of the frame
+        that killed the operator's socket. The trigger is precisely the burst
+        this method exists to absorb.
+
+        REFUSED, not degraded, because refusing is lossless: both frames are
+        individually sendable, so keeping them apart costs one queue slot and
+        no content, while degrading would throw away deltas the viewer needs.
+        Refusing can leave nothing compacted, and that is the honest answer —
+        the caller then drops a client it genuinely cannot serve, which is the
+        documented slow-reader path rather than a silently broken socket.
         """
         frames: list[dict[str, Any]] = []
         while True:
@@ -2100,6 +2229,10 @@ class RuntimeServer:
                 break
             conn.event_queue.task_done()
         compacted: list[dict[str, Any]] = []
+        # Escaped byte length of the DELTA currently held by ``compacted[-1]``.
+        # Tracked incrementally so a merge never re-measures the deltas already
+        # folded in; see the size check below for why this is exact.
+        merged_delta_bytes: list[int] = []
         for frame in frames:
             previous = compacted[-1] if compacted else None
             if (
@@ -2115,11 +2248,55 @@ class RuntimeServer:
                     and (data.get("message") or {}).get("id")
                     == (prior.get("message") or {}).get("id")
                 ):
-                    merged = dict(data)
-                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
-                    compacted[-1] = {"op": "event", "data": merged}
-                    continue
+                    # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
+                    # merged frame re-serializes the unchanged accumulated
+                    # ``message`` — hundreds of KB — on every merge, which is
+                    # quadratic in queue depth: one 64-frame compaction
+                    # serialized 67.4 MB and took 152 ms on the runtime loop.
+                    # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
+                    # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
+                    # dropped it — manufacturing the very false disconnect this
+                    # guard exists to prevent.
+                    #
+                    # Exact, not an estimate: JSON escaping is per-character,
+                    # so the escaped length of ``a + b`` is exactly the escaped
+                    # length of ``a`` plus that of ``b``. The merged frame is
+                    # THIS frame carrying its own delta with everything already
+                    # folded into ``compacted[-1]`` prepended, so its encoded
+                    # size is this frame's size plus those accumulated escaped
+                    # bytes. Measuring ``frame`` rather than the merge result
+                    # is what makes this O(one frame) per merge — and because
+                    # it is THIS frame's own ``message``, a message that grew
+                    # between frames is sized correctly rather than estimated
+                    # from a stale one. Verified equal to a full re-dump on
+                    # adversarial payloads (quotes, backslashes, control
+                    # characters, emoji, U+2028) and thousands of random ones.
+                    prior_delta_bytes = merged_delta_bytes[-1]
+                    frame_bytes = _frame_size_without_delta(frame) + len(
+                        json.dumps(str(data.get("delta", ""))).encode()
+                    )
+                    if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
+                        merged = dict(data)
+                        merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                        compacted[-1] = {"op": "event", "data": merged}
+                        # ACCUMULATES: the new head carries the prior head's
+                        # whole delta plus its own, so the next merge must be
+                        # measured against both. Overwriting this with only the
+                        # newly-folded delta under-counts every merge after the
+                        # second and emitted a 1,048,795-byte frame — over the
+                        # cap this method exists to respect.
+                        merged_delta_bytes[-1] = prior_delta_bytes + (
+                            len(json.dumps(str(data.get("delta", ""))).encode()) - 2
+                        )
+                        continue
             compacted.append(frame)
+            # Seeded with THIS frame's own delta, not zero: the running total
+            # is "escaped bytes of the delta ``compacted[-1]`` currently
+            # holds", and a later merge prepends all of it. Seeding zero
+            # under-counted the first merge of every run. Only the delta is
+            # serialized here, never the accumulated message.
+            own_delta = (frame.get("data") or {}).get("delta", "")
+            merged_delta_bytes.append(len(json.dumps(str(own_delta)).encode()) - 2)
         for frame in compacted:
             conn.event_queue.put_nowait(frame)
         return len(compacted) < len(frames)
