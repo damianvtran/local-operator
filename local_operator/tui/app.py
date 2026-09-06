@@ -2423,14 +2423,23 @@ class OperatorApp(App[None]):
         # gate armed, and will it still be tomorrow" — and the list, the band
         # and the bare report all have to answer both halves from the same pair.
         self._approvals_default_auto: bool = False
-        # True once the user has made a deliberate `/approvals` choice in THIS
-        # pane. Deliberately the same shape as `Session._explicit_model_choice`
-        # (and `OwnedSessionHandle._explicit_approvals_choice`, which is the
-        # authority whenever a runtime is attached), and the symmetry is the
-        # point: a config edit may not revoke a hardening a human typed here,
-        # exactly as it may not revoke an explicit `/model` pick. Consulted in
-        # the LOOSENING direction only — see `_follow_configured_approvals`.
-        self._explicit_approvals_choice: bool = False
+        # The mode the user typed with `/approvals` in THIS pane, or None.
+        # Deliberately the same shape as `Session._explicit_model_choice` (and
+        # `OwnedSessionHandle._explicit_approvals_mode`, which is the authority
+        # whenever a runtime is attached), and the symmetry is the point: a
+        # config edit may not revoke a hardening a human typed here, exactly as
+        # it may not revoke an explicit `/model` pick.
+        #
+        # Records WHICH mode, not merely THAT one was chosen (review round 2,
+        # R6): as a boolean, a pane whose human typed `/approvals auto` was
+        # pinned to `ask` permanently by a single file tightening, since the
+        # loosening guard read the flag as "the human chose ask".
+        #
+        # INVARIANT: non-None only while the gate in force is the mode a human
+        # typed here — `_follow_configured_approvals` clears it when a file
+        # write moves the gate, which is what keeps the keep notice's "set with
+        # /approvals in this session" true.
+        self._explicit_approvals_mode: str | None = None
         # Which TURN a stop belongs to, rather than a flag someone has to clear.
         # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
@@ -10763,10 +10772,10 @@ class OperatorApp(App[None]):
             if not problem:
                 self._approvals_default_auto = wanted_auto
         # The user typed the mode in this pane, so a later LOOSENING disk write
-        # leaves this gate alone (see `_follow_configured_approvals`). Recorded
-        # on both directions: the flag means "this pane has an owner's
-        # opinion", and only the loosening direction consults it.
-        self._explicit_approvals_choice = True
+        # leaves this gate alone (see `_follow_configured_approvals`). The MODE
+        # is recorded, not merely the fact of a choice (review round 2, R6):
+        # both directions are recorded, but only a recorded `ask` refuses a file.
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if problem:
             notice(problem, "warning")
@@ -14624,7 +14633,9 @@ class OperatorApp(App[None]):
 
         * tightening (``auto`` → ``ask``) follows the file unconditionally;
         * loosening (``ask`` → ``auto``) does not move a pane whose human typed
-          ``/approvals ask`` in it, and prints a keep notice instead;
+          ``/approvals ask`` in it, and prints a keep notice instead — the
+          CHOSEN MODE is what is consulted, so a pane whose human chose ``auto``
+          has no hardening to protect and still follows the file both ways;
         * a pane that never chose follows the file in both directions, which is
           the operator's "goes into effect for all my agents" case and is what
           this change exists to deliver.
@@ -14661,10 +14672,13 @@ class OperatorApp(App[None]):
         if wanted_auto == self._approve_all:
             self._set_approve_all(self._approve_all)  # re-assert the band's `always` marker
             return ""
-        if announce and wanted_auto and self._explicit_approvals_choice:
+        if announce and wanted_auto and self._explicit_approvals_mode == "ask":
             # Loosening against this pane's own deliberate hardening: keep the
             # gate. Shaped like the model half's keep notice — what is kept,
             # why, and the command that adopts the file.
+            #
+            # `== "ask"` rather than a bare truth test (review round 2, R6):
+            # only a typed `ask` is a hardening worth refusing the file for.
             self._system_notice(
                 "keeping tool approvals: ask — set with /approvals in this session; "
                 "config.yml now says auto, /approvals auto adopts it",
@@ -14677,7 +14691,14 @@ class OperatorApp(App[None]):
             # whatever `/approvals` had recorded rather than being refused by
             # it. Without this a pane that had typed `/approvals ask` could
             # never loosen itself from its own settings page.
-            self._explicit_approvals_choice = True
+            self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
+        else:
+            # An ANOTHER-PROCESS write that reaches here is one that moves the
+            # gate, so the file now owns the value in force and a mode typed
+            # here earlier no longer describes it. Clearing is what makes the
+            # keep notice's "set with /approvals in this session" true rather
+            # than a claim about a value the file chose (review round 2, R6).
+            self._explicit_approvals_mode = None
         if not wanted_auto:
             self._allow_approvals_again()
         self._set_approve_all(wanted_auto)
@@ -22260,8 +22281,10 @@ class OperatorApp(App[None]):
         else:
             self._allow_approvals_again()
         # The user typed the mode here, so a later LOOSENING disk write leaves
-        # this pane's gate alone (see `_follow_configured_approvals`).
-        self._explicit_approvals_choice = True
+        # this pane's gate alone (see `_follow_configured_approvals`). The mode
+        # itself is recorded, so only a typed `ask` refuses a file loosening
+        # (review round 2, R6).
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if wanted_auto:
             return SlashResult(

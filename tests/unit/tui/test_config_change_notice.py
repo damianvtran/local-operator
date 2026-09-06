@@ -734,7 +734,7 @@ async def test_a_loosening_does_not_revoke_an_explicit_approvals_ask(monkeypatch
         await _adopted(app, pilot)
         app._cmd_approvals("ask", app._notice)
         assert app._approve_all is False
-        assert app._explicit_approvals_choice is True
+        assert app._explicit_approvals_mode == "ask"
 
         _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
         process_watcher(tmp_path).poll_now()
@@ -762,12 +762,33 @@ async def test_a_tightening_follows_the_file_over_an_explicit_choice(monkeypatch
     async with app.run_test(size=(100, 24)) as pilot:
         await _adopted(app, pilot)
         app._cmd_approvals("auto", app._notice)
-        assert app._approve_all is True and app._explicit_approvals_choice is True
+        assert app._approve_all is True and app._explicit_approvals_mode == "auto"
 
         _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
         assert app._approve_all is False, "a tightening was refused; safety must always propagate"
+
+        # ...AND THE PANE CAN STILL FOLLOW THE FILE BACK (review round 2, R6).
+        # The human's only explicit act was choosing `auto`; the file tightened
+        # them off it, and a loosening guard that read merely "this pane chose
+        # something" pinned the pane to `ask` for the rest of its life. Nothing
+        # here is a hardening to protect: the only mode this human ever typed is
+        # the one the file is now returning them to. Reading the FILE's write as
+        # the human's own choice is precisely the operator's originating
+        # complaint reappearing on this change's central key.
+        assert app._explicit_approvals_mode is None, (
+            "a file write left the pane claiming the human had typed the mode; "
+            "the keep notice would then misattribute the file's value"
+        )
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+        assert app._approve_all is True, (
+            "a pane whose human only ever chose `auto` stayed pinned to `ask` after "
+            "a file tightening; the file can never move it again (R6)"
+        )
+        assert not [n for n in _notices(app) if "keeping tool approvals" in n], _notices(app)
 
 
 @pytest.mark.asyncio

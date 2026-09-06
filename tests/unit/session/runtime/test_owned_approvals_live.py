@@ -162,7 +162,7 @@ async def test_a_tightening_follows_the_file_even_over_an_explicit_choice(tmp_pa
 
     handle._approvals_slash(session, "auto", SlashResult)
     assert handle._auto_approve is True
-    assert handle._explicit_approvals_choice is True
+    assert handle._explicit_approvals_mode == "auto"
     emitted.clear()
 
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
@@ -171,6 +171,27 @@ async def test_a_tightening_follows_the_file_even_over_an_explicit_choice(tmp_pa
     assert handle._auto_approve is False, "a tightening was refused; safety must always propagate"
     texts = [getattr(e, "text", "") for e in emitted]
     assert any("tool approvals: ask" in t and "config.yml changed" in t for t in texts), texts
+
+    # ...AND THE SESSION CAN STILL FOLLOW THE FILE BACK (review round 2, R6).
+    # The runtime half of the same regression: the only mode this human ever
+    # typed is `auto`, so there is no hardening for the loosening guard to
+    # protect, and a guard that read merely "this session chose something"
+    # pinned it to `ask` permanently. The FILE owns the value once it moves the
+    # gate, which is why the recorded mode is cleared — that is also what keeps
+    # the keep notice's "set with /approvals in this session" a true statement.
+    assert (
+        handle._explicit_approvals_mode is None
+    ), "a file write left the session claiming the human had typed the mode"
+    emitted.clear()
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+    assert handle._auto_approve is True, (
+        "a session whose human only ever chose `auto` stayed pinned to `ask` after a "
+        "file tightening; no later file write could ever move it back (R6)"
+    )
+    texts = [getattr(e, "text", "") for e in emitted]
+    assert not any("keeping tool approvals" in t for t in texts), texts
     await handle.dispose()
 
 

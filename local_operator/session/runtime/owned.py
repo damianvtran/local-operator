@@ -166,14 +166,27 @@ class OwnedSessionHandle(SessionHandle):
         # CONFIG-derived value — the same ``True`` that must keep following
         # the file.
         self._approval_pinned = approval_pinned
-        #: True once a human has made a deliberate ``/approvals`` choice in
-        #: THIS session. Deliberately the same shape as
+        #: The mode a human typed with ``/approvals`` in THIS session, or
+        #: ``None``. Deliberately the same shape as
         #: ``Session._explicit_model_choice``, and the symmetry is the point:
         #: the model half of this change already protects an explicit ``/model``
         #: pick from a ``config.yml`` default, and approvals is the more
-        #: dangerous key of the two. Read only by :meth:`follow_config`, which
-        #: consults it in the LOOSENING direction alone \u2014 see the rule there.
-        self._explicit_approvals_choice = False
+        #: dangerous key of the two.
+        #:
+        #: It records WHICH mode was chosen, not merely THAT one was (review
+        #: round 2, R6). A boolean conflated the two and the loosening guard
+        #: read it as "the human chose ask", so a session whose human typed
+        #: ``/approvals auto`` was pinned to ``ask`` forever by one file
+        #: tightening \u2014 the operator's originating complaint ("if I change a
+        #: setting I want it to go into effect for all my agents") reappearing
+        #: on the very key this change is centred on.
+        #:
+        #: INVARIANT: non-``None`` only while the gate in force is the mode a
+        #: human typed here. :meth:`_on_config_change` clears it whenever a
+        #: file write MOVES the gate, because at that moment the file, not the
+        #: human, owns the value \u2014 which is also what keeps the keep notice's
+        #: "set with /approvals in this session" a true statement.
+        self._explicit_approvals_mode: str | None = None
         self._unsubscribe_config_watch: Callable[[], None] | None = None
         #: The (kind, title, detail) of the gate currently parked, or None.
         #: Kept so the announcement can be re-run when the last viewer
@@ -402,7 +415,10 @@ class OwnedSessionHandle(SessionHandle):
           wrong surprise.
         * **Loosening (``ask`` → ``auto``) does not move a session whose human
           typed ``/approvals ask`` in it.** That session keeps its gate and
-          reads a keep notice naming the way to adopt the file instead.
+          reads a keep notice naming the way to adopt the file instead. It is
+          the CHOSEN MODE that is consulted, not merely the fact of a choice:
+          a session whose human chose ``auto`` has no hardening to protect and
+          follows the file in both directions like any other.
 
         The asymmetry is the whole point. The operator asked for settings to
         REACH running sessions, which was broken and is what this change fixes;
@@ -450,11 +466,16 @@ class OwnedSessionHandle(SessionHandle):
         wanted_auto = mode == "auto"
         if wanted_auto == self._auto_approve:
             return
-        if wanted_auto and self._explicit_approvals_choice:
+        if wanted_auto and self._explicit_approvals_mode == "ask":
             # LOOSENING against a human's explicit hardening: keep the gate and
             # say so. Shaped like the model half's keep notice — what is kept,
             # why, and the exact command that adopts the file — so the two
             # conflicts read as one rule rather than two behaviours.
+            #
+            # `== "ask"` and not a bare truth test: only a typed `ask` is a
+            # hardening this may refuse a file for. A typed `auto` is an
+            # opinion about the same key, but refusing a loosening on its
+            # behalf would pin a session to a mode its human never asked for.
             self._emit_notice(
                 "keeping tool approvals: ask — set with /approvals in this session; "
                 "config.yml now says auto, /approvals auto adopts it",
@@ -463,6 +484,13 @@ class OwnedSessionHandle(SessionHandle):
             )
             return
         self._auto_approve = wanted_auto
+        # The FILE now owns the value in force, so a mode the human typed here
+        # earlier no longer describes this gate. Clearing keeps the invariant on
+        # `_explicit_approvals_mode` exact (review round 2, R6): without it, a
+        # session tightened off a typed `auto` would still be carrying that
+        # `auto`, and the keep notice's "set with /approvals in this session"
+        # would be describing a choice the file, not the human, had made.
+        self._explicit_approvals_mode = None
         self._notify()
         self._emit_notice(
             (
@@ -2355,7 +2383,9 @@ class OwnedSessionHandle(SessionHandle):
 
         The persist half is declined for the machine-locality reason
         `/approvals default` gives: a default belongs to the terminal whose
-        launches it governs, not to a runtime that outlives it.
+        launches it governs, not to a runtime that outlives it. ``saved`` is
+        NOT declined on those grounds — it only READS that default and switches
+        this session, which is this handle's own mutation (QA round 2, Q49).
         """
         target = (arg or "").strip()
         lowered = target.lower()
@@ -2376,14 +2406,55 @@ class OwnedSessionHandle(SessionHandle):
                 "switches the shared session now",
                 style="warning",
             )
-        provider, sep, model_id = target.partition("/")
-        if not sep or not model_id:
-            return SlashResult(
-                kind="notice",
-                text="usage: /model <provider>/<model-id> "
-                "(e.g. openrouter/deepseek/deepseek-chat)",
-                style="warning",
-            )
+        if lowered == "saved":
+            # ``/model saved`` — adopt the CONFIGURED default (#369). Handled
+            # here because this method is what serves a DETACHED runtime's
+            # `/model`: `OperatorApp` intercepts `saved` before routing, so a
+            # local pane always worked while the phone and any viewer on a
+            # runtime-owned session fell through to the `<provider>/<model-id>`
+            # usage error — `saved` has no `/` (QA round 2, Q49). That made the
+            # keep notice this same change emits (`session.py`, "/model saved
+            # adopts it") a dead end on the one surface that prints it from a
+            # runtime, and contradicted the `/help` text round 1's U5 added.
+            #
+            # UNLIKE `/model default`, this is a READ of config, not a write, so
+            # the machine-locality reason that declines the persist above does
+            # not apply: adopting a value is a switch on this session, which is
+            # exactly what this handle owns. The read is direct rather than a
+            # cached boot value, matching `OperatorApp._cmd_model_saved`, so a
+            # default written during this session is what gets adopted.
+            try:
+                from local_operator.config import ConfigManager
+                from local_operator.paths import config_dir
+
+                manager = ConfigManager(config_dir())
+                saved_provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+                saved_model = str(manager.get_config_value("model_name", "") or "").strip()
+            except Exception as error:  # noqa: BLE001 — reported, never fatal
+                return SlashResult(
+                    kind="notice",
+                    text=f"could not read the saved default: {error}",
+                    style="error",
+                )
+            if not saved_provider or not saved_model:
+                # Honest "there is nothing to go back to", in the app's own
+                # words so both surfaces answer an empty config identically.
+                return SlashResult(
+                    kind="notice",
+                    text="no boot default saved yet — /model default <provider>/<model-id> "
+                    "sets one",
+                    style="warning",
+                )
+            provider, model_id = saved_provider, saved_model
+        else:
+            provider, sep, model_id = target.partition("/")
+            if not sep or not model_id:
+                return SlashResult(
+                    kind="notice",
+                    text="usage: /model <provider>/<model-id> "
+                    "(e.g. openrouter/deepseek/deepseek-chat)",
+                    style="warning",
+                )
         old_label = getattr(session, "model_label", "")
         try:
             await self.set_model(provider.lower(), model_id)
@@ -2547,12 +2618,11 @@ class OwnedSessionHandle(SessionHandle):
             )
         self._auto_approve = wanted_auto
         # A human typed the mode in this session, so a later LOOSENING disk
-        # write leaves this gate alone (see :meth:`follow_config`). Recorded on
-        # both directions, not only on the hardening: the flag means "this
-        # session has an owner's opinion", and a user who typed `/approvals
-        # auto` here has one just as much — what differs is that only the
-        # loosening direction consults it.
-        self._explicit_approvals_choice = True
+        # write leaves this gate alone (see :meth:`_on_config_change`). The MODE
+        # is recorded, not merely the fact of a choice (review round 2, R6):
+        # both directions are worth recording, but only a recorded `ask` is a
+        # hardening a file loosening must not revoke.
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._notify()
         return SlashResult(
             kind="notice",
