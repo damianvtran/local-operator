@@ -591,7 +591,6 @@ Never tag an owner in a *comment* to ask for review unless their review is
 genuinely required — the auto-request is not a comment tag, and a comment tag
 is what says the PR is waiting on that person.
 
-
 ## Security advisories
 
 Any agent handling a reported vulnerability or a GHSA for this repository
