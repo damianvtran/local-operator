@@ -14479,15 +14479,22 @@ class OperatorApp(App[None]):
 
         * **disk drift** \u2014 the install on disk is no longer the one this
           process loaded, so any runtime started from here will be NEWER than
-          this terminal. ``/reload`` is the remedy because it restarts the
-          terminal on the current install and resumes the session.
+          this window. ``/reload`` is the remedy because it restarts the
+          window on the current install and picks the session back up.
         * **owner skew** \u2014 the runtime this session is bound to reports a
-          different build than this terminal, or reports none at all (which
+          different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
-          construction). ``/stop`` then resend is the remedy: the bare
+          construction). ``/stop`` then sending again is the remedy: the bare
           ``/stop`` on a follower asks the owner to stop, and the next prompt
           engages a fresh runtime from the current install. Both keep working
           in the meantime.
+
+        The COPY deliberately says "session" and "window" rather than
+        "runtime" and "terminal": the runtime/terminal split is real and
+        load-bearing for us, but the notice never explains it, so to a reader
+        the two words collapse into one thing they can see (design review
+        round 1, D2). The owner notices name the session by its title for the
+        same reason \u2014 see the ``subject`` construction below.
 
         Called at the seams that spawn or bind a runtime (adopt, engage, the
         tail of a successful bind) \u2014 the moments the answer can change and the
@@ -14537,10 +14544,9 @@ class OperatorApp(App[None]):
                 "disk",
                 loaded.label(),
                 on_disk.label(),
-                f"the install on disk changed since this terminal started "
-                f"({loaded.label()} \u2192 {on_disk.label()}). Runtimes started from here "
-                f"run the NEW build against this old terminal. /reload restarts this "
-                f"terminal on the current install and resumes this session.",
+                f"local-operator was updated after this window opened "
+                f"({_build_change(loaded, on_disk)}) \u2014 this window is still on the "
+                f"old version. /reload updates it and picks this session back up.",
             )
 
         # --- C: is the bound runtime a different build than this terminal? --
@@ -14560,18 +14566,28 @@ class OperatorApp(App[None]):
         # rather than the facade object so a takeover that swaps the object
         # under one conversation does not re-announce the same runtime.
         scope = str(getattr(session, "session_id", "") or id(session))
+        # NAME the session these notices are about. Two stale sessions in one
+        # terminal each legitimately get a notice (that is what the per-session
+        # debounce buys), but with a deictic "this session" in both they render
+        # as two byte-identical paragraphs — which reads as the app printing
+        # one warning twice, i.e. exactly the duplicate-notice bug the re-key
+        # fixed, and leaves ``/stop`` ambiguous about which session it acts on
+        # (design review round 1, D1). The title is what the user named and can
+        # see; "this session" survives only as the fallback for an unnamed one.
+        title = str(getattr(session, "conversation_name", "") or "").strip()
+        subject = f"\u201c{title}\u201d" if title else "this session"
         if not owner_version:
             # A runtime older than the field itself. It cannot tell us what it
             # is running, but the absence is informative: the field ships in
-            # this build, so anything without it predates this terminal. Every
-            # resident runtime legitimately trips this once in the release
-            # window, and it is telling the truth each time.
+            # this build, so anything without it is older than this window.
+            # Every resident runtime legitimately trips this once in the
+            # release window, and it is telling the truth each time.
             announce(
                 "owner-unknown",
                 "",
                 loaded.label(),
-                "this session's runtime predates build reporting \u2014 it is older than "
-                "this terminal. /stop, then resend, restarts it on the current install.",
+                f"{subject} is running an older version than this window \u2014 some "
+                f"commands may not work. /stop, then send again to restart it.",
                 scope,
             )
             return
@@ -14583,9 +14599,9 @@ class OperatorApp(App[None]):
                 "owner",
                 owner.label(),
                 loaded.label(),
-                f"this session's runtime is running {owner.label()} but this terminal "
-                f"is {loaded.label()} \u2014 routed commands may behave differently. /stop, "
-                f"then resend: the runtime restarts on the current install.",
+                f"{subject} is running {owner.label()} but this window is "
+                f"{loaded.label()} \u2014 some commands may not work. /stop, then send "
+                f"again to restart it.",
                 scope,
             )
 
@@ -14699,9 +14715,9 @@ class OperatorApp(App[None]):
                 # disturb ``test_noop_consumers``, which maps producers onto
                 # consumers rather than the reverse.
                 self._notice(
-                    "this session's runtime is running a build older than /team attach "
-                    "(pre 0.46.25); nothing was attached. /stop, then resend, to restart "
-                    "it on the current install.",
+                    "this session is running a version too old to attach a team "
+                    "(before 0.46.25); nothing was attached. /stop, then send again "
+                    "to restart it.",
                     "warning",
                 )
                 return
@@ -24371,6 +24387,28 @@ def _canonical_frontend(session: Any) -> bool:
     """
     attributes = getattr(session, "__dict__", {})
     return "_frontend_state_store" in attributes or "_frontend_store" in attributes
+
+
+def _build_change(before: Any, after: Any) -> str:
+    """How one build differs from another, without repeating what they share.
+
+    The headline case for drift is ``lop-update`` rebuilding from ``main``
+    WITHOUT a version bump, so both sides carry the same version and differ
+    only in the recorded commit. Two full labels then spend the sentence's most
+    prominent parenthetical restating one version:
+    ``0.48.0@aaaaaaa → 0.48.0@bbbbbbb``. The refs are the only distinguishing
+    fact there and must stay, but the version belongs outside the arrow:
+    ``0.48.0, aaaaaaa → bbbbbbb`` (design review round 1, D3).
+
+    When the versions genuinely differ the two-arm form is the honest one and
+    is kept. Deliberately a CALL-SITE formatter rather than a change to
+    ``BuildStamp.label()``: that method has other callers whose single-build
+    rendering is correct as it is.
+    """
+    same_version = before.version and before.version == after.version
+    if same_version and before.source_ref and after.source_ref:
+        return f"{before.version}, {before.source_ref[:7]} \u2192 {after.source_ref[:7]}"
+    return f"{before.label()} \u2192 {after.label()}"
 
 
 def _model_spec(session) -> Any | None:

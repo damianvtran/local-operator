@@ -41,6 +41,16 @@ def _notices(app: OperatorApp) -> list[str]:
     return [block._text for block in app.query(NoticeBlock)]
 
 
+# Match on a STABLE fragment of each notice rather than a whole sentence: the
+# copy is a design surface and was rewritten once already (design review round
+# 1, D1/D2), so cells that quote whole strings turn every wording change into a
+# batch of unrelated test failures. These name the one phrase that identifies
+# each notice.
+DRIFT = "was updated after this window opened"
+OWNER_SKEW = "but this window is"
+OWNER_UNKNOWN = "running an older version than this window"
+
+
 class _BoundViewer(FakeSession):
     """A follower facade that has already bound to a runtime.
 
@@ -59,18 +69,25 @@ class _BoundViewer(FakeSession):
         owner_version: str = "",
         owner_source_ref: str = "",
         session_id: str = "",
+        conversation_name: str = "",
     ) -> None:
         super().__init__()
         self.owner_version = owner_version
         self.owner_source_ref = owner_source_ref
-        # ``session_id`` is a read-only property on the base double, and the
-        # owner-notice debounce is keyed by it — so a test that needs two
-        # DISTINCT sessions has to override it here rather than assign it.
+        # ``session_id`` and ``conversation_name`` are read-only properties on
+        # the base double. The debounce is keyed by the first and the notice
+        # names the session with the second, so a test that needs two DISTINCT
+        # named sessions has to override both here rather than assign them.
         self._skew_session_id = session_id
+        self._skew_conversation_name = conversation_name
 
     @property
     def session_id(self) -> str:  # type: ignore[override]
         return self._skew_session_id or super().session_id
+
+    @property
+    def conversation_name(self) -> str:  # type: ignore[override]
+        return self._skew_conversation_name
 
 
 @pytest.mark.asyncio
@@ -79,7 +96,7 @@ async def test_a_moved_install_warns_once_and_names_reload(monkeypatch, tmp_path
 
     The notice has to name BOTH builds — a warning that says only "something
     changed" leaves the user unable to tell a routine rebuild from the
-    several-release gap that actually breaks routed commands — and it has to
+    several-release gap that actually breaks commands — and it has to
     name ``/reload``, which is the one action that fixes it without losing the
     session.
     """
@@ -106,7 +123,7 @@ async def test_a_moved_install_warns_once_and_names_reload(monkeypatch, tmp_path
         await pilot.pause()
         second = _notices(app)
 
-    drift = [n for n in first if "install on disk changed" in n]
+    drift = [n for n in first if DRIFT in n]
     assert len(drift) == 1, first
     assert "0.46.23" in drift[0] and "0.49.0" in drift[0], "both builds must be named"
     assert "/reload" in drift[0]
@@ -141,7 +158,7 @@ async def test_a_second_distinct_drift_is_still_announced(monkeypatch, tmp_path)
         await pilot.pause()
         notices = _notices(app)
 
-    drift = [n for n in notices if "install on disk changed" in n]
+    drift = [n for n in notices if DRIFT in n]
     assert len(drift) == 2, drift
     assert any("0.49.0" in n for n in drift) and any("0.50.0" in n for n in drift)
 
@@ -172,9 +189,14 @@ async def test_a_same_version_rebuild_is_detected_through_its_ref(monkeypatch, t
         await pilot.pause()
         notices = _notices(app)
 
-    drift = [n for n in notices if "install on disk changed" in n]
+    drift = [n for n in notices if DRIFT in n]
     assert len(drift) == 1, notices
-    assert "0.49.0@aaaaaaa" in drift[0] and "0.49.0@bbbbbbb" in drift[0]
+    # The refs are the only distinguishing fact, so both must appear — but the
+    # shared version is named ONCE rather than repeated on both arms, which is
+    # the whole of D3: `0.49.0@aaaaaaa → 0.49.0@bbbbbbb` spent 22 characters
+    # restating one version in the sentence's most prominent parenthetical.
+    assert "0.49.0, aaaaaaa \u2192 bbbbbbb" in drift[0], drift[0]
+    assert "0.49.0@" not in drift[0], "the version must not be repeated per arm"
 
 
 @pytest.mark.asyncio
@@ -199,8 +221,8 @@ async def test_a_matching_build_says_nothing(monkeypatch, tmp_path) -> None:
         await pilot.pause()
         notices = _notices(app)
 
-    assert not [n for n in notices if "install on disk changed" in n]
-    assert not [n for n in notices if "runtime is running" in n]
+    assert not [n for n in notices if DRIFT in n]
+    assert not [n for n in notices if OWNER_SKEW in n]
 
 
 @pytest.mark.asyncio
@@ -227,7 +249,7 @@ async def test_an_older_runtime_is_named_with_the_stop_remedy(monkeypatch, tmp_p
         await pilot.pause()
         notices = _notices(app)
 
-    skew = [n for n in notices if "runtime is running 0.46.23" in n]
+    skew = [n for n in notices if "running 0.46.23" in n and OWNER_SKEW in n]
     assert len(skew) == 1, notices
     assert "0.49.0" in skew[0]
     assert "/stop" in skew[0]
@@ -258,7 +280,7 @@ async def test_a_runtime_without_a_stamp_is_reported_as_predating_it(monkeypatch
         await pilot.pause()
         notices = _notices(app)
 
-    predates = [n for n in notices if "predates build reporting" in n]
+    predates = [n for n in notices if OWNER_UNKNOWN in n]
     assert len(predates) == 1, "one session, repeatedly checked, speaks once"
     assert "/stop" in predates[0]
 
@@ -296,7 +318,7 @@ async def test_a_second_stale_session_gets_its_own_notice(monkeypatch, tmp_path)
         await pilot.pause()
         notices = _notices(app)
 
-    predates = [n for n in notices if "predates build reporting" in n]
+    predates = [n for n in notices if OWNER_UNKNOWN in n]
     assert len(predates) == 2, (
         "each stale session must be reported once; a per-process key hides "
         "every runtime after the first"
@@ -332,7 +354,7 @@ async def test_disk_drift_is_not_rescoped_by_a_session_swap(monkeypatch, tmp_pat
         await pilot.pause()
         notices = _notices(app)
 
-    drift = [n for n in notices if "install on disk changed" in n]
+    drift = [n for n in notices if DRIFT in n]
     assert len(drift) == 1, "disk drift is per-process, not per-session"
 
 
@@ -354,7 +376,7 @@ async def test_a_matching_runtime_is_silent(monkeypatch, tmp_path) -> None:
         await pilot.pause()
         notices = _notices(app)
 
-    assert not [n for n in notices if "runtime is running" in n]
+    assert not [n for n in notices if OWNER_SKEW in n]
     assert not [n for n in notices if "predates" in n]
 
 
@@ -386,7 +408,7 @@ async def test_a_cold_viewer_is_not_reported_as_a_prehistoric_runtime(
         await pilot.pause()
         notices = _notices(app)
 
-    assert not [n for n in notices if "predates build reporting" in n]
+    assert not [n for n in notices if OWNER_UNKNOWN in n]
 
 
 @pytest.mark.asyncio
@@ -407,8 +429,8 @@ async def test_an_unreadable_own_build_disables_the_check(monkeypatch, tmp_path)
         await pilot.pause()
         notices = _notices(app)
 
-    assert not [n for n in notices if "runtime is running" in n]
-    assert not [n for n in notices if "install on disk changed" in n]
+    assert not [n for n in notices if OWNER_SKEW in n]
+    assert not [n for n in notices if DRIFT in n]
 
 
 @pytest.mark.asyncio
@@ -435,7 +457,7 @@ async def test_a_failing_disk_read_does_not_break_the_seam(monkeypatch, tmp_path
         await pilot.pause()
         notices = _notices(app)
 
-    assert not [n for n in notices if "install on disk changed" in n]
+    assert not [n for n in notices if DRIFT in n]
 
 
 @pytest.mark.asyncio
@@ -458,7 +480,7 @@ async def test_a_pre_attach_runtime_noop_degrades_loudly(monkeypatch, tmp_path) 
         await pilot.pause()
         notices = _notices(app)
 
-    stale = [n for n in notices if "older than /team attach" in n]
+    stale = [n for n in notices if "too old to attach a team" in n]
     assert len(stale) == 1, notices
     assert "nothing was attached" in stale[0], "the user must learn the attach did NOT happen"
     assert "/stop" in stale[0]
@@ -625,3 +647,145 @@ async def test_the_tui_owner_treats_declaring_nothing_as_undeclared(monkeypatch,
         await app.run_slash_authoritative("team", "lopdev do the thing", [], consumers=[])
 
     assert submitted == ["do the thing"]
+
+
+# ---------------------------------------------------------------------------
+# Notice COPY (design review round 1)
+#
+# The copy is a reviewed design surface, so these cells pin the properties the
+# review bought rather than whole sentences: the subject is named, the shared
+# version is not repeated, and the internal vocabulary stays out.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_two_stale_sessions_are_told_apart_by_name(monkeypatch, tmp_path) -> None:
+    """D1: correct per-session behaviour must not RENDER as a duplicate bug.
+
+    Two stale sessions each legitimately earn a notice — that is what the
+    per-session debounce buys. With a deictic "this session" in both, the two
+    paragraphs came out byte-identical, which reads as the app printing one
+    warning twice and leaves ``/stop`` ambiguous about which session it acts
+    on. Naming the subject is what makes two notices an inventory rather than
+    a malfunction.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.49.0")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+
+        first = _BoundViewer(
+            owner_version="", session_id="sessionaaaa1", conversation_name="ingest pipeline"
+        )
+        app._session = first
+        app._check_build_skew(reason="bind")
+
+        second = _BoundViewer(
+            owner_version="", session_id="sessionbbbb2", conversation_name="release notes"
+        )
+        app._session = second
+        app._check_build_skew(reason="resume")
+        await pilot.pause()
+        notices = _notices(app)
+
+    stale = [n for n in notices if OWNER_UNKNOWN in n]
+    assert len(stale) == 2, notices
+    assert stale[0] != stale[1], (
+        "two stale sessions must not produce byte-identical paragraphs; that "
+        "is indistinguishable from the duplicate-notice bug the re-key fixed"
+    )
+    assert "\u201cingest pipeline\u201d" in stale[0]
+    assert "\u201crelease notes\u201d" in stale[1]
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_session_falls_back_to_the_deictic(monkeypatch, tmp_path) -> None:
+    """A fork or a fresh session has no title yet; the notice still has to work.
+
+    The fallback is the ONLY case where the old deictic wording survives, so
+    an empty title must not render as empty quotes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.49.0")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        unnamed = _BoundViewer(owner_version="", session_id="sessionccccc")
+        app._session = unnamed
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        notices = _notices(app)
+
+    stale = [n for n in notices if OWNER_UNKNOWN in n]
+    assert len(stale) == 1, notices
+    assert stale[0].startswith("this session is running an older version")
+    assert "\u201c\u201d" not in stale[0], "an empty title must not render as empty quotes"
+
+
+@pytest.mark.asyncio
+async def test_differing_versions_keep_the_two_arm_form(monkeypatch, tmp_path) -> None:
+    """D3 factors out a SHARED version only; a real version change still shows both.
+
+    Collapsing here would hide the fact the user most needs — that the version
+    itself moved, not just the commit.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.46.23", source_ref="aaaaaaa1111")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.0", source_ref="bbbbbbb2222"),
+        )
+        app._check_build_skew(reason="rebuild")
+        await pilot.pause()
+        notices = _notices(app)
+
+    drift = [n for n in notices if DRIFT in n]
+    assert len(drift) == 1, notices
+    assert "0.46.23@aaaaaaa \u2192 0.49.0@bbbbbbb" in drift[0], drift[0]
+
+
+def test_the_notices_carry_no_internal_vocabulary() -> None:
+    """D2: the words we use for ourselves must not reach the user.
+
+    "routed", "runtime"/"terminal" and "build reporting" are all real and
+    load-bearing internally, but the notice never explains the runtime/terminal
+    split, so to a reader those words collapse into the one thing they can see.
+
+    Walks the AST and inspects STRING LITERALS only. A regex over the source
+    was the first attempt and is unsound: it reads through the surrounding
+    comments, which legitimately discuss runtimes and terminals and must keep
+    being able to — it reported a failure for the word "routed" appearing in a
+    code comment.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(OperatorApp._check_build_skew)))
+    literals = [
+        node.value.lower()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    # The docstring is prose for maintainers, not user copy.
+    body = " ".join(literals[1:]) if literals else ""
+    for word in ("routed", "predates build reporting", "this terminal", "resend"):
+        assert word not in body, f"internal vocabulary reached the notice copy: {word!r}"

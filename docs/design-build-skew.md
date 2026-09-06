@@ -329,14 +329,16 @@ loaded". Debounce state: `self._skew_notice_shown: set[tuple]`.
    - **C (owner skew):** if the adopted session is already attached and
      exposes `owner_version`, compare with `self._loaded_build`. An empty
      `owner_version` means the runtime predates the field, i.e. it is older
-     than this terminal by construction — warn once per session with the
-     "predates build reporting" copy.
+     than this window by construction — warn once per session with the
+     absent-version copy.
 2. `_start_runtime_engage` (`app.py:8848`) and the success tail of
    `_bind_then_dispatch` (`app.py:9004`) — re-check A immediately before a
    spawn, and re-check C after a fresh bind (`ensure()` resolved
    `owner_version`). Both are debounced, so the mount engage, the draft
    warm-up, and the slash-command engage cost one comparison each and paint at
-   most one notice per distinct (kind, from, to) triple per process.
+   most one notice per distinct (kind, from, to, scope) key — scope being the
+   session id for the owner notices and empty for disk drift, which is a fact
+   about the process rather than about any one session.
 
 **Where the notice lands:** `_system_notice(body, "warning")` — its contract
 (`app.py:14527-14538`) is exactly this class ("infrastructure the user did not
@@ -345,33 +347,49 @@ status-band element: a band change is a persistent layout surface and triggers
 the design-review path for marginal benefit over a notice the user reads at
 the moment it matters (when they are about to engage a runtime).
 
-**Notice copy:**
+**Notice copy** (rewritten wholesale by design review round 1 — D1/D2/D3.
+The originals used our vocabulary, not the user's: "routed commands",
+"predates build reporting", and a runtime/terminal split the notice never
+explains, so to a reader those two words collapse into the one thing they can
+see. Every string below was measured through the real `NoticeBlock` at
+120/100/80 columns and is the same height or shorter than what it replaced.):
 
-- A: `the install on disk changed since this terminal started (0.46.23 →
-  0.49.0). Runtimes started from here run the NEW build against this old
-  terminal. /reload restarts this terminal on the current install and resumes
-  this session.` (Version arms rendered from the stamp; with refs,
-  `0.48.0@a1b2c3d → 0.48.0@4d3ce1d`.)
-- C, known versions: `this session's runtime is running 0.46.23 but this
-  terminal is 0.49.0 — routed commands may behave differently. /stop, then
-  resend: the runtime restarts on the current install.`
+- A: `local-operator was updated after this window opened (0.49.5, cf2b854 →
+  a1b2c3d) — this window is still on the old version. /reload updates it and
+  picks this session back up.` The parenthetical names a SHARED version once
+  and lets the refs carry the difference (D3), because the headline case is
+  `lop-update` rebuilding `main` with no version bump — the two-arm
+  `0.48.0@a1b2c3d → 0.48.0@4d3ce1d` spent 22 characters restating one version.
+  When the versions genuinely differ, both arms are shown in full. This is a
+  call-site branch (`app.py::_build_change`), not a change to
+  `BuildStamp.label()`, which other callers share.
+- C, known versions: `“<conversation name>” is running 0.46.23 but this window
+  is 0.49.5 — some commands may not work. /stop, then send again to restart
+  it.`
   (Bare `/stop` on a follower sends the stop op to the owner,
   `app.py:15097-15102`; the next prompt or `/team` engages a fresh runtime
   from the current disk build. Both runtimes keep working in the meantime —
   this is advisory, not a block.)
-- C, absent version: `this session's runtime predates build reporting — it is
-  older than this terminal. /stop, then resend, restarts it on the current
-  install.` Once per session per process: right after this release ships,
-  every resident runtime legitimately triggers it once, and it is telling the
-  truth each time.
+- C, absent version: `“<conversation name>” is running an older version than
+  this window — some commands may not work. /stop, then send again to restart
+  it.` Once per session per process: right after this release ships, every
+  resident runtime legitimately triggers it once, and it is telling the truth
+  each time.
+
+Both C notices NAME the session, falling back to `this session` only when the
+title is empty (D1). The subject is load-bearing rather than decorative: two
+stale sessions in one terminal each earn a notice, and with a deictic subject
+in both they render as two byte-identical paragraphs — which reads as the app
+printing one warning twice, i.e. exactly the duplicate-notice bug the
+per-session debounce key exists to avoid, and leaves `/stop` ambiguous about
+which session it acts on.
 
 **Old-runtime noop degradation (viewer-side, pairs with C).**
 `_render_authoritative_slash` (`app.py:14629`): a `noop` whose `data.type` is
 `"team_mutate"` or `"agent_mutate"` can only come from a pre-#624 owner.
 Render a warning instead of returning silently:
-`this session's runtime is running a build older than /team attach (pre
-0.46.25); nothing was attached. /stop, then resend, to restart it on the
-current install.` Two lines of renderer that close the last silent quadrant.
+`this session is running a version too old to attach a team (before
+0.46.25); nothing was attached. /stop, then send again to restart it.` Two lines of renderer that close the last silent quadrant.
 (Adding a *consumer* for a type no current producer emits does not disturb the
 `test_noop_consumers` audit, which maps producers → consumers.)
 
