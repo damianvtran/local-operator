@@ -2054,6 +2054,24 @@ class RuntimeServer:
         the append contract UIs rely on. Returns whether any room was freed.
         Runs synchronously on the runtime loop, so the drain task cannot
         observe a half-compacted queue.
+
+        A MERGE THAT WOULD NOT FIT IS REFUSED, and that check cannot be
+        skipped on the grounds that everything in this queue already passed
+        ``relay_frame_or_degraded``. It did — individually. Merging is the one
+        operation here that makes a frame BIGGER than anything the guard was
+        shown, so it can assemble individually-legal frames into an
+        unreadable one downstream of the only guard: 20 frames of 908,157 B
+        merged to 1,060,157 B and killed a real pump, and at 1 KiB deltas a
+        full 64-frame queue merged to 1,109,802 B — within 20 KB of the frame
+        that killed the operator's socket. The trigger is precisely the burst
+        this method exists to absorb.
+
+        REFUSED, not degraded, because refusing is lossless: both frames are
+        individually sendable, so keeping them apart costs one queue slot and
+        no content, while degrading would throw away deltas the viewer needs.
+        Refusing can leave nothing compacted, and that is the honest answer —
+        the caller then drops a client it genuinely cannot serve, which is the
+        documented slow-reader path rather than a silently broken socket.
         """
         frames: list[dict[str, Any]] = []
         while True:
@@ -2080,8 +2098,13 @@ class RuntimeServer:
                 ):
                     merged = dict(data)
                     merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
-                    compacted[-1] = {"op": "event", "data": merged}
-                    continue
+                    merged_frame = {"op": "event", "data": merged}
+                    # Measured against the same cap the guard uses. Over it,
+                    # leave the two frames unmerged (see the docstring): the
+                    # pair is readable, their concatenation is not.
+                    if len(json.dumps(merged_frame).encode()) + 1 <= _MAX_LINE_BYTES:
+                        compacted[-1] = merged_frame
+                        continue
             compacted.append(frame)
         for frame in compacted:
             conn.event_queue.put_nowait(frame)

@@ -2004,6 +2004,10 @@ class Session:
         # the live session painted N identical ``interrupted`` rows at
         # sub-second cadence and none of them said why.
         self._pre_aborted_drops = 0
+        # Latch for the notice above, reset on the same edge as the counter.
+        # Separate from the count because the count answers "how long is this
+        # run" and this answers "have I already said so".
+        self._pre_abort_notified = False
         # Monotonic count of aborts. It is what lets an arriving unit of work
         # tell "an abort happened before I got here" (stale — my own intent is
         # newer, so I run) from "an abort happened while I was queued" (that
@@ -4529,6 +4533,11 @@ class Session:
                 admitted=admitted,
                 admitted_id=user.id,
                 producer_command_id=producer_command_id,
+                # A typed prompt has a caller awaiting it, so it may never be
+                # dropped silently: an abort landing between the clear above
+                # and the turn's own gate must produce a VISIBLE interrupt,
+                # not a success return for work that never ran.
+                may_drop=False,
             )
         finally:
             self._turn_lock.release()
@@ -5794,6 +5803,7 @@ class Session:
         admitted: asyncio.Future[None] | None = None,
         admitted_id: str | None = None,
         producer_command_id: str | None = None,
+        may_drop: bool = True,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -5837,6 +5847,7 @@ class Session:
                 admitted=admitted,
                 admitted_id=admitted_id,
                 producer_command_id=producer_command_id,
+                may_drop=may_drop,
             )
             await self._drain_continuation()
         finally:
@@ -5877,9 +5888,14 @@ class Session:
         admitted: asyncio.Future[None] | None = None,
         admitted_id: str | None = None,
         producer_command_id: str | None = None,
+        may_drop: bool = True,
     ) -> None:
-        """One loop run + persistence. Caller holds ``_turn_lock``."""
-        if self._abort_requested:
+        """One loop run + persistence. Caller holds ``_turn_lock``.
+
+        ``may_drop`` is False for a SYNCHRONOUS typed prompt; see the drop gate
+        below for why a caller that is waiting must not be dropped silently.
+        """
+        if self._abort_requested and may_drop:
             # BORN PRE-ABORTED: do not open a turn at all. Running one spends a
             # real provider request — the loop builds and issues the call
             # before ``_drain_stream`` cancels its pump — and returns an
@@ -5900,11 +5916,31 @@ class Session:
             # unit of work (``_prompt_messages``) or a typed prompt, and a drop
             # is neither. Clearing here would let the next arrival run the very
             # work the abort was meant to stop.
-            await self._drop_pre_aborted_turn(initial, admitted=admitted, admitted_id=admitted_id)
+            #
+            # ONLY ARRIVING WORK MAY BE DROPPED (``may_drop``). Dropping is
+            # silent by design — no start/end pair — which is right when
+            # nobody is waiting: a wake or peer message has no caller to
+            # inform, and the message is still held for the next turn.
+            # A TYPED PROMPT IS THE OPPOSITE. ``prompt()`` clears the flag
+            # under the lock, but the pipeline awaits twice before this gate
+            # reads it, so an abort landing in that window (submit, then
+            # immediately Esc — exactly the incident's behaviour) would send
+            # the user's OWN prompt down this path: no events, and ``prompt()``
+            # returning success for work that never ran. A user's typed prompt
+            # must never vanish silently — it either runs or is VISIBLY
+            # interrupted — so that caller keeps the pre-armed-signal
+            # behaviour below, which emits the ordinary aborted start/end pair.
+            await self._drop_pre_aborted_turn(
+                initial,
+                admitted=admitted,
+                admitted_id=admitted_id,
+                producer_command_id=producer_command_id,
+            )
             return
         # A turn is really running, so any run of drops has ended; the next one
         # earns a fresh notice.
         self._pre_aborted_drops = 0
+        self._pre_abort_notified = False
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
             # construction; the first turn (with a loop) re-arms via pump().
@@ -6156,6 +6192,7 @@ class Session:
         *,
         admitted: asyncio.Future[None] | None = None,
         admitted_id: str | None = None,
+        producer_command_id: str | None = None,
     ) -> None:
         """Retire a turn that would have been born aborted, without running it.
 
@@ -6175,32 +6212,63 @@ class Session:
         """
         self._pre_aborted_drops += 1
         for message in initial:
-            await self._transcript.append_message(message)
+            # EXACTLY ONE WRITER PER MESSAGE, and which one differs by type
+            # because the two parking paths have opposite persistence
+            # contracts:
+            #
+            # * ``CustomMessage`` -> ``_append_or_park_journal`` only touches
+            #   LIVE context, so the durable write is owed here.
+            # * plain ``Message`` -> the steering queue's consumer
+            #   (``_drain_steering``) persists whatever it drains. Appending
+            #   here too wrote the row twice, and the duplicate survived into
+            #   replayed history, so a resumed session showed the message
+            #   twice and sent it to the model twice. This is the same
+            #   contract ``receive_peer_message``'s mid-turn steer path relies
+            #   on: queue it, and let the drain be the single writer.
             if isinstance(message, CustomMessage):
+                await self._transcript.append_message(
+                    message,
+                    producer_command_id=(
+                        producer_command_id if message.id == admitted_id else None
+                    ),
+                )
                 self._append_or_park_journal(message)
             else:
-                # A plain Message has no journal park (that path is typed for
-                # CustomMessage). Park it the same way the steering queue does
-                # so the next turn reads it: the queue is drained at the loop's
-                # injection boundary, which is turn-safe by construction.
+                # Provenance rides with the message rather than being dropped:
+                # the drain reads this map and stamps the row, which is what
+                # ``_producer_command_id_from_entry`` needs on replay to
+                # recognise an already-admitted command. Without it a producer
+                # that redialled could re-admit the same command.
+                if producer_command_id is not None and message.id == admitted_id:
+                    self._steering_producers[id(message)] = producer_command_id
                 self._steering_queue.put_nowait(message)
             if admitted is not None and message.id == admitted_id and not admitted.done():
                 # The producer's durability contract is about the APPEND, not
                 # about a turn running: the row is on disk under Transcript's
-                # fsync boundary, so the producer may discard its retained
+                # fsync boundary (or, on the steering branch, guaranteed by the
+                # drain that owns it), so the producer may discard its retained
                 # command exactly as it would on the normal path. Leaving this
                 # future unresolved would hang the producer forever.
                 admitted.set_result(None)
-        if self._pre_aborted_drops == _PRE_ABORT_DROP_NOTICE_AT:
-            # ONE notice per run of drops. It names the remedy, because the
-            # state is otherwise invisible: the session looks idle, work keeps
-            # arriving, and nothing runs until a prompt clears the abort.
+        if self._pre_aborted_drops >= _PRE_ABORT_DROP_NOTICE_AT and not self._pre_abort_notified:
+            # ONE notice per run of drops, held by a LATCH rather than by an
+            # equality test on the counter. With ``==`` a run interrupted by a
+            # real turn at count 2 restarts the counter, so a long stuttering
+            # run could clear the threshold repeatedly and still never say
+            # anything. ``>=`` plus the latch says it once, on the first drop
+            # that crosses the line, however the run got there.
+            self._pre_abort_notified = True
+            # The text does NOT tell the user to act: a new arrival (a wake, a
+            # peer message) is itself fresh intent and clears the abort on its
+            # own, so the session recovers without them. Saying "send a message
+            # to resume" described work they do not have to do and misnamed the
+            # state. What they cannot see — and what this exists to say — is
+            # that things are arriving and being held rather than run.
             await self._emit(
                 NoticeEvent(
                     text=(
-                        "Work is arriving into a stopped session and is being held, "
-                        "not run. Send a message to resume; the held items are read "
-                        "on that turn."
+                        "Work arriving into this stopped session is being held, not run. "
+                        "The held items are read on the next turn."
                     ),
                     kind="warning",
                 )
@@ -10909,6 +10977,14 @@ class Session:
         # A courtesy wake still queued here was never delivered, so its count
         # must not survive to misclassify a later enqueue on a reused Session.
         self._courtesy_wake_count = 0
+        # Same reasoning for a run of pre-aborted drops in progress: the run
+        # ends with the session, so neither the count nor its notice latch may
+        # carry into a reused Session and suppress (or fabricate) a notice for
+        # a run that has not happened. ``_abort_epoch`` is deliberately NOT
+        # reset — it must stay monotonic, or work sampled before disposal could
+        # compare equal to a later epoch and run against a stale abort.
+        self._pre_aborted_drops = 0
+        self._pre_abort_notified = False
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.

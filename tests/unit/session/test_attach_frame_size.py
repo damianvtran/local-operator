@@ -20,11 +20,12 @@ import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator.harness.types import ModelSpec, Usage
+from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
@@ -1264,6 +1265,21 @@ def test_the_catalogue_budget_tracks_the_socket_line_limit() -> None:
     assert _MODEL_CATALOGUE_LINE_LIMIT == _MAX_LINE_BYTES
 
 
+def test_the_client_read_limit_tracks_the_socket_line_limit() -> None:
+    """The reader's limit must equal the writer's, or one side is wrong.
+
+    Same pin as the catalogue budget above, for the third copy of this value.
+    ``attach_client`` declares its own ``_READ_LIMIT_BYTES`` because the
+    transport is deliberately import-light, so nothing but this assertion keeps
+    the two honest. Drift IS caught today, but only incidentally, by e2e tests
+    whose failure message never names the cause: a client limit BELOW the
+    server's turns a legal frame into "owner sent a frame too large to read",
+    and one ABOVE it means the guard this module tests stops matching what the
+    reader will actually refuse.
+    """
+    assert _READ_LIMIT_BYTES == _MAX_LINE_BYTES
+
+
 @pytest.mark.asyncio
 async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
     tmp_path: Path, monkeypatch
@@ -1394,3 +1410,56 @@ def test_ordinary_relay_frames_pass_through_untouched():
 
     frame = {"op": "event", "data": {"type": "notice", "text": "hello", "kind": "note"}}
     assert relay_frame_or_degraded(frame, _MAX_LINE_BYTES) is frame
+
+
+@pytest.mark.asyncio
+async def test_compaction_never_assembles_an_unreadable_frame() -> None:
+    """Merging individually-legal frames must not produce an oversized one.
+
+    The guard runs at ``_enqueue_client_frame``, but ``_compact_event_queue``
+    runs AFTER it and is the one operation that makes a frame bigger than
+    anything the guard was shown: it concatenates ``delta`` fields and
+    re-queues the result, which ``_send_to`` then writes with no size re-check.
+    Measured on the real path, 20 frames of 908,157 B — every one legal on its
+    own — merged to 1,060,157 B and killed a real pump with the precise failure
+    the relay guard exists to prevent.
+
+    The merge is refused rather than degraded because refusing is lossless:
+    both frames are individually sendable.
+    """
+    from local_operator.session.runtime.server import _EVENT_QUEUE_MAX
+
+    conn = SimpleNamespace(event_queue=asyncio.Queue(maxsize=_EVENT_QUEUE_MAX))
+
+    # Ordinary streaming shape: a near-limit accumulated message with small
+    # deltas, which is exactly the burst compaction exists to absorb.
+    chunk = "z" * 1024
+    # Near the limit but under it: a long assistant message still streaming.
+    # Each frame is legal; 64 concatenated deltas are what push the merge over.
+    accumulated = "y" * 1_020_000
+    for _ in range(_EVENT_QUEUE_MAX):
+        conn.event_queue.put_nowait(
+            {
+                "op": "event",
+                "data": {
+                    "type": "message_update",
+                    "message": {"id": "m1", "role": "assistant", "text": accumulated},
+                    "delta": chunk,
+                },
+            }
+        )
+
+    # Precondition: every input frame is individually legal, so the guard at
+    # the chokepoint passes all of them and cannot be what saves us here.
+    for frame in list(conn.event_queue._queue):
+        assert len(json.dumps(frame).encode()) + 1 <= _MAX_LINE_BYTES
+
+    server = RuntimeServer.__new__(RuntimeServer)
+    server._compact_event_queue(cast(Any, conn))
+
+    # Whatever came out, every frame must be readable by the client.
+    out = list(conn.event_queue._queue)
+    assert out, "compaction must not empty the queue"
+    for frame in out:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"compaction emitted an unreadable {size}-byte frame"
