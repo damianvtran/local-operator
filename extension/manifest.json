@@ -1,16 +1,40 @@
 {
   "manifest_version": 3,
   "name": "Local Operator",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Connect Local Operator to the browser you already use, entirely on your machine.",
-  "permissions": ["debugger", "tabs", "tabGroups", "scripting", "storage", "alarms", "webNavigation", "notifications"],
-  "host_permissions": ["<all_urls>"],
-  "background": {"service_worker": "worker.js", "type": "module"},
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "scripting",
+    "storage",
+    "alarms",
+    "webNavigation",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "worker.js",
+    "type": "module"
+  },
   "action": {
     "default_title": "Local Operator",
     "default_popup": "popup/popup.html",
-    "default_icon": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"}
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "options_page": "options/options.html",
-  "icons": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"}
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
 }

@@ -64,6 +64,50 @@ _COLUMN_GAP = 2
 #: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
 PERSIST_HINT_PREFIX = "/model default"
 
+#: The argument words ``/model`` consumes as COMMANDS rather than as selectors
+#: to rank rows against. Typing one filters the catalogue to nothing by
+#: construction — no row is named `default` — so the empty-state row says what
+#: the word does instead of reporting a failed search (UX review round 3, U3).
+#: Kept beside ``PERSIST_HINT_PREFIX`` because both exist for the same reason:
+#: this widget has to recognise the app's `/model` vocabulary without importing
+#: ``app``, which imports this module. ``test_persist_keywords_match_app``
+#: asserts they stay in step with the handler's own dispatch.
+_PERSIST_KEYWORDS = frozenset({"default", "saved"})
+
+
+def _keyword_row(keyword: str) -> str:
+    """The empty-state row for a `/model` argument that is a COMMAND word.
+
+    Held to the same budget ``PERSIST_HINT`` is (design review round 1, D2).
+    The footer's body is ``width - _GUTTER_CELLS - _EDGE_MARGIN``, so 47 cells
+    at the 50-column floor; the first version of this row read `default is a
+    command, not a model — enter runs it` at 49 cells and truncated there to
+    `…not a model — enter…`, cutting the actionable half and leaving only the
+    negative clause at exactly the width where the user has least room to work
+    out what to do instead. The shorter carrier keeps BOTH halves — what the
+    word is, and what Enter will do with it — at every width the picker
+    renders at. `test_the_keyword_row_fits_the_narrow_footer` pins the ceiling.
+    """
+    return f"{keyword} is a command — enter runs it"
+
+
+def _partial_keyword_row(keyword: str) -> str:
+    """The same row while the command word is still being TYPED.
+
+    A sibling of :func:`_keyword_row` rather than an inline f-string (code
+    review round 2, R17): D2's budget applies to whichever of the two rows the
+    user is looking at, and only the one that had a helper had a ceiling test.
+    Built here so `test_the_keyword_row_fits_the_narrow_footer` measures both.
+
+    Same subject and same shape as the settled row, differing only in the half
+    that says what to do — so the row does not change out from under the reader
+    on the keystroke that completes the word. `enter runs it` is deliberately
+    NOT promised while the word is partial: Enter there is an ordinary failed
+    search, and the promise would be false.
+    """
+    return f"{keyword} is a command — keep typing"
+
+
 MAX_VISIBLE_ROWS = 14
 _SCREEN_HEIGHT_FRACTION = 3
 
@@ -562,6 +606,18 @@ class ModelPicker(Static):
         leaves slash context — the two lists expire an Esc on the same rule."""
         self._dismissed_query = None
 
+    def is_dismissed(self) -> bool:
+        """Whether an Esc is currently latched for the query in the buffer.
+
+        The state that is invisible on screen and still load-bearing: the list
+        is hidden, the text is unchanged, and the next key must not be routed
+        as though no list had ever been asked for. The editor uses it to hold
+        completion keys (UX review round 3, U13) — Tab with a latched Esc had
+        no rows to complete from, so it fell through to ``TextArea`` and
+        inserted a literal tab into the query.
+        """
+        return self._dismissed_query is not None
+
     def dismiss(self) -> None:
         """Hide the list for the CURRENT query without touching the text.
 
@@ -849,7 +905,46 @@ class ModelPicker(Static):
 
         bits: list[str] = []
         if total == 0:
-            bits.append("no matching models" if self._query.strip() else "no models available")
+            query = self._query.strip()
+            # A KEYWORD IS NOT A FAILED SEARCH (UX review round 3, U3). The
+            # footer one row below advertises `/model default`, and typing it
+            # narrowed the catalogue to `no matching models` — the list calling
+            # the instruction it is itself printing a dead end, which is the
+            # most confusing shape a hint can take. `default` and `saved` are
+            # COMMAND WORDS consumed by `_cmd_model`, not selectors that could
+            # ever match a row, so the empty list is the correct and expected
+            # state for them rather than a report about the catalogue. The row
+            # says what pressing Enter will do instead. Compared against the
+            # same lowered spelling `_cmd_model` dispatches on.
+            #
+            # PREFIX-AWARE, not exact-match only (UX review round 1, U1). An
+            # exact test fixed the settled state and left the contradiction
+            # reachable on the way there: typing `/model default` one character
+            # at a time printed `no matching models` directly above a footer
+            # advertising that exact phrase for FOUR consecutive keystrokes
+            # (`def`, `defa`, `defau`, `defaul`), resolving only on the final
+            # `t`. That is precisely the pairing U3 was filed against, so the
+            # suppression has to cover every prefix a user passes through
+            # rather than only the word they arrive at. A prefix is not yet a
+            # runnable command, so it gets the neutral half of the sentence
+            # without the `enter runs it` promise, which would be false there.
+            #
+            # Still only for a BARE word: `/model default anthropic/claude-opus-5`
+            # is a selector being typed and genuinely has no matches until it
+            # resolves, so it keeps the ordinary message.
+            lowered = query.lower()
+            partial = next(
+                (k for k in sorted(_PERSIST_KEYWORDS) if lowered and k.startswith(lowered)),
+                "",
+            )
+            if lowered in _PERSIST_KEYWORDS:
+                bits.append(_keyword_row(lowered))
+            elif partial:
+                # The two keywords share no common prefix, so a prefix names
+                # exactly one of them.
+                bits.append(_partial_keyword_row(partial))
+            else:
+                bits.append("no matching models" if query else "no models available")
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
         bits.extend(status)

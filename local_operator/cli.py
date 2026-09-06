@@ -1997,6 +1997,13 @@ def sessions_command(args: argparse.Namespace) -> int:
                 "pending": getattr(rec, "pending", None),
                 "busy": bool(getattr(rec, "busy", False)),
                 "detached": bool(getattr(rec, "detached", False)),
+                # Which build each runtime is running, for diagnosing skew
+                # across a host that replaces its install several times a day.
+                # Same getattr defaulting as the live-state fields above, and
+                # deliberately JSON-only: the fixed-width table is already
+                # eight columns wide.
+                "version": getattr(rec, "version", "") or "",
+                "source_ref": getattr(rec, "source_ref", "") or "",
             }
         )
 
@@ -4438,6 +4445,7 @@ def main() -> int:
                     run_tui,
                     provider_controller=tui_controller,
                     on_config_changed=config_manager.reload,
+                    warm_session_imports=False,
                 )
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an

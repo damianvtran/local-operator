@@ -697,8 +697,9 @@ def build_screenshot_allow(path: str):
     cv = _split_canvas(
         "Per-site consent",
         "You decide which sites.",
-        "The first time the agent wants a new site it asks. Allow once, always "
-        "allow, or deny. Reversible any time in Settings.",
+        "The first time the agent wants a new site it asks. Pick a scope: all "
+        "pages on this domain, only this site, or just this once. Reversible "
+        "any time in Settings.",
         frame,
     )
     cv.save(path)

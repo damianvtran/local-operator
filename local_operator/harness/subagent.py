@@ -166,6 +166,178 @@ class SubagentModelUnavailable(RuntimeError):
         self.reason = reason
 
 
+#: The tier names the harness supports, in the order they are presented.
+#:
+#: This is the WHOLE set, not merely a presentation order over a free mapping:
+#: :func:`read_effort_tier_selectors` drops every other key in
+#: ``values.subagents.models``, so a hand-added ``xl:`` is inert everywhere
+#: (schema, tool-argument validation, launch) rather than honoured by some
+#: consumers and not others.
+#:
+#: Narrowing to the registry set is what keeps ADVERTISED == REBUILDABLE.
+#: These are the only keys ``lop config edit`` and the ``/settings`` page can
+#: write (``settings_io`` accepts registered keys only), and — the reason this
+#: is a correctness boundary rather than a preference — the only ones the
+#: config watcher's per-registry-key diff can report. A tier outside the set
+#: would be read and advertised, but editing it produces no ``changed_keys``
+#: entry, so ``Session._rebuild_effort_tier_tools`` never fires: the schema
+#: would promise a tier whose edits the live re-render could not reach until
+#: the next session. Widening this tuple therefore means registering the key
+#: in ``settings_io.SETTINGS`` in the same change, which is what makes the
+#: watcher see it.
+#:
+#: The order is load-bearing too: the schema rides in the prompt-cache prefix,
+#: so it follows this tuple rather than YAML key order, and a reordering edit
+#: to ``config.yml`` cannot move the enum.
+CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
+
+
+def read_effort_tier_selectors() -> dict[str, Any]:
+    """``values.subagents.models``, narrowed to the tiers the harness supports.
+
+    The one place the tier mapping is read from ``config.yml``, shared by the
+    strict launch path (``Session._resolve_subagent_model``), the tool-argument
+    refusal (:func:`effort_tier_rejection`) and the tool schemas
+    (:func:`configured_effort_tiers`), so no two of them can disagree about
+    what is configured.
+
+    The narrowing to :data:`CANONICAL_EFFORT_TIERS` happens HERE rather than
+    in each consumer, because a key filtered in only one of them is exactly
+    the drift this shared reader exists to prevent: a hand-added ``xl`` left
+    visible to the launch path but hidden from the schema would be
+    unadvertised yet launchable through a role pin, and would draw the
+    "lacks provider/model" refusal (which is false — the selector is
+    well-formed) instead of the accurate "not configured". One filter, one
+    key set, one story. See :data:`CANONICAL_EFFORT_TIERS` for why the
+    registry set is the honest boundary.
+
+    That membership test also disposes of keys YAML silently coerced away
+    from ``str`` (``1:``, ``on:``, ``yes:`` parse as int/bool): they match no
+    canonical name, so they never reach a ``sorted()`` or an enum. Stringifying
+    them instead would advertise an ``effort='1'`` no operator ever typed.
+
+    Selector VALUES are stripped here and nowhere else: ``lop config edit``
+    preserves surrounding whitespace verbatim, and two consumers stripping
+    (or not) independently is how a padded ``'  openai/gpt-5-mini  '`` got
+    advertised, passed the strict launch check, and then failed on the first
+    provider call with ``provider='  openai'`` instead of at launch. A
+    non-string value is passed through raw so the launch path can still turn
+    it into a *named* refusal, which it cannot do if the read dropped it.
+
+    Raises whatever the config read raises; callers decide whether that is a
+    reason (launch) or nothing (schema).
+    """
+    from local_operator.config import ConfigManager
+
+    raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+    models = raw.get("models") if isinstance(raw, dict) else None
+    if not isinstance(models, dict):
+        return {}
+    return {
+        tier: selector.strip() if isinstance(selector, str) else selector
+        for tier, selector in models.items()
+        if tier in CANONICAL_EFFORT_TIERS
+    }
+
+
+def configured_effort_tiers() -> dict[str, str]:
+    """``{tier: "provider/model"}`` for every tier a launch could honour.
+
+    What the ``task`` and ``agent`` tool schemas advertise. Only a tier whose
+    selector is a non-empty ``provider/model`` string is included, because
+    those are exactly the tiers the strict launch path
+    (:class:`SubagentModelUnavailable`) accepts: the incident behind this was
+    the schema hard-coding ``lo|med|hi`` while the operator had configured
+    NONE, so the delegating model read the enum, picked ``hi``, and the launch
+    refused it — the tool's own schema was steering the model into a
+    guaranteed failure, and nothing told it that omitting ``effort`` was the
+    only working choice.
+
+    Never raises. A config that cannot be read reports no tiers: this runs
+    while the tool inventory is being built, and a corrupt ``config.yml`` must
+    cost the operator a tier picker, not a session. The launch path reads the
+    file again on its own terms and still names the read error there.
+    """
+    try:
+        selectors = read_effort_tier_selectors()
+    except Exception:  # noqa: BLE001 — schema construction must never fail a turn
+        return {}
+    # Iterating CANONICAL_EFFORT_TIERS rather than the config's own keys is
+    # what makes this function's "never raises" contract hold. The previous
+    # shape sorted the non-canonical leftovers, and that ``sorted()`` sat
+    # OUTSIDE the ``try``: one YAML-coerced ``1:`` key beside a ``hi:`` was a
+    # ``TypeError`` through ``create_tools`` (the session could not boot) and
+    # through ``TaskParams(effort=...)`` as a non-ValidationError. There is no
+    # ordering decision left to make here — the canonical tuple IS the order,
+    # which also keeps the schema byte-stable in the prompt-cache prefix.
+    ordered = [tier for tier in CANONICAL_EFFORT_TIERS if selectors.get(tier)]
+    tiers: dict[str, str] = {}
+    for tier in ordered:
+        selector = selectors[tier]
+        if not isinstance(selector, str):
+            # A non-string VALUE is kept by the read so the launch path can
+            # name it; it is simply not a tier the schema may advertise.
+            continue
+        provider, _, model_id = selector.partition("/")
+        if not provider or not model_id:
+            continue
+        tiers[tier] = selector
+    return tiers
+
+
+def effort_tier_rejection(tier: str) -> str | None:
+    """Why ``tier`` cannot be asked for right now, or ``None`` when it can.
+
+    The tool-argument counterpart of the strict launch check: the ``task``
+    and ``agent`` tools validate ``effort`` against the LIVE config with this
+    (``subagents.models.*`` is a live setting, read at every spawn), so a tier
+    that is not usable is refused with a message that names what IS — before
+    a job row, a role pin, or a launch attempt exists. The launch path keeps
+    its own refusal for the case this cannot see: a pin recorded while the
+    tier existed and read after the operator removed it.
+
+    Always tells the model the working alternative. The failure this guards
+    against was a model that could see tiers and not the fact that omitting
+    the field was the only choice that worked.
+    """
+    tiers = configured_effort_tiers()
+    if tier in tiers:
+        return None
+    inherit = "omit 'effort' to inherit this session's model and reasoning effort"
+    if not tiers:
+        return (
+            f"effort tier {tier!r} is unavailable: no tiers are configured under "
+            f"values.subagents.models; {inherit}"
+        )
+    try:
+        raw = read_effort_tier_selectors().get(tier)
+    except Exception:  # noqa: BLE001 — the tier list above already survived the read
+        raw = None
+    # Same wording as the launch path's refusal for a selector that is present
+    # but unusable, so an operator who set ``lo: gpt-5`` (no provider) learns
+    # that the KEY is there and the VALUE is wrong, not that it is missing.
+    why = (
+        f"subagents.models.{tier}={raw!r} lacks provider/model"
+        if raw not in (None, "")
+        else f"not configured at subagents.models.{tier}"
+    )
+    return (
+        f"effort tier {tier!r} is unavailable: {why} "
+        f"(configured: {describe_effort_tiers(tiers)}); pick one of those or {inherit}"
+    )
+
+
+def describe_effort_tiers(tiers: dict[str, str]) -> str:
+    """One short clause naming what each tier resolves to, for a schema
+    description: ``lo → openai/gpt-5-mini, hi → anthropic/claude-opus-5``.
+
+    The model chooses on this, so it must carry the MODEL and not just the
+    label — "hi" says nothing about cost, family, or capability — while
+    staying short, because a schema description is billed on every turn.
+    """
+    return ", ".join(f"{tier} → {selector}" for tier, selector in tiers.items())
+
+
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
     from local_operator.harness.comms import SubagentComms
@@ -1183,10 +1355,26 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     # may inherit its parent's discovered set but cannot expand it.
     deferred: set[tuple[str, str]] = set(getattr(parent_session, "_mcp_deferred_origins", ()))
     child: Session | None = None
-    base: list[AgentTool] = []
 
     def selected(source: list[AgentTool]) -> list[AgentTool]:
         return [tool for tool in source if origin(tool) in enabled]
+
+    def base() -> list[AgentTool]:
+        # Derived from the LIVE inventory on every activation rather than
+        # snapshotted at ``attach``: the config watcher swaps fresh
+        # ``task``/``agent`` objects into a child mid-run when the effort
+        # tiers change, and a frozen base would silently reinstate the
+        # pre-rebuild objects (with the stale ``effort`` enum) the first time
+        # the child activated an MCP tool. A live tool whose metadata has
+        # been dropped from the manager (``origin`` can no longer answer for
+        # it) keeps its earlier classification from being rewritten to base
+        # here: the cost of a transient misclassification — it stays visible
+        # until the next activation — beats disappearing a tool the child
+        # was already using, and the top-level path accepts the same
+        # trade-off with its ``installed_mcp`` name set.
+        if child is None:
+            return []
+        return [tool for tool in child._tools if origin(tool) is None]
 
     def activate(server_name: str, raw_tool_name: str) -> None:
         # Unreachable for a restricted child: its resolver is built with
@@ -1195,18 +1383,14 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
         # allow-check that could drift from the resolver's.
         enabled.add((server_name, raw_tool_name))
         if child is not None:
-            child.refresh_tools(base + selected(manager.get_tools()))
+            child.refresh_tools(base() + selected(manager.get_tools()))
 
     def defer(server_name: str, raw_tool_name: str) -> None:
         deferred.add((server_name, raw_tool_name))
 
     def attach(session: "Session") -> None:
-        nonlocal child, base
+        nonlocal child
         child = session
-        # The non-MCP base is DERIVED, not remembered: Session.__init__ merges
-        # its own capability tools in and this module prunes some back out, so
-        # the constructor's list is not what the session ended up with.
-        base = [tool for tool in session._tools if origin(tool) is None]
         prior = session._fallback_tool_resolver
 
         def resolve_deferred(name: str) -> AgentTool | None:
@@ -1597,6 +1781,11 @@ async def _construct_child_session(
         cleanup.push_async_callback(child_stream.close)
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
+        # A child's model was chosen HERE (tier or parent), never by the
+        # ``hosting``/``model_name`` keys, so a later edit to those must not
+        # switch it — ``_job_id`` already guards that path, this makes the
+        # provenance honest too.
+        model_source="child",
         stream_fn=child_stream,
         tools=tools,
         transcript=transcript,
@@ -1737,6 +1926,14 @@ async def _construct_child_session(
     # Unsubscribed by ``_dispose_child`` through the dispose hook, exactly as
     # the parent's is. Degrades silently: a child that cannot follow config is
     # a child built the way every child was before this seam.
+    #
+    # What a child does NOT follow, by design (``Session._apply_config_change``
+    # guards each on ``_job_id``): a ``hosting``/``model_name`` edit (its spec
+    # was picked above and a mid-task switch costs its cache prefix), and the
+    # ``web_*.enabled`` INVENTORY reconcile (re-adding would re-run the
+    # allowlist and network-floor filtering for a short-lived run). The web
+    # tools' per-call gate still refuses inside the child after a disable, and
+    # the approval MODE reaches it through the parent's gate closure.
     try:
         from local_operator.config_watch import process_watcher
 

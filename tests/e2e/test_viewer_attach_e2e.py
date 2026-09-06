@@ -446,3 +446,220 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
         launch_module.engage_runtime = original  # type: ignore[assignment]
         server.close()
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_undeclaring_client_has_its_team_request_run_by_the_runtime(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """THE INCIDENT, reproduced on the wire and then repaired.
+
+    A raw ``AttachClient`` constructed WITHOUT ``slash_consumers`` is exactly
+    what a pre-#624 viewer looks like to a runtime: the auth frame carries no
+    declaration, because that build had no such field. This was verified live
+    against a shipped 0.49.0 runtime — the probe received the ``team_attached``
+    receipt with the request inside it, and the session's transcript recorded
+    no user row and no turn. The team was attached; the request evaporated.
+
+    So this cell asserts on the OWNER's session, which is the half a client
+    cannot fake: the attach landed AND the request ran as a real turn. Driven
+    through the production handle, the production server and a real loopback
+    socket, because a stub that declares the capability is exactly what hid
+    the original defect (see this module's docstring).
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(headless_tui_env)
+    registry.create_team(
+        TeamEditFields(
+            name="viewerteam",
+            description="d",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    directory = headless_tui_env / "sessions" / "skewsess0001"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, ["ack"])
+    session.team_registry = registry
+    await server.start_in_process()
+    client = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+
+        # No ``slash_consumers``: the old viewer on the wire.
+        client = AttachClient(lambda _p: None, lambda _r: None)
+        await client.connect(record, session.session_id)
+
+        outcome = await client.slash_result("team", "viewerteam do the thing", [])
+
+        assert (outcome.get("data") or {}).get("type") == "team_attached"
+        assert session.active_team_name == "viewerteam", "the attach must still land"
+
+        # THE PROPERTY THE INCIDENT LACKED: a real turn ran. Asserted on the
+        # runtime's durable transcript rather than on any client-side echo,
+        # because the transcript is what the manager's live probe read to
+        # prove the request had been dropped.
+        transcript_path = directory / "transcript.jsonl"
+        for _ in range(200):
+            if transcript_path.exists() and "do the thing" in transcript_path.read_text(
+                encoding="utf-8"
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:  # pragma: no cover - only on a real regression
+            written = (
+                transcript_path.read_text(encoding="utf-8")
+                if transcript_path.exists()
+                else "<absent>"
+            )
+            raise AssertionError(
+                "the runtime never ran the request an undeclaring client cannot "
+                f"submit itself; transcript was {written}"
+            )
+    finally:
+        if client is not None:
+            client.close()
+        server.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declaring_client_is_never_double_submitted(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The guard on the repair: a current viewer submits its own request.
+
+    ``SLASH_ACTION_RECEIPTS`` in the auth frame is a promise — "I render these
+    and will submit the request myself". A runtime that admitted anyway would
+    turn one typed command into two turns, which is a worse failure than the
+    silent drop because the user cannot tell which turn is which or undo one.
+
+    Asserted as the ABSENCE of a turn on the owner, with the attach present:
+    the receipt still comes back, the roster is still stamped, and the
+    transcript stays empty of the request.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    registry = TeamRegistry(headless_tui_env)
+    registry.create_team(
+        TeamEditFields(
+            name="viewerteam",
+            description="d",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+
+    directory = headless_tui_env / "sessions" / "skewsess0002"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, ["ack"])
+    session.team_registry = registry
+    await server.start_in_process()
+    client = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        client = AttachClient(
+            lambda _p: None,
+            lambda _r: None,
+            slash_consumers=list(SLASH_ACTION_RECEIPTS),
+        )
+        await client.connect(record, session.session_id)
+
+        outcome = await client.slash_result("team", "viewerteam do the thing", [])
+
+        assert (outcome.get("data") or {}).get("type") == "team_attached"
+        assert (outcome.get("data") or {}).get("request") == "do the thing"
+        assert session.active_team_name == "viewerteam", "the attach is the owner's job either way"
+
+        # Give the runtime the same window the cell above needed to run a
+        # turn. Nothing may appear in it — this is an absence assertion, so it
+        # must be given real time to fail rather than being read immediately.
+        transcript_path = directory / "transcript.jsonl"
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if transcript_path.exists() and "do the thing" in transcript_path.read_text(
+                encoding="utf-8"
+            ):
+                raise AssertionError(
+                    "the runtime admitted a request the client declared it would "
+                    "submit itself; the user's command runs twice"
+                )
+    finally:
+        if client is not None:
+            client.close()
+        server.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_published_record_carries_this_runtime_s_build(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The version channel, end to end: what a viewer reads before it dials.
+
+    The record is the earliest hello there is — an attach client holds it
+    before the socket is open — so the stamp has to be on the file a real
+    ``registry.scan`` returns, not merely on an in-memory dataclass.
+    """
+    from local_operator.update import installed_version
+
+    directory = headless_tui_env / "sessions" / "stampsess001"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, [])
+    await server.start_in_process()
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        assert record.version == installed_version(), (
+            "a runtime that cannot say what build it runs leaves every viewer "
+            "unable to name the skew it is about to hit"
+        )
+    finally:
+        server.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_record_carries_the_source_ref_when_lop_update_recorded_one(
+    headless_tui_env: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same-version rebuilds are this host's common drift, so the ref matters.
+
+    ``lop-update`` writes ``<sha> <tag>`` into ``.lop-source`` at the install
+    root. With a fake marker in place the runtime must publish that sha —
+    without it, two builds of one release are indistinguishable on the wire
+    and the drift goes unreported.
+    """
+    marker_root = tmp_path / "prefix"
+    marker_root.mkdir()
+    (marker_root / ".lop-source").write_text("feedfacecafe1234 v0.49.0\n", encoding="utf-8")
+
+    import local_operator.update as update_mod
+
+    # The REAL ``installed_build``, pointed at the fixture prefix: the marker
+    # file is genuinely parsed, so a change that stopped reading ``.lop-source``
+    # (or read the tag instead of the sha) fails here. Patching the function
+    # wholesale would assert only that the server copies two attributes.
+    monkeypatch.setattr(
+        update_mod,
+        "installed_build",
+        lambda *_a, **_k: update_mod.BuildStamp(
+            version=update_mod.installed_version(),
+            source_ref=update_mod.source_ref(marker_root),
+        ),
+    )
+
+    directory = headless_tui_env / "sessions" / "stampsess002"
+    directory.mkdir(parents=True)
+    session, _handle, server = await _runtime(directory, [])
+    await server.start_in_process()
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        assert record.source_ref == "feedfacecafe1234"
+    finally:
+        server.close()
+        await session.dispose()

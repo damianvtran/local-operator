@@ -272,6 +272,16 @@ async def test_a_session_switched_away_from_its_default_says_both(config_dir: Pa
     one relaunch away from a mode they last chose days ago. Nothing else on the
     frame would ever mention it: the band goes quiet when the gate is armed,
     which is correct, and correct is not the same as complete.
+
+    The saved half names ``config.yml`` and is read from the FILE at report
+    time rather than from the cached default (UX round 1, U1/U2). Two reasons,
+    both from the live-config change: the cached value now MOVES on a config
+    tick, so comparing against it reported a matched pair for exactly the
+    divergence this sentence exists to disclose; and with the asymmetric
+    approvals rule a session can legitimately hold a mode the file disagrees
+    with, which makes "what does the file say" the question a user is actually
+    asking here. Naming the file also makes the claim checkable without
+    quitting, which "new sessions" never was.
     """
     first = OperatorApp(lambda: _factory(GatedSession()))
     async with first.run_test(size=(120, 40)) as pilot:
@@ -286,7 +296,7 @@ async def test_a_session_switched_away_from_its_default_says_both(config_dir: Pa
 
         report = _notices(app)[-1]
         assert "ask (this session)" in report
-        assert "new sessions open in auto" in report
+        assert "config.yml says auto" in report
         assert "/approvals default ask" in report
 
 

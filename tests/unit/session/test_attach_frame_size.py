@@ -323,6 +323,64 @@ _CAPPED_COLLECTION_FIELDS = {
 }
 
 
+#: Every free-text field on ``JobState``, with what bounds it ON THE WIRE.
+#:
+#: The state-level table above cannot see these. ``jobs`` is one entry there, so
+#: a new field on the ROW model is invisible to ``_collection_fields()`` no
+#: matter how much it costs — and a row field is multiplied by roster depth,
+#: which is the more dangerous of the two shapes.
+#:
+#: That blindness shipped a regression. ``launch_message_id`` was added to
+#: ``JobState`` as a per-row scalar bounded by nothing; at 46.7 B on every task
+#: child it cut the maximum attachable roster from 812 rows to 769 against a
+#: guard that passes with 3,316 bytes to spare, and no assertion here could
+#: fail (review round 1 blocker). Scalars are listed as well as collections
+#: because that regression WAS a scalar: "collection" is not the property that
+#: makes a row field dangerous, being per-row is.
+_BOUNDED_JOB_FIELDS = {
+    # Identity and O(1) scalars: bounded by their own shape, not by use.
+    "id": "one job id",
+    "type": "one of a fixed set of job types",
+    "status": "one of a fixed set of statuses",
+    "queued": "bool",
+    "label": "the caller's short label",
+    "agent": "one role name",
+    "intent": "one short intent line",
+    "model_label": "one model identity",
+    "context_window": "int",
+    "direct_cost": "float",
+    "direct_cost_knowledge": "enum",
+    "start_time": "float",
+    "started_at": "float",
+    "settled_at": "float",
+    "trajectory_length": "int",
+    "output_seq": "int",
+    "restored": "bool",
+    "parent_job_id": "one job id",
+    "session_id": "one session id",
+    "session_dir": "one filesystem path",
+    "agent_role": "one role name",
+    "effort": "one tier name",
+    "output_tail": "bounded by the job runner's own tail buffer",
+    "latest_details": "one progress payload, replaced not appended",
+    "usage": "folded by _fold_job_usage_in_place",
+    "attempt_aliases": "one id per collapsed resume attempt",
+}
+
+#: Row fields bounded by THIS module, each of which the frame guard must
+#: populate at its worst case.
+_CAPPED_JOB_FIELDS = {
+    "trajectory": "stripped entirely on the wire",
+    "todos": "nulled on the wire; fetched per job",
+    "descendant_usage": "folded by _fold_job_usage_in_place",
+    "result_text": "clipped to JOB_RESULT_WIRE_CHARS and the frame text share",
+    "prompt": "clipped to JOB_PROMPT_WIRE_CHARS and the frame text share",
+    "error_text": "clipped to JOB_ERROR_WIRE_CHARS and the frame text share",
+    "launch_prompts": "per-entry, per-row and roster-shared budgets",
+    "launch_message_id": "omitted when derivable from the job id",
+}
+
+
 def _collection_fields() -> set[str]:
     """Collection-typed fields on the state model, read from the model itself."""
     fields: set[str] = set()
@@ -331,6 +389,16 @@ def _collection_fields() -> set[str]:
         if "list[" in annotation or "dict[" in annotation:
             fields.add(name)
     return fields
+
+
+def _job_fields() -> set[str]:
+    """Every field on the ROW model, read from the model itself.
+
+    Not filtered to collections, unlike :func:`_collection_fields`: the
+    regression this exists to catch was a per-row STRING. What makes a row field
+    dangerous is that the frame pays for it once per child.
+    """
+    return set(JobState.model_fields)
 
 
 def test_every_collection_field_is_classified() -> None:
@@ -361,6 +429,34 @@ def test_every_collection_field_is_classified() -> None:
     assert not stale, f"stale entries for fields that no longer exist: {sorted(stale)}"
 
 
+def test_every_job_row_field_is_classified() -> None:
+    """The same closure for the ROW model, which the state-level guard cannot see.
+
+    ``_collection_fields`` reads ``FrontendSessionState``, where the entire
+    roster is one entry (``jobs``). A field added to ``JobState`` is therefore
+    invisible to it however much the frame pays for it — and a row field is
+    multiplied by roster depth, so it is the more dangerous of the two shapes.
+
+    That gap shipped a measured regression: ``launch_message_id`` went on as a
+    per-row scalar bounded by nothing, cost 46.7 B on every task child, and cut
+    the maximum attachable roster from 812 rows to 769 while every assertion in
+    this file stayed green (review round 1 blocker). Adding a field to
+    ``JobState`` now fails HERE until someone states which side of the line it
+    is on.
+    """
+    classified = set(_BOUNDED_JOB_FIELDS) | set(_CAPPED_JOB_FIELDS)
+    unclassified = _job_fields() - classified
+    assert not unclassified, (
+        f"unclassified field(s) on JobState: {sorted(unclassified)}. Every row field must "
+        "be listed in _BOUNDED_JOB_FIELDS (with the reason it cannot grow with "
+        "conversation length or child count) or in _CAPPED_JOB_FIELDS (and exercised by "
+        "the frame guard). The roster is paid for ONCE PER CHILD, so an unbounded row "
+        "field costs the attach ceiling far faster than a state-level one."
+    )
+    stale = classified - _job_fields()
+    assert not stale, f"stale entries for row fields that no longer exist: {sorted(stale)}"
+
+
 def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -> None:
     """The class guard: EVERY collection field maxed at once, still under the cap.
 
@@ -384,9 +480,38 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                 "result_text": "r" * 40_000,
                 "prompt": "p" * 40_000,
                 "error_text": "e" * 40_000,
+                # The PER-ROW launch identity and its collapsed-attempt map,
+                # which the state-level classifier structurally cannot reach.
+                # Unbounded these cost 9,290 B (identity alone) and 29,758 B
+                # (both) across these 200 rows, either of which overflows a
+                # frame that passed with 3,316 B to spare — the round-1 blocker.
+                #
+                # The identity is deliberately NOT the derivable
+                # ``subagent-launch:<job id>``: elision would drop it and the
+                # guard would measure nothing. Every real producer emits the
+                # derivable form (verified across launch, #314 resume-fold and
+                # the persist/restore round trip), so this is the worst case
+                # that cannot be elided away, held against the wire's own bounds.
+                #
+                # These two are what the OTHER maxed fields have to leave room
+                # for. Their aggregate is capped
+                # (JOB_LAUNCH_IDS_FRAME_BUDGET_CHARS +
+                # JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS ≈ 26 KB however deep the
+                # roster), so the per-row text below is trimmed by that much to
+                # keep the fixture's total at the same worst case it has always
+                # asserted rather than a strictly larger one.
+                "launch_message_id": f"subagent-launch:resumed-{index:04d}",
+                # Twelve collapsed attempts of 4 KB each: past both the per-row
+                # entry cap and the roster-shared budget, so most rows here land
+                # on the elided and dropped tiers, which is the shape a deep
+                # roster actually puts on the wire.
+                "launch_prompts": {
+                    f"subagent-launch:attempt-{index:04d}-{attempt}": "L" * 4_000
+                    for attempt in range(12)
+                },
             }
         )
-        for job in _jobs(200, 500)
+        for index, job in enumerate(_jobs(200, 500))
     ]
     # Exercise the real authority's complete, non-empty snapshot: an earlier
     # read plus a newer unread outcome. A new attention payload field must get

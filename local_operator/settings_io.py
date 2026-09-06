@@ -120,9 +120,16 @@ class Scope(enum.Enum):
     #: Takes effect immediately in every running session on this machine —
     #: on the same call stack in the process that wrote it, and within
     #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
-    #: :mod:`local_operator.config_watch`).
+    #: :mod:`local_operator.config_watch`). Per-key caveats live on the
+    #: SECTION description (``model``: a session that chose with ``/model``
+    #: keeps its choice; ``web_tools``: the inventory catches up at the next
+    #: turn while execution refuses at once) — the scope says WHEN, the
+    #: description says what "applied" means for that key.
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
+    #: Only ``local_providers`` carries it now: ``approvals``, ``model`` and
+    #: ``web_tools`` went LIVE, and ``session`` (autosave + cleanup) turned out
+    #: to be launch-time all along.
     NEW_SESSIONS = "new sessions"
     #: Read once at process start; needs a relaunch.
     NEW_LAUNCH = "new launch"
@@ -246,11 +253,22 @@ class Section:
 # retired keys are last.
 
 SECTIONS: tuple[Section, ...] = (
+    # LIVE with a rule, not unconditionally: ``Session._apply_config_change``
+    # switches a running session onto the new pair iff its model CAME from
+    # config (not an agent profile, not ``--hosting``/``--model``) and no
+    # explicit ``/model`` choice has been made since boot. A session the user
+    # pointed somewhere deliberately keeps its choice and prints a keep
+    # notice — ``/model saved`` re-adopts the default on demand. Children
+    # (subagents) never follow; their spec was picked at spawn. Before this
+    # the section was NEW_LAUNCH and the operator's report was exactly the
+    # painted lie: `/model default` in one pane told every other pane
+    # "model_name needs a relaunch" while "all my agents" was the intent.
     Section(
         "model",
         "Model",
-        Scope.NEW_LAUNCH,
-        "The provider and model new launches boot on.",
+        Scope.LIVE,
+        "The provider and model sessions run on. Sessions that chose a model "
+        "with /model keep it (/model saved adopts the default).",
     ),
     # Split out of ``model`` (review round 1, M3). The design left this key in
     # ``model`` and proposed documenting the discrepancy, which was defensible
@@ -260,8 +278,9 @@ SECTIONS: tuple[Section, ...] = (
     # ``configure._openai_api_mode`` reads the rebound mapping when it builds
     # the next client. Scope is uniform within a section by construction, so
     # saying something true here means a section of its own, exactly as ``fork``
-    # and ``web_tools`` are. ``hosting``/``model_name`` genuinely stay
-    # NEW_LAUNCH: they are the session's identity, not a knob it re-reads.
+    # and ``web_tools`` are. ``model`` has since gone LIVE too, but by a
+    # DIFFERENT mechanism (a guarded model switch rather than a mapping
+    # rebind), so the two stay separate sections with separate descriptions.
     Section(
         "providers",
         # Titled for the WIRE FORMAT, not the word "provider" (design review
@@ -293,16 +312,40 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Theme and the terminal features the TUI is allowed to use.",
     ),
-    # Deliberately NOT live, and split from ``subagents`` for that reason (scope
-    # is uniform within a section by construction). A tool-approval mode that
-    # flipped under a running turn would be a security-relevant surprise; the
-    # per-session ``/approvals`` toggle is the live control, and it WRITES this
-    # default rather than following it.
+    # LIVE — a reversal of the original design, which kept the approval mode
+    # build-time on the theory that a gate flipping under a running turn is a
+    # security-relevant surprise. The operator's actual request ("if I change
+    # a setting I want it to go into effect for all my agents") is the
+    # opposite: a disk write IS the machine-wide intent, and it overrides any
+    # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
+    # applies at the next approval DECISION (``OwnedSessionHandle`` reads its
+    # flag per gate call), so a prompt already parked on screen is left for
+    # the human — never auto-answered, never auto-denied; and every viewer
+    # prints the amber "tool approvals now auto" notice. ``--yolo`` is an
+    # explicit pin that outranks the key. Its own section because ``session``
+    # (autosave + cleanup) is launch-time and scope is uniform per section.
+    Section(
+        "approvals",
+        "Approvals",
+        Scope.LIVE,
+        "Whether write and command tools prompt, in every running session.",
+    ),
+    # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
+    # at process start (``cli.py`` sets ``args.train``) to pick the transcript
+    # DIRECTORY, and a transcript cannot move mid-session; the TUI's runtime
+    # child never reads it at all. ``session.cleanup.*`` is consumed by the
+    # once-per-process store-maintenance pass (``session_factory
+    # ._STORE_MAINTENANCE_TASK``), so a ``/new`` does not re-run it either.
+    # The former "new sessions" label promised a `/new` would adopt these,
+    # which nothing did.
     Section(
         "session",
-        "Session",
-        Scope.NEW_SESSIONS,
-        "Approvals and autosave for sessions started from now on.",
+        "Session storage",
+        Scope.NEW_LAUNCH,
+        # The scope tag one column away already says "takes effect: new
+        # launch", so restating "read once at launch" here said "launch" twice
+        # within one row (design round 1, D7).
+        "Autosave and the cleanup policy.",
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
@@ -316,9 +359,10 @@ SECTIONS: tuple[Section, ...] = (
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
-    # NEW_SESSIONS, and these keys take effect on the very next /resume in this
-    # same terminal. Filing a live key under a section labelled "new sessions"
-    # is exactly the painted lie AGENTS.md warns about — split the section.
+    # launch-time (autosave and the cleanup policy), and these keys take
+    # effect on the very next /resume in this same terminal. Filing a live key
+    # under a section labelled for launch is exactly the painted lie AGENTS.md
+    # warns about — split the section.
     Section(
         "runtime",
         "Runtime",
@@ -342,16 +386,22 @@ SECTIONS: tuple[Section, ...] = (
         "Where /fork opens the branched conversation.",
     ),
     # The GATE comes first, then the knobs it gates (design review round 1,
-    # D3). Whether each tool is offered at all is decided when the tool
-    # inventory is built, so these two flags cannot be LIVE — but reading order
-    # is the hierarchy the user sees, and putting the master switches after
-    # four tuning knobs left someone scanning for "is web search on?" finding
-    # the answer next to the retired-keys graveyard.
+    # D3): reading order is the hierarchy the user sees, and putting the
+    # master switches after four tuning knobs left someone scanning for "is
+    # web search on?" finding the answer next to the retired-keys graveyard.
+    # LIVE by two mechanisms that together make "applied" true: execution
+    # re-checks ``enabled`` on EVERY call (``execute_web_search`` /
+    # ``run_fetch`` — which also covers the ``read <url>`` sugar), so a
+    # disable refuses at once even mid-turn; and a top-level session
+    # reconciles its advertised inventory at the next TURN boundary (never
+    # mid-turn — a call the model already emitted against a just-removed tool
+    # would come back "Tool not found"). Subagents keep their spawn inventory
+    # and rely on the per-call gate alone.
     Section(
         "web_tools",
         "Web tools",
-        Scope.NEW_SESSIONS,
-        "Whether the search and fetch tools are offered to the model.",
+        Scope.LIVE,
+        "Whether the search and fetch tools are offered and allowed to run.",
     ),
     # LIVE: both tools build their settings from config on EVERY call
     # (``web_search/tool.py``, ``web_fetch/tool.py``).
@@ -366,6 +416,18 @@ SECTIONS: tuple[Section, ...] = (
         "Web fetch",
         Scope.LIVE,
         "Limits and rendering for the fetch tool.",
+    ),
+    # LIVE for the same reason as the two web sections: ``execute_bash`` reads
+    # ``bash.shell`` through a fresh ``ConfigManager(config_dir())`` on EVERY
+    # call (``tools/builtin.py::_configured_bash_shell``), so an edit lands on
+    # the very next command. Its own section rather than a row under "Session"
+    # or "Runtime": scope is uniform within a section by construction, and
+    # this is about how a tool executes, not how sessions behave.
+    Section(
+        "tools",
+        "Tools",
+        Scope.LIVE,
+        "How the built-in tools execute.",
     ),
     Section(
         "local_providers",
@@ -443,7 +505,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default provider",
         kind=Kind.TEXT,
         default="",
-        help="Provider new launches boot on. Set here or by /model default.",
+        # 72 cells. Every help string on this page has to clear the ~76-cell
+        # footer budget at 80 columns: past it the shed ladder drops the YAML
+        # key path (the thing a user maps a row to the file by) and then the
+        # sentence itself is clipped mid-clause with no ellipsis (design round
+        # 1, D2). Measure any edit to these four before landing it.
+        help="Provider sessions run on unless chosen with /model. Also /model default.",
         empty_unsets=True,
     ),
     Setting(
@@ -453,7 +520,8 @@ SETTINGS: tuple[Setting, ...] = (
         label="Default model",
         kind=Kind.TEXT,
         default="",
-        help="Model id new launches boot on. Set here or by /model default.",
+        # 72 cells — see the note on `hosting` above.
+        help="Model id sessions run on unless chosen with /model. Also /model default.",
         empty_unsets=True,
     ),
     # -- providers ----------------------------------------------------------
@@ -726,20 +794,48 @@ SETTINGS: tuple[Setting, ...] = (
         help="Fires only while the terminal is unfocused.",
         choices=_bool_choices("notify when unfocused", "never notify"),
     ),
-    # -- session ------------------------------------------------------------
+    Setting(
+        # The session's INITIAL dock density, not a hard override: `ctrl+g`
+        # cycles freely from it and never writes it back (the same split as
+        # `tool_approval_mode` vs `/approvals`). A hard override would make
+        # the key a no-op again, which is the defect #525 fixed. LIVE by
+        # section: a write applies to the mounted panel unless the user has
+        # already cycled it this session. Named `display.dock` rather than
+        # `display.subagent_dock` so a later todo-panel extension can share it.
+        key="display.dock",
+        path=("display.dock",),
+        section="appearance",
+        label="Subagent dock",
+        kind=Kind.ENUM,
+        default="full",
+        help="How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
+        choices=(
+            # Parallel descriptions: each names WHAT IS SHOWN and nothing
+            # else. `hidden` used to append "; ctrl+g brings it back", which
+            # made it the only choice explaining its own exit and left the
+            # list reading unevenly — and the help line above already names
+            # `ctrl+g` for all three (round 1, D5).
+            Choice("full", "full", "one row per child, newest first"),
+            Choice("summary", "summary", "a one-line count"),
+            Choice("hidden", "hidden", "not shown"),
+        ),
+    ),
+    # -- approvals ----------------------------------------------------------
     Setting(
         key="tool_approval_mode",
         path=("tool_approval_mode",),
-        section="session",
+        section="approvals",
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        help="How a new interactive session treats write and exec tools.",
+        # 74 cells — see the note on `hosting`.
+        help="How every running session treats write and exec tools, from its next call.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),
         ),
     ),
+    # -- session storage ----------------------------------------------------
     Setting(
         key="auto_save_conversation",
         path=("auto_save_conversation",),
@@ -747,7 +843,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Auto-save conversation",
         kind=Kind.BOOL,
         default=False,
-        help="Write the conversation to disk as it goes.",
+        help="Headless REPL launches only; the TUI's runtime does not read it.",
         choices=_bool_choices("save automatically", "save on request"),
     ),
     # -- runtime ------------------------------------------------------------
@@ -758,7 +854,7 @@ SETTINGS: tuple[Setting, ...] = (
         # stays in the Session section, so a user reading the Runtime page
         # could not predict which YAML key they were editing. The scope
         # argument for keeping it out of the Session SECTION (that section is
-        # NEW_SESSIONS, this key is LIVE) is sound and unaffected: the section
+        # NEW_LAUNCH, this key is LIVE) is sound and unaffected: the section
         # is the scope boundary, the namespace is the section's name. New in
         # this release, so there is no migration cost to settling it now.
         key="runtime.background_on_resume",
@@ -1053,9 +1149,11 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
     ),
     # -- web search ---------------------------------------------------------
-    # The two ``enabled`` flags sit in ``web_tools`` (NEW_SESSIONS), apart from
-    # the knobs that share their YAML block: they gate whether the tool exists
-    # in the inventory, which is decided once at build.
+    # The two ``enabled`` flags sit in ``web_tools``, apart from the knobs that
+    # share their YAML block, for reading order (the gate before what it
+    # gates). The startup snapshot decides the BOOT inventory; execution
+    # re-checks ``enabled`` per call; a flip is reconciled into a top-level
+    # session's inventory at its next turn.
     Setting(
         key="web_search.enabled",
         path=("web_search", "enabled"),
@@ -1063,7 +1161,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Web search",
         kind=Kind.BOOL,
         default=True,
-        help="Expose the search tool to the agent.",
+        help="Offer the search tool and let it run; off refuses every call.",
         choices=_bool_choices("search available", "search disabled"),
     ),
     Setting(
@@ -1125,7 +1223,10 @@ SETTINGS: tuple[Setting, ...] = (
         label="Web fetch",
         kind=Kind.BOOL,
         default=True,
-        help="Expose the fetch tool to the agent.",
+        # 60 cells — see the note on `hosting`. No BACKTICKS: the footer is a
+        # plain `Text`, so they render as literal characters, and this was the
+        # only one of 57 help strings carrying any (design round 1, D5).
+        help="Offer the fetch tool and read <url>; off refuses every call.",
         choices=_bool_choices("fetch available", "fetch disabled"),
     ),
     Setting(
@@ -1202,6 +1303,21 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
+    ),
+    # -- tools --------------------------------------------------------------
+    # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
+    # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
+    # imported, because this module must stay cheap for the CLI and
+    # ``tools.builtin`` is not (see the module docstring on Textual).
+    Setting(
+        key="bash.shell",
+        path=("bash", "shell"),
+        section="tools",
+        label="Bash interpreter",
+        kind=Kind.TEXT,
+        default="",
+        help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+        empty_unsets=True,
     ),
     *[
         setting

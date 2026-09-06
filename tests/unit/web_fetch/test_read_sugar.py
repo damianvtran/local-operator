@@ -158,3 +158,30 @@ async def test_read_skill_url_still_resolves(context: ToolContext) -> None:
     assert result.is_error is False
     assert "skill body content" in result.text
     assert resolved["target"] == "skill://demo"
+
+
+@pytest.mark.asyncio
+async def test_read_url_is_refused_when_web_fetch_is_disabled(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sugar has no createIf gate of its own, so before the per-call check
+    in ``run_fetch`` a user who turned fetching OFF still had every URL
+    fetched through ``read``. "Disabled" now means no fetching through any
+    spelling, and the refusal is the same sentence ``web_fetch`` gives."""
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    service.set_fetch_enabled(ConfigManager(config_dir()), False)
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, text="<p>never</p>", headers={"content-type": "text/html"})
+    )
+    orig = tool.run_fetch
+
+    async def _run_with_transport(url: str, **kwargs):
+        kwargs.setdefault("transport", transport)
+        return await orig(url, **kwargs)
+
+    monkeypatch.setattr(tool, "run_fetch", _run_with_transport)
+    result = await execute_read("t1", {"path": "https://example.com"}, None, None, context)
+    assert result.is_error is True
+    assert result.text == tool.WEB_FETCH_DISABLED_MESSAGE

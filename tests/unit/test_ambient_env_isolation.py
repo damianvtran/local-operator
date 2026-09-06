@@ -72,6 +72,7 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_NO_SHIMMER": "animation switch; the visual harness sets it",
     "LOCAL_OPERATOR_NO_TERMINAL_TITLE": "title-escape switch",
     "LOCAL_OPERATOR_NO_MULTIPLEXER_RESUME": "kill switch for the pane resume marker; safer ON",
+    "LOCAL_OPERATOR_NO_HERDR": "kill switch for the Herdr Agents-panel reporter; safer ON",
     "LOCAL_OPERATOR_NO_NOTIFICATIONS": "desktop-notification kill switch (safer ON)",
     "LOCAL_OPERATOR_IMAGES": "inline-image protocol switch",
     "LOCAL_OPERATOR_GREP_ENGINE": "rg vs python grep",

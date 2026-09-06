@@ -458,6 +458,49 @@ async def test_an_instance_type_override_reaches_the_real_run_instances_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hint", [False, True])
+@pytest.mark.parametrize("policy", [None, "false", "true"])
+async def test_proxy_policy_reaches_desktop_env_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hint: bool, policy: str | None
+) -> None:
+    task = taskfile.TaskDescriptor(
+        task_id="synthetic", instruction="", source_sha256="0" * 64, proxy=hint
+    )
+    infra = _infra() + (
+        ()
+        if policy is None
+        else (
+            ScopedInfraValue(
+                name="OSWORLD_ENABLE_PROXY", purpose="benchmark_compute", value=policy
+            ),
+        )
+    )
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=infra)
+    captured: list[_FakeEnv] = []
+
+    def factory(**kwargs: Any) -> _FakeEnv:
+        env = _FakeEnv(**kwargs)
+        captured.append(env)
+        return env
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs, plan=plan)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {"id": t.task_id, "proxy": t.proxy},
+        )
+        await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+    assert len(captured) == 1
+    assert captured[0].kwargs["enable_proxy"] is (hint if policy is None else policy == "true")
+
+
+@pytest.mark.asyncio
 async def test_desktop_env_cache_dir_is_absolute_and_outside_the_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1308,6 +1351,179 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         assert stubs.slept == [3.0, 3.0]
         assert await provider.respond("?") is None
         assert (await provider.observe())["screenshot"] == b"png"
+
+
+class _OpaqueSimulatorValue:
+    def __str__(self) -> str:
+        raise AssertionError("private simulator objects must not be stringified")
+
+
+_SIMULATOR_VALUES = [
+    None,
+    123,
+    {"internal": "PRIVATE_SIMULATOR_CANARY"},
+    _OpaqueSimulatorValue(),
+    "public answer",
+    "",
+    "   ",
+]
+_SIMULATOR_IDS = [
+    "refusal",
+    "number",
+    "mapping",
+    "opaque-object",
+    "public-string",
+    "empty",
+    "whitespace",
+]
+
+
+def _answer_adapter(tmp_path: Path, stubs: _Stubs, value: Any) -> Any:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from lop_osworld_v2_adapter.adapter import OSWorldV2Adapter
+
+    provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-answer", clients=stubs.clients)
+    respond = Mock(return_value=value)
+    provider._env = SimpleNamespace(user_simulator=SimpleNamespace(respond=respond))
+    adapter = OSWorldV2Adapter(workspace_root=tmp_path)
+    # Only the upstream simulator is scripted. No task module, profile, cloud
+    # allocation or FakeProvider participates in this answer-bearing boundary.
+    adapter._task = taskfile.TaskDescriptor(
+        task_id="synthetic",
+        instruction="",
+        source_sha256="0" * 64,
+        user_simulator={"type": "scripted"},
+    )
+    adapter._provider = provider
+    return adapter, respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", _SIMULATOR_VALUES, ids=_SIMULATOR_IDS)
+@pytest.mark.parametrize("boundary", ["provider", "adapter"])
+async def test_real_aws_simulator_answer_contract(
+    tmp_path: Path, value: Any, boundary: str
+) -> None:
+    from pydantic import ValidationError
+
+    from local_operator.evaluation.adapters.api import AskUserExchangeParams
+
+    with _Stubs() as stubs:
+        adapter, respond = _answer_adapter(tmp_path, stubs, value)
+        params = AskUserExchangeParams(
+            operation_id="begin", episode_id="episode", ask_id="ask", prompt="Public question?"
+        )
+
+        async def call() -> Any:
+            if boundary == "provider":
+                return await adapter._provider.respond(params.prompt)
+            return await adapter.ask_user_exchange(params)
+
+        if value is not None and not isinstance(value, str):
+            with pytest.raises(TypeError) as error:
+                await call()
+            assert str(error.value) == "simulator response must be a string or None"
+        elif boundary == "adapter" and isinstance(value, str) and not value.strip():
+            with pytest.raises(ValidationError):
+                await call()
+        else:
+            result = await call()
+            if boundary == "provider":
+                assert result is value
+            else:
+                assert result.accepted == (value is not None)
+                assert result.answer == value and result.request_digest == params.request_digest
+        respond.assert_called_once_with("Public question?")
+        assert not stubs.http_calls and not stubs.guest_posts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", _SIMULATOR_VALUES, ids=_SIMULATOR_IDS)
+async def test_real_aws_answer_never_publishes_coerced_values(
+    tmp_path: Path, episode_id: str, value: Any
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.evaluation.evidence.models import UserSimulatorExchangePayload
+    from local_operator.evaluation.evidence.verify import verify_bundle
+    from local_operator.evaluation.runner.episode import EpisodeRunner
+    from tests.unit.evaluation.runner.conftest import (
+        FakeAdapter,
+        ScriptedModel,
+        build_config,
+        build_spec,
+        payloads,
+        selector,
+    )
+
+    with _Stubs() as stubs:
+        adapter, respond = _answer_adapter(tmp_path, stubs, value)
+
+        class AnswerTransport(FakeAdapter):
+            # Reuse the existing no-cloud lifecycle fixture for everything
+            # except the real OSWorld -> AwsProvider -> upstream answer path.
+            async def handshake(self, *, timeout: float = 10.0) -> Any:
+                result = await super().handshake(timeout=timeout)
+                metadata = result.metadata.model_copy(
+                    update={"capabilities": adapter.metadata.capabilities}
+                )
+                return result.model_copy(update={"metadata": metadata})
+
+            async def _call_raw(
+                self, method: Any, params: Any, result_type: Any, *, timeout: float
+            ) -> Any:
+                if method == "ask_user_exchange":
+                    self.calls.append(method)
+                    return await adapter.ask_user_exchange(params)
+                return await super()._call_raw(method, params, result_type, timeout=timeout)
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(complete=True)
+
+        transport = AnswerTransport(tmp_path, episode_id)
+        model = ScriptedModel(["ask", "finish"])
+        outcome = await EpisodeRunner(
+            build_spec(episode_id),
+            build_config(tmp_path),
+            selector=selector(tmp_path),
+            model=model,
+            launch=lambda _: transport,
+            rescue=rescue,
+            synthetic_model=True,
+        ).run()
+        respond.assert_called_once_with("What next?")
+        assert transport.calls.count("ask_user_exchange") == 1
+        assert outcome.bundle_root is not None
+        report = verify_bundle(outcome.bundle_root)
+        assert report.valid, report.issues
+        exchanges = payloads(outcome.bundle_root, UserSimulatorExchangePayload)
+        if isinstance(value, str) and value.strip():
+            assert outcome.status == "completed", outcome.diagnostic
+            assert len(exchanges) == 1 and model.calls == 2
+            answer_file = next(
+                path
+                for path in outcome.bundle_root.rglob(exchanges[0].response_artifact.sha256)
+                if path.is_file()
+            )
+            assert answer_file.read_text() == value
+            assert model.histories[1][0].ask_answer == value
+        else:
+            assert outcome.status == (
+                "cancelled" if value is None else "failed"
+            ), outcome.diagnostic
+            assert outcome.score is not None and outcome.score.status == "unscored"
+            assert not exchanges and model.calls == 1
+            assert all(turn.ask_answer is None for history in model.histories for turn in history)
+            assert "execute" not in transport.calls and "score" not in transport.calls
+            assert "PRIVATE_SIMULATOR_CANARY" not in (outcome.diagnostic or "")
+            assert not any(
+                b"PRIVATE_SIMULATOR_CANARY" in path.read_bytes()
+                for path in outcome.bundle_root.rglob("*")
+                if path.is_file()
+            )
+        assert not stubs.http_calls and not stubs.guest_posts
 
 
 # ---------------------------------------------------------------------------

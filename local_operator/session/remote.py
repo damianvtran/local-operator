@@ -69,6 +69,7 @@ from local_operator.mobile.attach_client import (
     find_owner_record,
 )
 from local_operator.mobile.types import (
+    SLASH_ACTION_RECEIPTS,
     ContinuationCommand,
     PendingRequest,
     SessionRecord,
@@ -232,6 +233,14 @@ class RemoteSession:
         #: whose contract is still "recover the conversation into this
         #: process" and whose tests assert exactly that.
         self._can_go_cold = False
+        #: The BUILD the runtime on the other end is running, read off its
+        #: discovery record at dial. ``""`` on a facade that has never bound,
+        #: and on one bound to a runtime older than the field — the TUI treats
+        #: those two the same way (it has no build to compare against) and
+        #: distinguishes them by whether the facade is cold, not by this
+        #: value. See ``app.py::_check_build_skew``.
+        self.owner_version: str = ""
+        self.owner_source_ref: str = ""
         #: Why this viewer opened WITHOUT live state, when that was not the
         #: ordinary "no runtime was running" case. Set by the launcher when an
         #: attach to a live runtime failed and it fell back to cold; the TUI
@@ -318,6 +327,10 @@ class RemoteSession:
         # preserving adoption callback completes. Keystrokes remain editable in
         # the standard composer throughout — no attach/recovery UI state.
         self._owner_ready = asyncio.Event()
+        # Socket delivery can outrun the coroutine installing its initial sync.
+        # Buffer that suffix until its epoch, rather than the cold disk epoch,
+        # is authoritative. None means the canonical boundary is installed.
+        self._pending_frontend_updates: list[FrontendUpdate] | None = None
         self._takeover_target: Any | None = None
         self._streaming = False
         self._generation = 0
@@ -474,9 +487,16 @@ class RemoteSession:
             takeover_factory=takeover_factory,
         )
         await self._dial(record)
-        frontend = await self._await_frontend()
-        self._install_frontend(frontend.snapshot)
-        await self._load_history(frontend.live_cursor)
+        try:
+            frontend = await self._await_frontend()
+            self._install_frontend(frontend.snapshot)
+            await self._load_history(frontend.live_cursor)
+        except BaseException:
+            # The caller gets the error and no facade — so nothing would ever
+            # close the connection ``_dial`` just opened. See
+            # ``_discard_rejected_client`` for the leak this closes.
+            self._discard_rejected_client()
+            raise
         self._finish_sync()
         return self
 
@@ -592,12 +612,19 @@ class RemoteSession:
                 "todo panels start empty"
             )
             return self._restore_cold_subagents(state)
+        # A fork's transcript carries the PARENT's checkpoints verbatim (#573),
+        # and the parent's children are not this session's to list — the same
+        # reason ``fork.EXCLUDED_SIDECARS`` leaves the roster behind. The
+        # runtime applies the identical rule when it restores
+        # (``frontend_state._inherited_identity_fixups``), so the cold frame
+        # and the attached frame agree on what the fork has.
+        inherited = durable.session_id != self._session_id
         restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
                 # derive. The panel reads these directly, so restoring them is
                 # what puts the session's details on the FIRST frame.
-                "jobs": list(durable.jobs),
+                "jobs": [] if inherited else list(durable.jobs),
                 "todos": list(durable.todos),
                 "conversation_title": durable.conversation_title,
                 "conversation_title_user_set": durable.conversation_title_user_set,
@@ -947,8 +974,8 @@ class RemoteSession:
 
     @property
     def is_cold(self) -> bool:
-        """No runtime is attached (nor being attached) for this viewer."""
-        return self._client is None or not self._client.connected
+        """No fully synchronized runtime is attached to this viewer."""
+        return self._client is None or not self._client.connected or not self._ready_for_events
 
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
@@ -965,10 +992,13 @@ class RemoteSession:
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
         """
-        if not self._can_go_cold or not self.is_cold or self._disposed:
+        # Recovery already owns its dial/sync and signals _owner_ready. A
+        # prompt or steer must wait on that promise, not start a competing
+        # initial attachment merely because its connected socket is not ready.
+        if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
             return
         async with self._bind_lock:
-            if not self.is_cold or self._disposed:
+            if not self.is_cold or self._disposed or self._recovering:
                 return
             from local_operator.mobile.attach_client import find_owner_record
             from local_operator.session.runtime.launch import WarmErrand, engage_runtime
@@ -1007,22 +1037,81 @@ class RemoteSession:
         boundary, which is what stops the rows already on screen from painting
         a second time.
         """
-        await self._dial(record)
-        frontend = await self._await_frontend()
-        self._install_frontend(frontend.snapshot, publish=True)
-        await self._load_history(frontend.live_cursor)
-        self._finish_sync()
-        self._deliberate_stop = False
-        self._stopped_announced = False
-        self._owner_ready.set()
+        try:
+            await self._dial(record)
+            frontend = await self._await_frontend()
+            if self._disposed:
+                raise ConnectionError("viewer disposed while synchronizing")
+            self._install_frontend(frontend.snapshot, publish=True)
+            await self._load_history(frontend.live_cursor)
+            if self._disposed:
+                raise ConnectionError("viewer disposed while synchronizing")
+            self._finish_sync()
+            self._deliberate_stop = False
+            self._stopped_announced = False
+            self._owner_ready.set()
+        except BaseException:
+            # A failed/cancelled sync is not an attached viewer. Retrying must
+            # not leak the half-open socket or inherit its queued epoch suffix.
+            self._discard_rejected_client()
+            if not self._recovering:
+                self._owner_ready.set()
+            raise
+
+    def _discard_rejected_client(self) -> None:
+        """Drop a client whose runtime dialled fine but whose state was refused.
+
+        ``_dial`` installs ``self._client`` the moment the socket authenticates,
+        BEFORE the canonical sync is awaited and checked — so when the sync is
+        rejected (``_install_frontend``'s identity guard, a malformed frame, the
+        15 s sync timeout) the facade was left half-bound: ``is_cold`` said
+        False because a connected client existed, every RPC still reached the
+        owner, yet no state had been installed and none ever would be. That is
+        the exact shape #573 produced on a switched-to fork: ``/model`` landed
+        on the owner's journal while the band never repainted and the context
+        segment stayed blank, so the switch read as "nothing happened".
+
+        Closing the client makes ``is_cold`` honest again — the next
+        ``_ensure_bound`` retries the whole engage and the TUI's own failure
+        path can say why — and it releases the runtime's attach slot. Without
+        the release each retry of ``_recover_owner`` opened another connection
+        on top of the last, and the runtime's LRU cap evicted them in a burst
+        (272 evictions logged in the minutes after one fork booted).
+
+        ``close()`` also cancels the pump, which is the one thing that must not
+        run on: with no state installed, the owner's next ``frontend_update``
+        would land on a store at the wrong epoch and fail as a sequence gap.
+        Cleared directly rather than through ``_on_disconnected`` because the
+        socket did not fail — the state did — and the recovery loop that hook
+        starts would redial the same runtime and be refused the same way.
+        """
+        client, self._client = self._client, None
+        self._frontend_future = None
+        self._runtime_pid = None
+        # The rejected dial's buffered suffix belongs to its refused epoch.
+        # connect, initial binding and recovery all share this discard boundary.
+        self._pending_frontend_updates = None
+        if client is None:
+            return
+        # ``abandon`` rather than ``close``: this closure is ours, not the
+        # owner's, so it must not read as owner loss — a bind that was refused
+        # would otherwise start a recovery that redials the same runtime and
+        # is refused again.
+        try:
+            client.abandon()
+        except Exception:  # noqa: BLE001 - teardown of a connection being abandoned
+            logger.debug("closing a rejected owner connection failed", exc_info=True)
 
     async def _dial(self, record: SessionRecord) -> None:
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
+        self._owner_ready.clear()
+        self._pending_frontend_updates = []
         self._runtime_pid = record.pid
         loop = asyncio.get_running_loop()
         self._frontend_future = loop.create_future()
+        pending_sync = self._frontend_future
 
         def on_disconnected(reason: str) -> None:
             # A connection that dies while we are still waiting for the sync
@@ -1034,19 +1123,41 @@ class RemoteSession:
             # round 1, D5 is the same finding from the other side). The
             # reason string is carried into the error so the copy the pump
             # produced actually reaches a surface instead of only a log line.
-            future = self._frontend_future
-            if future is not None and not future.done():
-                future.set_exception(ConnectionError(reason))
-            self._on_disconnected(reason)
+            if not pending_sync.done():
+                pending_sync.set_exception(ConnectionError(reason))
+            # Closing a failed binding schedules the old pump's final callback.
+            # It must not mark a retried/newer binding as recovering.
+            if self._client is client:
+                self._on_disconnected(reason)
 
+        # The runtime's build, captured from the record BEFORE the socket is
+        # opened: a runtime's version cannot change while it lives, so one
+        # read at dial is complete. ``""`` means the owner predates the field,
+        # which by construction makes it older than this terminal. The TUI
+        # compares these with its own build and names the skew (see
+        # ``app.py::_check_build_skew``); nothing here decides anything, so a
+        # missing stamp degrades to "unknown", never to a refused attach.
+        self.owner_version = getattr(record, "version", "") or ""
+        self.owner_source_ref = getattr(record, "source_ref", "") or ""
         client = AttachClient(
             lambda _projection: None,
             on_disconnected,
             events=True,
-            on_event=self._on_wire_event,
+            on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
-            on_frontend_sync=self._on_frontend_sync,
-            on_frontend_update=self._on_frontend_update,
+            # THE full-TUI viewer is the client that renders action-carrying
+            # receipts: ``_render_authoritative_slash`` submits their
+            # ``request`` as a user turn. Declaring them is what tells the
+            # runtime NOT to admit the request itself, which would run the
+            # command twice. A viewer that omitted this (every build before
+            # the field) is exactly the case the runtime completes for.
+            slash_consumers=list(SLASH_ACTION_RECEIPTS),
+            on_frontend_sync=lambda data: (
+                self._on_frontend_sync(data) if self._client is client else None
+            ),
+            on_frontend_update=lambda data: (
+                self._on_frontend_update(data) if self._client is client else None
+            ),
         )
         try:
             await client.connect(record, self._session_id)
@@ -1365,6 +1476,9 @@ class RemoteSession:
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
         update = FrontendUpdate.model_validate(data)
+        if self._pending_frontend_updates is not None:
+            self._pending_frontend_updates.append(update)
+            return
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
@@ -1380,6 +1494,9 @@ class RemoteSession:
         else:
             self._frontend_store.replace(state)
         self._apply_frontend_facades(state)
+        pending, self._pending_frontend_updates = self._pending_frontend_updates, None
+        for update in pending or ():
+            self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
         """Refresh compatibility facades after one canonical install."""
@@ -1453,6 +1570,17 @@ class RemoteSession:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
             return
+        self._deliver(event)
+
+    def _deliver(self, event: AgentEvent[Any]) -> None:
+        """Hand ``event`` to every subscribed handler now, buffering nothing.
+
+        With NO subscriber the event is DROPPED, not parked — that is the
+        contract, not an omission. Callers reach for this instead of
+        ``_emit_or_buffer`` precisely when a deferred delivery would land on a
+        LATER runtime's turn (see ``_end_turn_locally``), and parking the event
+        for a future subscriber recreates exactly that hazard one seam over.
+        """
         for handler in list(self._handlers):
             result = handler(event)
             if inspect.isawaitable(result):
@@ -1598,19 +1726,66 @@ class RemoteSession:
         self._end_turn_locally()
         self._recovery_task = asyncio.create_task(self._recover_owner())
 
-    def _end_turn_locally(self) -> None:
+    def _end_turn_locally(self, *, direct: bool = False) -> None:
         """End an in-flight turn the owner can no longer end itself.
 
-        Both terminal outcomes need it and neither can get it from the owner:
-        a killed owner factually aborted the turn, and a stopped one ended the
-        whole session under it. Marked through the normal event path so no
+        All three terminal outcomes need it and none can get it from the
+        owner: a killed owner factually aborted the turn, a stopped one ended
+        the whole session under it, and a viewer going cold has no runtime
+        left to hear from. Marked through the normal event path so no
         card/banner or attach vocabulary appears — the transcript reads as an
         ordinary aborted turn, which is what it is.
+
+        ``direct`` bypasses the sync buffer and hands the end straight to the
+        subscribed handlers (dropping it when there are none). The go-cold
+        caller needs this: a failed successor ``_dial`` leaves
+        ``_ready_for_events`` False, so a BUFFERED end would sit until the
+        NEXT bind's ``_finish_sync`` drained it — behind that bind's seeded
+        ``AgentStartEvent`` — and would tear down the new turn it never
+        belonged to. Delivered now it ends the one it does.
+
+        UNSTAMPED (``generation=0``), never ``self._generation`` — review
+        round 1, BLOCKER-1. That field is not this viewer's own turn counter:
+        ``_apply_frontend_facades`` overwrites it from whatever snapshot last
+        arrived, and a SUCCESSOR is a fresh runtime whose counter restarts
+        (``Session.__init__`` sets 0, so its first turn is 1) while the app's
+        ``EventController`` has adopted the PREVIOUS owner's generation — 6,
+        or any long session's turn count. Stamping the synthesised end with
+        the successor's number therefore made ``_handle_agent_end`` drop it as
+        ``gen < current`` (``tui/events.py``), so the end reached the handler
+        and died one layer below it: no ``TurnEnded``, and — with edit 1's
+        hold in place and no wall-clock timeout by design — a band and tab
+        title asserting ``working`` for the rest of the process's life. ``0``
+        is the field's default and the established "unstamped: belongs to
+        whatever turn is open" encoding that the controller's ``if gen:``
+        branch reads, which is exactly the semantics a locally synthesised end
+        wants. It applies to the buffered path for the same reason: neither
+        delivery has standing to speak for the successor's numbering.
         """
         if not self._streaming:
             return
-        self._emit_or_buffer(AgentEndEvent(aborted=True, generation=self._generation, error=None))
-        self._streaming = False
+        end = AgentEndEvent(aborted=True, generation=0, error=None)
+        # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
+        # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
+        # synchronously with no guard of its own, and
+        # `EventController._handle_agent_end` does real work on this path —
+        # flush, usage pricing, cost summation. When one of those raises, a
+        # trailing assignment never runs and the facade reports `is_streaming`
+        # True on a session that is now cold with no runtime left to clear it.
+        # The caller's `try/except` cannot cover that: it catches the exception
+        # OUTSIDE this method, by which point the clear has already been
+        # skipped. That strands `_retire_turn_band`'s hold — the band and tab
+        # title assert `working` for the rest of the process's life, with no
+        # wall-clock timeout by design — and mis-routes the next message into
+        # the steer branch, which is the round-4 MAJOR-3/D4-1 failure the
+        # deliberate-stop comment above records.
+        try:
+            if direct:
+                self._deliver(end)
+            else:
+                self._emit_or_buffer(end)
+        finally:
+            self._streaming = False
 
     async def _session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
@@ -1661,6 +1836,22 @@ class RemoteSession:
         ``_owner_ready`` is SET rather than left clear because a cold viewer is
         ready — the next prompt engages a runtime through ``_ensure_bound``
         instead of waiting for one that is never coming back.
+
+        A turn still in flight is ENDED through the event path, not merely
+        flagged off (#642, UX U11). Clearing ``_streaming`` alone told the
+        facade the turn was over while the app — which holds its working line,
+        band and title open until an ``AgentEndEvent`` reaches it — was never
+        told anything, so a viewer that went cold mid-turn held a spinner
+        forever with no toast and no notice. On the common path this is a
+        no-op: ``_on_disconnected`` already ended the turn before
+        ``_recover_owner`` started. The case it exists for is a SUCCESSOR
+        dying mid-reattach — ``_on_disconnected`` returns early while
+        ``_recovering``, and ``_apply_frontend_facades`` has just re-marked
+        the turn live from the successor's snapshot — which leaves
+        ``_streaming`` True with nothing else on the way to clear it.
+        Delivered ``direct`` for the reason on ``_end_turn_locally``: the
+        failed dial left the sync buffer closed, and a buffered end would land
+        on the NEXT runtime's turn instead of this one.
         """
         client, self._client = self._client, None
         if client is not None:
@@ -1668,7 +1859,16 @@ class RemoteSession:
                 client.close()
             except Exception:  # noqa: BLE001 — teardown of a dead socket
                 logger.debug("closing the lost owner connection failed", exc_info=True)
-        self._streaming = False
+        # Guarded like the two teardown steps that bracket it (the client
+        # close above, the went-cold callback below): a handler that raises —
+        # `EventController._handle_agent_end` flushes, prices usage and sums
+        # cost — must not propagate out of teardown and skip `_owner_ready`,
+        # which would leave the prompt path waiting on an event nothing else
+        # will set (review round 1, MINOR-1).
+        try:
+            self._end_turn_locally(direct=True)
+        except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
+            logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
         self._owner_ready.set()
         callback = self._went_cold_callback
         if callback is None:
@@ -1754,6 +1954,29 @@ class RemoteSession:
                 ):
                     try:
                         await self._dial(record)
+                    except (ConnectionError, OSError, TimeoutError):
+                        # ``_dial`` closes the client it built on every raise
+                        # path and installs ``self._client`` only as its last
+                        # statement, so a failed redial leaks no socket. What it
+                        # DOES leave is the identity it stamped on entry:
+                        # ``_runtime_pid = record.pid`` (and a pending
+                        # ``_frontend_future``) for a runtime this viewer never
+                        # attached to. That outlives the pass — ``_go_cold``
+                        # does not clear it either — so a viewer that never
+                        # bound reports ``runtime_pid`` as a live pid where the
+                        # property promises None while cold, and
+                        # ``take_unannounced_cleanup`` reads that pid to decide
+                        # whether THIS viewer owns the cleanup notice: a stale
+                        # match claims another runtime's notice and blanks the
+                        # terminal that should have shown it (review round 1,
+                        # F3). Discarding here keeps the whole loop on one
+                        # rule — a pass that did not bind leaves no trace of
+                        # the runtime it tried.
+                        self._discard_rejected_client()
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 1.7, 0.5)
+                        continue
+                    try:
                         frontend = await self._await_frontend()
                         self._install_frontend(frontend.snapshot, publish=True)
                         # ONE threaded parse feeds both the gap replay and the
@@ -1781,7 +2004,13 @@ class RemoteSession:
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
-                        pass
+                        # The runtime answered but its state was refused (or
+                        # the sync never came). The dialled client must not
+                        # survive into the next pass: it would sit connected
+                        # on the runtime, make ``is_cold`` lie, and be joined
+                        # by another on every retry. See
+                        # ``_discard_rejected_client``.
+                        self._discard_rejected_client()
                 else:
                     try:
                         local = await self._takeover_factory()
@@ -2154,6 +2383,17 @@ class RemoteSession:
         (review round 3, MINOR-1/U8): the disconnect can also land mid-request,
         so the raced ``ConnectionError`` is rewritten below too.
         """
+        # An initial attachment is a bounded startup wait, not owner recovery.
+        # Join its lock before mutating so a newer selection cannot be painted
+        # and then overwritten by the older initial snapshot. Recovery keeps
+        # its existing explicit refusal instead of queueing commands indefinitely.
+        if (
+            self._can_go_cold
+            and self._bind_lock.locked()
+            and not self._recovering
+            and not self._deliberate_stop
+        ):
+            await self._ensure_bound()
         client = self._client
         if client is None or self._recovering or not client.connected:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))

@@ -10,6 +10,14 @@
          Hidden below 520px by CSS. -->
     <div class="field" aria-hidden="true"></div>
     <main>
+      <!-- Persistent while the all-sites switch is on. The danger colour is
+           spent here on a state the user should want to leave, not on
+           decoration; the Turn off action is the one-click way out. -->
+      <div class="banner danger hidden" id="allow-all-banner" role="status">
+        <p>All websites are allowed. The agent can use any site you are logged into.</p>
+        <button id="allow-all-banner-off" class="btn">Turn off</button>
+      </div>
+
       <div class="masthead">
         <svg
           class="mark"
@@ -41,16 +49,72 @@
         <p class="confirm hidden" id="confirm" role="status" aria-live="polite"></p>
       </section>
 
+      <!-- The one setting that bypasses the origin gate entirely. It is written
+           by options.ts straight into chrome.storage.local, never through the
+           worker or the daemon, and only after the dialog below is
+           acknowledged (allow-all-flow.ts). -->
+      <section class="card">
+        <h2>Site access</h2>
+        <label class="switch" for="allow-all">
+          <input id="allow-all" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">Dangerously allow all websites</span>
+        </label>
+        <p class="hint">
+          Skips the site prompt for every website. The agent can then use any site you are
+          logged into without asking. Only turn this on if you accept that risk.
+        </p>
+      </section>
+
       <section class="card">
         <h2>Allowed sites</h2>
         <p class="hint">
-          Exact site and port access is the default. Loopback sites may also have an explicit
-          all-ports grant. You can take either back here.
+          Each row is one grant. This site covers one exact address and port. All subdomains
+          covers a whole domain on any port. Any port covers a local host. You can take any of
+          them back here.
+        </p>
+        <!-- While the all-sites switch is on this list is not in effect, so
+             saying "No sites allowed yet." under a banner reading "All websites
+             are allowed" states the opposite of the truth to exactly the user
+             who came looking for what to undo (U2). -->
+        <p class="notice hidden" id="sites-superseded">
+          These grants are not in effect. All websites are allowed.
+          <button type="button" class="linkish" id="sites-superseded-off">Turn this off</button>
         </p>
         <ul id="sites"></ul>
         <p class="empty hidden" id="sites-empty">No sites allowed yet.</p>
       </section>
     </main>
+
+    <!-- Confirmation for the all-sites switch. A native dialog so Escape and
+         the backdrop are the platform's; both route through the cancel event
+         and revert the switch without writing. -->
+    <dialog id="allow-all-dialog" class="card" aria-labelledby="allow-all-title">
+      <h2 id="allow-all-title">Allow every website?</h2>
+      <ul class="warnings">
+        <li>The agent can open and act on any site you are logged into, including banking and email.</li>
+        <li>Site approval prompts stop entirely.</li>
+        <li>A mistaken or compromised agent gets all of that access.</li>
+      </ul>
+      <p class="disclaimer">
+        You are solely responsible for what the agent does with this access. Local Operator
+        provides this setting as-is. See the
+        <a href="https://local-operator.com/terms" target="_blank" rel="noopener">Terms</a> and
+        <a href="https://local-operator.com/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a>.
+      </p>
+      <!-- autofocus lands the keyboard on the acknowledgement rather than on
+           the Terms link, which showModal() would otherwise pick as the first
+           tabbable node: the first key a keyboard user could press on a
+           security confirmation would navigate away from it (U3). -->
+      <label class="ack" for="allow-all-ack">
+        <input id="allow-all-ack" type="checkbox" autofocus />
+        <span>I understand the risks</span>
+      </label>
+      <div class="dialog-actions">
+        <button id="allow-all-cancel" class="btn">Cancel</button>
+        <button id="allow-all-enable" class="btn danger" disabled>Enable</button>
+      </div>
+    </dialog>
     <script type="module" src="options.js"></script>
   </body>
 </html>

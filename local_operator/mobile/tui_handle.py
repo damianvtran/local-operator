@@ -39,7 +39,7 @@ import logging
 import secrets
 from concurrent.futures import Future
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -499,6 +499,7 @@ class TuiSessionHandle(SessionHandle):
         images: list[dict[str, str]] | None,
         *,
         locality: str = "local",
+        consumers: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
@@ -521,6 +522,13 @@ class TuiSessionHandle(SessionHandle):
         ``locality`` is the invoking client's declared position; it is passed
         through to the app so the grant verbs can tell a terminal on this
         machine from a relayed remote device.
+
+        ``consumers`` is forwarded for the same reason and to the same end as
+        on ``OwnedSessionHandle``: a session can be hosted either by a detached
+        runtime or by this app, and a follower must get the same answer from
+        both. A viewer that does not consume action-carrying receipts has its
+        request completed HERE when this TUI is the owner, exactly as the
+        runtime would.
         """
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -528,7 +536,11 @@ class TuiSessionHandle(SessionHandle):
         def schedule() -> None:
             task = owner_loop.create_task(
                 self._app.run_slash_authoritative(
-                    command, args, list(images or []), locality=locality
+                    command,
+                    args,
+                    list(images or []),
+                    locality=locality,
+                    consumers=consumers,
                 )
             )
 

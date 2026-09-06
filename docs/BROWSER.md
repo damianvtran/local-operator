@@ -9,14 +9,20 @@ Tests: `tests/unit/tools/test_browser_tool.py`.
 
 ## Site approval scopes
 
-The browser extension denies new sites by default. Persistent approval is exact
-origin, including scheme and port, and the popup shows the normalized authority
-so nondefault ports remain visible. For literal `localhost`, `127.0.0.1`, and
-`[::1]` only, the popup also offers **Always all ports**. That explicit grant
-covers the same scheme and exact hostname across ports; it never crosses to
-HTTPS, a sibling loopback address, a localhost subdomain, a private-network
-address, or a name that merely resolves to loopback. Settings lists and revokes
-exact-origin and loopback all-port grants independently.
+The browser extension denies new sites by default. The popup offers three
+scopes: **All pages on this domain** (the registrable domain, covering every
+subdomain, both schemes, and any port), **Only this site** (exact origin,
+including scheme and port), and **Just this once** (one navigation within
+10 minutes). For literal `localhost`, `127.0.0.1`, and `[::1]` only, the
+domain option is replaced by **Any port on this host**. Domain and host grants
+cover both schemes: the trust the user asserts is in the site operator, not
+the transport, and http-to-https redirect chains are gated per hop. A
+registrable domain is computed from the bundled Public Suffix List (both
+ICANN and PRIVATE sections), so `co.uk` and `github.io` are never offered as
+domains, and IP literals get no domain option. Settings lists and revokes
+every scope independently. A **Dangerously allow all websites** switch in
+Settings skips the prompt entirely; it requires a confirmed dialog and is
+off by default.
 
 ## Actions
 
