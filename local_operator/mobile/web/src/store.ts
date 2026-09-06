@@ -118,19 +118,24 @@ export function openEventStream(
 
 	const connect = () => {
 		if (closed) return;
-		es = new EventSource(url);
-		es.addEventListener(event, (e) => {
+		const source = new EventSource(url);
+		es = source;
+		// Closing an EventSource does not revoke callbacks already queued by the
+		// browser. A retired source must neither publish nor close its replacement.
+		source.addEventListener(event, (e) => {
+			if (closed || es !== source) return;
 			attempt = 0;
 			onData((e as MessageEvent).data as string);
 		});
-		es.onopen = () => {
+		source.onopen = () => {
+			if (closed || es !== source) return;
 			attempt = 0;
 			onOpen();
 		};
-		es.onerror = () => {
-			es?.close();
+		source.onerror = () => {
+			if (closed || es !== source) return;
+			source.close();
 			es = null;
-			if (closed) return;
 			onDisconnect();
 			const delay = Math.min(
 				BACKOFF_MAX_MS,
@@ -207,6 +212,7 @@ export function retainProjectionStream(sessionId: string): () => void {
 		existing.refs++;
 	} else {
 		projections.set(sessionId, { projection: null, connected: false });
+		let awaitingSnapshot = true;
 		const close = openEventStream(
 			`/api/sessions/${encodeURIComponent(sessionId)}/events`,
 			"projection",
@@ -217,25 +223,28 @@ export function retainProjectionStream(sessionId: string): () => void {
 				} catch {
 					return;
 				}
+				if (incoming.session_id !== sessionId) return;
 				const current = projections.get(sessionId);
-				/* Drop stale repaints: the daemon's epoch only moves forward. */
+				/* The daemon reconciles owner epochs while it is alive. Its counter
+				   can restart after reconnection, whose first authenticated snapshot
+				   is authoritative. Within that fenced source, keep normal ordering. */
 				if (
-					current?.projection &&
+					!awaitingSnapshot && current?.projection &&
 					incoming.version < current.projection.version
 				) {
 					return;
 				}
+				awaitingSnapshot = false;
 				projections.set(sessionId, { projection: incoming, connected: true });
 				emit();
 			},
 			() => {
-				const cur = projections.get(sessionId);
-				if (cur) {
-					projections.set(sessionId, { ...cur, connected: true });
-					emit();
-				}
+				// Connection establishment alone does not validate the old rendered
+				// result. Only the new source's first snapshot makes it viewable.
+				awaitingSnapshot = true;
 			},
 			() => {
+				awaitingSnapshot = true;
 				const cur = projections.get(sessionId);
 				if (cur) {
 					/* Retain the last good projection while making its staleness

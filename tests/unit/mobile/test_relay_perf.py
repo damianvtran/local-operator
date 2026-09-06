@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import string
+import uuid
 
 import pytest
 from starlette.testclient import TestClient
@@ -25,6 +26,7 @@ from local_operator.mobile.projection import (
 )
 from local_operator.mobile.seen import MAX_SEEN_ENTRIES, SEEN_STORE_NAME, SeenStore
 from local_operator.mobile.types import SessionProjection, SubagentRow
+from local_operator.session.attention import AttentionStore
 from local_operator.session.transcript import Transcript
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,16 @@ async def _write_turns_async(directory, n: int, start: int = 0) -> list[str]:
         await transcript.append_message(assistant)
         ids.extend([user.id, assistant.id])
     return ids
+
+
+def _publish_completion(session_id: str, *, read: bool = False) -> str:
+    """Use the shared authority; transcript mtime now affects recency only."""
+    store = AttentionStore()
+    token = str(uuid.uuid4())
+    store.publish(f"session/{session_id}", token, "a-000", "complete")
+    if read:
+        store.acknowledge(f"session/{session_id}", token)
+    return token
 
 
 def _fresh_render(directory) -> list[str]:
@@ -308,6 +320,7 @@ async def test_streaming_outranks_unseen_matching_the_render_ladder(tmp_path, mo
     unread_dir.mkdir(parents=True)
     streaming_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     await _write_turns_async(unread_dir, 1)
     await _write_turns_async(streaming_dir, 1)
     # The STREAMING row is the OLDER transcript: with unseen ranked first the
@@ -336,11 +349,8 @@ async def test_streaming_outranks_unseen_matching_the_render_ladder(tmp_path, mo
     table = SessionTable()
     table.entries[5150] = live(5150, "streaming-live", streaming=True)
     table.entries[5151] = live(5151, "unread-live", streaming=False)
-    await table.summaries()
-    # unread-live gains activity nobody has seen; the streaming row is read.
-    os.utime(unread_dir / "transcript.jsonl", (2_500_000, 2_500_000))
-    table.seen_store.mark_seen("streaming-live", now=3_000_000.0)
-    table.invalidate_summaries_cache()
+    _publish_completion("unread-live")
+    _publish_completion("streaming-live", read=True)
 
     rows = await table.summaries()
     by_id = {row["session_id"]: row for row in rows}
@@ -427,6 +437,7 @@ async def test_unseen_rows_sort_above_newer_seen_rows(tmp_path, monkeypatch) -> 
     old_dir.mkdir(parents=True)
     new_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     await _write_turns_async(old_dir, 1)
     await _write_turns_async(new_dir, 1)
 
@@ -438,13 +449,8 @@ async def test_unseen_rows_sort_above_newer_seen_rows(tmp_path, monkeypatch) -> 
     os.utime(new_transcript, (2_000_000, 2_000_000))
 
     table = SessionTable()
-    store = table.seen_store
-    # Both observed at their current mtimes (baseline), then the older one
-    # gains activity the phone has not seen while the newer one is marked read.
-    await table.summaries()
-    os.utime(old_transcript, (1_500_000, 1_500_000))
-    store.mark_seen("new-read", now=3_000_000.0)
-    table.invalidate_summaries_cache()
+    _publish_completion("old-unread")
+    _publish_completion("new-read", read=True)
 
     rows = await table.summaries()
     ordered = [row["session_id"] for row in rows]
@@ -456,49 +462,32 @@ async def test_unseen_rows_sort_above_newer_seen_rows(tmp_path, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_watching_a_session_over_sse_keeps_it_seen(tmp_path, monkeypatch) -> None:
-    """Holding the projection SSE stream IS viewing (A4, spec §3).
-
-    A user sitting in a session watching a turn finish must not come back to
-    that session marked new. Before this, the only writer was the client's
-    /seen POST on mount, so any activity after mount re-lit the mark.
-    """
-    import os
-    import time
-
+async def test_watching_over_sse_stays_unread_until_token_ack(tmp_path, monkeypatch) -> None:
+    """Connected/open is not viewed; only an explicit observed-token ACK clears."""
     cfg = tmp_path / "config"
     session_dir = cfg / "sessions" / "watched"
     session_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     await _write_turns_async(session_dir, 1)
-    transcript = session_dir / "transcript.jsonl"
-
     table = SessionTable()
-    opened_at = time.time()
-    os.utime(transcript, (opened_at, opened_at))
 
-    rows = await table.summaries()
-    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is False
+    async def unseen() -> bool:
+        table.invalidate_summaries_cache()
+        rows = await table.summaries()
+        return next(row["unseen"] for row in rows if row["session_id"] == "watched")
 
-    # The phone holds the projection stream for this session.
+    assert await unseen() is False  # no published completion/no upgrade flood
     table.session_subscribers["watched"] = {asyncio.Queue()}
-    table.invalidate_summaries_cache()
-    await table.summaries()
-
-    # A turn completes while the user is still watching.
-    completed_at = opened_at + 30
-    os.utime(transcript, (completed_at, completed_at))
-    table.invalidate_summaries_cache()
-    rows = await table.summaries()
-    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is False
-
-    # They navigate away; activity after that DOES light the mark.
+    token = _publish_completion("watched")
+    assert await unseen() is True
+    assert await unseen() is True  # repeated passive list reads do not mutate it
+    AttentionStore().acknowledge("session/watched", token)
+    assert await unseen() is False
+    _publish_completion("watched")
+    assert await unseen() is True  # the still-open stream cannot clear a later result
     table.session_subscribers.pop("watched")
-    later = time.time() + 120
-    os.utime(transcript, (later, later))
-    table.invalidate_summaries_cache()
-    rows = await table.summaries()
-    assert next(r["unseen"] for r in rows if r["session_id"] == "watched") is True
+    assert await unseen() is True  # nor can disconnecting it
 
 
 @pytest.mark.asyncio
@@ -987,19 +976,26 @@ def test_seen_endpoint_requires_auth_and_marks_seen(tmp_path, monkeypatch) -> No
     session_dir = cfg / "sessions" / "durable-1"
     session_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     _write_turns(session_dir, 1)
+    token = _publish_completion("durable-1")
 
     daemon = MobileDaemon(port=0, password="pw123")
     client = TestClient(build_app(daemon), follow_redirects=False)
     # Unauthenticated: 401 on the API route.
-    assert client.post("/api/sessions/durable-1/seen").status_code == 401
+    assert (
+        client.post("/api/sessions/durable-1/seen", json={"completion_token": token}).status_code
+        == 401
+    )
 
     client.post("/login", data={"password": "pw123"})
-    response = client.post("/api/sessions/durable-1/seen")
+    assert client.post("/api/sessions/durable-1/seen").status_code == 422
+    assert AttentionStore().state("session/durable-1")["unseen"] is True
+    response = client.post("/api/sessions/durable-1/seen", json={"completion_token": token})
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    # The store recorded the seen stamp.
-    assert daemon.seen_store.last_seen("durable-1") is not None
+    assert response.json()["ok"] is True
+    assert response.json()["attention"]["completion_token"] == token
+    assert AttentionStore().state("session/durable-1")["unseen"] is False
 
 
 def test_seen_endpoint_unknown_session_is_404(tmp_path, monkeypatch) -> None:
@@ -1014,12 +1010,14 @@ def test_seen_endpoint_unknown_session_is_404(tmp_path, monkeypatch) -> None:
 
 
 def test_seen_endpoint_clears_unseen_in_summaries(tmp_path, monkeypatch) -> None:
-    """Marking a session seen flips its summary ``unseen`` to False."""
+    """The actual batched summary changes from unread to read after token ACK."""
     cfg = tmp_path / "config"
     session_dir = cfg / "sessions" / "durable-1"
     session_dir.mkdir(parents=True)
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     _write_turns(session_dir, 1)
+    token = _publish_completion("durable-1")
 
     daemon = MobileDaemon(port=0, password="pw123")
     client = TestClient(build_app(daemon), follow_redirects=False)
@@ -1029,8 +1027,9 @@ def test_seen_endpoint_clears_unseen_in_summaries(tmp_path, monkeypatch) -> None
         rows = client.get("/api/sessions").json()["sessions"]
         return next(r["unseen"] for r in rows if r["session_id"] == session_id)
 
-    # First observation records the baseline at the current mtime, so the
-    # session is NOT unseen on first paint (no flood on upgrade).
-    assert unseen_for("durable-1") is False
-    client.post("/api/sessions/durable-1/seen")
+    # Establish an actual unread transition: an empty/no-flood baseline would
+    # leave this test green even if the POST failed or wrote nothing.
+    assert unseen_for("durable-1") is True
+    response = client.post("/api/sessions/durable-1/seen", json={"completion_token": token})
+    assert response.status_code == 200
     assert unseen_for("durable-1") is False

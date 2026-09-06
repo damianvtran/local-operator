@@ -43,6 +43,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -1645,7 +1646,14 @@ class Session:
         # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
         self._transcript = transcript
+        from local_operator.session.attention import bootstrap_transcript
+
+        bootstrap_transcript(transcript)
         self._session_id = session_id or transcript.directory.name
+        self._attention: dict[str, Any] = {}
+        self._attention_outcome: AgentEndEvent | None = None
+        self._attention_run_token: str | None = None
+        self._attention_restored = False
         self._agent_id = agent_id
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
@@ -5345,6 +5353,101 @@ class Session:
         if store is not None:
             store.refresh_jobs(self)
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        """Reconcile cross-process receipts without changing the read watermark."""
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            AttentionStore,
+            conversation_identity,
+        )
+
+        store = AttentionStore()
+        identity = conversation_identity(self._transcript.directory)
+        if not self._attention_restored:
+            saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+            if (
+                isinstance(saved, dict)
+                and saved.get("conversation_id") == identity
+                and saved.get("eligible", True)
+            ):
+                await asyncio.to_thread(
+                    store.publish, identity, saved["token"], saved["anchor"], saved["kind"]
+                )
+            self._attention_restored = True
+        state = await asyncio.to_thread(store.state, identity)
+        if state != self._attention:
+            self._attention = state
+            self.refresh_frontend_state()
+        return state
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        """Acknowledge the observed outcome, never whichever turn is newest now."""
+        from local_operator.session.attention import (
+            AttentionStore,
+            conversation_identity,
+        )
+
+        identity = conversation_identity(self._transcript.directory)
+        state = await asyncio.to_thread(AttentionStore().acknowledge, identity, token)
+        self._attention = state
+        self.refresh_frontend_state()
+        return state
+
+    async def _publish_attention_outcome(self) -> None:
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            AttentionStore,
+            conversation_identity,
+        )
+
+        outcome = self._attention_outcome
+        self._attention_outcome = None
+        if outcome is None:
+            return
+        # A delegating parent's first idle boundary is not a finished task.
+        delegated = any(job.type == "task" and job.status == "running" for job in self.jobs.list())
+        messages = [
+            message
+            for message in outcome.messages
+            if self._transcript.has_entry(message.id)
+            and getattr(message, "role", None) == "assistant"
+            and getattr(message, "text", "")
+        ]
+        kind = "error" if outcome.error else "interrupted" if outcome.aborted else "complete"
+        token = self._attention_run_token or str(uuid.uuid4())
+        if kind == "complete" and (not messages or delegated):
+            await self._transcript.append_custom(
+                ATTENTION_CUSTOM_TYPE,
+                {
+                    "conversation_id": conversation_identity(self._transcript.directory),
+                    "token": token,
+                    "eligible": False,
+                },
+            )
+            return
+        # Failure may precede the first assistant message. Its durable outcome
+        # marker, not an unrelated previous answer, is the viewable anchor.
+        anchor = messages[-1].id if kind == "complete" else f"completion-{token}"
+        # The journal precedes publication: owner death between these writes is
+        # repaired idempotently on resume, without fabricating a new token.
+        await self._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": conversation_identity(self._transcript.directory),
+                "token": token,
+                "anchor": anchor,
+                "kind": kind,
+            },
+        )
+        self._attention = await asyncio.to_thread(
+            AttentionStore().publish,
+            conversation_identity(self._transcript.directory),
+            token,
+            anchor,
+            kind,
+        )
+        self.refresh_frontend_state()
+
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
         """Current canonical state for any full terminal frontend."""
@@ -5528,6 +5631,8 @@ class Session:
             return None
 
     async def _emit(self, event: AgentEvent) -> None:
+        if isinstance(event, AgentEndEvent):
+            self._attention_outcome = event
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -5634,6 +5739,19 @@ class Session:
         begin_message = getattr(self._stream_fn, "begin_message", None)
         if callable(begin_message):
             begin_message()
+        self._attention_outcome = None
+        self._attention_run_token = str(uuid.uuid4())
+        from local_operator.session.attention import conversation_identity
+
+        # A process dying after result persistence but before outcome publication
+        # must recover an interrupted run, not misclassify it as legacy/read.
+        await self._transcript.append_custom(
+            "attention_started",
+            {
+                "conversation_id": conversation_identity(self._transcript.directory),
+                "token": self._attention_run_token,
+            },
+        )
         self._turn_task = asyncio.current_task()
         try:
             await self._run_turn(
@@ -5646,6 +5764,7 @@ class Session:
         finally:
             self._turn_task = None
             await self._flush_held_end()
+            await self._publish_attention_outcome()
             # A bang-mode command may have completed while this turn owned the
             # provider message list. Persist it before releasing `_turn_lock`,
             # when no next prompt can build from a half-updated conversation.
