@@ -1,0 +1,96 @@
+"""Render the `/usage` panel in the dead-grant states behind D6 and D7.
+
+Usage: cd <worktree> && env -u NO_COLOR TERM=xterm-256color \
+    .venv/bin/python docs/evidence/usage-dead-grant-followups/panel_shot.py.txt \
+    <alibaba|mixed> <cols> out.svg
+
+Drives the REAL `OperatorApp` (so `local_operator.tcss` is applied — the
+`_PanelHost` in `test_usage_panel.py` declares no `CSS_PATH`) and seeds the
+mounted `UsagePanel` through the same `start_fetch`/`show_reports` calls the
+`/usage` worker makes, so the title row and the per-block note are produced by
+the production rendering code rather than by a string the script chose.
+
+`alibaba`: one dead grant for the longest id in `USAGE_PROVIDERS`, which is the
+only provider that reaches the last `_fit_status_note` rung, at 32–41 cols (D6).
+`mixed`: one fresh, one transiently stale and one dead account on a scoped
+panel, which is the title shape D7 is about (`1 stale · 1 sign-in expired`
+below 56 cols).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+
+from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport  # noqa: E402
+from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.widgets.usage_panel import UsagePanel  # noqa: E402
+from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
+
+NOW_MS = 200 * 60_000.0
+
+
+def _limit(limit_id: str, label: str, percent: float) -> UsageLimit:
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(
+            used=percent,
+            limit=100.0,
+            remaining=100.0 - percent,
+            used_fraction=percent / 100.0,
+            unit="percent",
+        ),
+        window=label,
+        shared=True,
+    )
+
+
+def _report(provider: str, identity: str, percent: float, age_min: float) -> UsageReport:
+    report = UsageReport(
+        provider=provider,
+        fetched_at=int(NOW_MS - age_min * 60_000),
+        identity=identity,
+        limits=[_limit(f"{provider}:5h", "5 hour", percent)],
+    )
+    return report
+
+
+def _reports(scenario: str) -> tuple[str, list[UsageReport]]:
+    if scenario == "alibaba":
+        dead = _report("alibaba-token-plan-oauth", "cred:3", 64.0, 3 * 24 * 60)
+        dead.credential_invalid = True
+        return "", [dead]
+    if scenario == "mixed":
+        fresh = _report("anthropic", "a@x", 20.0, 1.8)
+        stale = _report("anthropic", "stuck@x", 30.0, 169)
+        stale.consecutive_failures = 1
+        dead = _report("anthropic", "dead@x", 64.0, 169)
+        dead.credential_invalid = True
+        return "anthropic", [fresh, stale, dead]
+    raise SystemExit(f"unknown scenario {scenario!r}")
+
+
+async def main() -> None:
+    scenario, cols, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    target, reports = _reports(scenario)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    # 36 rows so the three-block mixed panel renders whole: at 24 the body
+    # scrolls and the per-block notes D7 is judged against are off screen.
+    async with app.run_test(size=(cols, 36)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.set_clock(NOW_MS)
+        panel.start_fetch(target)
+        panel.show_reports(reports, now_ms=max(r.fetched_at for r in reports))
+        await pilot.pause()
+        await pilot.pause()
+        for line in panel.render_lines_for_test():
+            print(line)
+        app.save_screenshot(out)
+
+
+asyncio.run(main())

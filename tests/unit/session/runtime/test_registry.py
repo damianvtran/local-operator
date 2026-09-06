@@ -130,3 +130,58 @@ def test_a_killed_runtime_is_not_reported_live_while_it_is_a_zombie() -> None:
 
     # Once reaped, both paths agree it is gone.
     assert pid_alive(proc.pid) is False
+
+
+def test_the_build_stamp_round_trips_on_a_record(tmp_path: Path) -> None:
+    """The record IS the version channel between a viewer and a runtime.
+
+    An attach client reads it before it dials, so whatever the runtime stamped
+    has to survive the JSON round trip intact — a stamp that only exists in
+    the writing process tells nobody anything.
+    """
+    record = make_record()
+    record.version = "0.49.0"
+    record.source_ref = "4d3ce1d1a48f4f3b799efdfabb014979e70e0630"
+    restored = SessionRecord.from_json(record.to_json())
+    assert restored.version == "0.49.0"
+    assert restored.source_ref == "4d3ce1d1a48f4f3b799efdfabb014979e70e0630"
+
+
+def test_a_record_from_an_older_runtime_defaults_the_build_stamp() -> None:
+    """Additive means an OLD writer's payload still parses, as empty strings.
+
+    Every runtime resident when this ships predates the fields, and a new
+    viewer must read those records normally rather than raising mid-scan. The
+    empty stamp is itself the signal: a runtime that cannot say what it runs
+    is older than the terminal reading it.
+    """
+    payload = make_record().to_json()
+    payload.pop("version")
+    payload.pop("source_ref")
+    restored = SessionRecord.from_json(payload)
+    assert restored.version == ""
+    assert restored.source_ref == ""
+
+
+def test_the_heartbeat_republishes_the_build_stamp(tmp_path: Path) -> None:
+    """The stamp rides every rewrite because the publisher owns the dataclass.
+
+    ``RecordPublisher.heartbeat`` re-serialises the live record object rather
+    than rebuilding a payload from a field list, so a new field is carried
+    without a second code path. Pinned because the alternative — a hand-rolled
+    dict somewhere in the heartbeat — would publish the stamp once at startup
+    and then quietly drop it on the first rewrite, 15 seconds later.
+    """
+    record = make_record()
+    record.version = "0.49.0"
+    record.source_ref = "abc1234"
+    publisher = registry.RecordPublisher(record, root=tmp_path)
+    try:
+        publisher.heartbeat(conversation_name="renamed")
+        found = [rec for rec, _state in registry.scan(root=tmp_path) if rec.pid == record.pid]
+        assert found, "the republished record must still be discoverable"
+        assert found[0].version == "0.49.0"
+        assert found[0].source_ref == "abc1234"
+        assert found[0].conversation_name == "renamed", "the rewrite really happened"
+    finally:
+        publisher.close()

@@ -768,3 +768,113 @@ def test_installed_version_falls_back_when_a_side_is_missing_or_unparseable() ->
         patch.object(update_mod, "version", side_effect=update_mod.PackageNotFoundError),
     ):
         assert update_mod.installed_version() == "0.49.2"
+
+
+# ---------------------------------------------------------------------------
+# Build stamps: the comparable token a viewer and a runtime skew against
+# ---------------------------------------------------------------------------
+
+
+def test_source_ref_reads_the_commit_lop_update_recorded(tmp_path: Path) -> None:
+    """``.lop-source`` holds ``<git-sha> <tag>``; only the sha identifies a build.
+
+    The tag half repeats across every rebuild of one release, so keying on it
+    would report two genuinely different builds as identical — which is the
+    exact drift this host produces most often.
+    """
+    (tmp_path / ".lop-source").write_text(
+        "4d3ce1d1a48f4f3b799efdfabb014979e70e0630 v0.49.0\n", encoding="utf-8"
+    )
+    assert update_mod.source_ref(tmp_path) == "4d3ce1d1a48f4f3b799efdfabb014979e70e0630"
+
+
+def test_source_ref_is_empty_without_a_marker(tmp_path: Path) -> None:
+    """PyPI wheels, pipx installs and editable checkouts have no marker.
+
+    Empty rather than an error: those installs fall back to comparing on the
+    distribution version alone, and dev-tree skew is out of scope by design.
+    """
+    assert update_mod.source_ref(tmp_path) == ""
+
+
+def test_source_ref_survives_an_unreadable_marker(tmp_path: Path) -> None:
+    """A build token is decoration on a diagnostic path.
+
+    It is read at adopt, engage and bind — seams that must never fail because
+    a marker file was a directory or had its permissions changed underneath.
+    """
+    (tmp_path / ".lop-source").mkdir()
+    assert update_mod.source_ref(tmp_path) == ""
+
+
+def test_source_ref_of_an_empty_marker_is_empty(tmp_path: Path) -> None:
+    (tmp_path / ".lop-source").write_text("   \n", encoding="utf-8")
+    assert update_mod.source_ref(tmp_path) == ""
+
+
+def test_installed_build_pairs_the_version_with_the_ref(tmp_path: Path) -> None:
+    (tmp_path / ".lop-source").write_text("abc1234def v0.49.0\n", encoding="utf-8")
+    with patch.object(update_mod, "installed_version", return_value="0.49.0"):
+        stamp = update_mod.installed_build(tmp_path)
+    assert stamp == update_mod.BuildStamp(version="0.49.0", source_ref="abc1234def")
+
+
+def test_same_version_rebuilds_are_different_builds() -> None:
+    """The case that motivates the ref, stated as an equality.
+
+    ``lop-update`` builds from ``main`` while ``pyproject.toml`` still names
+    the last released version, so two different builds share one version
+    string. Comparing on version alone reports "no drift" for the drift this
+    host actually has.
+    """
+    before = update_mod.BuildStamp(version="0.49.0", source_ref="aaaaaaa1111")
+    after = update_mod.BuildStamp(version="0.49.0", source_ref="bbbbbbb2222")
+    assert before != after
+    assert before.version == after.version, "the version alone cannot tell them apart"
+
+
+def test_a_build_label_names_the_ref_only_when_there_is_one() -> None:
+    """Notice copy: ``0.49.0`` on a wheel, ``0.49.0@4d3ce1d`` on a snapshot."""
+    assert update_mod.BuildStamp(version="0.49.0").label() == "0.49.0"
+    assert (
+        update_mod.BuildStamp(version="0.49.0", source_ref="4d3ce1d1a48").label()
+        == "0.49.0@4d3ce1d"
+    )
+    assert update_mod.BuildStamp(version="").label() == "unknown"
+
+
+def test_installed_version_rereads_disk_within_one_process(tmp_path: Path) -> None:
+    """The empirical claim the whole design rests on, pinned as a test.
+
+    Drift detection compares what THIS process loaded against what is on disk
+    NOW, which only works if ``importlib.metadata`` actually re-reads. It
+    does, because the dist-info DIRECTORY NAME carries the version, so even a
+    path-keyed cache misses. Asserted on a synthetic distribution so the test
+    owns both sides and never depends on the real install.
+    """
+    import sys as _sys
+    from importlib.metadata import version as _version
+
+    site = tmp_path / "site"
+    old = site / "skewpkg-0.46.23.dist-info"
+    old.mkdir(parents=True)
+    (old / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: skewpkg\nVersion: 0.46.23\n", encoding="utf-8"
+    )
+    _sys.path.insert(0, str(site))
+    try:
+        assert _version("skewpkg") == "0.46.23"
+        new = site / "skewpkg-0.49.0.dist-info"
+        new.mkdir()
+        (new / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: skewpkg\nVersion: 0.49.0\n", encoding="utf-8"
+        )
+        import shutil
+
+        shutil.rmtree(old)
+        assert _version("skewpkg") == "0.49.0", (
+            "importlib.metadata must re-read disk in a live process, or a TUI "
+            "can never notice that lop-update replaced the install under it"
+        )
+    finally:
+        _sys.path.remove(str(site))

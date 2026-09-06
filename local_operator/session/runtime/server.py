@@ -122,8 +122,8 @@ _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 _PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "fork_snapshot", "credential"}
 
 
-def _accepts_locality(fn: Any) -> bool:
-    """Whether ``fn`` takes the ``locality`` keyword.
+def _accepts_kw(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes the keyword ``name``.
 
     Cached because it is asked on every routed slash command and
     ``inspect.signature`` is not cheap. Keyed by the underlying function so
@@ -131,26 +131,40 @@ def _accepts_locality(fn: Any) -> bool:
     cannot be read (a C callable, an exotic mock) is treated as not accepting
     it: the caller then uses the narrow call, which every implementation has
     always supported.
+
+    Generalised from a ``locality``-only probe when ``slash_consumers`` became
+    the second optional keyword on the same call. A handle is an INJECTED
+    collaborator — the TUI's, the runtime's, and several test doubles all
+    implement ``run_slash_authoritative`` — so each new keyword must stay
+    optional in the protocol rather than force a lockstep change across every
+    implementation. Two independent probes rather than one combined answer:
+    a handle may well accept one keyword and not the other.
     """
     target = getattr(fn, "__func__", fn)
-    cached = _LOCALITY_SUPPORT.get(target)
-    if cached is not None:
-        return cached
+    by_name = _KEYWORD_SUPPORT.get(target)
+    if by_name is not None:
+        cached = by_name.get(name)
+        if cached is not None:
+            return cached
+    else:
+        by_name = {}
+        _KEYWORD_SUPPORT[target] = by_name
     try:
         params = inspect.signature(target).parameters
     except (TypeError, ValueError):
         answer = False
     else:
-        answer = "locality" in params or any(
+        answer = name in params or any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
-    _LOCALITY_SUPPORT[target] = answer
+    by_name[name] = answer
     return answer
 
 
-#: Memo for ``_accepts_locality``. Keyed weakly so a handle class that goes
-#: away (a per-test double) does not pin its function objects in memory.
-_LOCALITY_SUPPORT: "weakref.WeakKeyDictionary[Any, bool]" = weakref.WeakKeyDictionary()
+#: Memo for ``_accepts_kw``, keyword name → answer per function. Keyed weakly
+#: so a handle class that goes away (a per-test double) does not pin its
+#: function objects in memory.
+_KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
 #: Rows one ``job_trajectory`` reply may carry. The whole retained window is
@@ -179,10 +193,21 @@ class _ClientConn:
     #: auth frame; see ``ClientLocality``. Only ops that act on the USER's
     #: surroundings (an OAuth browser tab) read it.
     locality: ClientLocality = "local"
+    #: Which host is on the other end. ``"desktop"`` is declared in the attach
+    #: frame; the remaining fields are that host's presentation state, which
+    #: only it reports and only it is scored on.
     surface: str = "terminal"
     desktop_visible: bool = False
     desktop_can_notify: bool = False
     desktop_seen: float = 0.0
+    #: Which action-carrying slash receipts this client renders itself (see
+    #: ``SLASH_ACTION_RECEIPTS``). ``None`` means the auth frame omitted the
+    #: field, i.e. a client built before it existed — the runtime then
+    #: completes the action on its behalf. An EMPTY frozenset is a different
+    #: fact from ``None`` only in provenance, not in effect: both mean "this
+    #: type was not declared", which is the one rule the completion path
+    #: applies.
+    slash_consumers: frozenset[str] | None = None
     last_seen: float = field(default_factory=time.monotonic)
     # Frames on one TCP stream must stay ordered, while unrelated streams must
     # never queue behind its backpressure.
@@ -376,6 +401,16 @@ class RuntimeServer:
         #: for tests and for the "did a headless runtime pay for a fold?"
         #: question; 0 after a lifetime with no daemon client is the claim.
         self.projection_sinks_built: int = 0
+        # What build this runtime is running, stamped once at construction:
+        # the answer cannot change while the process lives, and the record is
+        # the channel an attach client reads it from before it dials.
+        #
+        # Imported function-locally although ``update`` is stdlib-only, because
+        # server.py sits near the CLI startup path and the house style there
+        # (see ``app.py``'s update imports) is to keep it off the import graph.
+        from local_operator.update import installed_build
+
+        build = installed_build()
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -392,6 +427,10 @@ class RuntimeServer:
             # the window before a viewer attaches is exactly when a detached
             # runtime is most interesting to look at.
             detached=True,
+            # The heartbeat republishes this same dataclass, so the stamp
+            # rides every rewrite without a second code path.
+            version=build.version,
+            source_ref=build.source_ref,
         )
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -818,6 +857,21 @@ class RuntimeServer:
         # carrying the flag (there is none today) is deliberately ignored.
         wants_events = kind == "attach" and bool(frame.get("events"))
         wants_frontend = kind == "attach" and bool(frame.get("frontend_state"))
+        # Which action-carrying receipts this client consumes itself. Parsed
+        # ONCE here rather than per command: the answer cannot change for the
+        # life of a connection. Absent (the common case today, and every
+        # client built before the field) stays ``None`` so the completion path
+        # can tell "did not declare" from "declared nothing" in the logs, even
+        # though both admit. Advisory only — a malformed value degrades to
+        # ``None`` and never refuses the connection, because a client that
+        # cannot attach is strictly worse than one whose request gets run
+        # twice-proof treatment it did not ask for.
+        raw_consumers = frame.get("slash_consumers")
+        slash_consumers: frozenset[str] | None = (
+            frozenset(str(item) for item in raw_consumers)
+            if isinstance(raw_consumers, (list, tuple))
+            else None
+        )
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
             return
@@ -848,6 +902,7 @@ class RuntimeServer:
             surface=(
                 "desktop" if kind == "attach" and frame.get("surface") == "desktop" else "terminal"
             ),
+            slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
         )
@@ -1296,7 +1351,7 @@ class RuntimeServer:
                 # ``data`` the invoker renders locally (a slash command's typed
                 # outcome, a cancel's authoritative count) rather than a
                 # one-line receipt that would paint in the owner's transcript.
-                data = await self._dispatch_payload(op, frame, conn.locality)
+                data = await self._dispatch_payload(op, frame, conn.locality, conn.slash_consumers)
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
                 await self._push()
@@ -1620,9 +1675,19 @@ class RuntimeServer:
         raise ValueError(f"unknown op: {op!r}")
 
     async def _dispatch_payload(
-        self, op: str, frame: dict[str, Any], locality: ClientLocality = "local"
+        self,
+        op: str,
+        frame: dict[str, Any],
+        locality: ClientLocality = "local",
+        consumers: frozenset[str] | None = None,
     ) -> Any:
-        """Structured-answer ops: the return value becomes the ``result`` data."""
+        """Structured-answer ops: the return value becomes the ``result`` data.
+
+        ``consumers`` is the calling connection's declared
+        ``slash_consumers`` set (``None`` when the auth frame omitted it),
+        carried here for the same reason ``locality`` is: it is a property of
+        the CONNECTION, not of the frame, and only the handle can act on it.
+        """
         h = self._handle
         if op == "fork_snapshot":
             # Fork destinations are resumed from this machine's session store.
@@ -1651,17 +1716,25 @@ class RuntimeServer:
                 str(frame.get("args", "")),
                 list(frame.get("images") or []),
             ]
-            # ``locality`` is passed only to handles that accept it. A handle
-            # is an injected collaborator — the TUI's, the runtime's, and test
-            # doubles all implement this — so widening the call unconditionally
-            # would break every implementation that has not been updated. The
-            # probe keeps the parameter OPTIONAL in the protocol rather than
-            # forcing a lockstep change, which is the same capability-probe
-            # stance the ops above take with ``getattr``.
-            if _accepts_locality(run):
-                result = run(*args, locality=locality)
-            else:
-                result = run(*args)
+            # ``locality`` and ``consumers`` are passed only to handles that
+            # accept them. A handle is an injected collaborator — the TUI's,
+            # the runtime's, and test doubles all implement this — so widening
+            # the call unconditionally would break every implementation that
+            # has not been updated. The probe keeps each parameter OPTIONAL in
+            # the protocol rather than forcing a lockstep change, which is the
+            # same capability-probe stance the ops above take with ``getattr``.
+            #
+            # ``consumers`` is what lets the handle decide whether the CLIENT
+            # will submit an action-carrying receipt's request or whether the
+            # runtime must do it. It is the connection's declaration, so it is
+            # read here where the connection is known rather than threaded
+            # through the frame.
+            kwargs: dict[str, Any] = {}
+            if _accepts_kw(run, "locality"):
+                kwargs["locality"] = locality
+            if _accepts_kw(run, "consumers"):
+                kwargs["consumers"] = consumers
+            result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
             return result

@@ -65,6 +65,15 @@ _AMBIENT_VARS = (
     "CMUX_PANEL_ID",
     "CMUX_TAB_ID",
     "CMUX_SOCKET",
+    # The calling Herdr pane: the identical hazard as CMUX_* — a test run from
+    # inside a Herdr pane would take over that pane's Agents row and then
+    # RELEASE it on exit. Nothing in a test may address a real Herdr pane.
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_BIN_PATH",
+    "HERDR_SOCKET_PATH",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this

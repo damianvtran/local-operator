@@ -19,13 +19,17 @@ async def run_tui(
     provider_controller: Any | None = None,
     resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
     on_config_changed: Callable[[], None] | None = None,
+    warm_session_imports: bool = True,
 ) -> int:
     """Run the full-screen TUI to completion; return a process exit code.
 
     ``session_factory`` is awaited lazily inside a worker so the app paints
     before session construction (providers, skills, MCP discovery). The
     factory shape — rather than a pre-built session — is what lets the app
-    own the construction error path and the dispose lifecycle.
+    own the construction error path and the dispose lifecycle. Pass
+    ``warm_session_imports=False`` only for factories that construct lightweight
+    remote facades; local Session factories retain the threaded owner warmup.
+    The policy also applies to the supplied resume factory.
 
     Everything runs inside :func:`~local_operator.logger.file_logging`: while
     Textual owns the terminal, a log record on stderr is painted straight over
@@ -45,6 +49,7 @@ async def run_tui(
             provider_controller=provider_controller,
             resume_factory=resume_factory,
             on_config_changed=on_config_changed,
+            warm_session_imports=warm_session_imports,
         )
         try:
             await app.run_async()

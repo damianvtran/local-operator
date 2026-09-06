@@ -1759,7 +1759,7 @@ class MobileDaemon:
         """The phone's slash sheet. Imported lazily (the TUI registry pulls
         the app's command table) and cached — the registry is static."""
         if self._slash_commands is None:
-            from local_operator.tui.app import SLASH_COMMANDS
+            from local_operator.slash_commands import SLASH_COMMANDS
             from local_operator.tui.autocomplete import ArgumentMode
 
             excluded = {"exit", "quit", "clear"}  # TUI chrome, meaningless on a phone

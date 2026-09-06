@@ -69,6 +69,21 @@ TERM_PROGRAM_APPLE = "apple_terminal"
 CMUX_SURFACE_ENV = "CMUX_SURFACE_ID"
 CMUX_WORKSPACE_ENV = "CMUX_WORKSPACE_ID"
 
+#: Herdr (https://herdr.dev) injects these into every pane process. ``HERDR_ENV``
+#: is the "inside Herdr" flag and ``HERDR_PANE_ID`` names the pane holding this
+#: session — BOTH gate :func:`is_herdr`, because the pane id is what every
+#: report is addressed to and a flag with no pane is nothing to report to.
+#: ``HERDR_BIN_PATH`` is the ``herdr`` CLI the reporter prefers over PATH (the
+#: binary that started the pane is by definition the one whose socket protocol
+#: matches the running server). The socket path and the tab/workspace ids are
+#: recorded for completeness; nothing here reads them yet.
+HERDR_ENV = "HERDR_ENV"
+HERDR_PANE_ENV = "HERDR_PANE_ID"
+HERDR_BIN_ENV = "HERDR_BIN_PATH"
+HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
+HERDR_TAB_ENV = "HERDR_TAB_ID"
+HERDR_WORKSPACE_ENV = "HERDR_WORKSPACE_ID"
+
 #: Set by sshd in a remote session. Used to say "no window server here" in a
 #: fork's fallback receipt, which reads as competent rather than broken.
 SSH_CONNECTION_ENV = "SSH_CONNECTION"
@@ -148,6 +163,22 @@ def is_cmux(env: EnvMap | None = None) -> bool:
     """
     source = _source(env)
     return bool(source.get(CMUX_SURFACE_ENV) and source.get(CMUX_WORKSPACE_ENV))
+
+
+def is_herdr(env: EnvMap | None = None) -> bool:
+    """True when this process is a Herdr pane, by MARKERS ALONE.
+
+    The same caveat as :func:`is_cmux`: the markers are inherited across a
+    container or an ssh hop into a host with no ``herdr`` CLI, so this is
+    sufficient for "was this started by Herdr" and NOT for shelling out.
+    ``herdr.reporter`` additionally gates on a resolvable binary.
+
+    ``HERDR_ENV`` is compared to ``"1"`` exactly, as documented, rather than
+    tested for truthiness: a stray ``HERDR_ENV=0`` exported to switch the
+    integration off by hand should read as "not Herdr".
+    """
+    source = _source(env)
+    return source.get(HERDR_ENV) == "1" and bool(source.get(HERDR_PANE_ENV))
 
 
 def is_ssh(env: EnvMap | None = None) -> bool:

@@ -55,6 +55,7 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     HEARTBEAT_TIMEOUT_S,
     PROTOCOL_VERSION,
     RUN_DIRNAME,
+    SLASH_ACTION_RECEIPTS,
     ClientKind,
     SessionRecord,
 )

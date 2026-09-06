@@ -568,17 +568,35 @@ async def test_context_compaction_event_is_recorded_and_verifies(
 
 
 @pytest.mark.asyncio
-async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode_id: str) -> None:
-    """A floundering guard stops the episode the way ``max_steps`` does: the
-    last step is truncated with the guard's code, the episode is SCORED on the
-    state reached, and the bundle verifies."""
+@pytest.mark.parametrize("stationary", [True, False])
+async def test_guard_truncation_seals_scored_with_reason(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, stationary: bool
+) -> None:
+    """A stationary loop stops early, but repeated input with text progress
+    reaches the step cap. Both paths score and seal a verifiable bundle."""
 
+    from local_operator.evaluation.adapters.api import observation_content_id
+    from local_operator.evaluation.protocol import Observation
     from local_operator.evaluation.runner.guards import RepeatedBatchGuard
+    from tests.unit.evaluation.runner import conftest
+
+    if stationary:
+        original_observation = conftest.observation
+
+        def observation(episode_id: str, sequence: int, *, text: str = "state") -> Observation:
+            # Keep real sequence/identity validation while removing visible
+            # progress; the normal fixture's changing text is not a loop.
+            current = original_observation(episode_id, sequence, text=text).model_copy(
+                update={"text": text}
+            )
+            return current.model_copy(update={"observation_id": observation_content_id(current)})
+
+        monkeypatch.setattr(conftest, "observation", observation)
 
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id),
-        build_config(tmp_path, max_steps=10, guards=(RepeatedBatchGuard(repeats=2),)),
+        build_config(tmp_path, max_steps=4, guards=(RepeatedBatchGuard(repeats=2),)),
         selector=selector(tmp_path),
         model=ScriptedModel(["type"] * 8),
         launch=lambda _: adapter,
@@ -594,9 +612,13 @@ async def test_guard_truncation_seals_scored_with_reason(tmp_path: Path, episode
     report = verify_bundle(root)
     assert report.valid, [issue.code for issue in report.issues]
     steps = payloads(root, EnvironmentStepPayload)
-    assert len(steps) == 2
-    assert [step.truncated for step in steps] == [False, True]
-    assert [step.truncation_reason for step in steps] == [None, "repeated-batch"]
+    expected_steps = 2 if stationary else 4
+    expected_reason = "repeated-batch" if stationary else "max-steps"
+    assert len(steps) == expected_steps
+    assert [step.truncated for step in steps] == [False] * (expected_steps - 1) + [True]
+    assert [step.truncation_reason for step in steps] == [None] * (expected_steps - 1) + [
+        expected_reason
+    ]
 
 
 @pytest.mark.asyncio
@@ -1287,7 +1309,11 @@ def _spec_with_infra(episode_id: str, *names: str) -> Any:
         spec,
         "infra_values",
         tuple(
-            ScopedInfraValue(name=name, purpose="benchmark_compute", value="m5.xlarge")
+            ScopedInfraValue(
+                name=name,
+                purpose="benchmark_compute",
+                value="false" if name == "OSWORLD_ENABLE_PROXY" else "m5.xlarge",
+            )
             for name in names
         ),
     )
@@ -1308,8 +1334,9 @@ def _infra_runner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY"])
 async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, name: str
 ) -> None:
     """The reviewer's reproduction, as a test: old adapter + new host script.
 
@@ -1322,12 +1349,12 @@ async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
 
     adapter = FakeAdapter(tmp_path, episode_id)
     outcome = await _infra_runner(
-        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+        tmp_path, episode_id, _spec_with_infra(episode_id, name), adapter
     ).run()
 
     assert outcome.status == "failed_pre_bundle"
     assert outcome.bundle_root is None
-    assert "AWS_INSTANCE_TYPE" in (outcome.diagnostic or "")
+    assert name in (outcome.diagnostic or "")
     assert "UndeclaredDisclosedInfra" in (outcome.diagnostic or "")
     # The side-effect boundary was never crossed and the worker was reaped.
     assert "prepare" not in adapter.calls and "reset_start" not in adapter.calls
@@ -1335,8 +1362,9 @@ async def test_a_disclosed_infra_value_an_adapter_does_not_declare_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AWS_INSTANCE_TYPE", "OSWORLD_ENABLE_PROXY"])
 async def test_a_declared_disclosed_infra_value_runs_normally(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, name: str
 ) -> None:
     """The inverse direction: a rebuilt adapter DOES declare it, so it runs.
 
@@ -1349,15 +1377,15 @@ async def test_a_declared_disclosed_infra_value_runs_normally(
         episode_id,
         declared_requirements=(
             Requirement(
-                requirement_id="AWS_INSTANCE_TYPE",
+                requirement_id=name,
                 kind="infra",
-                name="AWS_INSTANCE_TYPE",
+                name=name,
                 required=False,
             ),
         ),
     )
     outcome = await _infra_runner(
-        tmp_path, episode_id, _spec_with_infra(episode_id, "AWS_INSTANCE_TYPE"), adapter
+        tmp_path, episode_id, _spec_with_infra(episode_id, name), adapter
     ).run()
 
     assert outcome.status == "completed", outcome.diagnostic
@@ -1479,9 +1507,44 @@ def test_an_undisclosed_infra_value_is_never_stamped() -> None:
     import scripts.run_episode as run_episode
 
     assert run_episode._infra_disclosure_metadata(["OSWORLD_TTL_SECONDS=900"]) == {}
-    assert run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"]) == {}
+    with pytest.raises(ValueError, match="--infra expects"):
+        run_episode._infra_disclosure_metadata(["AWS_ROOT_VOLUME_SIZE"])
     assert run_episode._infra_disclosure_metadata([]) == {}
     # Both at once, each under its own key.
     assert run_episode._infra_disclosure_metadata(
         ["AWS_INSTANCE_TYPE=m5.xlarge", "AWS_ROOT_VOLUME_SIZE=120", "OSWORLD_TTL_SECONDS=900"]
     ) == {"aws_instance_type_override": "m5.xlarge", "aws_root_volume_size_override": "120"}
+
+
+@pytest.mark.asyncio
+async def test_host_refusal_does_not_publish_supplied_answer(
+    tmp_path: Path, episode_id: str
+) -> None:
+    from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    original = adapter._call_raw
+
+    async def refusing(method: Any, params: Any, result_type: Any, *, timeout: float) -> Any:
+        if method == "ask_user_exchange":
+            adapter.calls.append(method)
+            return AskUserExchangeResult(
+                ask_id=params.ask_id, request_digest=params.request_digest, accepted=False
+            )
+        return await original(method, params, result_type, timeout=timeout)
+
+    adapter._call_raw = refusing
+    model = ScriptedModel(["ask", "finish"])
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=model,
+        responder=RecordingResponder("must not publish"),
+    ).run()
+    assert outcome.status == "cancelled", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "unscored"
+    assert model.calls == 1
+    assert outcome.bundle_root is not None
+    assert "user_simulator_exchange" not in _kinds(outcome.bundle_root)
+    assert "execute" not in adapter.calls and "score" not in adapter.calls

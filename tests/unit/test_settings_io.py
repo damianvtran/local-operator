@@ -62,6 +62,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
+    from local_operator.tools.builtin import BASH_SHELL_DEFAULT
     from local_operator.tui.theme import DEFAULT_THEME
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -85,6 +86,9 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
+        # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
+        # an interpreter, so the consumer's constant is the empty string too.
+        "bash.shell": BASH_SHELL_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "session.cleanup.enabled": DEFAULT_ENABLED,
@@ -145,6 +149,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
     "display.notifications": "tui/settings.py derives its defaults from this registry",
+    "display.dock": "tui/settings.py derives its defaults from this registry",
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
@@ -195,6 +200,7 @@ def test_display_keys_are_flat_dotted() -> None:
         "display.terminal_title",
         "display.images",
         "display.notifications",
+        "display.dock",
     }
 
 
@@ -339,6 +345,23 @@ def test_no_consumer_reads_a_nested_setting_through_the_flat_accessor() -> None:
                         f"{path.relative_to(package.parent)}:{number}: {match.group(0)}"
                     )
     assert not offenders, "\n".join(offenders)
+
+
+def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None:
+    """The ``bash.shell`` row is pinned to ``builtin.BASH_SHELL_PATH`` and a
+    write lands as a nested ``bash: {shell: ...}`` block the tool reads back.
+    Pinned by test rather than import because ``settings_io`` must stay cheap
+    for the CLI and ``tools.builtin`` is not."""
+    from local_operator.tools.builtin import BASH_SHELL_PATH, _configured_bash_shell
+
+    assert settings_io.BY_KEY["bash.shell"].path == BASH_SHELL_PATH
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.shell"], "/opt/x/bash")
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["bash"]["shell"] == "/opt/x/bash"
+    assert "bash.shell" not in stored
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert _configured_bash_shell() == "/opt/x/bash"
 
 
 def test_cleanup_settings_are_nested_under_session_cleanup(manager: ConfigManager) -> None:
@@ -714,6 +737,38 @@ def test_display_defaults_matches_the_tui_reader() -> None:
     from local_operator.tui import settings as tui_settings
 
     assert settings_io.display_defaults() == tui_settings._DEFAULT_NOTES
+
+
+def test_display_dock_is_a_closed_enum_whose_default_is_the_panels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#525 case 8: the dock density key.
+
+    Its default is the panel's own constant (the registry is the guarded
+    source, the constant is the panel's fallback — they must agree), its
+    value space is exactly the enum's, and a write round-trips through the
+    flat-dotted reader the panel uses.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+    from local_operator.tui.widgets.subagent_panel import DEFAULT_DOCK_DENSITY, Density
+
+    settings_reload()
+    setting = settings_io.BY_KEY["display.dock"]
+    assert setting.section == "appearance"
+    assert setting.kind is settings_io.Kind.ENUM
+    assert setting.default == DEFAULT_DOCK_DENSITY.value == "full"
+    assert [choice.value for choice in setting.choices] == [d.value for d in Density]
+    assert settings_io.display_defaults()["display.dock"] == "full"
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, "summary")
+    raw = yaml.safe_load((tmp_path / "config.yml").read_text())
+    assert raw["values"]["display.dock"] == "summary", raw
+    assert "display" not in raw["values"], "split into a nested mapping nothing reads"
+    # The facade dropped the cache, so the panel's reader sees it at once.
+    assert settings_get("display.dock", "full") == "summary"
+    settings_reload()
 
 
 def test_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:

@@ -64,7 +64,8 @@ expiry if the final UI displays it, and no account/sign-up step.
 
 **Frame:** The popup's pending-origin prompt for a safe, recognizable demo
 origin such as `example.com` or the Local Operator documentation site. Show
-all three choices: Allow once, Always allow, Deny.
+the Allow scope dropdown (all pages on this domain, only this site, just this
+once) alongside the Allow and Deny buttons.
 
 **Caption suggestion:**
 > New site? You decide before the agent opens it.

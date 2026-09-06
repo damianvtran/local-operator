@@ -373,13 +373,21 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     data = (await client.get("/v1/settings")).json()["result"]
     assert {row["key"] for row in data["settings"]} == {s.key for s in settings_io.SETTINGS}
     assert "never-serialize-me" not in str(data)
+    # Both sentinels are deliberately UNIQUE strings rather than ordinary
+    # words. The query sentinel was `hidden`, which stopped proving anything
+    # the moment an unrelated setting shipped a choice named `hidden`
+    # (`display.dock`): the assertion then failed on a legitimate row while a
+    # real leak of the query value would still have been reported the same
+    # way. A sentinel has to be a string that can only have come from the
+    # value under test.
     manager.set_config_value(
-        "web_search", {"searxng_endpoint": "https://user:private-inline@example.org/?key=hidden"}
+        "web_search",
+        {"searxng_endpoint": "https://user:private-inline@example.org/?key=private-query"},
     )
     protected = await client.get("/v1/settings")
     assert protected.headers["cache-control"] == "no-store"
     assert "private-inline" not in protected.text
-    assert "hidden" not in protected.text
+    assert "private-query" not in protected.text
     assert next(
         row
         for row in protected.json()["result"]["settings"]

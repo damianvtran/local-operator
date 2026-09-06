@@ -486,6 +486,7 @@ class HostVerifier:
         self.current_observation: Any | None = None
         self._sequences: set[int] = set()
         self._outstanding_ask: tuple[AskUserExchangeParams, Digest] | None = None
+        self._completed_asks: set[str] = set()
         self._score_ids: set[str] = set()
 
     def accept_initial(self, observation: Any) -> None:
@@ -541,7 +542,11 @@ class HostVerifier:
     def begin_ask(self, params: AskUserExchangeParams) -> None:
         if params.episode_id != self.episode_id:
             raise SupervisionError("ask-user exchange belongs to another episode")
-        if self._outstanding_ask is not None or params.answer is not None:
+        if (
+            self._outstanding_ask is not None
+            or params.answer is not None
+            or params.ask_id in self._completed_asks
+        ):
             raise SupervisionError("ask-user exchange must begin once without an answer")
         request_digest = self._ask_request_digest(params)
         self._outstanding_ask = (params, request_digest)
@@ -550,6 +555,8 @@ class HostVerifier:
         self,
         params: AskUserExchangeParams,
         result: AskUserExchangeResult | None = None,
+        *,
+        answer_owner: str = "host",
     ) -> None:
         outstanding = self._outstanding_ask
         request_digest = self._ask_request_digest(params)
@@ -558,23 +565,37 @@ class HostVerifier:
             or outstanding is None
             or outstanding[1] != request_digest
             or outstanding[0].ask_id != params.ask_id
-            or (result is not None and result.ask_id != params.ask_id)
-            or params.answer is None
+            or (
+                result is not None
+                and (result.ask_id != params.ask_id or result.request_digest != request_digest)
+            )
+            or (answer_owner == "host" and params.answer is None)
+            or (answer_owner == "adapter" and params.answer is not None)
         ):
             raise SupervisionError("ask-user response is stale, unsolicited, or mismatched")
 
-    def finish_ask(self, params: AskUserExchangeParams, result: AskUserExchangeResult) -> None:
-        self.validate_ask_completion(params, result)
+        if result is not None:
+            if answer_owner == "host" and result.answer is not None:
+                raise SupervisionError("host-owned ask cannot return an adapter answer")
+            if answer_owner == "adapter" and result.accepted and result.answer is None:
+                raise SupervisionError("accepted adapter-owned ask requires a public answer")
+
+    def finish_ask(
+        self,
+        params: AskUserExchangeParams,
+        result: AskUserExchangeResult,
+        *,
+        answer_owner: str = "host",
+    ) -> None:
+        self.validate_ask_completion(params, result, answer_owner=answer_owner)
+        self._completed_asks.add(params.ask_id)
         self._outstanding_ask = None
 
     @staticmethod
     def _ask_request_digest(params: AskUserExchangeParams) -> Digest:
         # The answer and retry operation key are completion data. Everything
         # model-visible in the initiating request remains immutable.
-        return canonical_digest(
-            "adapter-ask-user-request-v1",
-            params.model_dump(mode="json", exclude={"operation_id", "answer"}),
-        )
+        return params.request_digest
 
     def accept_score(self, params: ScoreParams, result: ScoreResult) -> None:
         if params.episode_id != self.episode_id:
@@ -600,7 +621,11 @@ class VerifiedAdapterSession:
         verifier: HostVerifier,
         *,
         rescue_required: Callable[[], None] | None = None,
+        answer_owner: str = "host",
     ) -> None:
+        if answer_owner not in ("host", "adapter"):
+            raise SupervisionError("invalid ask-user answer ownership")
+        self._answer_owner = answer_owner
         self._supervisor = supervisor
         self.verifier = verifier
         self._rescue_required = rescue_required or (lambda: None)
@@ -834,20 +859,24 @@ class VerifiedAdapterSession:
     ) -> AskUserExchangeResult:
         self._ensure_usable()
         # This prospective check rejects changed prompts before an adapter call.
-        self.verifier.validate_ask_completion(params)
+        self.verifier.validate_ask_completion(params, answer_owner=self._answer_owner)
+        # Both owners use one existing exchange RPC. In adapter mode the null
+        # answer requests generation; completion is local, never a second call.
         result = await self._mutating_call(
             "ask_user_exchange",
             params,
             AskUserExchangeResult,
             timeout=timeout,
             validate=lambda value: (
-                self.verifier.validate_ask_completion(params, value)
+                self.verifier.validate_ask_completion(
+                    params, value, answer_owner=self._answer_owner
+                )
                 if isinstance(value, AskUserExchangeResult)
                 else (_ for _ in ()).throw(SupervisionError("ask returned the wrong result"))
             ),
         )
         assert isinstance(result, AskUserExchangeResult)
-        self.verifier.finish_ask(params, result)
+        self.verifier.finish_ask(params, result, answer_owner=self._answer_owner)
         return result
 
     async def score(self, params: ScoreParams, *, timeout: float) -> ScoreResult:

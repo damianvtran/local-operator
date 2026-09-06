@@ -91,7 +91,7 @@ def runner_descriptor(tmp_path: Path, episode_id: str, *, secret_refs: Any = ())
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     return RescueDescriptor(
-        schema_version="1.5",
+        schema_version="1.6",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id=episode_id,

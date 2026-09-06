@@ -158,7 +158,7 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 # Deliberately a NARROW allowlist rather than "reject every undeclared infra
 # value". ``inspect_requirements`` runs before the task is named, so it returns
 # only the adapter's UNCONDITIONAL baseline -- a task-conditional requirement
-# (OSWORLD_PROXY_CREDENTIALS, OSWORLD_PROXY_ENDPOINT) is legitimately absent
+# (GOOGLE_ACCOUNT_CREDENTIALS for a login task) is legitimately absent
 # from it, and a blanket rule would refuse correct proxy runs. Only a value
 # whose silent drop corrupts the evidence record belongs here.
 #
@@ -181,6 +181,9 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # ~t+383s exhaustion wall that truncated earlier runs, so it is not
         # comparable to one that hit it, and the bundle has to say so on its own.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
+        # Network policy changes comparability too: older adapters must refuse
+        # this request rather than seal a disabled-policy claim while enabling it.
+        "OSWORLD_ENABLE_PROXY": "osworld_enable_proxy_override",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)
@@ -368,7 +371,9 @@ class EpisodeRunner:
         self._config = config
         self._selector = selector
         self._model = model
-        self._responder = responder or NullUserResponder()
+        self._responder = responder if responder is not None else NullUserResponder()
+        self._responder_override = responder is not None
+        self._answer_owner = "host"
         self._redactions = redactions or RedactionSet.from_resolved_values(())
         # ``None`` means "this episode has no secrets to resolve", which is only
         # true when the spec declares no refs. An empty static resolver makes a
@@ -459,6 +464,9 @@ class EpisodeRunner:
         self._supervisor = supervisor
         handshake = await supervisor.handshake(timeout=self._config.handshake_timeout)
         self._action_surface = handshake.metadata.capabilities.action_surface()
+        self._answer_owner = handshake.metadata.capabilities.ask_user_answer_owner
+        if self._answer_owner == "adapter" and self._responder_override:
+            raise ValueError("adapter-owned answers cannot override the user responder")
         verifier = HostVerifier(
             self._spec.task_id,
             self._spec.episode_id,
@@ -468,6 +476,7 @@ class EpisodeRunner:
             supervisor,
             verifier,
             rescue_required=self._mark_rescue_required,
+            answer_owner=self._answer_owner,
         )
         self._session = session
 
@@ -1197,13 +1206,27 @@ class EpisodeRunner:
             prompt=prompt,
         )
         session.begin_ask(begin)
-        answer = await self._responder.ask(prompt, self._config.ask_deadline_ms)
-        if answer is None:
-            # An outstanding ask may not be left open, and there is no way to
-            # withdraw one. Cancelling is the only coherent resolution.
+        if self._answer_owner == "adapter":
+            # The simulator lives behind the adapter boundary. A null-answer
+            # exchange generates once; sending a host finish would generate twice.
+            result = await session.finish_ask(begin, timeout=self._config.step_timeout)
+            answer = result.answer
+        else:
+            answer = await self._responder.ask(prompt, self._config.ask_deadline_ms)
+            if answer is None:
+                raise _Cancelled("ask-user was not answered")
+            finish = AskUserExchangeParams(
+                operation_id=f"ask-finish-{ask_id}",
+                episode_id=begin.episode_id,
+                ask_id=ask_id,
+                prompt=prompt,
+                answer=answer,
+            )
+            result = await session.finish_ask(finish, timeout=self._config.step_timeout)
+        # Refusal is a clean, unscored cancellation, never permission to publish
+        # a host substitute or a synthetic empty answer into the model history.
+        if not result.accepted or answer is None:
             raise _Cancelled("ask-user was not answered")
-        finish = begin.model_copy(update={"operation_id": f"ask-finish-{ask_id}", "answer": answer})
-        result = await session.finish_ask(finish, timeout=self._config.step_timeout)
         request_artifact = self._publish(prompt.encode("utf-8"), media_type="text/plain")
         response_artifact = self._publish(answer.encode("utf-8"), media_type="text/plain")
         exchange_id = ask_id

@@ -196,7 +196,7 @@ current session's cost live).
 
 | Command | What it does |
 | --- | --- |
-| `/model` | Switch model for this session; `/model default` saves the current one for new ones, `/model saved` switches back to it (`/settings` sets it too) |
+| `/model` | Switch model for this session; `/model default` saves the current one for new ones, `/model saved` reverts to it (`/settings` edits the boot default too) |
 | `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
 | `/fast` | Toggle fast mode where the provider sells one — the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
@@ -207,6 +207,7 @@ current session's cost live).
 | `/btw` | Ask a side question off the record — it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
+| `/session` | Current-session recorded usage, combined cost, cache and request diagnostics |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>` puts a manager and roster on it |
@@ -611,7 +612,8 @@ then load `extension/dist` unpacked at `chrome://extensions` with Developer mode
 on — the extension is not yet on the Chrome Web Store), click its toolbar icon,
 and enter the pairing code. Once paired, `browser` tool calls drive a dedicated
 tab in your real browser. The first time the agent wants a new site, the
-extension asks you to Allow once / Always allow / Deny; you stay in control of
+extension asks you to pick a scope (all pages on this domain, only this site,
+just this once) or Deny; you stay in control of
 which sites it can reach, and can revoke the whole browser any time from the
 extension's Settings or with `lop browser pair --reset`.
 
@@ -659,7 +661,11 @@ lop config open        # open it in your editor
 Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), and `tui.theme` (any registered theme name — easier to set with
-`/theme`, which previews live).
+`/theme`, which previews live). `bash.shell` picks the interpreter the `bash`
+tool spawns: unset, it runs the first `bash` on `PATH` (Homebrew bash 5 when
+installed, else the system one) and falls back to `/bin/sh` only on a host
+with no bash — so process substitution and other bash syntax work as the
+tool's name promises. Every option is browsable in `/settings`.
 
 Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
@@ -720,6 +726,15 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
 submit bug reports and feature requests, set up a development environment,
 and open pull requests. `docs/` covers the architecture
 ([REWRITE.md](./docs/REWRITE.md)), benchmarks, and verification evidence.
+
+### Inside a multiplexer
+
+Run a column of `lop` sessions as panes and `lop` meets the host halfway:
+it publishes a per-pane crash-restore binding
+([multiplexer-resume.md](./docs/multiplexer-resume.md)) and, inside a
+[Herdr](https://herdr.dev) pane, reports its live state — `idle`, `working`,
+`blocked` on an approval — to the Agents panel
+([herdr-agents.md](./docs/herdr-agents.md)).
 
 ## 🙏 Credits and Acknowledgements
 

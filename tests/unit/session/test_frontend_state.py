@@ -899,3 +899,116 @@ def test_queued_custom_steers_project_their_human_text() -> None:
     ]
     assert [entry["id"] for entry in state.queued_steering] == [peer.id, wake.id, typed.id]
     assert all(entry["image_count"] == 0 for entry in state.queued_steering)
+
+
+class _CheckpointTranscript:
+    """The one method ``FrontendStateStore._restored_state`` reads."""
+
+    def __init__(self, state: FrontendSessionState | None, checkpoint_id: str = "cp-parent"):
+        self._state = state
+        self._checkpoint_id = checkpoint_id
+
+    def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
+        if self._state is None:
+            return None
+        return {
+            "checkpoint_id": self._checkpoint_id,
+            "state": self._state.model_dump(mode="json"),
+        }
+
+
+def _owner_over(session_id: str, checkpoint: FrontendSessionState | None) -> SimpleNamespace:
+    return SimpleNamespace(session_id=session_id, _transcript=_CheckpointTranscript(checkpoint))
+
+
+def test_a_fork_restores_its_own_session_id_not_the_parents(tmp_path) -> None:
+    """#573: the directory a session runs in is authoritative for who it is.
+
+    A fork copies ``transcript.jsonl`` verbatim, so the newest checkpoint it
+    restores was written BY THE PARENT and carries the parent's ``session_id``.
+    The runtime then served that id in every ``frontend_sync`` and
+    ``RemoteSession._install_frontend`` refused the frame — a fork nobody could
+    attach to, and (in switch mode) a fork whose own viewer never got a state
+    install, so ``/model`` looked inert and the band never painted its context.
+    The same shape as the ``COPIED_SIDECARS`` set-equality test in
+    ``tests/unit/test_fork.py``: fork with a checkpoint present, assert the
+    restored identity equals the new directory name.
+    """
+    from local_operator.fork import fork_session
+
+    parent = _state(session_id="parent000001", checkpoint_id="cp-parent")
+    parent_dir = tmp_path / "sessions" / "parent000001"
+    parent_dir.mkdir(parents=True)
+    row = {
+        "id": "r1",
+        "ts": 1.0,
+        "type": "custom",
+        "payload": {
+            "custom_type": "frontend_state_checkpoint_v1",
+            "details": {"checkpoint_id": "cp-parent", "state": parent.model_dump(mode="json")},
+        },
+    }
+    import json
+
+    (parent_dir / "transcript.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    fork_id = fork_session(tmp_path, "parent000001")
+
+    from local_operator.session.transcript import Transcript
+
+    owner = SimpleNamespace(
+        session_id=fork_id, _transcript=Transcript(tmp_path / "sessions" / fork_id)
+    )
+    restored = FrontendStateStore.from_checkpoint(owner).state
+    assert restored.session_id == fork_id
+    # Everything that is genuinely the conversation's carries over: spend,
+    # title, occupancy against the window it was measured on.
+    assert restored.conversation_title == parent.conversation_title
+    assert restored.cumulative_parent_cost == parent.cumulative_parent_cost
+    assert restored.context_tokens == parent.context_tokens
+    assert restored.context_window == parent.context_window
+
+
+def test_a_same_session_resume_keeps_its_checkpoint_id_and_jobs() -> None:
+    """The fixup is scoped to INHERITED checkpoints. A resume of the session
+    that wrote the row keeps its own bookkeeping: the checkpoint id names a row
+    this transcript wrote for itself, and the jobs are its own children."""
+    own = _state(session_id="s1", checkpoint_id="cp-own")
+    restored = FrontendStateStore.from_checkpoint(_owner_over("s1", own)).state
+    assert restored.session_id == "s1"
+    assert restored.checkpoint_id == "cp-own"
+    assert [job.id for job in restored.jobs] == ["j1"]
+
+
+def test_an_inherited_checkpoint_drops_the_parents_checkpoint_id_and_jobs() -> None:
+    """The two identity-bearing fields #573 flagged beside ``session_id``.
+
+    ``checkpoint_id`` would otherwise name the parent's last row until the
+    fork's first turn end; ``jobs`` are the parent's children, which
+    ``fork.EXCLUDED_SIDECARS`` already keeps out of the roster sidecar — the
+    checkpoint was the one door left open.
+    """
+    inherited = _state(session_id="parent000001", checkpoint_id="cp-parent")
+    restored = FrontendStateStore.from_checkpoint(_owner_over("fork00000001", inherited)).state
+    assert restored.session_id == "fork00000001"
+    assert restored.checkpoint_id is None
+    assert restored.jobs == ()
+    # ``from_session`` (the TUI-hosted construction) restores through the same
+    # helper, so the two hosts cannot disagree about the fork's identity.
+    assert FrontendStateStore._restored_state(
+        _owner_over("fork00000001", inherited)
+    ).session_id == ("fork00000001")
+
+
+def test_a_fork_of_a_fork_is_stamped_with_its_own_id_at_every_hop() -> None:
+    """#573 observed the GRANDPARENT's id two hops down: each hop inherited
+    whatever the previous one was already serving. With the re-stamp on
+    restore, a checkpoint written by the first fork names the first fork, and
+    the second fork corrects it again to itself."""
+    grandparent = _state(session_id="grand0000001")
+    first_fork = FrontendStateStore.from_checkpoint(_owner_over("fork10000001", grandparent)).state
+    assert first_fork.session_id == "fork10000001"
+    # The first fork writes ITS checkpoint (now correctly stamped); the second
+    # fork inherits that row.
+    second_fork = FrontendStateStore.from_checkpoint(_owner_over("fork20000001", first_fork)).state
+    assert second_fork.session_id == "fork20000001"
+    assert second_fork.jobs == ()

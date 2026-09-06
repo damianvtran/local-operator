@@ -368,6 +368,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Limits and rendering for the fetch tool.",
     ),
+    # LIVE for the same reason as the two web sections: ``execute_bash`` reads
+    # ``bash.shell`` through a fresh ``ConfigManager(config_dir())`` on EVERY
+    # call (``tools/builtin.py::_configured_bash_shell``), so an edit lands on
+    # the very next command. Its own section rather than a row under "Session"
+    # or "Runtime": scope is uniform within a section by construction, and
+    # this is about how a tool executes, not how sessions behave.
+    Section(
+        "tools",
+        "Tools",
+        Scope.LIVE,
+        "How the built-in tools execute.",
+    ),
     Section(
         "local_providers",
         "Local servers",
@@ -726,6 +738,32 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help="Fires only while the terminal is unfocused.",
         choices=_bool_choices("notify when unfocused", "never notify"),
+    ),
+    Setting(
+        # The session's INITIAL dock density, not a hard override: `ctrl+g`
+        # cycles freely from it and never writes it back (the same split as
+        # `tool_approval_mode` vs `/approvals`). A hard override would make
+        # the key a no-op again, which is the defect #525 fixed. LIVE by
+        # section: a write applies to the mounted panel unless the user has
+        # already cycled it this session. Named `display.dock` rather than
+        # `display.subagent_dock` so a later todo-panel extension can share it.
+        key="display.dock",
+        path=("display.dock",),
+        section="appearance",
+        label="Subagent dock",
+        kind=Kind.ENUM,
+        default="full",
+        help="How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
+        choices=(
+            # Parallel descriptions: each names WHAT IS SHOWN and nothing
+            # else. `hidden` used to append "; ctrl+g brings it back", which
+            # made it the only choice explaining its own exit and left the
+            # list reading unevenly — and the help line above already names
+            # `ctrl+g` for all three (round 1, D5).
+            Choice("full", "full", "one row per child, newest first"),
+            Choice("summary", "summary", "a one-line count"),
+            Choice("hidden", "hidden", "not shown"),
+        ),
     ),
     # -- session ------------------------------------------------------------
     Setting(
@@ -1203,6 +1241,21 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
+    ),
+    # -- tools --------------------------------------------------------------
+    # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
+    # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
+    # imported, because this module must stay cheap for the CLI and
+    # ``tools.builtin`` is not (see the module docstring on Textual).
+    Setting(
+        key="bash.shell",
+        path=("bash", "shell"),
+        section="tools",
+        label="Bash interpreter",
+        kind=Kind.TEXT,
+        default="",
+        help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+        empty_unsets=True,
     ),
     *[
         setting

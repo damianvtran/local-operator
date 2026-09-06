@@ -825,7 +825,12 @@ class AwsProvider:
         if simulator is None:
             return None
         answer = await asyncio.to_thread(simulator.respond, prompt)
-        return str(answer)
+        # None is a refusal, not the public string "None". Other objects may
+        # contain private simulator state; never stringify them into replies or
+        # diagnostics. Public string content is validated by the adapter wire.
+        if answer is not None and not isinstance(answer, str):
+            raise TypeError("simulator response must be a string or None")
+        return answer
 
     # ------------------------------------------------------------------
     # teardown (usable with only credentials + refs; see for_teardown)
