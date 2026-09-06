@@ -38,7 +38,11 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
-from local_operator.session.goal_loop import LOOP_REASON_CHARS, MAX_LOOP_ITERATIONS
+from local_operator.session.goal_loop import (
+    LOOP_GOAL_CHARS,
+    LOOP_REASON_CHARS,
+    MAX_LOOP_ITERATIONS,
+)
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
@@ -312,10 +316,11 @@ _BOUNDED_COLLECTION_FIELDS = {
     # A FIXED set of five scalar keys (status/completed/goal/iterations/reason),
     # REPLACED on each publish rather than appended to, so it does not grow with
     # iteration count: a 100-iteration loop and a 1-iteration loop serialize the
-    # same shape, only `completed` differs. Its one free-text value, the judge's
-    # `reason`, is clipped at LOOP_REASON_CHARS where it is parsed, and `goal` is
-    # the user's own typed slash argument.
-    "loop": "five scalar keys, replaced per publish; judge reason clipped at parse",
+    # same shape, only `completed` differs. BOTH free-text values are clipped
+    # where they enter the state: the judge's `reason` at LOOP_REASON_CHARS in
+    # `_parse_loop_verdict`, and the user's `goal` at LOOP_GOAL_CHARS in
+    # `GoalLoop.start`.
+    "loop": "five scalar keys, replaced per publish; both free-text values clipped at entry",
 }
 
 #: Fields that grow with use and are therefore bounded HERE, by this module.
@@ -423,7 +428,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year() -> None:
             "status": "running",
             "completed": MAX_LOOP_ITERATIONS,
             "iterations": MAX_LOOP_ITERATIONS,
-            "goal": "g" * 2_000,
+            "goal": "g" * LOOP_GOAL_CHARS,
             "reason": "r" * LOOP_REASON_CHARS,
         },
         "slash_capabilities": [],
@@ -930,3 +935,38 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
         )
     finally:
         registrant.close()
+
+
+def test_the_loop_goal_is_clipped_where_it_enters_the_state() -> None:
+    """`goal` is bounded by the producer, not merely by the fixture above.
+
+    The frame guard asserted against a 2,000-char goal while nothing enforced
+    2,000: `GoalLoop.start` took the slash argument verbatim, bounded only by
+    the desktop route's `max_length=200_000`. The guard was therefore testing a
+    limit that did not exist, and an oversized attach frame is a DROPPED LINE --
+    a session that cannot be attached to (review round 2, MINOR-1).
+    """
+    import asyncio
+
+    from local_operator.session.goal_loop import GoalLoop
+
+    async def start_a_huge_goal() -> dict[str, object]:
+        async def never_runs(_text: str) -> str:
+            # The loop is cancelled before a turn completes; this exists to
+            # satisfy the judge signature, not to be called.
+            raise AssertionError("the loop should not reach its judge")
+
+        loop = GoalLoop(
+            prompt=lambda _text: asyncio.sleep(0),
+            judge=never_runs,
+            abort=lambda: None,
+            changed=lambda _state: None,
+        )
+        # The largest value the ROUTE accepts, which is what the producer must
+        # defend against -- two orders of magnitude past the guard's fixture.
+        state = loop.start("G" * 200_000, "")
+        await loop.cancel()
+        return state
+
+    state = asyncio.run(start_a_huge_goal())
+    assert len(str(state["goal"])) == LOOP_GOAL_CHARS
