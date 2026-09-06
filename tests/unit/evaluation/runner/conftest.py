@@ -73,7 +73,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.5",
+        schema_version="1.6",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -97,7 +97,7 @@ def handshake(tmp_path: Path) -> Handshake:
             entry_point="tiny_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
-            schema_version="1.5",
+            schema_version="1.6",
             capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
         ),
         python=PythonRuntime.current(),
@@ -288,7 +288,9 @@ class FakeAdapter:
             self.current = output
             return ExecuteResult(observation=output, receipt=receipt)
         if method == "ask_user_exchange":
-            return AskUserExchangeResult(ask_id=params.ask_id, accepted=True)
+            return AskUserExchangeResult(
+                ask_id=params.ask_id, request_digest=params.request_digest, accepted=True
+            )
         if method == "score":
             return ScoreResult(score=self.score)
         if method == "cleanup":

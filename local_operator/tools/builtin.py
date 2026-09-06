@@ -51,6 +51,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import signal as signal_module
 import threading
 import time
@@ -73,7 +74,13 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.subagent import (
+    configured_effort_tiers,
+    describe_effort_tiers,
+    effort_tier_rejection,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -102,6 +109,7 @@ from local_operator.imaging import (
     bound_image_for_model,
 )
 from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.paths import config_dir
 from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -149,6 +157,17 @@ BASH_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: Hard cap on the per-command timeout; longer runs are a session bug, not a
 #: tool feature.
 BASH_MAX_TIMEOUT_SECONDS = 3600.0
+#: Where ``bash.shell`` lives under ``values``, spelled ONCE and shared with
+#: the ``settings_io`` row so the reader and the writer cannot disagree about
+#: the path (the flat-vs-nested mismatch that silenced the #576 opt-out).
+BASH_SHELL_PATH: tuple[str, ...] = ("bash", "shell")
+#: The registry default for ``bash.shell``: empty means "auto-resolve" via
+#: :func:`resolve_bash_shell`, never a literal interpreter, so a config that
+#: says nothing tracks whatever bash the host has rather than freezing a path.
+BASH_SHELL_DEFAULT = ""
+#: Last-resort interpreter when the host has no ``bash`` on PATH at all. The
+#: tool keeps working (POSIX syntax only) instead of failing every call.
+BASH_SHELL_FALLBACK = "/bin/sh"
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
@@ -1146,10 +1165,61 @@ async def _run_with_abort(
 # ---------------------------------------------------------------------------
 
 
+def resolve_bash_shell(configured: str | None) -> str:
+    """Pick the interpreter the ``bash`` tool spawns (#629).
+
+    Order: the ``bash.shell`` config value when set and non-blank; else the
+    first ``bash`` on PATH (Homebrew's bash 5 when installed, else
+    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else ``/bin/sh`` so a
+    host with no bash still runs POSIX commands rather than nothing.
+
+    Deliberately NOT ``$SHELL``: the login shell is zsh on macOS, and zsh's
+    word-splitting and globbing differ from what a tool named ``bash``
+    promises, so a model writing bash would get a third dialect. Pure and
+    cheap (one ``which`` per call) so the config edit is LIVE and the order is
+    unit-testable without spawning anything.
+
+    ``~`` is expanded because the key is a ``Kind.TEXT`` row in ``/settings``
+    and ``~/bin/bash`` is a plausible thing to type there; nothing else in the
+    settings registry or the reader expands it, so an unexpanded value would
+    reach ``execve`` verbatim and fail every call.
+    """
+    stripped = (configured or "").strip()
+    chosen = (
+        os.path.expanduser(stripped) if stripped else shutil.which("bash") or BASH_SHELL_FALLBACK
+    )
+    logger.debug("bash tool interpreter: %s", chosen)
+    return chosen
+
+
+def _configured_bash_shell() -> str | None:
+    """Read ``bash.shell`` from config at CALL time, the way web_fetch does.
+
+    A fresh ``ConfigManager(config_dir())`` per call is what makes the key
+    honestly LIVE in ``/settings``: an edit takes effect on the very next
+    command with no session rebuild. Any read failure means "unset" — the
+    command must run even when config.yml is unreadable.
+    """
+    try:
+        value = ConfigManager(config_dir()).get_nested_value(BASH_SHELL_PATH, BASH_SHELL_DEFAULT)
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        return None
+    return value if isinstance(value, str) else None
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    command: str = Field(description="Shell command to run (executed via /bin/sh -c).")
+    # Kept terse on purpose: a schema rides EVERY request in every session and
+    # subagent. The bash-syntax claim is model-actionable (it tells the model
+    # which dialect to write); the /bin/sh fallback is not — the model cannot
+    # detect or change which host it runs on.
+    command: str = Field(
+        description=(
+            "Bash command to run (via `bash -c`; bash syntax such as <(...), "
+            "arrays and [[ ]] works)."
+        )
+    )
     timeout: float = Field(
         default=BASH_DEFAULT_TIMEOUT_SECONDS,
         gt=0,
@@ -1422,16 +1492,79 @@ async def execute_bash(
         extra = {str(name): str(value) for name, value in extra.items()}
         env.update(extra)
 
-    process = await asyncio.create_subprocess_exec(
-        "/bin/sh",
-        "-c",
-        params.command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=_safe_cwd(context),
-        env=env,
-        start_new_session=True,
-    )
+    # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
+    # mode, which rejects process substitution and other bashisms at parse
+    # time — and because this tool is NAMED bash, models write bash: 37 of 43
+    # `<(...)` commands in a week of transcripts died on `syntax error near
+    # unexpected token '('`. Resolution order: the configured `bash.shell`,
+    # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
+    # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
+    shell = resolve_bash_shell(_configured_bash_shell())
+    cwd = _safe_cwd(context)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            shell,
+            "-c",
+            params.command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        # A `bash.shell` pointing at a missing or non-executable file made the
+        # spawn raise out of the tool, and the generic tool boundary rendered
+        # `Tool 'bash' failed unexpectedly:` plus a 2000-char traceback tail —
+        # so EVERY call failed with a stack dump that never named the key that
+        # caused it. OSError (not just FileNotFoundError) because the same
+        # misconfiguration also arrives as PermissionError for a non-executable
+        # path, and ENOTDIR/ELOOP for a malformed one.
+        #
+        # But the SAME OSError family covers two distinct arguments, and only
+        # one of them is `bash.shell`: argv[0] (the interpreter) and `cwd=`
+        # (the session directory, which is routinely deleted under us — a
+        # removed worktree, a reclaimed tmpdir). Blaming `bash.shell`
+        # unconditionally named a key the operator may never have set and
+        # prescribed two commands that cannot fix a missing directory.
+        # `exc.filename` is the discriminator: CPython sets it to the path that
+        # actually failed, and the child chdirs BEFORE execve, so a bad cwd
+        # correctly wins even when both are bad. It is None only for errors
+        # that carry no path at all, which must not be attributed to either.
+        #
+        # Each message is split across short lines and carries no backticks:
+        # the tool card truncates per line and paints Text rather than
+        # markdown, so a single long sentence loses its own recovery half and
+        # backticks land literally inside the command the operator must type.
+        if exc.filename is None:
+            return _error(
+                tool_call_id,
+                "bash",
+                f"cannot start the command ({exc.strerror or exc}).\n"
+                f"Interpreter: {shell}\n"
+                f"Working directory: {cwd}",
+            )
+        if exc.filename != shell:
+            # The offending path IS the cwd in the case this branch exists for,
+            # so repeating it on its own line would spend a scarce card line on
+            # a duplicate; it is named separately only when the two differ.
+            where = "" if exc.filename == cwd else f"Working directory: {cwd}\n"
+            return _error(
+                tool_call_id,
+                "bash",
+                f"cannot start the command in {exc.filename!r} "
+                f"({exc.strerror or exc}).\n"
+                f"{where}"
+                "That directory is gone or unreadable. Recreate it, or work "
+                "from a directory that exists.",
+            )
+        return _error(
+            tool_call_id,
+            "bash",
+            f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}).\n"
+            "Point it at a real interpreter: lop config edit bash.shell <path>\n"
+            "Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ''",
+        )
 
     # Record this group in the owner's process-group ledger so a HARD death of
     # THIS lop process (SIGKILL from cmux, OOM, crash) — the one stop path with
@@ -1973,7 +2106,7 @@ def build_bash_tool() -> AgentTool:
         name="bash",
         label="Shell",
         describe_approval=_describe_shell_approval,
-        description=("Run a shell command and return its exit code, stdout and stderr."),
+        description=("Run a bash command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # bash runs shared when non-pty; models batch independent
@@ -7684,12 +7817,142 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 # never advertise tools that can only error.
 
 
+def _validate_effort_tier(value: str | None) -> str | None:
+    """Refuse an ``effort`` the live config cannot honour, naming what can be.
+
+    Shared by both ``task`` forms and the ``agent`` tool so the three fields
+    cannot drift. Validation reads the config at CALL time while the schema
+    was rendered at BUILD time (see :func:`_advertise_effort_tiers`); the two
+    agree except across a mid-session edit, and this is the side that must be
+    right — an accepted-but-stale tier would reach the strict launch path and
+    fail there with less context than the message here carries.
+    """
+    if value is None:
+        return None
+    rejection = effort_tier_rejection(value)
+    if rejection is not None:
+        raise ValueError(rejection)
+    return value
+
+
+def _advertise_effort_tiers(
+    schema: dict[str, Any], *, description: str, extra: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Rewrite every ``effort`` property in ``schema`` to the CONFIGURED tiers.
+
+    The params models declare ``effort`` as a free string so validation can
+    consult the live config; the schema the model reads is patched here at
+    tool-build time. Before this, ``effort`` was a hard-coded
+    ``Literal["lo", "med", "hi"]`` regardless of what the operator had set
+    under ``values.subagents.models``. Observed live with NO tier configured:
+    the delegating model read the enum, chose ``effort="hi"``, and the strict
+    launch path (correctly) refused it — every value the schema offered was a
+    guaranteed failure, and the schema never said that omitting the field was
+    the one choice that worked.
+
+    With tiers configured, the enum lists exactly those and the description
+    names the ``provider/model`` each resolves to, so the model chooses on
+    information rather than a label. With none configured the property is
+    REMOVED rather than advertised as empty: Gemini function declarations
+    reject ``enum: []``, an always-invalid field is pure schema cost on every
+    turn, and a model that cannot see the field cannot pick it. Validation
+    still refuses a stray ``effort`` with the same guidance (see
+    :func:`_validate_effort_tier`). ``extra`` members (the ``agent`` tool's
+    ``inherit`` sentinel) follow the configured tiers and keep the property
+    alive on their own.
+
+    Patches both the top-level property and every ``$defs`` entry, so the
+    batch form's ``TaskItem`` mirror gets the same treatment as the single
+    form. Tools are built once at session construction; a config edit is
+    picked up by ``Session._apply_config_change``, which rebuilds the two
+    tools that carry this field.
+    """
+    tiers = configured_effort_tiers()
+    members = [*tiers, *extra]
+
+    def patch(properties: Any) -> None:
+        if not isinstance(properties, dict) or "effort" not in properties:
+            return
+        if not members:
+            del properties["effort"]
+            return
+        # The same ``anyOf [enum, null]`` shape pydantic renders for
+        # ``Literal[...] | None``, so providers see a field of the shape they
+        # always did — only the members and the description change.
+        properties["effort"] = {
+            "anyOf": [{"type": "string", "enum": members}, {"type": "null"}],
+            "default": None,
+            "description": description,
+            "title": "Effort",
+        }
+
+    patched = dict(schema)
+    patched["properties"] = dict(patched.get("properties") or {})
+    patch(patched["properties"])
+    defs = patched.get("$defs")
+    if isinstance(defs, dict):
+        patched["$defs"] = {
+            name: (
+                {**entry, "properties": dict(entry.get("properties") or {})}
+                if isinstance(entry, dict)
+                else entry
+            )
+            for name, entry in defs.items()
+        }
+        for entry in patched["$defs"].values():
+            if isinstance(entry, dict):
+                patch(entry.get("properties"))
+    return patched
+
+
+def _effort_tier_field_description() -> str:
+    """The ``task`` ``effort`` description, built from the configured tiers.
+
+    Only ever rendered when at least one tier exists (with none the property
+    is dropped), so it can lead with the tier list. Short on purpose: it is
+    billed on every turn of every session that can delegate.
+    """
+    tiers = configured_effort_tiers()
+    return (
+        f"Model tier for this subagent ({describe_effort_tiers(tiers)}). "
+        "Omit to inherit this session's model and reasoning effort."
+    )
+
+
+def _task_tool_description() -> str:
+    """The ``task`` tool description, with the effort sentence matching the schema.
+
+    A model told "effort picks a configured model tier" while no tier is
+    configured infers that some tier must be pickable; the sentence has to
+    say which state it is in. One sentence either way — prompt text is paid on
+    every turn.
+    """
+    tiers = configured_effort_tiers()
+    if tiers:
+        effort = (
+            "Omit 'effort' to inherit this session's model and reasoning effort, "
+            "or set it to one of the configured tiers the schema lists."
+        )
+    else:
+        effort = (
+            "No effort tiers are configured (values.subagents.models), so every "
+            "child inherits this session's model and reasoning effort; do not pass "
+            "'effort'."
+        )
+    return (
+        "Launch background subagents — one, or a whole concurrent batch "
+        "('tasks' + shared 'context') in a single call. 'agent' names a "
+        "role carrying vetted guidance (reviewer, coder, architect, "
+        f"manager, designer, scout — see the `agent` tool). {effort}"
+    )
+
+
 class TaskItem(BaseModel):
     """One slice of a task batch. ``agent`` names the ROLE the child runs as —
     a registered profile or a packaged starter (reviewer, coder, architect,
     manager, designer, scout); the role supplies standing guidance and may
     restrict the child's tools. ``effort`` routes to a configured model tier
-    (values.subagents.models lo/med/hi)."""
+    (a key of values.subagents.models)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -7709,10 +7972,20 @@ class TaskItem(BaseModel):
             "carries vetted guidance and may restrict tools."
         ),
     )
-    effort: Literal["lo", "med", "hi"] | None = Field(
+    # A free string, not a Literal: the valid set is whatever the operator has
+    # configured under ``values.subagents.models`` at CALL time, and a Literal
+    # would freeze one guess at import. The schema the model sees is rewritten
+    # to the configured tiers by ``_advertise_effort_tiers``; validation below
+    # is what refuses anything else.
+    effort: str | None = Field(
         default=None,
-        description="Model tier for this subagent (values.subagents.models).",
+        description="Model tier for this subagent (a configured values.subagents.models key).",
     )
+
+    @field_validator("effort")
+    @classmethod
+    def _effort_is_configured(cls, value: str | None) -> str | None:
+        return _validate_effort_tier(value)
 
 
 class TaskParams(BaseModel):
@@ -7736,10 +8009,16 @@ class TaskParams(BaseModel):
         default=None,
         description="Single-task form: role for the subagent (see 'tasks[].agent').",
     )
-    effort: Literal["lo", "med", "hi"] | None = Field(
+    effort: str | None = Field(
         default=None,
         description="Single-task form: model tier for the subagent.",
     )
+
+    @field_validator("effort")
+    @classmethod
+    def _effort_is_configured(cls, value: str | None) -> str | None:
+        return _validate_effort_tier(value)
+
     context: str = Field(
         default="",
         description=(
@@ -8088,14 +8367,11 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=(
-            "Launch background subagents — one, or a whole concurrent batch "
-            "('tasks' + shared 'context') in a single call. 'agent' names a "
-            "role carrying vetted guidance (reviewer, coder, architect, "
-            "manager, designer, scout — see the `agent` tool); effort picks a "
-            "configured model tier."
+        description=_task_tool_description(),
+        parameters=_advertise_effort_tiers(
+            TaskParams.model_json_schema(),
+            description=_effort_tier_field_description(),
         ),
-        parameters=TaskParams.model_json_schema(),
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",

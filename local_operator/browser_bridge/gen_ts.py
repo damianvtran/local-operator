@@ -70,7 +70,7 @@ export interface AwaitingOrigin {{ event: 'awaiting_origin'; id: string; origin:
 export interface AwaitingOriginCleared {{ event: 'awaiting_origin_cleared'; id: string; }}
 export interface Unpair {{ event: 'unpair'; }}
 export interface OriginDecision {{
-  event: 'origin_decision'; origin: string; decision: 'once' | 'always' | 'deny';
+  event: 'origin_decision'; origin: string; decision: 'once' | 'site' | 'domain' | 'deny';
 }}
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared

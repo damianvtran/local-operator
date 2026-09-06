@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, NamedTuple
 
 from rich.cells import cell_len
@@ -155,10 +156,84 @@ _MIN_PREVIEW_JOB_ROWS = 0
 #: composer off-screen; overflow therefore scrolls inside the roster.
 _EXPANDED_DOCK_ROWS = 14
 
+
+class Density(str, Enum):
+    """How much of the dock the panel takes; ``ctrl+g`` cycles it (#525).
+
+    A SECOND axis beside ``_expanded``, not a replacement for it. ``full`` is
+    everything the panel did before: the budgeted preview, and inside it the
+    expanded roster the overflow disclosure opens. ``summary`` is one row of
+    counts in the caption; ``hidden`` paints nothing. Kept orthogonal so the
+    overflow contract (``+N earlier``, navigation, ``collapse_for_child_view``)
+    is untouched — the density only decides whether that machinery is shown.
+
+    Before this the key was an OVERFLOW disclosure and nothing else: with six
+    or fewer children — the common fan-out — ``toggle_expanded`` returned at
+    its budget gate and the press did nothing, so the panel was a fixed claim
+    on 2-8 rows above the composer for the rest of the session (#525). The
+    only zero-row shape was the height-forced compact fallback, which the user
+    could not ask for.
+
+    Values are the ``display.dock`` setting's vocabulary: ``compact`` already
+    names the height-forced state in this module and ``off`` would read as
+    "the feature is disabled", so the setting, the enum, the ``/help`` row and
+    the tests all say ``full | summary | hidden``.
+    """
+
+    FULL = "full"
+    SUMMARY = "summary"
+    HIDDEN = "hidden"
+
+
+#: The density a session starts at when ``display.dock`` is unset. Read via
+#: ``tui/settings.settings_get`` — whose defaults derive from the ``settings_io``
+#: registry, so the registry row is the guarded source and this constant is
+#: the panel's own fallback for a reader that cannot reach it.
+DEFAULT_DOCK_DENSITY = Density.FULL
+
+#: Order the summary row sheds its segments at a narrow width, first to go
+#: first. Whole segments, never a truncation into the hotkey: the ``ctrl+g``
+#: token is the one thing on the row that must always survive, because it is
+#: the ONLY cue the panel can be brought back (``todo_panel._footer`` rule).
+#: Counts of settled-quietly states go before the running count, and the
+#: failed count goes last because it is the reason the row re-emerged from
+#: ``hidden`` at all. The ``Subagents`` word goes before the numbers: on a
+#: 50-column terminal the reader can tell a row of ✗/⣾ counts from the todo
+#: list without the label, and cannot tell ``1 failed`` from nothing.
+_SUMMARY_SHED_ORDER = ("cancelled", "interrupted", "queued", "done", "label", "running", "failed")
+
+#: Eviction rank for the collapsed preview, lowest kept first. Running and
+#: queued children are the ones the user is waiting on; a failure is the one
+#: outcome that needs acting on; an interrupted child may be resumable; a
+#: completed or cancelled one has said everything a row can say. Ties break
+#: by start order, newest kept, which is the rule the slice had before.
+#: ``queued`` is spelled out rather than folded onto ``running`` by the
+#: caller: it shares rank 0, but reaching that through a string substitution
+#: meant "completed", "cancelled" and "queued" all landed on the default
+#: together, so adding a queued rank later — the obvious edit, since the
+#: design names queued explicitly — would have silently changed behaviour for
+#: a state this table appears to describe (round 1, F4).
+_EVICTION_RANK: dict[str, int] = {
+    "running": 0,
+    "queued": 0,
+    "failed": 1,
+    "interrupted": 2,
+}
+
 #: Seam between the numbers on a row. The same ` · ` the full-page view's
 #: title uses between its own facts, one tone under them — a row and the page
 #: it opens must punctuate the same way.
 STATS_SEAM = " · "
+
+#: Break between the FULL header's label and its `ctrl+g` hint. Deliberately
+#: not :data:`STATS_SEAM`: that seam separates COUNTS, so borrowing it here
+#: made the hotkey scan as one more statistic beside the label rather than as
+#: a hint about it (round 1, D3). Same reasoning and same shape as
+#: :data:`ACTIVITY_GAP` below — a break between two KINDS of thing is wider
+#: than the separator used within one kind, so proximity groups them
+#: correctly. Three spaces, one under the 4-cell activity gap, because this
+#: header carries two short tokens rather than a row of numbers.
+HINT_GAP = "   "
 
 #: Cells between the numbers and the activity. FOUR, and wider than the
 #: 3-cell seam on purpose: this is the break between the row's numbers and its
@@ -1016,6 +1091,139 @@ def compose_row(
     return row
 
 
+class SummaryCounts(NamedTuple):
+    """Per-state child counts the summary row paints.
+
+    A tuple rather than a dict so it can be the paint-once guard's key: the
+    summary caption repaints only when one of these moves or the spinner
+    frame advances, the same equality gate every other coalesced paint on
+    this panel sits behind.
+    """
+
+    running: int = 0
+    queued: int = 0
+    done: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    interrupted: int = 0
+
+    @property
+    def total(self) -> int:
+        return sum(self)
+
+
+def summary_counts(jobs: Sequence[Any]) -> SummaryCounts:
+    """Bucket task jobs by the state the row vocabulary already names.
+
+    Reads through :func:`row_facts` rather than ``job.status`` directly so a
+    queued child counts as queued here exactly as its row would glyph it (a
+    queued job's ``status`` is still ``running``; see :func:`status_glyph`).
+    Restored rows arrive as ``interrupted``/``completed`` and bucket there.
+    """
+    counts = dict.fromkeys(SummaryCounts._fields, 0)
+    for job in jobs:
+        facts = row_facts(job, fallback_id="", current=False)
+        if facts.queued:
+            counts["queued"] += 1
+        elif facts.status == "running":
+            counts["running"] += 1
+        elif facts.status == "failed":
+            counts["failed"] += 1
+        elif facts.status == "cancelled":
+            counts["cancelled"] += 1
+        elif facts.status == "interrupted":
+            counts["interrupted"] += 1
+        else:
+            counts["done"] += 1
+    return SummaryCounts(**counts)
+
+
+def _summary_segments(
+    counts: SummaryCounts, spinner_glyph: str, *, dropped: frozenset[str]
+) -> list[tuple[str, str, str]]:
+    """``(name, text, semantic ink)`` for every segment that survives ``dropped``.
+
+    Zero-count segments are omitted outright (``format_agents`` says nothing
+    at zero, and ``0 failed`` would spend the danger ink on good news). The
+    spinner frame follows the running count so the count is what the eye
+    reads first and the motion is what says it is still moving. When the
+    running COUNT is shed but children are still running, the frame stays as
+    a bare glyph: at the width that sheds it, the reader still needs to know
+    the panel is not describing a finished session. A count that is shed
+    while nonzero compresses to its glyph (``✗2``) for the same reason the
+    label is shed before it: the number carries the meaning, the word only
+    spells it.
+    """
+    segments: list[tuple[str, str, str]] = []
+    if "label" not in dropped:
+        segments.append(("label", "Subagents", "dim"))
+    if counts.running:
+        if "running" in dropped:
+            segments.append(("running", spinner_glyph, "muted"))
+        else:
+            segments.append(("running", f"{counts.running} running {spinner_glyph}", "muted"))
+    if counts.done and "done" not in dropped:
+        segments.append(("done", f"{counts.done} done", "dim"))
+    if counts.failed:
+        if "failed" in dropped:
+            segments.append(("failed", f"{GLYPH_FAILED}{counts.failed}", "danger"))
+        else:
+            segments.append(("failed", f"{counts.failed} failed", "danger"))
+    if counts.queued and "queued" not in dropped:
+        segments.append(("queued", f"{counts.queued} queued", "dim"))
+    if counts.cancelled and "cancelled" not in dropped:
+        segments.append(("cancelled", f"{counts.cancelled} cancelled", "dim"))
+    if counts.interrupted and "interrupted" not in dropped:
+        segments.append(("interrupted", f"{counts.interrupted} interrupted", "dim"))
+    segments.append(("hotkey", "ctrl+g", "muted"))
+    return segments
+
+
+def compose_summary(counts: SummaryCounts, *, spinner_glyph: str, width: int) -> Text:
+    """The one-row summary the panel paints in :attr:`Density.SUMMARY`.
+
+    ``Subagents · 1 running ⣾ · 3 done · 1 failed · ctrl+g``
+
+    Ink follows the row law: ``failed`` is the only coloured segment, matching
+    the ``✗`` a full row would carry; everything else is ``dim`` chrome except
+    the running count and the hotkey at ``muted``, because the hotkey is the
+    only signal the panel can grow again and has to be the loudest token
+    (``todo_panel`` D3/U3).
+
+    Fit is decided against the WIDEST rendering the roster can produce (every
+    count at its current digit width, spinner present) rather than the string
+    being painted, so a segment does not flicker in and out as the spinner
+    frame or a count's last digit changes (``todo_panel`` U1). Segments are
+    shed whole in :data:`_SUMMARY_SHED_ORDER`; the row is never truncated into
+    the hotkey, and if even ``✗N · ctrl+g`` cannot fit the hotkey alone is
+    painted and clipped by the renderer, which is the one case with nothing
+    left to shed.
+    """
+    inks = {
+        name: Style(color=theme_mod.semantic_color(name)) for name in ("dim", "muted", "danger")
+    }
+    dropped: set[str] = set()
+    # The widest frame is the reference so the choice is stable across frames.
+    widest = max(SPINNER_FRAMES, key=cell_len)
+    for _ in range(len(_SUMMARY_SHED_ORDER) + 1):
+        segments = _summary_segments(counts, widest, dropped=frozenset(dropped))
+        needed = sum(cell_len(text) for _name, text, _ink in segments)
+        needed += cell_len(STATS_SEAM) * (len(segments) - 1)
+        if needed <= width:
+            break
+        remaining = [name for name in _SUMMARY_SHED_ORDER if name not in dropped]
+        if not remaining:
+            break
+        dropped.add(remaining[0])
+    segments = _summary_segments(counts, spinner_glyph, dropped=frozenset(dropped))
+    row = Text(no_wrap=True, overflow="ellipsis")
+    for index, (_name, text, ink) in enumerate(segments):
+        if index:
+            row.append(STATS_SEAM, style=inks["dim"])
+        row.append(text, style=inks[ink])
+    return row
+
+
 class SubagentRow(Static):
     """One task job: bullet, label, state glyph, elapsed, numbers, activity.
 
@@ -1186,6 +1394,28 @@ class SubagentAffordance(Static):
             panel.request_toggle()
 
 
+class SubagentHeader(Static):
+    """The caption, clickable in every density (#525 design §3).
+
+    The affordance row only exists with overflow, so before this a pointer
+    user had no target at all in the common ≤ 6-child case — the same gap
+    the key had. The caption is the one widget painted in every non-hidden
+    density (it IS the summary row), so it is the one that can carry the
+    click. Same contract as the affordance: stop the event so the transcript
+    behind the dock does not also scroll, and cycle through the pointer path
+    so the composer keeps focus.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="subagent-header", classes="band-body")
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        event.stop()
+        panel = self.parent
+        if isinstance(panel, SubagentPanel):
+            panel.request_toggle()
+
+
 class SubagentPanel(Container):
     """The task-job list in the dock band.
 
@@ -1233,7 +1463,7 @@ class SubagentPanel(Container):
     def __init__(self, on_open: Callable[[str], None]) -> None:
         super().__init__(id="subagent-panel", classes="band-slot")
         self._on_open = on_open
-        self._header = Static(id="subagent-header", classes="band-body")
+        self._header = SubagentHeader()
         # `.band-body`, the same class the header carries and the todo panel's
         # single body carries: the panel's ROWS are the panel, so they take the
         # dock's fill and the dock's one-cell inset rather than sitting on bare
@@ -1248,6 +1478,35 @@ class SubagentPanel(Container):
         self._affordance = SubagentAffordance()
         self._rows: dict[str, SubagentRow] = {}
         self._expanded = False
+        #: How much of the dock the panel takes (#525). VIEW state, like
+        #: `_expanded`: `ctrl+g` and the header click cycle it, the setting
+        #: only seeds it, and nothing writes it back to disk — a hard override
+        #: would make the key a no-op again, the exact defect being fixed.
+        self._density: Density = DEFAULT_DOCK_DENSITY
+        #: Whether the user chose the current density THIS session (plandex's
+        #: `userToggledBuild`). An explicit choice holds against a live edit of
+        #: `display.dock` and against new children starting; only a child
+        #: FAILING breaks through, and that clears it so the next press reads
+        #: naturally (summary → hidden re-hides what the failure surfaced).
+        self._user_density: bool = False
+        #: Whether the seed from `display.dock` has been read. Deferred to the
+        #: first non-empty `sync` rather than `__init__` because the panel is
+        #: built at compose time, before the config watcher the reader prefers
+        #: exists, and a session swap (`/new`, `/resume`) re-seeds through
+        #: `reset_density` anyway.
+        self._density_seeded: bool = False
+        #: What the summary caption last painted, for its paint-once guard
+        #: (counts + spinner frame). None until the summary has painted once.
+        self._summary_key: tuple[SummaryCounts, str] | None = None
+        #: Memo for `_summary_counts_cached`: the ledger identity the counts
+        #: were derived from, and the counts themselves. Keyed rather than
+        #: invalidated because the caption is reached from every tick, and
+        #: re-deriving every job's facts there is the cheap state costing more
+        #: than the expensive one (round 1, F3). One entry per job of
+        #: ``(identity, status, queued)`` — see the method for why the flag is
+        #: a term and not redundant with the status (round 2, Q2/F7).
+        self._summary_counts_key: tuple[tuple[int, str, bool], ...] | None = None
+        self._summary_counts_value: SummaryCounts = SummaryCounts()
         # Logical focus within the full roster. The expanded DOM displays only
         # one screenful around it; every job remains keyboard-reachable without
         # making Textual reflow 100 hidden/off-screen widgets per arrow press.
@@ -1272,6 +1531,10 @@ class SubagentPanel(Container):
         #: paint-once guard can still repaint when the state flips (a resize
         #: across the threshold), without repainting on every unrelated tick.
         self._header_compact: bool = False
+        #: Whether the full-density caption is carrying the `ctrl+g` hint (no
+        #: overflow, so no affordance row to say it). Same guard purpose as
+        #: `_header_compact`: repaint when the hint moves, not per tick.
+        self._header_hint: bool = False
         #: The ledger moved since the last paint. Set by `sync`, cleared by
         #: the tick that acts on it — the coalescing buffer, one bit wide,
         #: because "something changed" is all a full repaint needs to know.
@@ -1305,22 +1568,64 @@ class SubagentPanel(Container):
         yield self._list
         yield self._affordance
 
+    @property
+    def density(self) -> Density:
+        """The panel's current :class:`Density` (view state; see `_density`)."""
+        return self._density
+
+    @property
+    def has_children(self) -> bool:
+        """Whether the panel holds any child rows, PAINTED OR NOT.
+
+        Deliberately independent of ``display``: in `Density.HIDDEN` the panel
+        is out of the layout but the roster is still docked and still owns its
+        share of the band. The todo panel's shared transcript floor and the
+        app's re-emergence check both need "is a roster present", which is not
+        the same question as "is a roster on screen" — keying either on
+        ``display`` is how hiding the panel came to hand its rows to the todo
+        panel instead of the conversation (review round 1, F1/D1/Q1).
+        """
+        return bool(self._rows)
+
+    @property
+    def has_overflow(self) -> bool:
+        """Whether the collapsed preview hides rows, i.e. expanding is a step.
+
+        Gated on the BUDGET, not the flat ceiling: on a short terminal the
+        preview shows fewer rows than `_PREVIEW_JOB_ROWS`, so a roster of
+        four children can already have rows hidden. Keying the refusal on the
+        constant would make `ctrl+g` a silent no-op on exactly the screens
+        where it is the only way to reach them (UX round 2, U7).
+        """
+        return len(self._rows) > self._preview_job_rows()
+
     def toggle_expanded(self, *, enter_navigation: bool = False) -> None:
-        """Flip the roster, optionally entering its explicit keyboard mode."""
-        # Gated on the BUDGET, not the flat ceiling: on a short terminal the
-        # preview shows fewer rows than `_PREVIEW_JOB_ROWS`, so a roster of
-        # four children can already have rows hidden. Keying the refusal on the
-        # constant would make `ctrl+g` a silent no-op on exactly the screens
-        # where it is the only way to reach them (UX round 2, U7).
-        if len(self._rows) <= self._preview_job_rows():
-            return
-        self._expanded = not self._expanded
-        self._apply_visibility()
-        # Existing row content remains valid across disclosure/navigation. A
-        # full 100-row repaint here delayed the key's visible focus feedback;
-        # the ordinary spinner tick may refresh changing facts afterwards.
-        if enter_navigation:
-            if self._expanded:
+        """Advance the density cycle one step, optionally entering navigation.
+
+        The name predates the cycle and is kept because both callers (the
+        ``ctrl+g`` action and the header/affordance click) already go through
+        it; what it does is now the ``ctrl+g`` table from the #525 design:
+
+        * full, no overflow → summary (was a silent no-op: the bug)
+        * full, overflow, collapsed → expanded roster, as before
+        * full, overflow, expanded → collapse AND shrink to summary in one
+          press — the roster's own collapse is folded into the forward cycle
+          rather than being a fourth stop the user has to press through
+        * summary → hidden
+        * hidden → full, collapsed
+
+        Any press is the USER's choice, so it pins `_user_density` (decision
+        2): from here a live `display.dock` edit and new children starting
+        leave the density alone; only a failure moves it, and that unpins.
+        """
+        self._user_density = True
+        if self._density is Density.FULL and self.has_overflow and not self._expanded:
+            self._expanded = True
+            self._apply_visibility()
+            # Existing row content remains valid across disclosure/navigation.
+            # A full 100-row repaint here delayed the key's visible focus
+            # feedback; the ordinary spinner tick refreshes facts afterwards.
+            if enter_navigation:
                 # ``ctrl+g`` is the explicit keyboard-navigation gesture: start
                 # at the oldest row so arrows can traverse every retained child.
                 # Pointer disclosure only changes visibility and must leave the
@@ -1328,8 +1633,119 @@ class SubagentPanel(Container):
                 self._navigation_index = 0
                 self._apply_visibility()
                 self.call_after_refresh(self._focus_navigation_row)
-            else:
-                self.exit_navigation()
+            return
+        if self._density is Density.FULL:
+            next_density = Density.SUMMARY
+        elif self._density is Density.SUMMARY:
+            next_density = Density.HIDDEN
+        else:
+            next_density = Density.FULL
+        # Leaving the expanded roster from the keyboard hands focus back to
+        # the composer exactly as the old collapse did; the pointer path never
+        # took it. Unconditional on `_expanded` because navigation may have
+        # been entered by the key and the collapse by the click.
+        if self._expanded and enter_navigation:
+            self.exit_navigation()
+        self._set_density(next_density)
+
+    def _set_density(self, density: Density) -> None:
+        """Apply ``density`` and settle the panel's own geometry for it.
+
+        Every density change funnels through here so the three things that
+        must move together always do: the expanded flag (only meaningful in
+        `full`, and a hidden roster that came back expanded would re-take the
+        screen), the row visibility and the caption. The band inset and the
+        todo budget are the app's to settle — callers go through
+        `request_toggle`/`action_toggle_subagents`, which `_refresh_band` in
+        the same frame (design §8, dock height jumps).
+        """
+        if density is not Density.FULL:
+            self._expanded = False
+        changed = density is not self._density
+        self._density = density
+        # `display` is settled HERE and re-asserted by `sync`, not only there:
+        # the key press must change the frame it lands on, and `sync` only
+        # runs on the following band refresh.
+        if self._rows:
+            self.display = density is not Density.HIDDEN
+        self._apply_visibility()
+        if changed:
+            # A caption keyed on the old density would stand for a repaint.
+            self._header_shown = False
+            self._summary_key = None
+            self._paint_header()
+            self._sync_spinner_for_density()
+
+    def _sync_spinner_for_density(self) -> None:
+        """Stop the spinner while hidden; let `sync_animation_rate` restart it.
+
+        A hidden panel has nothing to animate, and without this it would keep
+        ticking at 12.5 fps for the rest of the session (design §8). The
+        restart is not done here: `_tick`'s own start/stop already answers to
+        whether any row is running, and it is called from the sync that paints
+        the re-emerged panel.
+        """
+        if self._density is Density.HIDDEN:
+            self._stop_spinner()
+        elif self._ledger_has_running():
+            # Same stale-flag trap as `_tick`'s: coming back from `summary`
+            # the rows have not painted since the density changed, so their
+            # own flags would start a timer for a roster with nothing left
+            # running (round 1, F2).
+            self._start_spinner()
+
+    def seed_density(self, density: Density, *, force: bool = False) -> None:
+        """Take the configured initial density without claiming it as a choice.
+
+        The setting's job (decision 5): it is where a session STARTS, so a
+        `ctrl+g` afterwards still cycles from it and never writes it back. The
+        live-apply path uses the same entry with the same rule — a file edit
+        applies only while the user has not chosen a density this session
+        (`force` is for the session swap, where the previous choice belonged to
+        a conversation that is gone).
+        """
+        if force:
+            self._user_density = False
+        if self._user_density:
+            return
+        self._set_density(density)
+
+    def reset_density(self) -> None:
+        """Session swap: forget the user's choice and re-read `display.dock`."""
+        self._density_seeded = False
+        self._user_density = False
+
+    def note_child_failed(self) -> None:
+        """A child failed: a hidden panel re-emerges as ONE row, never more.
+
+        The clig.dev rule the issue quotes ("if there is an error, print the
+        logs") scaled to a row: a failure should not re-take 2-8 rows of the
+        user's screen, it should make one row appear that says ``1 failed``.
+        Regardless of `_user_density` — a failure outranks the preference —
+        and it CLEARS the pin so the user's next press re-hides it rather than
+        stepping to `full` (decision 2). Cancelled and interrupted children
+        are not failures and do not come through here; neither do restored
+        rows, which never end in this process.
+        """
+        if self._density is not Density.HIDDEN:
+            return
+        self._user_density = False
+        self._set_density(Density.SUMMARY)
+
+    def _configured_density(self) -> Density:
+        """The `display.dock` value, mapped to the enum; unknown strings are full.
+
+        Function-local import for the reason `tui/settings.py` gives: this
+        module is on the band paint path and the reader is cheap, but the
+        registry it consults on first read is not, so it is not paid at import.
+        """
+        try:
+            from local_operator.tui.settings import settings_get
+
+            raw = settings_get("display.dock", DEFAULT_DOCK_DENSITY.value)
+            return Density(str(raw).strip().lower())
+        except Exception:
+            return DEFAULT_DOCK_DENSITY
 
     def _focus_navigation_row(self) -> None:
         rows = list(self._rows.values())
@@ -1352,7 +1768,11 @@ class SubagentPanel(Container):
         self._focus_navigation_row()
 
     def collapse_for_child_view(self) -> None:
-        """Give the child page the rows the expanded roster was temporarily using."""
+        """Give the child page the rows the expanded roster was temporarily using.
+
+        Touches `_expanded` only: the density is the user's and survives opening
+        a child page and coming back (design §8).
+        """
         if not self._expanded:
             return
         self._expanded = False
@@ -1367,7 +1787,12 @@ class SubagentPanel(Container):
             pass
 
     def request_toggle(self) -> None:
-        """Toggle from the pointer path and settle the dock in the same frame."""
+        """Cycle from the pointer path and settle the dock in the same frame.
+
+        The SAME cycle as ``ctrl+g`` (the header and the affordance both land
+        here) but with ``enter_navigation=False``: a click is a visibility
+        gesture and must never take focus from a draft-bearing composer.
+        """
         self.toggle_expanded()
         app = getattr(self, "app", None)
         refresh = getattr(app, "_refresh_band", None)
@@ -1375,8 +1800,23 @@ class SubagentPanel(Container):
             refresh()
 
     def _apply_visibility(self) -> None:
-        """Show the newest preview slice, or make every start-ordered row reachable."""
+        """Show the preview slice, or make every start-ordered row reachable.
+
+        In `summary` and `hidden` the list and the affordance are switched off
+        and the panel is header-only (one row, or nothing); the row budget
+        arithmetic already counts the caption, so `_painted_rows` is
+        ``_HEADER_ROWS`` and the app's inset and todo budget follow from it.
+        """
         job_ids = list(self._rows)
+        if self._density is not Density.FULL:
+            for row in self._rows.values():
+                row.display = False
+            self._list.display = False
+            self._affordance.display = False
+            self._painted_rows = _HEADER_ROWS if self._density is Density.SUMMARY else 0
+            self._paint_header()
+            return
+        self._list.display = True
         # The COLLAPSED budget is computed in both states: the expanded branch
         # sizes its own viewport, but the affordance below is keyed on this one
         # so the way back stays on screen (see `has_overflow`).
@@ -1398,13 +1838,13 @@ class SubagentPanel(Container):
             # A zero budget is the COMPACT state, and the slice has to be
             # written as a guard rather than `job_ids[-0:]` — which is the whole
             # list, the exact inversion of what a zero budget asks for.
-            visible_ids = set(job_ids[-budget:]) if budget > 0 else set()
+            visible_ids = self._priority_slice(job_ids, budget) if budget > 0 else set()
         for job_id, row in self._rows.items():
             row.display = job_id in visible_ids
         visible_count = len(visible_ids)
         # Overflow is measured against the COLLAPSED budget in both states, so
         # an expanded roster showing every child still carries the row that says
-        # `ctrl+g to collapse`. Keying it on what is hidden RIGHT NOW would hide
+        # `ctrl+g to shrink`. Keying it on what is hidden RIGHT NOW would hide
         # the affordance exactly when the user needs it to get back.
         has_overflow = len(job_ids) > preview_budget
         self._affordance.display = has_overflow
@@ -1412,7 +1852,15 @@ class SubagentPanel(Container):
         self._list.styles.max_height = budget
         self._painted_rows = _HEADER_ROWS + list_rows + int(has_overflow)
         if has_overflow:
-            self._paint_affordance(len(job_ids) - visible_count)
+            # `+N earlier` is only TRUE when the hidden set is the roster's
+            # prefix, which the collapsed priority pick no longer guarantees:
+            # a failed child from the first batch can outrank a completed one
+            # from the last. `+N more` when the hidden rows are mixed in. The
+            # expanded roster keeps the wording it had: its window scrolls and
+            # the count there is "not in view", the same as before.
+            hidden_ids = [job_id for job_id in job_ids if job_id not in visible_ids]
+            prefix = job_ids[: len(hidden_ids)]
+            self._paint_affordance(len(hidden_ids), earlier=self._expanded or hidden_ids == prefix)
         # The caption changes shape with the compact state, and that flips on a
         # RESIZE — which moves no row content, so `_paint_all` does not run.
         # Repainting here keeps the count truthful across a resize; the guard
@@ -1481,13 +1929,57 @@ class SubagentPanel(Container):
         except Exception:
             return 0
 
-    def _paint_affordance(self, hidden: int) -> None:
+    def _priority_slice(self, job_ids: list[str], budget: int) -> set[str]:
+        """The ``budget`` rows the collapsed preview shows, by what needs attention.
+
+        Was ``job_ids[-budget:]`` — newest by start order — which evicted a
+        failed child the moment enough later ones completed, so the one row
+        that asked for action was the one the preview dropped (#525 design
+        §4). Rank by :data:`_EVICTION_RANK` (running/queued, then failed, then
+        interrupted, then everything settled quietly), ties to the newest, and
+        the picked set keeps its start order because `_sync_rows` owns the DOM
+        order and this only decides which rows are displayed.
+
+        Only the collapsed preview: the expanded roster shows every row, so
+        there is nothing to pick.
+        """
+        if len(job_ids) <= budget:
+            return set(job_ids)
+
+        def rank(item: tuple[int, str]) -> tuple[int, int]:
+            index, job_id = item
+            # Always the LEDGER, never `row.running`. That flag is written
+            # only in `SubagentRow.paint`, so it reports the last frame the
+            # row was painted in, not the job's state now: a child that
+            # painted while running and has since failed still reads
+            # "running" and outranks the failures this slice exists to keep —
+            # non-deterministically, since whether the row got a paint before
+            # this sync depends on tick timing (it failed ~50% of runs in
+            # isolation). It is the same staleness as F2, one function over.
+            facts = row_facts(self._jobs_by_id.get(job_id), fallback_id=job_id, current=False)
+            # `queued` by its own name: the table ranks it explicitly, so
+            # there is no longer a substitution here to keep in step.
+            status = "queued" if facts.queued else facts.status
+            # Newest first within a rank: a negative index sorts later starts
+            # ahead, which is the `[-budget:]` rule the slice had before.
+            return (_EVICTION_RANK.get(status, 3), -index)
+
+        picked = sorted(enumerate(job_ids), key=rank)[:budget]
+        return {job_id for _index, job_id in picked}
+
+    def _paint_affordance(self, hidden: int, *, earlier: bool = True) -> None:
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         row = Text(no_wrap=True, overflow="ellipsis")
         if hidden:
-            row.append(f"+{hidden} earlier · ", style=dim)
-        row.append("ctrl+g to collapse" if self._expanded else "ctrl+g to expand", style=muted)
+            row.append(f"+{hidden} {'earlier' if earlier else 'more'} · ", style=dim)
+        # "shrink", not "collapse": from the expanded roster the key goes to
+        # the one-row SUMMARY, skipping the collapsed preview entirely, so
+        # "collapse" promised a state the press does not reach — on the very
+        # frame where the panel is largest and the user is most deliberately
+        # trying to get back to a known shape (round 1, U1/D2). "Shrink" is
+        # true of every forward step and names no destination.
+        row.append("ctrl+g to shrink" if self._expanded else "ctrl+g to expand", style=muted)
         self._affordance.update(row)
 
     def predicted_rows(self) -> int:
@@ -1502,7 +1994,8 @@ class SubagentPanel(Container):
 
         Never raises and never returns less than one: a displayed panel is at
         least a row, and under-counting hands the transcript a row the dock is
-        about to take.
+        about to take. In `summary` that row IS the panel; a hidden panel is
+        not displayed, so the app never asks.
         """
         return max(1, self._painted_rows)
 
@@ -1547,12 +2040,26 @@ class SubagentPanel(Container):
             self._dirty = False
             self._stop_spinner()
             return
-        self.display = True
+        if not self._density_seeded:
+            # First non-empty sync of this session: the setting is the INITIAL
+            # density (decision 5). Read here rather than at construction so
+            # the config watcher's snapshot, which the reader prefers, exists.
+            self._density_seeded = True
+            self.seed_density(self._configured_density())
+        # NOT an unconditional `True`: the 1 Hz poll lands here every second,
+        # and un-hiding on each tick would make `hidden` last one second.
+        self.display = self._density is not Density.HIDDEN
         self._jobs_by_id = {str(getattr(job, "id", "") or ""): job for job in task_jobs}
         changed = self._sync_rows(task_jobs)
         self._apply_visibility()
         if changed:
             self._paint_all()
+        if self._density is Density.HIDDEN:
+            # Nothing is painted, so nothing should animate; the rows keep
+            # their facts through `_sync_rows` for the frame the panel returns.
+            self._dirty = False
+            self._stop_spinner()
+            return
         # Dirty AFTER the arrival paint, not before it. That paint happens the
         # instant a row is mounted, which is before the layout has measured
         # anything, so it necessarily lays out against the guessed width — it
@@ -1812,19 +2319,117 @@ class SubagentPanel(Container):
         # not a second copy of the band's RUNNING tally (the D-04 objection):
         # this counts every child the session HAS, which on a resumed session
         # with nothing running is precisely the number the band cannot show.
+        #
+        # The SUMMARY density is the same zero-row shape asked for by the user
+        # rather than forced by the height, so it paints the same row (design
+        # §8: one vocabulary, not two) — the counts caption replaced the bare
+        # `Subagents · 19` when the summary row arrived (#525).
         compact = self._painted_rows > 0 and not self._list_shows_any_row()
-        if self._header_shown and compact == self._header_compact:
+        if compact:
+            self._paint_summary()
+            return
+        # In full with no overflow the affordance row is not painted, so the
+        # hint moves into the caption: a `ctrl+g` the user only ever saw with
+        # seven or more children was the discoverability half of #525, and
+        # the caption already has the row. With overflow the affordance says
+        # it and the caption does not repeat it.
+        hint = not self._affordance.display
+        if self._header_shown and not self._header_compact and hint == self._header_hint:
             return
         self._header_shown = True
-        self._header_compact = compact
+        self._header_compact = False
+        self._header_hint = hint
+        self._summary_key = None
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Subagents", style=muted)
-        if compact:
-            header.append(" · ", style=dim)
-            header.append(str(len(self._rows)), style=muted)
+        if hint:
+            # A GAP, not `STATS_SEAM`. That ` · ` is the separator between
+            # counts, so in the summary row the hotkey genuinely is the last
+            # item of a list and the seam is right. The FULL header has no
+            # list, and borrowing the seam put `ctrl+g` in the slot the eye
+            # has learned holds a statistic — it read as "Subagents, and also
+            # ctrl+g" rather than "Subagents (press ctrl+g)" (round 1, D3).
+            header.append(HINT_GAP, style=dim)
+            header.append("ctrl+g", style=muted)
         self._header.update(header)
+
+    def _summary_counts_cached(self) -> SummaryCounts:
+        """This frame's counts, re-derived only when the ledger has moved.
+
+        ``summary_counts`` calls :func:`row_facts` once per job and is reached
+        from every ``sync`` AND every tick — 956 µs/call at 60 children, on
+        the state that is supposed to be the CHEAP one (round 1, F3).
+
+        THE KEY MUST NAME EVERY FIELD THE COUNTS ARE DERIVED FROM. ``id(job)``
+        catches the roster changing shape, but it is stable ACROSS a mutation
+        of the job it identifies, so it detects nothing about a job that is
+        edited in place — only the fields spelled out beside it do. This
+        docstring previously claimed the opposite ("a job object mutating in
+        place is picked up because the key carries each job's identity"),
+        which was wrong in exactly one reachable way and shipped a caption
+        that lied (round 2, Q2/F7).
+
+        ``queued`` is that second field, and it is not a redundant one:
+        :func:`summary_counts` buckets on ``facts.queued`` BEFORE it looks at
+        the status, and a queued child already carries
+        ``status == "running"``. So when the capacity gate admits it,
+        ``AsyncJobManager.start_queued`` clears ``job.queued`` in place and
+        leaves ``status`` untouched — the one ledger move that changes
+        neither the identity nor the status while changing the counts. With
+        ``status`` alone the memo returned the pre-admission numbers
+        indefinitely, until an unrelated job happened to settle and move the
+        key. In `summary` the caption is the panel's ONLY representation, so
+        that stale tuple was the whole surface.
+
+        Anything added to :func:`summary_counts`' bucketing belongs here too.
+        """
+        jobs = list(self._jobs_by_id.values())
+        key = tuple(
+            (id(job), getattr(job, "status", ""), bool(getattr(job, "queued", False)))
+            for job in jobs
+        )
+        if self._summary_counts_key != key:
+            self._summary_counts_key = key
+            self._summary_counts_value = summary_counts(jobs)
+        return self._summary_counts_value
+
+    def _ledger_has_running(self) -> bool:
+        """Whether any child is live, read from the LEDGER not the rows.
+
+        ``row.running`` is written only in ``SubagentRow.paint``, which never
+        runs in `summary` (no row is displayed) — so both the tick's stop
+        condition and the spinner's restart were reading a flag frozen at the
+        last `full` frame. A user who summarised a running fan-out and walked
+        away kept a 12.5 fps timer on the keyboard thread for the rest of the
+        session, on a dock where every child had finished (round 1, F2;
+        measured 12.7 ticks/sec settled, against 1.0/sec in `full`). The
+        counts are already computed for the caption, so this is free.
+        """
+        counts = self._summary_counts_cached()
+        return bool(counts.running or counts.queued)
+
+    def _paint_summary(self) -> None:
+        """Paint the one-row summary, once per (counts, spinner frame).
+
+        The guard is keyed on the counts tuple and the glyph, not on the
+        density flag the old caption keyed on: a summary keyed on the flag
+        alone painted once and then froze while children settled (design §8).
+        """
+        counts = self._summary_counts_cached()
+        glyph = SPINNER_FRAMES[self._spinner_index] if counts.running else ""
+        key = (counts, glyph)
+        if self._header_shown and self._header_compact and self._summary_key == key:
+            return
+        self._header_shown = True
+        self._header_compact = True
+        self._summary_key = key
+        self._header.update(compose_summary(counts, spinner_glyph=glyph, width=self._row_width()))
+
+    def summary_text(self) -> str:
+        """The plain string the caption reads right now, for a test to assert."""
+        return str(self._header.content)
 
     def _list_shows_any_row(self) -> bool:
         """Whether the roster is painting a job row right now."""
@@ -1898,6 +2503,21 @@ class SubagentPanel(Container):
         self._tick_count += 1
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
         due = self._tick_count % self.STATS_EVERY_TICKS == 0
+        if self._density is not Density.FULL:
+            # Header-only: the rows are not displayed, so the cheap path is the
+            # caption — its own guard keeps a settled roster from repainting.
+            # `_dirty` is consumed here too, or the first tick after the panel
+            # returns to `full` would still owe a full paint (which it does,
+            # from the sync that un-hid it).
+            self._paint_header()
+            self._dirty = False
+            # Liveness from the LEDGER, not from `row.running`: no row is
+            # displayed here, so nothing repaints them and their flags stay
+            # frozen at the last `full` frame — which kept this timer alive at
+            # 12.5 fps on a fully settled dock (round 1, F2).
+            if not self._ledger_has_running():
+                self._stop_spinner()
+            return
         if self._dirty or due:
             self._paint_all(reread_stats=self._dirty or due)
         elif any(row.running for row in self._rows.values()):

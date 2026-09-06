@@ -70,7 +70,11 @@ from local_operator.harness.jobs import (
     AsyncJobManager,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
-from local_operator.harness.subagent import SubagentModelUnavailable, run_subagent
+from local_operator.harness.subagent import (
+    SubagentModelUnavailable,
+    read_effort_tier_selectors,
+    run_subagent,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -6099,18 +6103,41 @@ class Session:
             return None
 
         try:
-            from local_operator.config import ConfigManager
-            from local_operator.paths import config_dir
-
-            raw = ConfigManager(config_dir()).get_config_value("subagents", None)
-            models = raw.get("models", {}) if isinstance(raw, dict) else {}
-            selector = models.get(wanted)
+            # The same read the tool schemas use (``configured_effort_tiers``),
+            # so a tier the schema advertises is one this path resolves and
+            # vice versa. Unstripped-but-not on purpose: the shared reader
+            # strips selectors once, so the tier it advertises cannot pass
+            # this check and then die on a whitespace-padded provider name at
+            # the first provider call. Malformed selectors are still kept by
+            # the read: they must reach the named refusal below, not vanish
+            # into "not configured".
+            selector = read_effort_tier_selectors().get(wanted)
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
             return _unavailable(f"config could not be read ({exc})")
+        # Type before falsiness, and the ``is not None`` is what makes the two
+        # surfaces agree (review R2-F7). A FALSY non-string (``lo: 0``,
+        # ``lo: []``) is a key the operator DID write, so it must draw the same
+        # "lacks provider/model" refusal that ``effort_tier_rejection`` gives
+        # it — under the old order it fell into the quiet "not configured"
+        # branch and the tool-argument path called the same key malformed,
+        # which is the schema-vs-launch drift this change exists to close,
+        # merely moved into the message text. Only a genuinely absent key
+        # (``None``) or an empty/whitespace-only string (the shared reader
+        # strips) stays quiet: a session with no ``subagents.models`` at all
+        # names itself on the parent model by design and must not warn.
+        if selector is not None and not isinstance(selector, str):
+            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
-        provider, _, model_id = str(selector).partition("/")
-        if not model_id:
+        provider, _, model_id = selector.partition("/")
+        # BOTH halves, to the same standard ``configured_effort_tiers`` applies
+        # (review R3-F11). Checking only the model let a leading-slash selector
+        # (``hi: "/kimi"``) through here while the schema surface refused it —
+        # the same schema-vs-launch drift this change exists to close, and the
+        # worse direction of it: the launch built ``ModelSpec(provider='',
+        # model_id='kimi')`` and the child died at its first provider call
+        # instead of at launch, where the tier is still named.
+        if not provider or not model_id:
             return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
         try:
             from local_operator.model.configure import build_model_spec
@@ -10068,9 +10095,16 @@ class Session:
           value restores the manager's built-in default rather than freezing
           the last explicit one, so "reset to default" on the page means it.
 
+        * ``subagents.models.*`` — the launch path reads these per spawn, but
+          the ``task``/``agent`` tool SCHEMAS bake the configured tiers in at
+          build time (the enum the model picks from, and the description
+          naming what each tier resolves to). Rebuilt here so an operator who
+          configures a tier mid-session gets a tool that offers it, and one
+          who removes a tier gets a tool that stops offering it.
+
         Everything else the registry calls LIVE is already read per use
-        (``fork.*``, ``web_*`` knobs, ``subagents.models.*``) and needs no
-        apply here. Everything it calls NEW_SESSIONS is deliberately ignored.
+        (``fork.*``, ``web_*`` knobs) and needs no apply here. Everything it
+        calls NEW_SESSIONS is deliberately ignored.
 
         Guards on ``_disposed`` because the unsubscribe runs as a dispose
         HOOK, after the session's own teardown, and a tick can land between.
@@ -10136,6 +10170,38 @@ class Session:
                 self.jobs.set_max_running(cap)
             except ValueError:
                 logger.warning("subagents.max_running=%r rejected by the job manager", cap)
+        if any(key.startswith("subagents.models.") for key in changed):
+            self._rebuild_effort_tier_tools()
+
+    def _rebuild_effort_tier_tools(self) -> None:
+        """Re-render the tools whose schema advertises the configured effort tiers.
+
+        Only ``task`` and ``agent`` carry the field, and only tools ALREADY in
+        the inventory are replaced: a child whose ``task`` was pruned because
+        its role may not delegate must not get it back because the operator
+        edited a model tier, which is why this does not go through
+        :meth:`_merge_capability_tools` (that one appends). Replacement is
+        in place so the provider-visible tool order — part of the prompt-cache
+        prefix — is unchanged; the schema text itself changing is the point.
+        Never raises: a tool rebuild failing must not take the config watcher
+        or the turn with it.
+        """
+        present = {tool.name for tool in self._tools} & {"task", "agent"}
+        if not present:
+            return
+        try:
+            from local_operator.tools.registry import create_tools
+
+            rebuilt = {
+                tool.name: tool
+                for tool in create_tools(self._build_tool_context(), enabled=sorted(present))
+            }
+        except Exception:  # noqa: BLE001 — a schema refresh must never break a live session
+            logger.warning("could not rebuild effort-tier tool schemas", exc_info=True)
+            return
+        if not rebuilt:
+            return
+        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
     def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
         """Register teardown that runs after the session's own dispose.

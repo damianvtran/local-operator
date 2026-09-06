@@ -3,7 +3,7 @@
 Run this against the final release candidate. Do not submit from a development
 build or from copy that no longer matches the manifest.
 
-## Live session status (2026-09-02) — where we actually are
+## Live session status (2026-09-06) — where we actually are
 
 The extension is **published**. The first-publication gates described in the
 previous revision of this section (Radient, Inc. business verification and the
@@ -12,38 +12,38 @@ re-checks — but they can reopen if the account owner, legal entity, or
 declaration details change, so re-verify on any such change rather than assuming
 them settled forever.
 
-- **v0.1.0 is live** on the Chrome Web Store at 100% deployment, item
-  `omibaecbjdhgbbcedbnnnmjpmopfheof`.
-- **v0.1.5 is submitted and `PENDING_REVIEW`** at 100% deployment, uploaded
-  manually because it adds the `tabGroups` permission, whose justification can
-  only be entered in the dashboard. See the release record in
+- **v0.1.7 is live** on the Chrome Web Store at 100% deployment, item
+  `omibaecbjdhgbbcedbnnnmjpmopfheof`, promoted 2026-09-04 (run 33926643637). It
+  supersedes v0.1.0, and also v0.1.5, which was the pending submission when this
+  section was last written.
+- **v0.1.8 is submitted and `PENDING_REVIEW`** at 100% deployment, from source
+  commit `ff9b16b5` (PR #672). See the release record in
   `docs/store/release-record.md`.
-- **Automated publishing is verified end to end** and is the intended path for
-  every subsequent release — see "Automated updates after the first public
-  release" below. Both protected environments, the WIF provider, and the
-  Chrome Web Store API authorization were confirmed working on 2026-09-02.
+- **Automated publishing has now carried two real releases.** v0.1.7 was the
+  first, submitted and published end to end through the workflows (runs
+  33815585846 and 33926643637); v0.1.8 followed through `chrome-web-store.yml`
+  (run 34000911184). It is the intended path for every subsequent release. See
+  "Automated updates after the first public release" below.
 - **Known platform limit, still true:** Chrome forbids the debugger API on the
   Web Store domains ("The extensions gallery cannot be scripted"), so the
   extension cannot auto-fill the developer console — a human drives the console
   pages. Documented in `guide://browser`. This is why a release that introduces
   a new permission needs a human in the dashboard.
 
-- **`main` carries v0.1.6, unsubmitted.** The tab-group naming fix bumped
-  `manifest.json`/`package.json` past the version that is sitting in review, so
-  the tree no longer matches the pending submission. This is expected — the
-  manifest tracks the code, not the review queue — and nothing auto-fires,
-  because `chrome-web-store.yml` is `workflow_dispatch` with an explicit `ref`
-  and `version` behind a protected environment. It adds **no new permission**
-  over v0.1.5, so whenever it is submitted it takes the automated path rather
-  than the manual dashboard one. No release-record entry is owed until it
-  actually ships.
+- **`main` carries v0.1.8, which is the submitted version.** The tree and the
+  pending submission agree for now; the manifest tracks the code rather than the
+  review queue, so any further extension change on `main` moves past 0.1.8 again.
+  Nothing auto-fires when it does — `chrome-web-store.yml` is
+  `workflow_dispatch` with an explicit `ref` and `version` behind a protected
+  environment. A release-record entry is owed only when a version actually
+  ships.
 
-**Pick-up point:** watch for the v0.1.5 review decision, then run the
-post-approval steps in section 11 — noting that `main` has since moved to
-v0.1.6, so a submission after that decision ships 0.1.6, not the tree as it
-stood at 0.1.5. Sections 0–9 describe *first* publication and are retained as
-the reference for listing copy and asset requirements; re-walk them only when
-the listing, permissions, or privacy policy change.
+**Pick-up point:** watch for the v0.1.8 review decision, then run the
+post-approval steps in section 11 — including appending the approval timestamp
+to the v0.1.8 entry in `release-record.md`, and promoting the staged release.
+Sections 0–9 describe *first* publication and are retained as the reference for
+listing copy and asset requirements; re-walk them only when the listing,
+permissions, or privacy policy change.
 
 ## 0. Resolve the launch assumptions
 
@@ -123,6 +123,14 @@ permission list on every release to catch this; when they differ, upload by hand
 - [ ] Confirm the Python bridge and extension enforce the same protocol version.
 - [ ] Run extension gates: frozen pnpm install, TypeScript check, production
       build, generated-protocol check, and applicable tests.
+- [ ] Refresh the bundled Public Suffix List and confirm it is current:
+      `node scripts/gen-psl.mjs` then `node scripts/gen-psl.mjs --check`.
+      Its own step rather than a clause in the bullet above, because this is
+      the only place drift is actually gated: the CI step is advisory
+      (`continue-on-error`, since it fetches publicsuffix.org and an upstream
+      blip must not fail an unrelated PR). A suffix registered after
+      `PSL_GENERATED_AT` is treated as a registrable domain, so a stale list
+      lets one approval cover every name beneath it.
 - [ ] Load the exact unzipped artifact through `chrome://extensions` in a clean
       Chrome profile and complete the manual matrix from design §9.5: pairing,
       all eight actions, persistent login across app-session restart, site
@@ -289,13 +297,24 @@ and what control remains with the user.
 
 ### Automated updates after the first public release
 
-**Status (2026-09-02): configured and verified end to end.** Both protected
-environments, the workload identity provider, the service-account IAM binding,
-and the store's authorization of that service account were all confirmed
-working; the evidence is in `release-record.md`. The workflows have not yet run
-a real release — v0.1.5 went out by hand because it added a permission — so the
-first automated run will be the next version. It fails closed before uploading
-anything, so a surprise there is recoverable.
+**Status (2026-09-06): configured, verified end to end, and proven on two real
+releases.** Both protected environments, the workload identity provider, the
+service-account IAM binding, and the store's authorization of that service
+account were confirmed working on 2026-09-02; the evidence is in
+`release-record.md`. **v0.1.7 was the first version actually released through
+the workflows** — submitted 2026-09-03 (run 33815585846) and published
+2026-09-04 (run 33926643637), no dashboard step in either half. **v0.1.8**
+followed on 2026-09-06 (run 34000911184), validating and submitting with
+`STAGED_PUBLISH`. Every release before v0.1.7 went out by hand. The workflow
+fails closed before uploading anything, and the two earlier staged attempts both
+stopped well short of the store: run 33766746870 never started a single step,
+sitting 4h29m awaiting environment approval before its pending deployment failed
+(annotation: `The deployment was rejected or didn't satisfy other protection
+rules`) seconds after #585 removed the required-reviewer gate it was queued
+behind; run 33793517588 got as far as `Verify protected environment
+configuration` and exited 22 on a GitHub API 403, with the authenticate and
+upload steps skipped — the failure #589 then fixed. Neither reached the Chrome
+Web Store, so a surprise there is recoverable.
 
 The workflows use Chrome Web Store API v2 directly with `curl` and exchange a
 GitHub OIDC token for a short-lived service-account access token through

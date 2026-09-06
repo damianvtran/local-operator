@@ -1086,6 +1086,10 @@ async def test_a_follower_whose_owner_never_reports_still_retires_the_turn() -> 
         # turn stays open for the owner's end — the pre-existing contract.
         assert app._turn_open is True
         assert _working(app) is not None
+        # And the BAND holds with it (#642): the worker's own write applies the
+        # same predicate, so a live owner keeps the title on `working` rather
+        # than dropping it to `idle` for a turn this viewer was never told about.
+        assert app._status is not None and app._status._streaming is True
     assert notifier.kinds == [], "a mid-turn follower ACK was read as a finish"
 
 
@@ -1356,3 +1360,245 @@ async def test_the_toast_kind_and_the_title_agree_on_one_turn(
         [expected_kind],
         expected_title,
     ), f"the toast said {notifier.kinds} while the title said {title!r}"
+
+
+def _titles(writes: list[str]) -> list[str]:
+    """The rendered title strings, in write order, from a `TerminalTitle` spy."""
+    return [w.split("\x07")[0].split(";", 1)[1] for w in writes if "]0;" in w]
+
+
+async def _spy_title(pilot: Any, app: OperatorApp) -> list[str]:
+    """Attach a write-recording `TerminalTitle` and drop the attach-time idle write."""
+    from local_operator.tui.terminal_title import TerminalTitle
+
+    assert app._status is not None
+    writes: list[str] = []
+    title = TerminalTitle(writes.append, enabled=True)
+    title.start()
+    app._status.set_terminal_title(title)
+    await pilot.pause()
+    # The band writes an ordinary `lo ›` while wiring up, and that one is
+    # correct — there is no turn yet. The window under test is the TURN.
+    writes.clear()
+    return writes
+
+
+async def _hold(pilot: Any, seconds: float) -> None:
+    """Keep the pump running for ``seconds`` — the owner's relay latency."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        await pilot.pause()
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.parametrize("relay_delay", [0.05, 0.3])
+@pytest.mark.asyncio
+async def test_a_followers_failed_turn_holds_working_until_the_owner_reports(
+    relay_delay: float,
+) -> None:
+    """#642 (D-1 from #619). "Ignorant" must not render as "finished cleanly".
+
+    On a follower, `prompt()` returns on the owner's ACK — mid-turn — so the
+    worker's `finally` runs with the outcome genuinely unknown. It used to
+    write `streaming=False, failed=None` anyway, and with no failure mark set
+    the title resolved to `idle`: `lo ›` for exactly the owner's relay latency
+    (measured 501.7 ms at a 0.5 s relay, 2011 ms at 2 s), then `lo ✗`. A user
+    glancing at the tab strip in that window read success on a failed turn.
+
+    The band now HOLDS `working` while `is_streaming` is still True, and the
+    outcome lands through `_finalize_turn` when the relayed end arrives. The
+    delay is parametrized because the window WAS the relay: a fix that merely
+    shrank it would pass at one delay and fail at the other. Asserted on the
+    emitted bytes, as the sibling flash tests are, because that is where the
+    defect lived.
+    """
+    session = HangingFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        writes = await _spy_title(pilot, app)
+
+        app._start_turn("Run the audit")
+        await _hold(pilot, relay_delay)
+        assert app._status is not None
+        assert app._status._title_state() == "working", "the hold dropped while the owner was live"
+
+        # The owner's relayed end: the turn FAILED.
+        session.streaming = False
+        app.post_message(TurnEnded(aborted=False, error="MCP authorization failed"))
+        for _ in range(5):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+    titles = _titles(writes)
+    assert titles, "the turn wrote no title at all"
+    assert titles[-1].startswith("lo ✗"), titles
+    assert not any(
+        t.startswith("lo ›") for t in titles
+    ), f"flashed 'finished cleanly' on a failed follower turn: {titles}"
+
+
+@pytest.mark.asyncio
+async def test_a_followers_clean_turn_settles_idle_once_the_owner_reports() -> None:
+    """The other half of #642: the hold releases to `›` on a clean relay.
+
+    A hold that never let go would trade a false `idle` for a permanent
+    `working`. The clean relay lands `lo ›`, and the completion toast fires
+    exactly once — the hold changes WHEN the band settles, not whether the
+    owner's end is announced.
+    """
+    session = HangingFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+        writes = await _spy_title(pilot, app)
+
+        app._start_turn("Run the audit")
+        await _hold(pilot, 0.1)
+        assert app._status is not None
+        assert app._status._title_state() == "working"
+        assert not any(t.startswith("lo ›") for t in _titles(writes)), _titles(writes)
+
+        session.streaming = False
+        app.post_message(TurnEnded(aborted=False, error=None))
+        for _ in range(5):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert app._status._title_state() == "idle"
+        assert _working(app) is None
+    assert _titles(writes)[-1].startswith("lo ›"), _titles(writes)
+    assert notifier.kinds == ["complete"], "the held clean turn went unannounced or doubled"
+
+
+@pytest.mark.asyncio
+async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_band() -> None:
+    """The hold is scoped to a LIVE owner, not to every follower.
+
+    A follower's `prompt()` can refuse before any `agent_start` reaches the
+    owner (disposed session, queue full, owner reconnecting). `is_streaming`
+    is False, no `TurnStarted` ever arrives, and the worker's `finally` is the
+    only thing that clears the band `_start_turn` lit — exactly the "KEPT"
+    case the in-process refusal test pins. Gating the write on `is_remote`
+    alone would have left THIS band lit forever.
+    """
+
+    class RefusingFollowerSession(JobsSession):
+        is_remote = True
+
+        async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
+            raise RuntimeError("session owner is reconnecting")
+
+    app = OperatorApp(lambda: _factory(RefusingFollowerSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        app._start_turn("do the thing")
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert app._turn_open is False
+        assert app._status is not None and not app._status._streaming
+        assert _working(app) is None
+
+
+@pytest.mark.asyncio
+async def test_a_followers_held_turn_settles_when_the_owner_dies() -> None:
+    """Owner death releases the hold: `›`, an "interrupted" notice, no toast.
+
+    `RemoteSession._end_turn_locally` synthesises an aborted `AgentEndEvent`
+    on EOF, which reaches the app as `TurnEnded(aborted=True)`. The held band
+    must read that as the terminal state it is — not a failure (the owner did
+    not report one) and not a completion (nothing completed).
+    """
+    session = HangingFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    notifier = RecordingNotifier()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, notifier)
+        writes = await _spy_title(pilot, app)
+
+        app._start_turn("Run the audit")
+        await _hold(pilot, 0.1)
+        assert app._status is not None
+        assert app._status._title_state() == "working"
+
+        session.streaming = False
+        app.post_message(TurnEnded(aborted=True, error=None))
+        for _ in range(5):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        assert app._status._title_state() == "idle"
+        assert _working(app) is None
+        notices = [
+            b.text() for b in app.query_one(TranscriptView).blocks() if isinstance(b, NoticeBlock)
+        ]
+        assert "interrupted" in notices, notices
+    assert _titles(writes)[-1].startswith("lo ›"), _titles(writes)
+    assert notifier.kinds == [], "an owner-death abort is not announced"
+
+
+@pytest.mark.asyncio
+async def test_a_followers_loop_turn_holds_working_between_iterations() -> None:
+    """Review round 1, MAJOR-1/U1: the `/loop` surface takes the same gate.
+
+    The band gate first shipped inlined at the composer's worker only, on the
+    premise that `/loop` always routes to the owner. It does not on a COLD
+    viewer: `_synthesise_cold_state` advertises no `slash_capabilities`, so
+    `_run_slash_command`'s routing branch (which needs a matching capability)
+    is not taken, `/loop` is not in `_needs_runtime_first`, and the LOCAL loop
+    worker drives the `RemoteSession` — whose `prompt()` returns on the
+    owner's ACK, mid-turn. The loop workers' bare `update(streaming=False)`
+    then wrote `lo ›` between every iteration with the owner still live:
+    `⣾ → › → ⣾ → ›`, D-1 verbatim on the one surface the issue calls out as
+    unattended (`/loop 20` overnight).
+
+    Driven through the real slash dispatch rather than by calling the worker,
+    because the dispatch is half of what the finding is about.
+    """
+
+    class CapabilitylessFollowerSession(JobsSession):
+        """A follower whose owner advertised nothing — every cold viewer."""
+
+        is_remote = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.local_prompts: list[str] = []
+
+        async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
+            self.local_prompts.append(text)
+            self.streaming = True
+            return None
+
+    session = CapabilitylessFollowerSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _armed(pilot, app, RecordingNotifier())
+        writes = await _spy_title(pilot, app)
+
+        app._run_slash_command("/goal ship the audit")
+        await pilot.pause()
+        app._run_slash_command("/loop 2")
+        for _ in range(30):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+
+        # The premise of the finding: this really is the LOCAL worker driving a
+        # follower, not a routed command. Without this the test could pass by
+        # never running a loop at all.
+        assert session.local_prompts, "the local loop worker never drove the session"
+        assert session.is_streaming is True, "the owner is no longer live; nothing to hold"
+        assert app._status is not None and app._status._streaming is True
+
+    titles = _titles(writes)
+    assert not any(
+        t.startswith("lo ›") for t in titles
+    ), f"flashed 'finished cleanly' between loop iterations: {titles}"

@@ -38,6 +38,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Iterable,
     NamedTuple,
     Protocol,
     TypeGuard,
@@ -231,6 +232,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    Density,
     JobStats,
     SubagentPanel,
     SubagentRow,
@@ -273,39 +275,16 @@ from local_operator.tui.widgets.welcome import (
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.herdr import HerdrReporter
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.skills.discovery import Skill
+    from local_operator.tui.widgets.session_panel import (
+        SessionDiagnostics,
+        SessionScreen,
+    )
 
-
-#: ONE sentence for ONE instruction, carried verbatim by every surface that
-#: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
-#: the model picker's footer and the ``/help`` row. They used to say it four
-#: different ways within two keystrokes of each other — "saves this provider and
-#: model as the boot default", "to make it the boot default", "saves the boot
-#: default", "persists it" — so a user met a new phrasing on every surface
-#: instead of learning one string.
-#:
-#: Sized by its TIGHTEST site. The picker footer truncates at the card's width
-#: and this clause sits after the access note, so it has to be complete and short.
-#: "Saves provider and model" named the payload but not why it mattered; "saves
-#: this for new sessions" names the consequence, fits the same slot, and includes
-#: the article the clipped phrase lacked. The budget arithmetic is in the last
-#: paragraph below — one set of figures, so nobody "fixes" the string toward a
-#: stale number.
-#:
-#: REPOINTED BACK at `/model default`, after #369 briefly pointed it at a `d`
-#: key on a picker row. That key is gone: inside a filter every printable
-#: character belongs to the query, so a `d` that saved config on an empty query
-#: and narrowed the list otherwise was a mode with nothing on screen to mark it.
-#: The ambiguity #369 reported is closed by the COMMAND being unambiguous — a
-#: bare `/model default` writes the model the session is already on and switches
-#: nothing — not by moving the write onto a keystroke.
-#:
-#: It names `/model` as well as `d` because two of its four sites are receipts
-#: printed when NO picker is open (the switch receipt, and the bare-`/model`
-#: notice), where "press d" alone would name a key that does nothing yet.
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
 #: and whose rows are therefore an older document. One constant because the
@@ -505,23 +484,11 @@ _SUBAGENT_DOCK_ROWS = 10
 _BAND_SETTLE_PASSES = 3
 
 
-#: Slash commands handled synchronously before any prompt is sent. One
-#: registry entry per command; aliases live on the entry (TUI-014).
-#:
-#: ``echo`` says whether running the command leaves a user row in the visible
-#: ledger. It USED to be unconditional, on the reasoning that typing a command
-#: is the same visible commitment as sending a prompt. That reasoning had the
-#: wrong subject: a prompt is echoed because the transcript is the only record
-#: of what the user said, whereas every handler below already reports what it
-#: did — ``/usage`` opens the panel that IS the answer, ``/provider`` prints the
-#: list, ``/model p/id`` names both labels — so the echo was a row restating a
-#: row underneath it. The reading record kept the keystrokes and gained nothing.
-#:
-#: So the test is not "did the user commit to something" but "would the receipt
-#: be missing something without it", and exactly one thing qualifies: an
-#: argument that becomes part of what the MODEL is told. Comment per entry
-#: below; the table is pinned in ``tests/unit/tui/test_slash_echo.py``.
-# Registry and resolver are shared with non-terminal front ends.
+# The registry, its policy commentary and `slash_command_for` live in
+# `local_operator.slash_commands`, which the server front ends import too; both
+# are re-exported above so existing `tui.app` callers are unaffected.
+# `_BOTCHED_COUNT_RE` moved the same way, to `session.goal_loop`, so a detached
+# owner parses a `/loop` count identically without importing Textual.
 
 
 #: Longest goal string echoed into the launch notice. Independent of the
@@ -1574,9 +1541,10 @@ class OperatorApp(App[None]):
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
         Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
-        # The subagent roster's matching disclosure. `ctrl+g` is free in the
-        # app and TextArea, and bubbles so an active picker keeps first refusal.
-        Binding("ctrl+g", "toggle_subagents", "Expand/collapse subagents", show=False),
+        # The subagent dock's density cycle (full → summary → hidden, with the
+        # overflow roster as a stop inside full). `ctrl+g` is free in the app
+        # and TextArea, and bubbles so an active picker keeps first refusal.
+        Binding("ctrl+g", "toggle_subagents", "Cycle the subagent panel", show=False),
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -1676,6 +1644,7 @@ class OperatorApp(App[None]):
         provider_controller: Any | None = None,
         resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
         on_config_changed: Callable[[], None] | None = None,
+        warm_session_imports: bool = True,
     ) -> None:
         super().__init__()
         # Dark is the product's island night and the fallback: `theme_name`
@@ -1688,6 +1657,10 @@ class OperatorApp(App[None]):
         except KeyError:
             theme_mod.set_theme(theme_mod.DEFAULT_THEME)
         self._session_factory = session_factory
+        # CLI factories only construct a remote facade. Warming the owner stack
+        # here duplicates the child process's work and delays eager engagement.
+        # Embedded in-process factories retain their responsive threaded warmup.
+        self._warm_factory_imports = warm_session_imports
         # ``/resume <id>`` rebinds the session factory to a resume-specific one
         # (the CLI wires it to ``create_session`` with ``args.resume`` mutated)
         # and reloads — the "proper /resume command" the app is asked for. A
@@ -1787,6 +1760,13 @@ class OperatorApp(App[None]):
         #: — all ordinary, none an error. Rebound on every session swap, since
         #: the pane's binding must name the conversation currently in it.
         self._multiplexer_broadcast: SessionBroadcast | None = None
+        #: Reports idle/working/blocked to the hosting Herdr pane's Agents row
+        #: (see :mod:`local_operator.herdr`). ``None`` outside Herdr, headless,
+        #: for a subagent's session, or under the kill switch — all ordinary.
+        #: Unlike the multiplexer binding this is NOT rebuilt on a session
+        #: swap: the row belongs to the PANE and the process, and a ``/new``
+        #: only changes the session-id metadata it carries.
+        self._herdr_reporter: HerdrReporter | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -2400,6 +2380,29 @@ class OperatorApp(App[None]):
         #: binding. Reset by a session swap (`/new`, `/resume`), because the
         #: new binding is cold again and owes its own warm-up.
         self._warm_engage_started = False
+        #: What build THIS process loaded. App construction is process start
+        #: for a TUI, so this is the honest "what is running in here" token,
+        #: and it can never be refreshed — already-imported modules do not get
+        #: younger. Every later comparison is against this snapshot.
+        #:
+        #: Read lazily (``update`` is stdlib-only, but the house style keeps it
+        #: off the import graph) and never allowed to raise: a build stamp is a
+        #: diagnostic, and a TUI that will not boot because it could not read
+        #: its own version number is a far worse failure than undetected skew.
+        try:
+            from local_operator import update as _update_mod
+
+            self._loaded_build = _update_mod.installed_build()
+        except Exception:  # noqa: BLE001 — see above; degrade to "unknown"
+            self._loaded_build = None
+        #: Debounce for :meth:`_check_build_skew`. Keyed on the whole
+        #: ``(kind, from, to, scope)`` key rather than on the kind alone, so a
+        #: SECOND drift (two ``lop-update`` runs while this terminal lives) is
+        #: still announced while the mount engage, the draft warm-up and the
+        #: slash engage together cost exactly one notice. ``scope`` is the
+        #: session id for the owner notices and empty for disk drift — see
+        #: :meth:`_check_build_skew` for why the two differ.
+        self._skew_notice_shown: set[tuple[str, str, str, str]] = set()
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -2687,7 +2690,7 @@ class OperatorApp(App[None]):
         await asyncio.to_thread(warm_session_imports)
 
     async def _construct_session(self) -> Any:
-        """Warm the factory's imports and await it. RAISES; adopts nothing.
+        """Apply the factory's import policy and await it. RAISES; adopts nothing.
 
         Split from :meth:`_adopt_session` because the two halves want to happen
         at different moments on the two paths through here. On a cold boot they
@@ -2701,7 +2704,8 @@ class OperatorApp(App[None]):
         # itself never raises, but the import that reaches it and the thread hop
         # around it can, and anything that escapes the boot worker leaves the
         # user with a splash and no explanation.
-        await self._warm_session_imports()
+        if self._warm_factory_imports:
+            await self._warm_session_imports()
         return await self._session_factory()
 
     def _adopt_session(self, session: Any) -> None:
@@ -2758,6 +2762,9 @@ class OperatorApp(App[None]):
         # to name the conversation now in it, and a swap (`/new`, `/resume`)
         # is exactly when the old one becomes wrong.
         self._start_multiplexer_broadcast()
+        # Same moment, same reason: the Herdr row's session-id metadata has to
+        # name the conversation now in the pane.
+        self._start_herdr_reporter()
         # A remote follower must never publish a second discovery record for
         # the shared session, and it must be ready to replace this facade with
         # the lease-winning real Session after owner death. The callback uses
@@ -2897,6 +2904,14 @@ class OperatorApp(App[None]):
             self._measure_preloaded_context(session)
         elif getattr(session.frontend_state, "context_tokens", None) is None:
             self._measure_preloaded_context(session)
+        # LAST, and after the history is on screen: adoption covers `/new`,
+        # `/resume`, `/fork`, `/login` and the initial mount — every path that
+        # takes a session, and therefore every path that can pair this
+        # terminal with a runtime built from a different install. Placed at
+        # the tail so a skew notice lands under the replayed transcript rather
+        # than being scrolled away by it, the same ordering constraint
+        # ``_report_attachment_restore`` documents above.
+        self._check_build_skew(reason="adopt")
 
     def _invalidate_pending_frontend_state(self) -> None:
         """Retire queued paints before another session becomes authoritative."""
@@ -3021,7 +3036,10 @@ class OperatorApp(App[None]):
             # is the answer that leaves such a host exactly as it was.
             forked=bool(getattr(state, "conversation_title_forked", False)),
             streaming=bool(getattr(state, "streaming", False)),
-            subagents=sum(1 for j in task_jobs if j.status == "running" and not j.queued),
+            # Queued children counted, matching `_job_count("task")`: the band
+            # is the hidden dock's only liveness cue, so a follower's band must
+            # not go silent where the owner's would not (round 1, U2).
+            subagents=sum(1 for j in task_jobs if j.status == "running"),
             jobs=sum(1 for j in bash_jobs if j.status == "running" and not j.queued),
             mcp=McpStatus(
                 configured=len(mcp_servers),
@@ -3029,6 +3047,22 @@ class OperatorApp(App[None]):
                 failed=any(server.status == "failed" for server in mcp_servers),
             ),
         )
+        # Refresh data, not the interaction. The picker may have opened against
+        # a cold facade with no catalogue; set_rows retains its query, highlight
+        # and dismissal while leaving composer text/selection/focus untouched.
+        catalogue = getattr(state, "model_catalogue", None)
+        model_identity = (
+            getattr(state, "model_label", ""),
+            getattr(state, "effective_model_label", ""),
+        )
+        model_changed = model_identity != getattr(self, "_last_frontend_model_identity", None)
+        if model_changed or catalogue != getattr(self, "_last_frontend_model_catalogue", None):
+            self._last_frontend_model_catalogue = catalogue
+            self._last_frontend_model_identity = model_identity
+            if self._editor().model_picker.is_open():
+                self._populate_model_picker()
+            if model_changed and self._welcome is not None:
+                self._welcome.refresh_info()
         self._status.seed_duration(
             active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
             activity_started_at=getattr(state, "activity_started_at", None),
@@ -4986,6 +5020,12 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
+        # The dock density chosen for the dead conversation goes with it: the
+        # replacement session re-reads `display.dock` on its first roster and
+        # a `ctrl+g` pressed against the old children does not pin the new
+        # ones (#525 design §2).
+        if self._subagent_panel is not None:
+            self._subagent_panel.reset_density()
         return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
@@ -8423,6 +8463,11 @@ class OperatorApp(App[None]):
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
             return
+        # BEFORE the spawn, which is the moment the disk build matters: the
+        # runtime is started from ``sys.executable``, resolved fresh, so a
+        # terminal that has drifted behind the install is about to pair itself
+        # with a NEWER runtime. That pairing is the incident.
+        self._check_build_skew(reason=reason)
         if not self._runtime_can_start():
             # First run, or `hosting`/`model_name` cleared: there is nothing to
             # spawn against. The cold viewer opens on an empty config on
@@ -8451,46 +8496,67 @@ class OperatorApp(App[None]):
                 # to retry.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                return
             finally:
                 self._set_starting(False)
+            # AFTER a successful bind, which is the only moment the OWNER's
+            # build is knowable: the pre-spawn check above runs while the
+            # facade is still cold, so its C branch always returns at the
+            # ``is_cold`` guard and only disk drift can be reported there.
+            # Without this second call the mechanism misses the case it exists
+            # for — ``engage_runtime`` finding an EXISTING resident record and
+            # binding to it without spawning, i.e. an ordinary first prompt
+            # against a stale runtime (review round 1, R1-4).
+            self._check_build_skew(reason=f"{reason}-bound")
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
     def _needs_runtime_first(self, command: str, arg: str) -> bool:
-        """Whether ``command`` must engage a runtime before it can be dispatched.
+        """Keep owner mutations behind initial sync, including non-picker routes.
 
-        True only on a COLD viewer (``is_cold`` on a facade that can bind), and
-        only for the commands whose effect lives on the runtime rather than in
-        this terminal:
-
-        - ``/team <name> …`` and ``/agent <name>`` — the attach stamps the
-          roster and briefs onto the session that builds the next turn, which
-          does not exist yet on a cold viewer. The bare LISTINGS and ``/team
-          chart`` read local config and stay local; engaging a runtime to list
-          teams would make opening `lop` and pressing `/team` cost a process.
-        - ``/credential`` — every verb. The store is the runtime's in-memory
-          dict (the `bash` tool reads it there), so even ``list`` has nothing
-          to answer from until one exists, and the STORE verb must have a
-          destination BEFORE the masked paste opens: accepting a secret and
-          then reporting nowhere to put it was the worst shape in the round
-          (UX U3).
-
-        Every other slash either runs locally or is already refused honestly
-        when cold; this list is deliberately the three the round measured.
+        The canonical locality registry is the census: a cold facade advertises
+        no capabilities yet, so falling through before consulting it would call
+        compatibility setters that drop writes before dial or send before sync.
+        Only local interactions/read-only bare forms stay local. Recovery is a
+        different lifecycle: slashes retain their explicit reconnect refusal.
         """
         session = self._session
-        if session is None or not getattr(session, "is_cold", False):
+        if (
+            session is None
+            or not getattr(session, "is_cold", False)
+            or getattr(session, "_recovering", False)
+            or getattr(session, "_deliberate_stop", False)
+            or not callable(getattr(session, "_ensure_bound", None))
+        ):
             return False
-        if not callable(getattr(session, "_ensure_bound", None)):
+        from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
+
+        entry = slash_command_for(command)
+        if entry is None:
             return False
-        head = arg.partition(" ")[0].strip()
-        if command == "/credential":
+        name = entry.name
+        if name == "credential":
+            # Its masked interaction is local but its in-memory store is not.
             return True
-        if command == "/team":
-            return bool(head) and head.casefold() != "chart"
-        if command == "/agent":
-            return bool(head)
-        return False
+        if name in _FRONTEND_LOCAL_SLASHES:
+            return False
+        head = arg.partition(" ")[0].strip().casefold()
+        if (name == "model" and head == "default") or (name == "team" and head == "chart"):
+            return False
+        # These bare forms only read the cold projection or open local UI.
+        # New owner commands conservatively wait unless explicitly classified
+        # as a local reading, rather than silently acquiring a raw-setter path.
+        return bool(arg.strip()) or name not in {
+            "rename",
+            "model",
+            "effort",
+            "context",
+            "goal",
+            "approvals",
+            "mcp",
+            "team",
+            "agent",
+        }
 
     def _bind_then_dispatch(
         self, text: str, attachments: Mapping[int, Marked] | None = None
@@ -8571,7 +8637,18 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            self._run_slash_command(text, attachments)
+            # The bind resolved, so ``owner_version`` now holds the runtime's
+            # own stamp: this is the first moment the owner-skew comparison
+            # has anything to compare. Before the command runs, because a
+            # routed command is exactly what skew distorts.
+            self._check_build_skew(reason="slash-engage")
+            operation = self._run_slash_command(text, attachments, _inline_remote=True)
+            if operation is not None:
+                # Stay in the worker that joined the bind at commitment time.
+                # Scheduling another worker lets the next prompt waiter send
+                # first. The runtime serializes this socket's requests through
+                # mutation completion, so send the committed mutation now.
+                await operation
 
         self.run_worker(run(), thread=False, group="warm-engage", exclusive=False)
 
@@ -11045,6 +11122,94 @@ class OperatorApp(App[None]):
         # withdraw simply lands whenever its worker finishes and the exit
         # drain still guarantees it lands at all.
 
+    def _start_herdr_reporter(self) -> None:
+        """Report this pane's lifecycle state to Herdr's Agents panel.
+
+        Called on every session adoption, like the multiplexer broadcast, but
+        the reporter is built ONCE per process and only re-labelled on a swap:
+        the Agents row is a property of the pane, and a ``/new`` that released
+        and re-reported would flash the row empty for one round trip. Only the
+        ``--agent-session-id`` metadata changes, and the reporter re-sends the
+        current state under the new id.
+
+        Everything below is best-effort and returns on the ordinary paths —
+        no Herdr, the kill switch, headless, a subagent's session — see
+        :mod:`local_operator.herdr`. Nothing here can raise into the boot
+        path, and no subprocess runs on this thread: the reporter owns a
+        worker thread so the event loop never waits on the ``herdr`` CLI.
+        """
+        # Headless means no pane, and this is the SECOND of two independent
+        # guards keeping the test suite off a developer's own Herdr pane: a
+        # pilot test run from inside Herdr would otherwise overwrite the Agents
+        # row of the session running the tests. `tests/conftest.py` scrubs
+        # `HERDR_*` (alongside `CMUX_*`, for the same reason and after the same
+        # class of incident), so detection already fails there — this gate is
+        # what holds if that scrub is ever narrowed, and it is verified on its
+        # own by `test_a_headless_app_reports_nothing` plus its lifted-gate
+        # control. Same hazard `_start_multiplexer_broadcast` documents.
+        if self.is_headless:
+            return
+        session = self._session
+        if session is None:
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return
+        # Guarded even though `start_reporter` guards itself: the IMPORT is
+        # part of this path, and the feature can never be the reason a
+        # session fails to open.
+        try:
+            from local_operator.multiplexer.broadcast import is_user_owned_session
+
+            # A subagent's child session runs INSIDE its parent's pane, so
+            # reporting it would overwrite the user's own row with the
+            # child's state — `idle` while the parent is parked on an
+            # approval. The same gate as the resume binding, deliberately:
+            # one definition of "the user's own session".
+            if not is_user_owned_session(session_id):
+                return
+            reporter = self._herdr_reporter
+            if reporter is not None:
+                reporter.set_session_id(session_id)
+                if self._status is not None:
+                    # Re-attach so the current state goes out under the
+                    # new session id (the reporter cleared its de-dupe).
+                    self._status.set_herdr_reporter(reporter)
+                return
+            from local_operator.herdr import start_reporter
+
+            reporter = start_reporter(session_id)
+        except Exception:  # noqa: BLE001 — bookkeeping must not break a session
+            logger.debug("herdr reporter failed to start", exc_info=True)
+            reporter = None
+        self._herdr_reporter = reporter
+        if reporter is not None and self._status is not None:
+            # Attaching is what sends the initial report, with the band's
+            # actual state rather than an assumed `idle`.
+            self._status.set_herdr_reporter(reporter)
+
+    def _stop_herdr_reporter(self) -> None:
+        """Release the pane's Agents row (idempotent). Never blocks.
+
+        The release runs on the reporter's worker and the exit drain lands it
+        before the interpreter is gone; see ``herdr.reporter`` for why that is
+        ``atexit`` and not a join here (a join here would be on the loop).
+        """
+        reporter = self._herdr_reporter
+        if reporter is None:
+            return
+        # Cleared FIRST, so a failure below cannot leave the app holding a
+        # handle it believes is still reporting.
+        self._herdr_reporter = None
+        try:
+            if self._status is not None:
+                self._status.set_herdr_reporter(None)
+            from local_operator.herdr import release_reporter
+
+            release_reporter(reporter)
+        except Exception:  # noqa: BLE001 — never block an exit path
+            logger.debug("herdr reporter failed to stop", exc_info=True)
+
     def _stop_multiplexer_broadcast(self, *, retire: bool = True) -> "SessionBroadcast | None":
         """Withdraw this pane's binding (idempotent), returning the handle.
 
@@ -11495,6 +11660,11 @@ class OperatorApp(App[None]):
         # closed. A crash never reaches this line, which is what leaves the
         # binding standing for the restore to find.
         self._stop_multiplexer_broadcast()
+        # And the Herdr row, for the same reason: a clean exit must not leave
+        # the Agents panel showing a session that is gone. Before the approval
+        # settling below so the release is queued ahead of anything that can
+        # await — the exit drain then lands it even if teardown throws.
+        self._stop_herdr_reporter()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
@@ -12048,25 +12218,62 @@ class OperatorApp(App[None]):
                 # `streaming=True` above and no `TurnStarted` ever arrived, so
                 # `_turn_open` is False and nothing else would clear the band.
                 #
-                # CARRIES THE OUTCOME, and that is what closes the title flash
-                # structurally. This is the EARLIER of the two writes that retire
-                # a turn's band — `_finalize_turn`'s is the other — so writing
-                # only `streaming=False` here published `lo ›` ("finished
-                # cleanly") for a turn this very `except` had just caught, and
-                # `lo ✗` landed one write later (review D6/U8). The fact is
-                # already in hand; sending it with the write that needs it means
-                # there is no interval in which the title is wrong, rather than a
-                # short one. `_finalize_turn` then writes the same pair and the
-                # title dedupes on the rendered string.
+                # IN-PROCESS, CARRIES THE OUTCOME, and that is what closes the
+                # title flash structurally on that path. This is the EARLIER of
+                # the two writes that retire a turn's band — `_finalize_turn`'s
+                # is the other — so writing only `streaming=False` here
+                # published `lo ›` ("finished cleanly") for a turn this very
+                # `except` had just caught, and `lo ✗` landed one write later
+                # (review D6/U8). The fact is already in hand; sending it with
+                # the write that needs it means there is no interval in which
+                # the title is wrong. `_finalize_turn` then writes the same pair
+                # and the title dedupes on the rendered string.
                 #
-                # `None` (leave alone) when this worker cannot know the outcome —
-                # a FOLLOWER's `prompt()` returns on the owner's ACK, mid-turn,
-                # so its `error_text` is None because nothing was reported here,
-                # not because the turn succeeded. Same reasoning as
-                # `_post_turn_abandoned`'s `outcome_known`.
+                # ON A FOLLOWER, WITHHELD WHILE THE OWNER IS LIVE (#642). A
+                # follower's `prompt()` returns on the owner's ACK, mid-turn, so
+                # this worker cannot know the outcome: its `error_text` is None
+                # because nothing was reported here, not because the turn
+                # succeeded (same reasoning as `_post_turn_abandoned`'s
+                # `outcome_known`). Carrying the fact into this write — the fix
+                # that worked in-process — is therefore unavailable, and writing
+                # `streaming=False` with `failed=None` resolved the title to
+                # `idle`: `lo ›` for exactly the owner's relay latency (measured
+                # 501.7 ms at a 0.5 s relay, 2011 ms at 2 s — the window IS the
+                # relay), then `lo ✗`. "Ignorant" must not render as "finished
+                # cleanly": `idle` is a positive claim that the turn is over and
+                # the user's attention is free, and a viewer that has not been
+                # told has no standing to make it. So while `is_streaming` is
+                # still True the band HOLDS `working` — honest, because the turn
+                # IS still running as far as this viewer knows — and the
+                # outcome lands through `_finalize_turn` when the owner's end
+                # arrives. This is the same predicate `on_turn_abandoned`'s
+                # guard 2 applies at dispatch, read here at worker time.
+                #
+                # A follower whose `prompt()` refused BEFORE any `agent_start`
+                # has `is_streaming` False and still takes the write: that is
+                # the "KEPT" case above, and it survives unchanged.
+                #
+                # NO WALL-CLOCK TIMEOUT ON THE HOLD, deliberately. Every way the
+                # outcome can fail to arrive is a socket event that ends the
+                # turn locally: the relayed `agent_end`; EOF/reset →
+                # `_on_disconnected` → `_end_turn_locally`; a slow-follower drop
+                # (the owner's `_send_to` timeout closes the socket → EOF); and
+                # the cold fallback (`_go_cold` → `_end_turn_locally`). A timer
+                # could only fire while the socket is alive and silent — i.e.
+                # while the owner IS still working, and turns legitimately run
+                # for hours — and every terminal it could pick (`›`, `✗`,
+                # "interrupted") would be a false claim. The bound is
+                # event-driven, not timed.
+                #
+                # Accepted residual: the owner ACKs on the durable append BEFORE
+                # `agent_start` (`runtime/owned.py` `prompt` vs `harness/loop.py`
+                # `_run_turn`), so a `finally` that runs inside that gap reads
+                # `is_streaming` False and clears the band — a working→idle→
+                # working blip bounded by the owner's prompt preparation, not by
+                # the relay of the OUTCOME. That is not the flash this closes.
                 knows_outcome = not bool(getattr(session, "is_remote", False))
-                self._status.update(
-                    streaming=False,
+                self._retire_turn_band(
+                    session,
                     failed=(bool(error_text) and not aborted) if knows_outcome else None,
                 )
                 # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
@@ -12082,6 +12289,42 @@ class OperatorApp(App[None]):
                 self._post_turn_abandoned(aborted=aborted, error=error_text)
 
         self.run_worker(run_prompt(), thread=False, group="turns")
+
+    def _retire_turn_band(self, session: Any, *, failed: bool | None = None) -> None:
+        """Clear the status band for a turn whose worker is done with it.
+
+        ONE helper for the same reason `_post_turn_abandoned` is one: THREE
+        places drive `session.prompt()` — `_start_turn` and both `/loop`
+        workers — and "a follower never publishes an outcome it was not told"
+        has to hold at all of them. It did not: the loop workers wrote a bare
+        `update(streaming=False)`, so a `/loop` on a follower reproduced D-1
+        verbatim, `⣾ → › → ⣾ → ›` with the owner live throughout, on the most
+        unattended surface in the app (review round 1, MAJOR-1/U1). The gate
+        was originally inlined at the composer's path only, on the incorrect
+        premise that `/loop` always routes to the owner; it does not on a COLD
+        viewer, whose `_synthesise_cold_state` advertises no
+        `slash_capabilities`, so the `route_shared_slash` branch is not taken
+        and the LOCAL worker drives the `RemoteSession` (see the corrected
+        note in `_run_slash_command`'s routing branch).
+
+        WITHHELD on a follower whose owner is still streaming: that worker
+        returned on the owner's ACK, mid-turn, so `streaming=False` there
+        resolves the title to `idle` — "finished cleanly" — for a turn whose
+        outcome this viewer has not been told. The band is released by the
+        relayed `agent_end` through `_finalize_turn`, or by a locally
+        synthesised one (owner death, `/stop`, go-cold). In-process
+        (`is_remote` False) the write is unconditional and unchanged.
+
+        ``failed`` carries the outcome where the caller HAS it (the composer's
+        worker does, in-process); `None` means "leave the mark alone".
+        """
+        if self._status is None:
+            return
+        if bool(getattr(session, "is_remote", False)) and bool(
+            getattr(session, "is_streaming", False)
+        ):
+            return
+        self._status.update(streaming=False, failed=failed)
 
     def _post_turn_abandoned(self, *, aborted: bool, error: str | None) -> None:
         """Offer the fallback retirement for the turn this worker just left.
@@ -13535,6 +13778,8 @@ class OperatorApp(App[None]):
                 # and every block already on screen re-lays out with it. A
                 # repaint would re-ink content that has not changed colour.
                 self._sync_row_density_class()
+            elif message.key == "display.dock":
+                self._apply_dock_density()
             elif message.key.startswith("display."):
                 # The display flags are read through the cached fast path, which
                 # `settings_io` already invalidated; the widgets that resolved a
@@ -13793,31 +14038,39 @@ class OperatorApp(App[None]):
             self.screen.set_focus(None)
 
     def _job_count(self, kind: str) -> int:
-        """Running jobs of one ``kind`` — ``task`` (subagents) or ``bash``.
+        """Jobs of one ``kind`` the band counts — ``task`` (subagents) or ``bash``.
 
         The two are counted separately because they are different things an
         operator tracks: a subagent is delegated reasoning with no other
         representation on screen, while a backgrounded shell command already has
         a tool card. Summing them would hide which kind is running.
 
-        ``queued`` is excluded to match ``AsyncJobManager``'s own running count
-        (``harness/jobs.py``): a job admitted to the ledger but held behind the
-        capacity gate carries ``status == "running"`` and has not started, so
-        counting it would report work that is not yet happening — and disagree
-        with the number the harness itself reports.
+        ``task`` INCLUDES children still queued behind the capacity gate;
+        ``bash`` does not. The asymmetry is the point. This counter is the
+        stated fallback for a dock the user has hidden with `ctrl+g` — the
+        justification for letting a live panel disappear is that the band
+        still says children exist — and excluding queued children made that
+        fallback empty for exactly the state the panel had been showing: a
+        hidden dock whose children were all queued reported nothing anywhere
+        (round 1, U2). A queued child is delegated work the user is waiting
+        on, which is the question this segment answers, whereas a queued
+        shell command still has its tool card on screen and the ``bash``
+        count stays aligned with ``AsyncJobManager``'s own running total
+        (``harness/jobs.py``).
 
         Never raises: a status segment must not be able to take the app down.
         """
         manager = getattr(self._session, "jobs", None)
         if manager is None:
             return 0
+        counts_queued = kind == "task"
         try:
             return sum(
                 1
                 for job in manager.list()
                 if job.status == "running"
                 and job.type == kind
-                and not getattr(job, "queued", False)
+                and (counts_queued or not getattr(job, "queued", False))
             )
         except Exception:
             return 0
@@ -14160,6 +14413,8 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
+        if "display.dock" in changed:
+            self._apply_dock_density()
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -14191,6 +14446,149 @@ class OperatorApp(App[None]):
         # state — so the notice is right on the first frame and stays right as
         # the terminal resizes across the threshold and when the splash retires.
         self._append_block(block, ends_empty_state=False)
+
+    def _check_build_skew(self, *, reason: str) -> None:
+        """Warn when this terminal and the code around it are different builds.
+
+        Two long-lived populations coexist on a developer host: viewer TUIs
+        and the runtime processes they spawn. ``lop-update`` replaces the
+        on-disk install under both, often several times a day, and neither
+        side could see it. The concrete cost was a silent one: a TUI running
+        pre-#624 code spawned a runtime from the NEW install (the spawn
+        resolves ``sys.executable`` fresh), routed ``/team <name> <request>``
+        to it, printed the receipt, and dropped the request because that
+        build of the renderer had no consumer for it.
+
+        Two comparisons, both cheap and both advisory \u2014 nothing here blocks a
+        command or refuses an attach:
+
+        * **disk drift** \u2014 the install on disk is no longer the one this
+          process loaded, so any runtime started from here will be NEWER than
+          this window. ``/reload`` is the remedy because it restarts the
+          window on the current install and picks the session back up.
+        * **owner skew** \u2014 the runtime this session is bound to reports a
+          different build than this window, or reports none at all (which
+          means it predates the field, and is therefore older by
+          construction). ``/stop`` then sending again is the remedy: the bare
+          ``/stop`` on a follower asks the owner to stop, and the next prompt
+          engages a fresh runtime from the current install. Both keep working
+          in the meantime.
+
+        The COPY deliberately says "session" and "window" rather than
+        "runtime" and "terminal": the runtime/terminal split is real and
+        load-bearing for us, but the notice never explains it, so to a reader
+        the two words collapse into one thing they can see (design review
+        round 1, D2). The owner notices name the session by its title for the
+        same reason \u2014 see the ``subject`` construction below.
+
+        Called at the seams that spawn or bind a runtime (adopt, engage, the
+        tail of a successful bind) \u2014 the moments the answer can change and the
+        moments the user is about to depend on it. Debounced on the whole
+        (kind, from, to, scope) key so those seams together cost at most one
+        notice per distinct skew, while a genuinely new drift still speaks up.
+        Disk drift carries no scope: it is a fact about THIS process against
+        the disk, once per from/to pair whichever session is open. The owner
+        notices are scoped BY SESSION, so a terminal that adopts two different
+        stale runtimes hears about both \u2014 \"once per session per process\", which
+        is what design \u00a76.7 states.
+
+        ``reason`` names the calling seam for logs only; the copy is chosen by
+        WHICH skew was found, not by where it was noticed.
+        """
+        loaded = self._loaded_build
+        if loaded is None:
+            # This process could not read its own build (see ``__init__``);
+            # every comparison below would be against an unknown, which can
+            # only produce false alarms.
+            return
+
+        def announce(kind: str, before: str, after: str, body: str, scope: str = "") -> None:
+            # ``scope`` narrows the debounce from per-process to per-SUBJECT
+            # where the subject is what varies: an owner notice describes ONE
+            # session's runtime, so a second stale session adopted in the same
+            # terminal is a different fact and must speak. Disk drift takes no
+            # scope because it describes THIS process against the disk and is
+            # genuinely once per (from, to) pair whichever session is open
+            # (review round 1, R1-5).
+            key = (kind, before, after, scope)
+            if key in self._skew_notice_shown:
+                return
+            self._skew_notice_shown.add(key)
+            logger.debug("build skew (%s) noticed at %s: %s -> %s", kind, reason, before, after)
+            self._system_notice(body, "warning")
+
+        # --- A: has the install on disk moved under this process? ----------
+        try:
+            from local_operator import update as update_mod
+
+            on_disk = update_mod.installed_build()
+        except Exception:  # noqa: BLE001 — diagnostics never break a seam
+            on_disk = None
+        if on_disk is not None and on_disk != loaded:
+            announce(
+                "disk",
+                loaded.label(),
+                on_disk.label(),
+                f"local-operator was updated after this window opened "
+                f"({_build_change(loaded, on_disk)}) \u2014 this window is still on the "
+                f"old version. /reload updates it and picks this session back up.",
+            )
+
+        # --- C: is the bound runtime a different build than this terminal? --
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            return
+        # Only a BOUND follower has an owner to compare against. A cold viewer
+        # has not dialled anything yet, and reading its empty stamp would
+        # report every cold session as a prehistoric runtime.
+        if bool(getattr(session, "is_cold", False)):
+            return
+        owner_version = str(getattr(session, "owner_version", "") or "")
+        owner_ref = str(getattr(session, "owner_source_ref", "") or "")
+        # The subject of an owner notice is the SESSION, so the debounce is
+        # keyed by it: "once per session per process", which is what design
+        # §6.7 and this method's own contract say. Keyed on the session id
+        # rather than the facade object so a takeover that swaps the object
+        # under one conversation does not re-announce the same runtime.
+        scope = str(getattr(session, "session_id", "") or id(session))
+        # NAME the session these notices are about. Two stale sessions in one
+        # terminal each legitimately get a notice (that is what the per-session
+        # debounce buys), but with a deictic "this session" in both they render
+        # as two byte-identical paragraphs — which reads as the app printing
+        # one warning twice, i.e. exactly the duplicate-notice bug the re-key
+        # fixed, and leaves ``/stop`` ambiguous about which session it acts on
+        # (design review round 1, D1). The title is what the user named and can
+        # see; "this session" survives only as the fallback for an unnamed one.
+        title = str(getattr(session, "conversation_name", "") or "").strip()
+        subject = f"\u201c{title}\u201d" if title else "this session"
+        if not owner_version:
+            # A runtime older than the field itself. It cannot tell us what it
+            # is running, but the absence is informative: the field ships in
+            # this build, so anything without it is older than this window.
+            # Every resident runtime legitimately trips this once in the
+            # release window, and it is telling the truth each time.
+            announce(
+                "owner-unknown",
+                "",
+                loaded.label(),
+                f"{subject} is running an older version than this window \u2014 some "
+                f"commands may not work. /stop, then send again to restart it.",
+                scope,
+            )
+            return
+        from local_operator.update import BuildStamp
+
+        owner = BuildStamp(version=owner_version, source_ref=owner_ref)
+        if owner != loaded:
+            announce(
+                "owner",
+                owner.label(),
+                loaded.label(),
+                f"{subject} is running {owner.label()} but this window is "
+                f"{loaded.label()} \u2014 some commands may not work. /stop, then send "
+                f"again to restart it.",
+                scope,
+            )
 
     def _echo_user_command(self, text: str) -> None:
         """Write a slash command into the ledger as the user's own row, IF its
@@ -14288,6 +14686,26 @@ class OperatorApp(App[None]):
                     self._notice("no agents yet. Ask the agent to create one.")
                 else:
                     self._append_block(self._agent_list_block(rows))
+                return
+            if data.get("type") in ("team_mutate", "agent_mutate"):
+                # The LAST silent quadrant, and it is reachable only through
+                # the version dimension the static audit cannot see: no
+                # current producer emits these, but a runtime resident from
+                # before #624 still does, and this terminal is new enough to
+                # be talking to one. Without this arm the attach never
+                # happened AND nothing was printed — the original defect,
+                # arriving from the other side.
+                #
+                # Adding a consumer for a type nothing produces does not
+                # disturb ``test_noop_consumers``, which maps producers onto
+                # consumers rather than the reverse.
+                self._notice(
+                    "this session is running a version too old to attach a team "
+                    "(before 0.46.25); nothing was attached. /stop, then send again "
+                    "to restart it.",
+                    "warning",
+                )
+                return
             return
         if kind == "block":
             block_type = data.get("type")
@@ -14337,6 +14755,14 @@ class OperatorApp(App[None]):
         # terminal's own images and paste expansion, and so the transcript row
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
+        # Spelled as LITERALS, deliberately, and kept in step with
+        # ``SLASH_ACTION_RECEIPTS`` — the set ``RemoteSession`` declares in its
+        # auth frame — by ``test_noop_consumers``, which reads these strings
+        # statically out of this function. Importing the constant here would
+        # blind that audit to the very seam it guards: a type declared on the
+        # wire but not consumed here is a request the runtime deferred to this
+        # terminal and this terminal then dropped, which is the original
+        # defect wearing a new hat.
         if data.get("type") in ("team_attached", "agent_attached"):
             # Each receipt syncs ITS OWN segment (review round 1, N1): the
             # post-op push repaints both from ``frontend_state`` a tick later
@@ -14377,9 +14803,17 @@ class OperatorApp(App[None]):
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
-        self, text: str, attachments: Mapping[int, Marked] | None = None
-    ) -> None:
+        self,
+        text: str,
+        attachments: Mapping[int, Marked] | None = None,
+        *,
+        _inline_remote: bool = False,
+    ) -> Awaitable[None] | None:
         """Dispatch a typed slash command (with arguments) to its handler.
+
+        Ordinary callers schedule remote work and return None. The cold-bind
+        worker requests the SAME operation inline so queued commands reach the
+        owner before a later prompt can overtake an extra scheduling hop.
 
         ``attachments`` is the composer's index→image map at submit time, passed
         through so the two prompt-sending commands (``/team``/``/agent``) can
@@ -14443,6 +14877,13 @@ class OperatorApp(App[None]):
             _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
         )
 
+        if command == "/model" and arg.strip().casefold() == "saved":
+            # Saved belongs to the invoking terminal, not the owner's config.
+            # Resolve now, at commitment, and route the concrete selection so
+            # an older startup snapshot cannot choose its meaning later.
+            self._cmd_model_saved(notice)
+            return
+
         remote_route = getattr(self._session, "route_shared_slash", None)
         remote_capabilities = {
             f"/{cap.command}": cap
@@ -14476,23 +14917,12 @@ class OperatorApp(App[None]):
         if command == "/team" and arg.partition(" ")[0].strip().casefold() == "chart":
             remote_capability = None
         if self._needs_runtime_first(command, arg):
-            # BIND, THEN ROUTE. A COLD viewer — every fresh `lop`, and every
-            # viewer after `/stop` — advertises no capabilities at all, so the
-            # branches below would fall through to the LOCAL handler, whose
-            # attach seam does not exist on a `RemoteSession`, and refuse with
-            # copy that reads as permanent. Measured: engaging takes 1.1–2.8 s,
-            # and a paste-and-Enter at t=0, or Enter typed faster than the warm
-            # engage the first keystroke started, lost the command every time
-            # (review round 1 R2, QA Q2, UX U1/U3).
-            #
-            # The rule is the one a PROMPT already follows: `RemoteSession.
-            # prompt()` calls `_ensure_bound()` first and the runtime it needs
-            # comes into existence. A slash that needs the same runtime gets
-            # the same treatment — engage, then dispatch again against the
-            # capabilities the bound viewer just adopted. Re-entering
-            # `_run_slash_command` rather than calling the routed branch
-            # directly keeps ONE dispatch, so the pullbacks above (`chart`,
-            # `default`, bare `/mcp`) apply identically on the second pass.
+            # A cold facade has no authoritative capability snapshot yet.
+            # Resolve locality from the canonical registry, then re-enter this
+            # SAME dispatch after binding: both typed commands and picker
+            # choices must avoid raw setters that drop or prematurely send.
+            # Local pullbacks (default/chart/bare pickers) remain local, and
+            # recovery/stop retain their existing refusal paths.
             self._bind_then_dispatch(text, attachments)
             return
         if (
@@ -14506,11 +14936,80 @@ class OperatorApp(App[None]):
             # the whole point of the interaction (the old routing opened it in
             # the owner's process, invisible to the user who asked). Choosing a
             # row still routes the switch back to the owner.
+            #
+            # It sits ABOVE the stopped-follower answer below deliberately, so
+            # that answer only ever sees a command carrying an ARGUMENT. The
+            # picker is a local widget over this terminal's own catalogue and
+            # needs no owner, so a stopped session is no reason to refuse it:
+            # placing the guard first swallowed bare ``/model`` (and its
+            # ``/models`` alias) and painted no list, a regression against
+            # 51dc347cd that design D1, QA Q9 and review round 3 all found
+            # independently. Reading which model you are on, and `/model
+            # default`'s config write, both work with no runtime at all.
             if command == "/model" and not arg:
                 self._open_model_picker()
                 return
+            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+                # A viewer that `/stop` ended keeps the owner's LAST capability
+                # list (the sync that would clear it is never coming), so a
+                # routed command reaches `route_shared_slash` and is refused
+                # with "session is reconnecting; try /<cmd> again" — a wait for
+                # something the row above just said was stopped on purpose
+                # (QA round 2, Q5). Answered here with the stopped-state
+                # notice (`/resume <id>`), the same answer the prompt path and
+                # a second `/stop` give. Gated on `is_cold` as well: the id is
+                # recorded before the socket closes, and a still-connected
+                # facade must keep routing so the owner's own reply lands.
+                #
+                # COMMAND-AGNOSTIC BY DESIGN, not by accident of placement:
+                # this answers every routed command that REACHES it — `/goal`,
+                # `/rename`, `/effort`, `/compact` and the ~30 others the owner
+                # advertises — because `route_shared_slash` refuses all of them
+                # identically on `client is None`, with the same misleading
+                # "reconnecting" wording. A `/model`-only guard would have
+                # fixed one command and left every neighbour telling the user
+                # to wait for an owner that is not coming back (review round 3,
+                # MINOR-1; QA Q8 measured the breadth on `/goal`, `/rename`,
+                # `/effort`).
+                #
+                # THREE commands deliberately never reach it, and this branch
+                # does not try to take them back. `_needs_runtime_first` above
+                # routes `/team <name>`, `/agent <name>` and `/credential` into
+                # `_bind_then_dispatch` for any cold facade that can bind, a
+                # stopped one included: those three have no answer to give
+                # until a runtime exists (the credential store IS the runtime's
+                # memory, and an attach stamps the session that builds the next
+                # turn), so engaging one and retrying is a better answer than
+                # "/resume" — and `_bind_then_dispatch` still ends at the same
+                # honest refusal if the facade stays cold. Answering them here
+                # as well would be a second, contradictory answer to a case
+                # main already decides (UX U3). Verified by probe, not
+                # inferred: with a stopped id set, `_needs_runtime_first` is
+                # True for exactly those three argument-bearing forms and False
+                # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
+                # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
+                # The LOCAL pullbacks above are untouched by that breadth:
+                # `/model default`, bare `/mcp` and `/team chart` set
+                # `remote_capability = None` before this branch is entered, so
+                # they never reach it, and bare `/model` is pulled back just
+                # above for the same reason.
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+                return
+
+            route_session = self._session
+            route_generation = getattr(self, "_frontend_session_generation", 0)
 
             async def run_remote_slash() -> None:
+                # A queued operation belongs to its committed session, and an
+                # already-sent operation's receipt must not paint a replacement
+                # opened by /new or /resume while the owner was answering.
+                if (
+                    self._session is not route_session
+                    or getattr(self, "_frontend_session_generation", 0) != route_generation
+                ):
+                    return
                 try:
                     typed_route = cast(
                         Callable[[str, str, Sequence[ImageContent]], Awaitable[Any]], remote_route
@@ -14518,10 +15017,20 @@ class OperatorApp(App[None]):
                     images = resolve_markers(arg, attachments or {})
                     outcome = await typed_route(command.removeprefix("/"), arg, images)
                 except Exception as error:
-                    self._system_notice(str(error), "warning")
+                    if (
+                        self._session is route_session
+                        and getattr(self, "_frontend_session_generation", 0) == route_generation
+                    ):
+                        self._system_notice(str(error), "warning")
                 else:
-                    self._render_authoritative_slash(command, arg, outcome, attachments)
+                    if (
+                        self._session is route_session
+                        and getattr(self, "_frontend_session_generation", 0) == route_generation
+                    ):
+                        self._render_authoritative_slash(command, arg, outcome, attachments)
 
+            if _inline_remote:
+                return run_remote_slash()
             self.run_worker(run_remote_slash(), thread=False, group="session")
             return
 
@@ -14601,6 +15110,8 @@ class OperatorApp(App[None]):
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
             self._cmd_analytics(arg, notice)
+        elif command == "/session":
+            self._cmd_session(arg, notice)
         elif command == "/context":
             block = self._context_block()
             if block is not None:
@@ -15497,6 +16008,58 @@ class OperatorApp(App[None]):
         notice: NoticeFn,
     ) -> None:
         old_label = session.model_label
+        # The DESTINATION is derived from the spec this command resolved, never
+        # re-read from ``session.model_label`` after ``set_model``. On a local
+        # ``Session`` the two agree — ``set_model`` assigns synchronously — but
+        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # session) ``set_model`` only schedules the request as a task and
+        # ``model_label`` keeps reading the owner's frontend-state sync, which
+        # lands on a later tick. Re-reading there printed
+        # ``model: X → X (this session)`` for a switch that DID happen: the
+        # band and the incident were right and the receipt named the old
+        # model. The effort/fast-mode copies below change neither half of the
+        # identity, so this is the same pair ``set_model`` is asked for.
+        new_label = f"{spec.provider}/{spec.model_id}"
+        if not persist_default and bool(getattr(session, "is_cold", False)):
+            # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
+            # viewer after `/stop`) is bound to no runtime, and
+            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # anything — the same silent drop its ``set_goal`` and
+            # ``set_conversation_name`` siblings perform, and deliberately not
+            # changed there: the facade cannot raise from a synchronous setter
+            # every caller treats as fire-and-forget. Now that the receipt is
+            # built from the resolved spec rather than a re-read label, that
+            # drop would print a confident ``old → new (this session)`` for a
+            # switch that never reached anything (QA round 1, Q4). ``is_cold``
+            # is exactly the predicate the facade drops on (no client, or one
+            # that is not connected), so it is asked HERE, before the receipt,
+            # and the answer names the lever that makes the switch possible —
+            # the same wording the `/credential` cold branch uses. The persist
+            # form is exempt: its config write is what the NEXT runtime boots
+            # on, and its receipt claims a saved default, not a switch.
+            if self._stopped_session_id:
+                text_line, kind = self._no_session_notice()
+                self._system_notice(text_line, kind)
+            elif bool(getattr(session, "_recovering", False)):
+                # `is_cold` is a superset of the drop: it is also true while
+                # the facade is redialing an owner that died. There "send a
+                # message" is not the lever — the facade's own answer for the
+                # gap is `_unavailable_reason()` ("session owner is
+                # reconnecting"), the sentence the prompt path already uses
+                # (review round 2, R2-M1).
+                reason = getattr(session, "_unavailable_reason", None)
+                self._system_notice(
+                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    "try /model again in a moment",
+                    "warning",
+                )
+            else:
+                self._system_notice(
+                    "no runtime is running for this session; "
+                    "send a message to start one, then run /model again",
+                    "warning",
+                )
+            return
         # WRITE-ONLY when the default being saved is the model already in force
         # (review round 1, R3/Q1). This is the whole of the bare form, and it is
         # what makes "switches nothing" a true statement rather than a summary
@@ -15507,9 +16070,11 @@ class OperatorApp(App[None]):
         # cleared — so "make this my default" was silently also "drop the route
         # that is currently serving me". A user who wants the fallback withdrawn
         # has the plain `/model <p>/<id>` spelling for exactly that gesture.
-        # Compared on the joined label because that is what the elided form was
-        # derived from, so the two halves cannot disagree by case or spacing.
-        write_only = persist_default and f"{provider}/{model_id}" == old_label
+        # Compared on the joined labels — the RESOLVED spec's against the
+        # session's, both `provider/model_id` — because that is what the elided
+        # form was derived from, so the two halves cannot disagree by case,
+        # spacing, or a hosting alias the spec canonicalises.
+        write_only = persist_default and new_label == old_label
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a
             # user who dropped to `low` for cost did not mean "until I switch
@@ -15633,10 +16198,7 @@ class OperatorApp(App[None]):
             # run-on. "(this session)" is the half that answers "for how long";
             # "from the next turn" answered "starting when", which nothing had
             # asked and which the very next receipt demonstrates anyway.
-            notice(
-                f"model: {old_label} → {session.model_label} "
-                f"(this session){suffix} — {PERSIST_HINT}"
-            )
+            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -15651,12 +16213,16 @@ class OperatorApp(App[None]):
         # new model. Every spelling that switches the session owes the same
         # answer to "starting when".
         #
-        # ``old_label != session.model_label`` because re-selecting the model
-        # already in force is a no-op, and promising that "this one finishes on
-        # the old model" describes a handover that will not happen (D4). The
-        # session layer already declines to re-derive anything for a same-model
-        # write; this is the UI half of that rule.
-        if session.is_streaming and old_label != session.model_label:
+        # ``old_label != new_label`` because re-selecting the model already in
+        # force is a no-op, and promising that "this one finishes on the old
+        # model" describes a handover that will not happen (D4). The session
+        # layer already declines to re-derive anything for a same-model write;
+        # this is the UI half of that rule. Compared against the RESOLVED
+        # label, not a re-read of ``session.model_label``: on a remote session
+        # the re-read still equals ``old_label`` (see ``new_label`` above), so
+        # the mid-turn row never printed for exactly the switches it exists to
+        # qualify.
+        if session.is_streaming and old_label != new_label:
             # ``info``, matching the receipt it qualifies, NOT ``note`` (design
             # review D3). Both rows answer one action, and at ``note`` the
             # subordinate half measured 8.62:1 against the receipt's 4.55:1 —
@@ -15724,12 +16290,10 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
-        # Routed through `_cmd_model`'s selector path rather than reimplemented:
-        # that path validates the provider, resolves the spec, carries the
-        # chosen effort across, re-measures the context and repaints the band.
-        # A second switch implementation here is how the two would drift on the
-        # next change to any of those steps.
-        self._cmd_model(f"{provider}/{model_id}", notice)
+        # Re-enter the normal selector dispatch: local Sessions still use the
+        # local activation path, while viewers await their owner and use its
+        # canonical mutation/receipt rather than a fire-and-forget raw setter.
+        self._run_slash_command(f"/model {provider}/{model_id}")
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
@@ -15810,6 +16374,33 @@ class OperatorApp(App[None]):
         notice("starting session…", "info")
         self._run_session_transition(self._reload_session())
 
+    def _footer_persist_hint(self) -> str:
+        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+
+        The footer's half of U12. The notice above the list stops naming
+        `/model default` in the no-hosting and unknown-hosting setup variants
+        because every `/model` route refuses there — but the footer is a second
+        surface printing the same instruction, and a fix that left it advertising
+        the dead end would only move the trap one row down (visible in the U12
+        before/after frames: the notice was honest and the footer was not).
+
+        The predicate is ``_model_missing_for``, the same one `_cmd_model`'s
+        escape is gated on, so across the three SETUP-STATE variants "the
+        footer offers it" and "the command performs it" cannot drift apart.
+
+        That is the full extent of the claim (code review round 1, R2). It is
+        not a general equivalence: `_cmd_model` ALSO refuses `/model default`
+        when :meth:`_session_runs_elsewhere` is true, and this predicate does
+        not consult it, so on a genuinely remote session the footer still
+        advertises a command that answers with the "run it on the terminal
+        whose launches it should govern" refusal. That case is pre-existing and
+        outside #641's scope — recorded here rather than fixed so the next
+        reader does not take the coupling for wider than it is.
+        """
+        if self._setup_state and not self._model_missing_for:
+            return ""
+        return PERSIST_HINT
+
     def _persist_hint_notice(self) -> str:
         """The line a bare ``/model`` prints above the list.
 
@@ -15830,24 +16421,148 @@ class OperatorApp(App[None]):
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
 
+        The measurement above is about the NOTICE's own last row and about
+        command names spanning a fold — nothing stronger (QA round 1, Q1). An
+        earlier revision of this docstring claimed `/settings` "is never the
+        final token at ANY body width from 38 to 90", which is false: it ends a
+        folded, non-final row in 58 combinations across 27 widths for the
+        ordinary variant (162 across all three), measured through
+        `NoticeBlock.body_budget` (QA round 2, Q5 — the earlier 62/39 came from
+        a harness that is not recoverable from what was written). A clause that
+        continues on the next row is not the defect D8 named; a command the
+        reader must re-join two rows to recover is, and that is what is
+        actually pinned.
+
         The nouns are placed so each pronoun sits beside its antecedent (design
-        review D4): "this" is the model on the band, "the boot default" is
-        restated before "set it" so "it" does not have to reach back past
-        "this". "Boot default" is the ONE noun for the thing `/model default`
-        writes — the receipt says `boot default saved to …` and `/model saved`
-        refuses with `no boot default …` — so the user is never left wondering
-        whether a "saved default" and a "boot default" are two settings
-        (design review round 2, D6).
+        review D4). "Boot default" is the ONE noun for the thing `/model
+        default` writes — the receipt says `boot default saved to …` and
+        `/model saved` refuses with `no boot default …` — so the user is never
+        left wondering whether a "saved default" and a "boot default" are two
+        settings (design review round 2, D6).
+
+        CLAUSE ORDER IS A WRAP CONSTRAINT, not a preference (design review
+        round 2, D8). The old order ended on `· or set it in /settings`, and at
+        the three widths the block actually renders at — body budgets 70/69/76
+        cells for 80/100/120 columns — the fold left `/settings` alone on the
+        last row for most model labels: the row length varies with the label,
+        so a single label measuring clean proves nothing.
+
+        TWO defect classes, not one, and a fix for the first can create the
+        second (design review round 4 D1 / UX round 4 U3). D8's harness scored
+        only LONE-TOKEN LAST ROWS, so the arrangement it picked
+        (`… · /settings edits the boot default too · /model saved reverts to
+        it`) scored a clean 0 while quietly moving the damage into the middle
+        of the block: a row ending on a bare `/model` whose next row opens
+        `saved reverts to it` splits the two-word COMMAND NAME across the fold,
+        which costs the reader exactly what D8 cost them — the command cannot
+        be read off one row. That measured 4 splits over the 9 labels the test
+        carries x the three pristine widths (code review round 2, R18 — the
+        earlier "5 over 11 labels" described a wider matrix than the one that
+        ships as evidence), and the frame shipped as D8's own evidence
+        contained one.
+
+        Both classes are scored now, and the lever turned out to be structural
+        rather than lexical: it is WHERE a two-word command name sits in its
+        clause. A name that OPENS a clause (`/model saved reverts to it`) sits
+        one word from the `·` seam, so it breaks across the fold whenever that
+        seam lands near the margin; a name at the clause's END has ordinary
+        words ahead of it to absorb the fold. So `/model saved` moved to the
+        end of its clause and the pristine split count goes 4 -> 0.
+        `/settings` keeps its leading position because four words follow it
+        either way.
+
+        THE BLOCK RENDERS AT TWO WIDTH FAMILIES AND BOTH ARE MEASURED (QA
+        round 2, Q3). Earlier rounds scored only the PRISTINE family — the
+        widths a `NoticeBlock` takes in a transcript with nothing else in it
+        (block widths 76/75/82 at 80/100/120 columns, body budgets 70/69/76).
+        Once the transcript holds any content the block is `cols - 4` instead
+        (76/96/116, budgets 70/90/110), and that is the family the hint is
+        NORMALLY read at, because a user meets it after they have been working.
+        Measured over the 9 labels the test carries x 3 variants x 3 widths in
+        each family:
+
+        =========================  ========  =========
+        class                      pristine  non-empty
+        =========================  ========  =========
+        C1 lone command last row          0          0
+        C2 split command name             0          3
+        C3 lone ordinary word             2          1
+        =========================  ========  =========
+
+        So the clean 0 that earlier rounds claimed holds at the pristine family
+        only. At the non-empty family C2 is not zero, and the honest
+        justification for the arrangement is a comparison rather than a clean
+        sheet: the D8 arrangement scores C2 4 / C3 2 pristine and C2 2 / C3 1
+        non-empty, so this trades a class the reader cannot act on (a command
+        split across the fold, in the family they see least) against one they
+        can (prose wrapping). Sweeping 80-160 columns at the non-empty family
+        the two arrangements are a wash — the split occupies a narrow band — so
+        the pristine improvement is what is actually bought.
+
+        What is NOT claimed: this does not promise every row ends on a
+        multi-word phrase, and the residual is not a rounding error (design
+        review round 2, D4). An ordinary word can still land alone on the last
+        row — 2 label x width combinations at the pristine family and 1 at the
+        non-empty one, on the test's own 9 labels. That is ordinary prose
+        wrapping rather than the defect these findings are about, and the
+        reader can still read every command off a single row, which is the
+        property being bought — but it is a real cost paid on a real surface,
+        not a hypothetical one. A 2,240-combination search over clause wordings
+        and orders found no arrangement that is clean on all three classes
+        across all three variants, so this is the measured optimum and not a
+        claim of perfection. `test_the_bare_model_notice_does_not_orphan_a_route_token`
+        pins the two that matter, at BOTH families.
 
         The `/model saved` clause is DROPPED in the setup state (UX review
         round 2, U11): that state is by definition the one with no usable boot
         default, and `_cmd_model_saved` refuses there, so naming the route
         would advertise a dead end the app already knows about.
+
+        THE SETUP STATE HAS TWO SHAPES and they get different sentences (UX
+        review round 3, U12). In the no-model variant (`_model_missing_for`
+        set) the `/model` routes genuinely work: `_cmd_model` has an escape
+        that writes config and boots, so the persist hint is live advice. In
+        the no-hosting and unknown-hosting variants there is no model escape at
+        all — `_cmd_model`, `_cmd_model_saved` and the bare `/model default`
+        all fall through to `session is still starting…`, and #625 kept
+        Enter-on-a-row from writing config there for exactly that reason. So
+        naming `/model default` there advertises three dead ends beside the one
+        working route. Those variants get the `/settings` clause ALONE, which
+        is the route that actually resolves, and the splash's `/login` remains
+        the primary next step it always was. Pinned by
+        `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
         session = self._session
         label = session.model_label if session is not None else ""
-        back = "" if self._setup_state else " · /model saved switches back to the boot default"
-        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
+        # Named once: it is the one clause every variant below shares, and the
+        # wrap analysis above measured this exact string.
+        settings_clause = "/settings edits the boot default too"
+        # `/model saved` sits at its clause's END, which is what removes the
+        # split: as the clause's FIRST word it sat one word from the `·` seam
+        # and broke across the fold at 4 of the 27 rendered label x width
+        # combinations the test pins (R18). `/settings` is left leading its own
+        # clause because it is followed by four words, so the fold has slack
+        # after it either way.
+        #
+        # The carrier NAMES ITS DESTINATION (design review round 2, D5). It
+        # read `come back with /model saved`, which put the only mention of
+        # what the user comes back TO at character 95 of 111 — in the following
+        # clause, attached to `/settings` — so a strictly left-to-right reader
+        # met the pronoun before its antecedent, which is what D6/D10 were
+        # filed to prevent. `boot default` now sits at character 59, beside the
+        # command it describes. It also says what the command DOES rather than
+        # naming an occasion to use it (UX review round 2, U6), and it measures
+        # better on both width families, not worse: pristine C3 3 -> 2 and
+        # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
+        saved_clause = "switch to the boot default with /model saved"
+        if self._setup_state and not self._model_missing_for:
+            # No hosting / unknown hosting: every `/model` route refuses here,
+            # so the notice must not name one. `/settings` is the live escape.
+            routes = settings_clause
+        elif self._setup_state:
+            routes = f"{PERSIST_HINT} · {settings_clause}"
+        else:
+            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
         return f"model: {label} — {routes}"
@@ -16416,10 +17131,55 @@ class OperatorApp(App[None]):
                 self._repaint_themed_widgets()
 
     def action_toggle_subagents(self) -> None:
-        """``ctrl+g`` — flip the dock roster between recent and complete."""
-        if self._subagent_panel is not None and self._subagent_panel.display:
-            self._subagent_panel.toggle_expanded(enter_navigation=True)
+        """``ctrl+g`` — cycle the dock subagent panel: full, summary, hidden.
+
+        With overflow the full state has two stops (preview, then the expanded
+        roster with keyboard navigation) before it shrinks; without it the
+        first press goes straight to the summary row — which is the change
+        #525 asked for, since that press used to be a silent no-op at ≤6
+        children. ``_refresh_band`` settles the band inset and the todo budget
+        in the same frame the density changed, so the dock never paints one
+        frame at the old height.
+
+        Gated on ``_panel_holds_children`` rather than ``display``: a HIDDEN
+        panel is not displayed by definition, and the key is the only way
+        back from it.
+        """
+        panel = self._subagent_panel
+        if panel is not None and (panel.display or self._panel_holds_children(panel)):
+            panel.toggle_expanded(enter_navigation=True)
             self._refresh_band()
+
+    @staticmethod
+    def _panel_holds_children(panel: SubagentPanel) -> bool:
+        """Whether a hidden panel would show rows if brought back.
+
+        Through the panel's own ``has_children`` rather than its private
+        ``_rows``: every other app→panel call here goes through a public
+        member, and the accessor is what the todo panel's band budget needs
+        anyway (round 1, F5).
+        """
+        return panel.density is Density.HIDDEN and panel.has_children
+
+    def _apply_dock_density(self) -> None:
+        """Live-apply a changed ``display.dock`` to the mounted panel.
+
+        Honest LIVE scope for the Appearance section (#525 design §5): the
+        page's write and another process's edit both land here. The panel
+        applies it only while the user has not pressed ``ctrl+g`` this
+        session — an explicit choice outranks a file edit, the same rule the
+        todo panel's ``_expanded`` follows — so the apply cannot fight the
+        user, and the band is settled in the same frame either way.
+        """
+        panel = self._subagent_panel
+        if panel is None:
+            return
+        try:
+            panel.seed_density(panel._configured_density())
+        except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
+            logger.debug("display.dock live apply failed", exc_info=True)
+            return
+        self._refresh_band()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -16678,7 +17438,7 @@ class OperatorApp(App[None]):
         notice ends the empty state — which collapses the boot composition and
         makes the centred prompt unreachable.
 
-        The notice is skipped when the ledger's LAST row already says it. The
+        The notice is skipped when the ledger's last ROW ALREADY SAYS IT. The
         message is meant to fire once per visible opening, and the editor now
         keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
         round 2, U8, where each Esc-then-edit cycle stacked another copy). This
@@ -16686,11 +17446,27 @@ class OperatorApp(App[None]):
         opens that produces nothing between them can print the hint twice,
         whatever the editor's resync does in future. Compared on the text, so
         a hint that changed (a switch landed between two opens) still prints.
+
+        THE SCAN SKIPS THE PINNED WORKING LINE (code review round 2, R12). A
+        turn in flight pins its working line to the bottom of the transcript
+        (``TranscriptView.pin_tail``) and every later append is inserted BEFORE
+        it, so mid-turn the hint never lands last and a guard reading only
+        ``blocks()[-1]`` could not match it — the deduplication silently
+        stopped applying in exactly the state where a user re-opening the list
+        while the agent works would stack copies. Walking back over the pinned
+        tail costs one comparison and makes the guard mean what its name says
+        in both states. Only the tail is skipped, not an arbitrary run: two
+        notices with a real block between them are two separate openings and
+        must both print.
         """
         message.stop()
         hint = self._persist_hint_notice()
-        blocks = self._transcript_view().blocks()
-        last = blocks[-1] if blocks else None
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        pinned = transcript.pinned_tail()
+        # The last block that is not the pinned working line — which is where a
+        # mid-turn append actually lands.
+        last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
             self._system_notice(hint)
         self._populate_model_picker()
@@ -16746,7 +17522,9 @@ class OperatorApp(App[None]):
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
             status=_status_line(
-                note, "checking providers…" if self._providers else "", PERSIST_HINT
+                note,
+                "checking providers…" if self._providers else "",
+                self._footer_persist_hint(),
             ),
         )
         if self._providers is not None:
@@ -16778,7 +17556,9 @@ class OperatorApp(App[None]):
                 rows,
                 current=self._current_selector(),
                 status=_status_line(
-                    note, f"{STALE_LIST_LABEL} all providers — {error}", PERSIST_HINT
+                    note,
+                    f"{STALE_LIST_LABEL} all providers — {error}",
+                    self._footer_persist_hint(),
                 ),
             )
             return
@@ -16786,7 +17566,7 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
+            status=_status_line(note, _catalogue_status(statuses), self._footer_persist_hint()),
         )
 
     def _publish_model_catalogue(self, session: Any) -> None:
@@ -17041,7 +17821,9 @@ class OperatorApp(App[None]):
             notice(f"{row.provider} needs a login first — starting it now", "warning")
             self._cmd_login(row.provider, notice)
             return
-        self._cmd_model(row.selector, notice)
+        # A picker choice is the same commitment as a typed selector. Bypassing
+        # dispatch here called the facade's raw setter before it had an owner.
+        self._run_slash_command(f"/model {row.selector}")
 
     # -- goal / loop --------------------------------------------------------
     def _cmd_goal(self, arg: str, notice: NoticeFn) -> None:
@@ -17278,8 +18060,11 @@ class OperatorApp(App[None]):
                     crashed = True
                     break
                 finally:
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    # Through the shared gate, not a bare write: on a follower
+                    # this `finally` runs on the owner's ACK, mid-turn, and the
+                    # bare write published `lo ›` for a turn still running (see
+                    # `_retire_turn_band`).
+                    self._retire_turn_band(session)
                     # The SAME retirement the composer's turn gets. A loop
                     # iteration is an ordinary turn as far as the transcript is
                     # concerned — it mounts a working line and opens the latch —
@@ -17396,8 +18181,7 @@ class OperatorApp(App[None]):
                 try:
                     await session.prompt(prompt, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    self._retire_turn_band(session)
                     # Same helper, same reason as the numeric worker: a held
                     # goal loop is the MOST unattended surface in the app, and
                     # it was printing a bare `str(error)` (review U6).
@@ -17422,8 +18206,7 @@ class OperatorApp(App[None]):
                 completed += 1
                 # --- yield boundary reached: judge the settled turn ---
                 if self._loop_cancelled or session is not self._session:
-                    if self._status is not None:
-                        self._status.update(streaming=False)
+                    self._retire_turn_band(session)
                     break
                 # Keep the status in a working state ACROSS the judge call. The
                 # judge is a real `complete_aside` network round-trip that can
@@ -17431,8 +18214,7 @@ class OperatorApp(App[None]):
                 # `loop N` and `loop N+1` while it is in fact spending tokens on
                 # the verdict. Cleared once the verdict is in hand (below).
                 achieved, reason = await self._judge_goal(session, goal)
-                if self._status is not None:
-                    self._status.update(streaming=False)
+                self._retire_turn_band(session)
                 if achieved is True:
                     released = True
                     break
@@ -18094,6 +18876,57 @@ class OperatorApp(App[None]):
         self.push_screen(
             AnalyticsScreen(aggregate, daily=daily, monthly=monthly, window_totals=window_totals)
         )
+
+    def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
+        """Read only this session's ledger; never interpret arguments as a prompt."""
+        from local_operator.tui.widgets.session_panel import (
+            SessionDiagnostics,
+            SessionScreen,
+        )
+
+        if arg.strip():
+            self._system_notice(
+                "/session takes no arguments; it reports the current session", "warning"
+            )
+            return
+        session = self._session
+        if session is None:
+            self._system_notice("session is not ready yet", "warning")
+            return
+        # Capture mutable identity and model selection BEFORE yielding. A /new
+        # or /resume during the disk read must not put an old bill over a new
+        # conversation. Object identity also catches resuming the same ID.
+        runtime = SessionDiagnostics.capture(session)
+        # Own a visible, cancellable surface before starting IO. A late disk
+        # result must update this surface, never push over a user's new draft.
+        screen = SessionScreen(None, runtime)
+        self.push_screen(screen)
+        self.run_worker(
+            self._open_session_report_worker(session, runtime, screen),
+            thread=False,
+            group="session-report",
+            exclusive=True,
+        )
+
+    async def _open_session_report_worker(
+        self, session: SessionProtocol, runtime: SessionDiagnostics, screen: SessionScreen
+    ) -> None:
+        from local_operator.analytics import AnalyticsStore
+
+        report = await asyncio.to_thread(AnalyticsStore().session_report, runtime.session_id)
+        if screen.presentation_cancelled or screen not in self.screen_stack:
+            return
+        if self._session is not session or session.session_id != runtime.session_id:
+            screen.invalidate()
+            return
+        # A mirrored facade may survive an owner replacement for the SAME ID.
+        # Its public epoch, unlike the per-event sequence, changes only across
+        # that lifecycle boundary and must not invalidate ordinary live usage.
+        state = getattr(session, "frontend_state", None)
+        if runtime.epoch is not None and getattr(state, "epoch", None) != runtime.epoch:
+            screen.invalidate()
+            return
+        screen.set_report(report)
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""
@@ -20261,7 +21094,10 @@ class OperatorApp(App[None]):
         lines.append(_key_row("shift+tab", "cycle reasoning effort"))
         lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
-        lines.append(_key_row("ctrl+g", "expand or collapse the subagent panel"))
+        # 46 cells (66 composed) against the 74-cell ceiling: names the three
+        # stops so a user who only ever saw "expand/collapse" learns the panel
+        # can now shrink to a row or go away (#525).
+        lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "open an aside; ctrl+f forks it in"))
         # Directly under `ctrl+b`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
@@ -20559,6 +21395,7 @@ class OperatorApp(App[None]):
         images: list[Any] | None = None,
         *,
         locality: str = "local",
+        consumers: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -20580,9 +21417,74 @@ class OperatorApp(App[None]):
 
         Only the commands a follower routes land here; process/terminal
         commands stay local and never reach this dispatcher.
+
+        ``consumers`` is which action-carrying receipts the invoking client
+        renders itself; see :meth:`_complete_unconsumed_action`.
         """
         result = await self._slash_result(command, args, images, locality)
+        result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
+
+    def _complete_unconsumed_action(
+        self,
+        result: Any,
+        wire_images: list[Any] | None,
+        consumers: Iterable[str] | None,
+    ) -> Any:
+        """The TUI-hosted owner's half of the runtime's completion path.
+
+        A session is owned either by a detached runtime or by THIS app, and
+        both hosts must agree — the same mirror contract
+        ``_team_attach_slash_result`` keeps with ``owned.py``. So the rule is
+        identical to ``OwnedSessionHandle._complete_unconsumed_action``: a
+        request-carrying attach receipt whose type the client did NOT declare
+        is submitted here, because that client will not submit it and would
+        otherwise drop it in silence.
+
+        Submission goes through :meth:`_submit_prompt` rather than
+        :meth:`_submit_command_prompt`, and that choice is load-bearing.
+        ``_submit_command_prompt`` re-resolves ``[Image #N]`` markers against
+        the COMPOSER's attachment map, which owner-side does not exist for a
+        request typed in another terminal — it would drop the wire images
+        entirely. ``_submit_prompt`` takes decoded image blocks directly,
+        paints the user row once, and keeps the echo registry consistent. Its
+        own streaming branch steers when a turn is running, so the busy
+        behaviour matches the runtime's for free.
+
+        Synchronous because every step is: this already runs on the app loop,
+        and ``_submit_prompt`` dispatches its own worker.
+        """
+        # Imported here rather than at module scope: both live under the
+        # runtime package, which the TUI otherwise touches only lazily (the
+        # handle at ``_mobile_handle`` does the same), and this method runs
+        # only when a follower routes a slash command to a TUI-hosted owner.
+        from local_operator.session.runtime.server import image_blocks
+        from local_operator.session.runtime.types import runtime_must_complete
+
+        if getattr(result, "kind", None) != "notice":
+            return result
+        data = getattr(result, "data", None) or {}
+        receipt_type = data.get("type")
+        # THE SAME predicate the runtime host applies, imported rather than
+        # restated: the two hosts must answer identically, and a second copy
+        # is free to drift toward double-submitting on this path alone.
+        if not runtime_must_complete(receipt_type, consumers):
+            return result
+        request = str(data.get("request") or "")
+        if not request:
+            return result
+        try:
+            images = image_blocks(wire_images)
+            self._submit_prompt(request, images, None, typed=request)
+        except Exception as exc:  # noqa: BLE001 — the attach landed; name what did not
+            logger.debug("completing an unconsumed slash action failed", exc_info=True)
+            return result.model_copy(
+                update={
+                    "text": f"{result.text} — but the request was not sent: {exc}",
+                    "style": "warning",
+                }
+            )
+        return result
 
     async def _slash_result(
         self, command: str, args: str, images: list[Any] | None, locality: str = "local"
@@ -21132,6 +22034,10 @@ class OperatorApp(App[None]):
                 kind="notice", text=f"cannot resolve {provider}: {error}", style="error"
             )
         old_label = session.model_label
+        # Destination from the RESOLVED spec, not a re-read of the session's
+        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # ``set_model`` asynchronously and its label follows the owner's sync.
+        new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
             self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
             explicit=True,
@@ -21144,10 +22050,7 @@ class OperatorApp(App[None]):
         # repaints from the canonical update — the receipt below only has to
         # reach the invoker. Mid-turn timing is stated by the owner-side
         # notice path (the streamed turn's own events carry it).
-        text = (
-            f"model: {old_label} → {session.model_label} "
-            f"(this session){suffix} — {PERSIST_HINT}"
-        )
+        text = f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}"
         if warning:
             text = f"{text}\n{warning}"
         return SlashResult(kind="notice", text=text, style="info")
@@ -22090,8 +22993,11 @@ class OperatorApp(App[None]):
         #    in-process `Session` this is already False when `prompt()` returns
         #    (`_run_turn`'s finally clears it before the pipeline flushes the
         #    held end), so it never suppresses a genuine fallback — and a
-        #    follower needs none, since an owner death or a `/stop` synthesises
-        #    a real aborted `AgentEndEvent` locally.
+        #    follower needs none, since an owner death, a `/stop`, or the
+        #    viewer going cold (`_go_cold`, #642) each synthesise a real
+        #    aborted `AgentEndEvent` locally. The turn worker's own band write
+        #    applies this SAME predicate at worker time, so the band holds
+        #    `working` exactly as long as this guard keeps the turn open.
         if self._session is not None and getattr(self._session, "is_streaming", False):
             return
         # 3. NOTHING TO FALL BACK FOR. A fallback is only meaningful for a turn
@@ -22378,8 +23284,9 @@ class OperatorApp(App[None]):
         # same turn (review R4). The turn is fully retired by the work above;
         # only the announcement waits for the route that knows.
         #
-        # NOT a silence hole: a follower whose owner dies or is stopped gets a
-        # real aborted `AgentEndEvent` synthesised locally
+        # NOT a silence hole: a follower whose owner dies, is stopped, or whose
+        # viewer goes cold with no successor (`_go_cold`, #642) gets a real
+        # aborted `AgentEndEvent` synthesised locally
         # (`RemoteSession._end_turn_locally`), which reaches this method through
         # `on_turn_ended` and settles the ladder. The abandoned route is the
         # fallback for a turn NOBODY ends, and on a follower that is precisely
@@ -23623,6 +24530,13 @@ class OperatorApp(App[None]):
         pass
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
+        # BEFORE the refresh, so the re-emerged summary row paints in the same
+        # band pass that reads the failure — a hidden panel that came back one
+        # frame later would be a dock height jump (#525 design §2/§8). Only a
+        # FAILURE breaks through a hidden dock; cancelled and interrupted are
+        # not failures and leave the user's choice alone.
+        if message.status == "failed" and self._subagent_panel is not None:
+            self._subagent_panel.note_child_failed()
         self._refresh_band()
         # The last child settling is the moment a deferred completion becomes
         # true: the parent stopped talking earlier, and now the delegated work
@@ -23708,6 +24622,28 @@ def _canonical_frontend(session: Any) -> bool:
     """
     attributes = getattr(session, "__dict__", {})
     return "_frontend_state_store" in attributes or "_frontend_store" in attributes
+
+
+def _build_change(before: Any, after: Any) -> str:
+    """How one build differs from another, without repeating what they share.
+
+    The headline case for drift is ``lop-update`` rebuilding from ``main``
+    WITHOUT a version bump, so both sides carry the same version and differ
+    only in the recorded commit. Two full labels then spend the sentence's most
+    prominent parenthetical restating one version:
+    ``0.48.0@aaaaaaa → 0.48.0@bbbbbbb``. The refs are the only distinguishing
+    fact there and must stay, but the version belongs outside the arrow:
+    ``0.48.0, aaaaaaa → bbbbbbb`` (design review round 1, D3).
+
+    When the versions genuinely differ the two-arm form is the honest one and
+    is kept. Deliberately a CALL-SITE formatter rather than a change to
+    ``BuildStamp.label()``: that method has other callers whose single-build
+    rendering is correct as it is.
+    """
+    same_version = before.version and before.version == after.version
+    if same_version and before.source_ref and after.source_ref:
+        return f"{before.version}, {before.source_ref[:7]} \u2192 {after.source_ref[:7]}"
+    return f"{before.label()} \u2192 {after.label()}"
 
 
 def _model_spec(session) -> Any | None:

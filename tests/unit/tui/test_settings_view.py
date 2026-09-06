@@ -4954,3 +4954,45 @@ async def test_page_reads_a_garbage_master_switch_the_way_the_policy_does(tmp_pa
             theme_mod.semantic_color("dim").lower()
         )
         assert "inert: Session cleanup is off" in view.render_lines_for_test()[-1]
+
+
+@pytest.mark.asyncio
+async def test_subagent_dock_row_renders_in_appearance_with_its_three_choices(
+    tmp_path: Path,
+) -> None:
+    """#525 case 8: the ``display.dock`` row is on the page, in Appearance, and
+    expanding it offers exactly ``full | summary | hidden`` — the enum's own
+    vocabulary, not the issue's ``compact``/``off``. Committing a choice writes
+    the FLAT-DOTTED key, which is the trap the registry's path guards."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        index = _select(view, "display.dock")
+        lines = view.render_lines_for_test()
+        row = lines[index + 2]
+        assert "Subagent dock" in row and "full" in row, row
+        # The row sits under the Appearance header, not Session.
+        headers = [
+            (offset, line)
+            for offset, line in enumerate(lines[: index + 2])
+            if line.strip().lower().startswith("appearance") or line.strip().lower() == "session"
+        ]
+        assert headers and headers[-1][1].strip().lower().startswith("appearance"), headers
+
+        view.action_activate()
+        await pilot.pause()
+        assert view._expanded == "display.dock"
+        choices = [row.choice.value for row in view._rows if row.kind == "choice"]
+        assert choices == ["full", "summary", "hidden"], choices
+
+        for offset, row in enumerate(view._rows[index + 1 :], start=index + 1):
+            if row.kind == "choice" and row.choice.value == "hidden":
+                view._selected = offset
+                break
+        view.action_activate()
+        await pilot.pause()
+        assert _values(tmp_path)["display.dock"] == "hidden"
+        assert "display" not in _values(tmp_path)

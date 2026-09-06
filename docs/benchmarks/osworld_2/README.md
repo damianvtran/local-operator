@@ -15,8 +15,10 @@ decision and no score existed at that point. The dated observations under
 [Status and honest limitations](#status-and-honest-limitations) preserve that
 baseline, not the current episode count. See [the matched-model pilot ledger](MODEL_PILOT.md)
 for subsequent attempts, current apparatus validation and reference caveats.
-Neither an individual score nor the offline checks below establish a full-suite
-benchmark result.
+See the [ten-task developmental pilot](PILOT10_2026_09_05.md) for the frozen
+sample, all ten first attempts, confirmed completion, costs, and apparatus
+amendments. Neither an individual score nor the offline checks below establish
+a full-suite benchmark result.
 
 ## 1. The benchmark
 
@@ -24,8 +26,9 @@ OSWorld 2.0 (`osworld-v2-2026.08.08`) is a computer-use benchmark of **108
 long-horizon workflows** on a real Ubuntu desktop. Upstream reports a median
 human completion time of about 1.6 hours per task and an average of ~318 tool
 calls for a frontier model, against about 30 in OSWorld 1.0; its headline
-figures are quoted **under a binary-completion metric at 500 steps**, where
-the best reported model completes 20.6% of tasks (54.8% partial). Tasks are
+figures in the original paper are quoted **under a binary-completion metric at
+500 steps**, with 20.6% completion (54.8% partial) for its best reported
+configuration. That historical paper result is not a current frontier claim. Tasks are
 scored by per-task Python evaluators shipped with the corpus, averaging 27.25
 scoring checkpoints per task.
 
@@ -128,6 +131,10 @@ neither creates nor repairs one — and it must allow inbound TCP from the
   (`chromium_port`, default 9222).
 - **5910** — noVNC web access, optional, for a human watching a guest.
   Upstream logs a `http://<ip>:5910/vnc.html` URL for AWS instances.
+- **3000 and 8000** — V2 task services, explicitly required in the pinned
+  upstream README in addition to the standard backend/control ports. The
+  ten-task pilot's dated report records when the staged group was corrected;
+  do not imply those ports were open for every earlier attempt.
 
 These are unauthenticated services on a public IP. A `0.0.0.0/0` rule on 5000
 hands anyone on the internet full control of a desktop that is executing a
@@ -358,7 +365,60 @@ build that does not declare it fails the episode before `prepare` with
 disclosure is a false statement sealed in a `verify_bundle`-valid bundle. Both
 the gate and the stamp derive from a single table
 (`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
-so a future third value cannot be gated without being disclosed or vice versa.
+so a future value cannot be gated without being disclosed or vice versa.
+
+### Explicit system proxy policy
+
+`--infra OSWORLD_ENABLE_PROXY=false` in `benchmark_compute` scope selects
+upstream's supported system-disabled mode. Only the exact lowercase strings
+`true` and `false` are accepted; malformed values or the wrong scope fail at
+`prepare`, before provider construction or allocation, even before a task is
+loaded. This is apparatus policy, not a task edit or a task-ID exception.
+
+For episodes that also need simulator configuration, the generic CLI accepts
+an optional per-value purpose prefix, without changing the global default:
+
+```sh
+--infra-purpose benchmark_compute \
+  --infra AWS_REGION=us-east-1 \
+  --infra benchmark_compute:OSWORLD_ENABLE_PROXY=false \
+  --infra benchmark_user_simulator:OSWORLD_USER_SIM_MODEL=<simulator-model>
+```
+
+Legacy `NAME=VALUE` entries still use `--infra-purpose` (default
+`benchmark_compute`). A prefix applies only to that entry. Unknown purposes,
+empty names/values, and conflicting entries for the same name (including across
+scopes) fail cleanly before selector loading/allocation without printing their
+values; identical duplicates coalesce. Purpose-prefixed policy and hardware
+inputs receive the same manifest disclosures as unprefixed inputs. Values stay
+non-secret; simulator API keys still travel through the existing secret path.
+
+Omitting the value preserves the adapter's existing behavior:
+`enable_proxy=bool(task.proxy)`. Explicit `true` sets the upstream system switch
+on; upstream still combines it with the task's proxy hint. Explicit `false`
+sets the switch off regardless of that hint, and post-policy requirements no
+longer demand `OSWORLD_PROXY_CREDENTIALS` or `OSWORLD_PROXY_ENDPOINT`.
+
+**Enabled setup remains incomplete.** The legacy credential/endpoint declarations
+are retained for omission and enabled proxy tasks for compatibility, but are
+insufficient: upstream expects an actual `ProxyPool`; the adapter does not wire
+those `OSWORLD_PROXY_*` inputs into one. Setting `true` or supplying those inputs
+is not proof of a working proxy. A real enabled setup needs a separately reviewed
+follow-up; this change builds no proxy bridge and fabricates no credentials.
+
+The requested switch is sealed as `osworld_enable_proxy_override` via the same
+manifest disclosure table as the compute overrides. An older adapter that does
+not declare the optional `OSWORLD_ENABLE_PROXY` requirement is refused before
+`prepare`, rather than silently applying its old behavior under a false disclosure.
+Omission adds no override metadata and remains compatible with older selectors;
+no adapter wire-schema change is required.
+
+Disabling proxy does **not** establish direct-network adequacy or benchmark
+comparability. Record the changed apparatus before outcomes, verify necessary
+guest network access separately, and classify blocked access as an infrastructure
+failure rather than inventing credentials or silently changing policy. Local
+validation here uses captured provider constructor arguments and fake-provider
+CLI episodes, not cloud/network validation.
 
 ### Guest disk reclamation at episode start
 

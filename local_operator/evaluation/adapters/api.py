@@ -82,10 +82,13 @@ from local_operator.evaluation.receipts import (
 # 1.5 advertises clipboard paste and the native text execution restriction.
 # Exact negotiation rejects old workers before prepare/reset can allocate, rather
 # than discovering an unknown action after a preceding click has already applied.
-ADAPTER_SCHEMA_VERSION = "1.5"
+# 1.6 makes answer ownership explicit and binds the public answer to its request.
+# Canonical replies gain fields, so mixed peers must fail during hello in
+# either direction, before any environment allocation or simulator invocation.
+ADAPTER_SCHEMA_VERSION = "1.6"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.5"]
+SchemaVersion: TypeAlias = Literal["1.6"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -192,6 +195,9 @@ class AdapterSelector(ProtocolModel):
 class AdapterCapabilities(ProtocolModel):
     routes: tuple[RouteCapability, ...] = Field(min_length=1, max_length=3)
     ask_user: bool
+    # Generic adapters retain their host responder; simulator ownership must be
+    # advertised separately rather than inferred from support for the action.
+    ask_user_answer_owner: Literal["host", "adapter"] = "host"
     scoring: bool
     paste_text: bool = False
     type_text_mode: Literal["unicode", "ascii"] = "unicode"
@@ -210,6 +216,8 @@ class AdapterCapabilities(ProtocolModel):
 
     @model_validator(mode="after")
     def _unique_routes(self) -> "AdapterCapabilities":
+        if self.ask_user_answer_owner == "adapter" and not self.ask_user:
+            raise ValueError("adapter answer ownership requires ask_user support")
         if len(self.routes) != len(set(self.routes)):
             raise ValueError("adapter routes must be unique")
         return self
@@ -639,10 +647,35 @@ class AskUserExchangeParams(OperationParams):
     prompt: str = Field(min_length=1, max_length=100_000)
     answer: str | None = Field(default=None, min_length=1, max_length=100_000)
 
+    @field_validator("answer")
+    @classmethod
+    def _nonblank_answer(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("a public answer must be nonempty")
+        return value
+
+    @property
+    def request_digest(self) -> Digest:
+        # Completion data may vary, but the episode, ask identity and exact
+        # public prompt must remain bound across the process boundary.
+        return canonical_digest(
+            "adapter-ask-user-request-v1",
+            self.model_dump(mode="json", exclude={"operation_id", "answer"}),
+        )
+
 
 class AskUserExchangeResult(ProtocolModel):
     ask_id: StrictIdentifier
+    request_digest: Digest
     accepted: bool
+    # Only the public reply crosses the boundary, never simulator state/profile.
+    answer: str | None = Field(default=None, min_length=1, max_length=100_000)
+
+    @model_validator(mode="after")
+    def _public_answer(self) -> "AskUserExchangeResult":
+        if self.answer is not None and (not self.accepted or not self.answer.strip()):
+            raise ValueError("a public answer must be nonempty and accepted")
+        return self
 
 
 class ScoreParams(OperationParams):

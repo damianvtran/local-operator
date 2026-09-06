@@ -24,11 +24,16 @@ from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.events import SubagentEnded, SubagentStarted
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.status_line import format_agents
 from local_operator.tui.widgets.subagent_panel import (
     MAX_SUBAGENT_ROWS,
+    Density,
     SubagentPanel,
     SubagentRow,
+    SummaryCounts,
+    compose_summary,
 )
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
 
@@ -263,6 +268,11 @@ class _Job:
         # does not think about it says "never ran" — the same default the real
         # model carries, and the discriminator ``cancel()`` stamps on.
         self.started_at: float | None = None
+        # Mirrors ``AsyncJob.queued``: admitted to the ledger but held behind
+        # the capacity gate, which carries ``status == "running"`` while not
+        # actually running. Declared so a test can set it without inventing an
+        # attribute the real model has.
+        self.queued: bool = False
         self.result_text: str | None = None
         self.error_text: str | None = None
         self.settled_at: float | None = None
@@ -337,7 +347,11 @@ async def test_band_panels_hidden_when_empty_and_shown_when_populated() -> None:
 @pytest.mark.asyncio
 async def test_subagent_panel_bounds_to_newest_slice_and_expands_in_start_order() -> None:
     """The default roster preserves the relevant tail without reversing it;
-    its keyboard disclosure reveals every retained child and collapses back."""
+    its keyboard disclosure reveals every retained child, and the press after
+    that collapses the roster AND shrinks the panel to the summary row in one
+    step (#525 design §1: the roster's collapse is folded into the forward
+    cycle rather than being a fourth stop). The press after that hides it,
+    and the one after brings the preview back exactly as it was."""
     session = FakeSession()
     jobs = [_Job(f"sub-{index:02d}", f"task {index:02d}") for index in range(1, 13)]
     session.jobs = _fake_jobs(*jobs)
@@ -361,11 +375,25 @@ async def test_subagent_panel_bounds_to_newest_slice_and_expands_in_start_order(
         assert [row.job_id for row in panel.query(SubagentRow) if row.display] == [
             f"sub-{index:02d}" for index in range(1, 13)
         ]
-        assert str(panel._affordance.content) == "ctrl+g to collapse"
+        assert str(panel._affordance.content) == "ctrl+g to shrink"
 
         await pilot.press("ctrl+g")
         await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert panel._expanded is False
+        assert [row.job_id for row in panel.query(SubagentRow) if row.display] == []
+        assert app.focused is app.query_one(Editor)
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert panel.display is False
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.FULL
         assert [row.job_id for row in panel.query(SubagentRow) if row.display] == visible
+        assert str(panel._affordance.content) == "+6 earlier · ctrl+g to expand"
 
 
 @pytest.mark.asyncio
@@ -397,12 +425,39 @@ async def test_clicking_subagent_disclosure_preserves_composer_focus_and_input()
         await pilot.press("x")
         assert editor.text == "draftx"
 
+        # The second click on the affordance is the forward cycle: collapse
+        # AND shrink to the summary row, with the composer still focused.
         await pilot.click("#subagent-affordance")
         await pilot.pause()
         assert app.focused is editor
-        assert app.query_one(SubagentPanel)._expanded is False
+        panel = app.query_one(SubagentPanel)
+        assert panel._expanded is False
+        assert panel.density is Density.SUMMARY
         await pilot.press("y")
         assert editor.text == "draftxy"
+
+        # The header is the pointer target in every density (#525 design §3):
+        # in summary the affordance row is gone, so the caption is what the
+        # user has to click to keep cycling, and it too leaves the draft alone.
+        await pilot.click("#subagent-header")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert app.focused is editor
+        await pilot.press("z")
+        assert editor.text == "draftxyz"
+        # Hidden has no header to click; the key is the way back.
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.FULL
+        assert panel._expanded is False
+        await pilot.click("#subagent-header")
+        await pilot.pause()
+        # With overflow the header click is the expand step, same as the key
+        # would be, and still does not enter navigation.
+        assert panel._expanded is True
+        assert app.focused is editor
+        await pilot.press("w")
+        assert editor.text == "draftxyzw"
 
 
 @pytest.mark.asyncio
@@ -1273,10 +1328,610 @@ async def test_ctrl_g_still_reaches_every_child_from_the_compact_roster() -> Non
         # the transcript — but it must still leave the composer on screen.
         assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
 
+        # The press after the expanded roster collapses it AND shrinks the
+        # panel to the summary row (#525 cycle), which on this short screen
+        # is the strongest form of "gives the conversation its rows back".
         await pilot.press("ctrl+g")
         for _ in range(8):
             await pilot.pause()
-        assert sum(1 for row in panel._rows.values() if row.display) == collapsed_visible
+        assert panel.density is Density.SUMMARY
+        assert sum(1 for row in panel._rows.values() if row.display) == 0
         assert (
             app.query_one("#transcript").size.height > 0
         ), "collapsing did not give the conversation its rows back"
+        # Two more presses round the cycle: hidden, then the preview as it was.
+        await pilot.press("ctrl+g")
+        await pilot.press("ctrl+g")
+        for _ in range(8):
+            await pilot.pause()
+        assert panel.density is Density.FULL
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+        # Coming back from hidden is the ARRIVAL path — the todo list grew into
+        # the rows while the panel was gone, and the two slots re-divide the
+        # band over the next polls exactly as they do on `main` when a roster
+        # first appears beside a docked plan (`slot_rows` keeps the larger of
+        # measured and predicted, so the todo's stale height withholds rows
+        # for a frame). Converge through the poll rather than asserting the
+        # first frame; the settled preview must be the one the session began on.
+        for _ in range(4):
+            app._refresh_band()
+            for _ in range(4):
+                await pilot.pause()
+        assert sum(1 for row in panel._rows.values() if row.display) == collapsed_visible
+
+
+async def _boot_with_jobs(app: OperatorApp, pilot: Any) -> SubagentPanel:
+    """Wait for the session, paint the band, and return the panel."""
+    for _ in range(80):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    app._refresh_band()
+    for _ in range(4):
+        await pilot.pause()
+    return app.query_one(SubagentPanel)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_g_cycles_full_summary_hidden_with_three_children() -> None:
+    """#525 case 1: the common ≤6-child roster, where the key used to no-op.
+
+    Every stop is checked against the geometry the app budgets from
+    (``predicted_rows``: header+3 → 1 → not displayed → header+3) and against
+    the screen never becoming scrollable, the invariant the band tests share.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(*[_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        editor = app.query_one(Editor)
+        assert panel.density is Density.FULL
+        assert panel.predicted_rows() == 4
+        # No overflow, so the hint lives in the caption (design §3).
+        # A gap, not the counts' ` · ` seam, so the hint does not scan as a
+        # statistic beside the label (round 1, D3).
+        assert panel.summary_text() == "Subagents   ctrl+g"
+        assert panel._affordance.display is False
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert panel.display is True
+        assert panel.predicted_rows() == 1
+        assert panel._list.display is False
+        assert panel.summary_text().startswith("Subagents · 3 running ")
+        assert panel.summary_text().endswith(" · ctrl+g")
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+        assert app.focused is editor
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert panel.display is False
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+        # The 1 Hz poll must not un-hide it (design §8).
+        app._refresh_band()
+        await pilot.pause()
+        assert panel.display is False
+        assert panel._spinner_timer is None, "a hidden panel must not keep ticking"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.FULL
+        assert panel.display is True
+        assert panel._expanded is False
+        assert panel.predicted_rows() == 4
+        assert sum(1 for row in panel._rows.values() if row.display) == 3
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+        assert panel._spinner_timer is not None, "running rows must animate again"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_g_with_overflow_expands_then_summarises_then_hides() -> None:
+    """#525 case 2: with 30 children the full state has two stops.
+
+    Expanded enters navigation (focus on a row, as before); the NEXT press
+    leaves navigation, collapses the roster and shrinks to summary in one
+    step; then hidden; then the preview.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(*[_Job(f"sub-{n:02d}", f"task {n:02d}") for n in range(1, 31)])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        editor = app.query_one(Editor)
+        # With overflow the affordance says the hint; the caption does not
+        # repeat it.
+        assert panel.summary_text() == "Subagents"
+        assert str(panel._affordance.content) == "+24 earlier · ctrl+g to expand"
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel._expanded is True
+        assert isinstance(app.focused, SubagentRow)
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert panel._expanded is False
+        assert app.focused is editor
+        assert panel.predicted_rows() == 1
+        # The spinner frame between the count and the hotkey varies per tick.
+        text = panel.summary_text()
+        assert text.startswith("Subagents · 30 running ") and text.endswith(" · ctrl+g")
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert panel.display is False
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.FULL
+        assert panel._expanded is False
+        assert sum(1 for row in panel._rows.values() if row.display) == 6
+        assert str(panel._affordance.content) == "+24 earlier · ctrl+g to expand"
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+
+
+def test_summary_row_counts_each_state_and_sheds_segments_in_order() -> None:
+    """#525 case 3: the summary row's content and its width ladder.
+
+    Zero segments are omitted, the spinner is present iff something is
+    running, and shedding drops whole segments in the documented order
+    without ever truncating into ``ctrl+g``.
+    """
+    counts = SummaryCounts(running=1, queued=2, done=3, failed=1, cancelled=1, interrupted=1)
+    wide = compose_summary(counts, spinner_glyph="⣾", width=200).plain
+    assert wide == (
+        "Subagents · 1 running ⣾ · 3 done · 1 failed · 2 queued · 1 cancelled · 1 interrupted"
+        " · ctrl+g"
+    )
+    # Ink: `failed` is the only danger segment; the hotkey is muted.
+    row = compose_summary(counts, spinner_glyph="⣾", width=200)
+    assert _ink(_style_at(row, "1 failed")) == theme_mod.semantic_color("danger")
+    assert _ink(_style_at(row, "ctrl+g")) == theme_mod.semantic_color("muted")
+    assert _ink(_style_at(row, "3 done")) == theme_mod.semantic_color("dim")
+
+    # Zero counts are omitted, and no spinner when nothing runs.
+    settled = compose_summary(SummaryCounts(done=4, failed=1), spinner_glyph="", width=200).plain
+    assert settled == "Subagents · 4 done · 1 failed · ctrl+g"
+    assert "⣾" not in settled and "running" not in settled
+
+    # The ladder, from a width that fits everything down to one that fits
+    # only the compressed failed glyph and the hotkey. Each step is a strict
+    # subset of the segments before it and the hotkey is always intact.
+    floor = "⣾ · ✗1 · ctrl+g"
+    seen: list[str] = []
+    for width in range(len(wide), 8, -1):
+        text = compose_summary(counts, spinner_glyph="⣾", width=width).plain
+        assert text.endswith("ctrl+g"), (width, text)
+        # Below the floor there is nothing left to shed; the renderer clips.
+        assert len(text) <= width or text == floor, (width, text)
+        if not seen or seen[-1] != text:
+            seen.append(text)
+    # The documented order: cancelled, interrupted, queued, done, label,
+    # running count (glyph stays), failed count (glyph stays).
+    assert seen[0] == wide
+    assert (
+        seen[1] == "Subagents · 1 running ⣾ · 3 done · 1 failed · 2 queued · 1 interrupted · ctrl+g"
+    )
+    assert seen[2] == "Subagents · 1 running ⣾ · 3 done · 1 failed · 2 queued · ctrl+g"
+    assert seen[3] == "Subagents · 1 running ⣾ · 3 done · 1 failed · ctrl+g"
+    assert seen[4] == "Subagents · 1 running ⣾ · 1 failed · ctrl+g"
+    assert seen[5] == "1 running ⣾ · 1 failed · ctrl+g"
+    assert seen[6] == "⣾ · 1 failed · ctrl+g"
+    assert seen[7] == floor
+    assert seen[-1] == floor
+
+
+@pytest.mark.asyncio
+async def test_summary_row_at_fifty_columns_keeps_the_hotkey() -> None:
+    """#525 case 3, on the real panel: 50x16 sheds segments, never ctrl+g."""
+    session = FakeSession()
+    session.jobs = _fake_jobs(
+        _Job("sub-1", "child one"),
+        _Job("sub-2", "child two"),
+        _Job("sub-3", "child three"),
+        _Job("sub-4", "child four", status="completed"),
+        _Job("sub-5", "child five", status="completed"),
+        _Job("sub-6", "child six", status="failed"),
+    )
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(50, 16)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        # Height-forced compact on this screen paints the SAME summary row
+        # (design §8: one vocabulary for the two zero-row shapes) — so go to
+        # summary explicitly and assert the row either way.
+        while panel.density is not Density.SUMMARY:
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+        from rich.cells import cell_len
+
+        text = panel.summary_text()
+        assert text.endswith("ctrl+g"), text
+        assert "3 running" in text and "1 failed" in text, text
+        # `cell_len`, not `len`: `compose_summary` budgets in CELLS because
+        # the spinner and `✗` are width-sensitive, so a character count
+        # asserts a different quantity than the code guarantees and passes
+        # only while the glyphs happen to be single-width (round 1, F6).
+        assert cell_len(text) <= panel._row_width(), (text, panel._row_width())
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+
+
+@pytest.mark.asyncio
+async def test_a_failure_promotes_hidden_to_summary_and_a_start_does_not() -> None:
+    """#525 case 4: re-emergence rules.
+
+    Hidden + a child STARTING stays hidden (a preference for a small dock is
+    a preference; the band's counter says children run). Hidden + a child
+    FAILING becomes summary — one row, never full — and clears the user pin
+    so the next press re-hides. Summary + failure stays summary with the
+    count moved.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)]
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        await pilot.press("ctrl+g")
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert panel._user_density is True
+
+        # A fourth child starts: still hidden.
+        jobs.append(_Job("sub-4", "child task 4"))
+        session.jobs = _fake_jobs(*jobs)
+        app.post_message(SubagentStarted("sub-4", "child task 4"))
+        await pilot.pause()
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        assert panel.display is False
+
+        # A cancel is not a failure: still hidden.
+        jobs[1].status = "cancelled"
+        app.post_message(SubagentEnded("sub-2", "child task 2", "cancelled"))
+        await pilot.pause()
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+
+        # A failure breaks through, to ONE row, and unpins.
+        jobs[0].status = "failed"
+        app.post_message(SubagentEnded("sub-1", "child task 1", "failed"))
+        await pilot.pause()
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert panel.display is True
+        assert panel.predicted_rows() == 1
+        assert panel._user_density is False
+        text = panel.summary_text()
+        assert "1 failed" in text and "2 running" in text and "1 cancelled" in text, text
+        assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
+
+        # Summary + another failure: still summary, count moves.
+        jobs[2].status = "failed"
+        app.post_message(SubagentEnded("sub-3", "child task 3", "failed"))
+        await pilot.pause()
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert "2 failed" in panel.summary_text(), panel.summary_text()
+
+        # The next press reads naturally: summary → hidden.
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.HIDDEN
+
+
+@pytest.mark.asyncio
+async def test_collapsed_preview_keeps_failed_children_over_completed_ones() -> None:
+    """#525 case 6: the budgeted slice is a priority pick, not the newest tail.
+
+    Eight children, budget six, the two OLDEST failed and the two NEWEST
+    completed: the failed pair is shown, the affordance says ``+2 more``
+    (the hidden set is no longer the roster's prefix), and DOM order is
+    unchanged.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n:02d}", f"task {n:02d}") for n in range(1, 9)]
+    jobs[0].status = "failed"
+    jobs[1].status = "failed"
+    jobs[6].status = "completed"
+    jobs[7].status = "completed"
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert panel._preview_job_rows() == 6
+        visible = [row.job_id for row in panel.query(SubagentRow) if row.display]
+        assert visible == ["sub-01", "sub-02", "sub-03", "sub-04", "sub-05", "sub-06"]
+        assert str(panel._affordance.content) == "+2 more · ctrl+g to expand"
+
+        # When the hidden set IS the prefix the old wording stands.
+        for job in jobs:
+            job.status = "running"
+        session.jobs = _fake_jobs(*jobs)
+        app._refresh_band()
+        await pilot.pause()
+        visible = [row.job_id for row in panel.query(SubagentRow) if row.display]
+        assert visible == [f"sub-{n:02d}" for n in range(3, 9)]
+        assert str(panel._affordance.content) == "+2 earlier · ctrl+g to expand"
+
+
+@pytest.mark.asyncio
+async def test_display_dock_seeds_the_initial_density_and_live_applies_unless_pinned(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#525 case 7: the setting is where a session STARTS, never an override.
+
+    ``display.dock: summary`` in an isolated config paints summary on the
+    first non-empty sync; ``ctrl+g`` still cycles from it; a live write
+    applies while the user has not chosen, and is ignored once they have.
+    """
+    import yaml
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.tui.settings import settings_reload
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(yaml.safe_dump({"values": {"display.dock": "summary"}}))
+    settings_reload()
+    # Writes go through the facade the `/settings` page uses, so the process
+    # watcher's snapshot (which the fast-path reader prefers once the app has
+    # started one) and the display cache both move, exactly as a page edit
+    # would move them. A bare file write would be read by nobody until the
+    # watcher's next poll.
+    manager = ConfigManager(tmp_path)
+    dock = settings_io.BY_KEY["display.dock"]
+    try:
+        session = FakeSession()
+        session.jobs = _fake_jobs(*[_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)])
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = await _boot_with_jobs(app, pilot)
+            assert panel.density is Density.SUMMARY
+            assert panel._user_density is False
+            assert panel.predicted_rows() == 1
+
+            # A live write with no user choice applies.
+            settings_io.write_setting(manager, dock, "hidden")
+            app._apply_dock_density()
+            await pilot.pause()
+            assert panel.density is Density.HIDDEN
+            assert panel.display is False
+
+            # ctrl+g cycles from wherever the setting put it.
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            assert panel.density is Density.FULL
+            assert panel._user_density is True
+
+            # Now pinned: a live write does not fight the user.
+            settings_io.write_setting(manager, dock, "summary")
+            app._apply_dock_density()
+            await pilot.pause()
+            assert panel.density is Density.FULL
+
+            # A session swap forgets the pin and re-reads the setting.
+            panel.reset_density()
+            app._refresh_band()
+            await pilot.pause()
+            assert panel.density is Density.SUMMARY
+            assert panel._user_density is False
+    finally:
+        settings_reload()
+
+
+@pytest.mark.asyncio
+async def test_hiding_the_roster_beside_a_todo_list_never_shrinks_the_transcript() -> None:
+    """Round 1 F1/D1/Q1: the rows a hidden roster frees go to the CONVERSATION.
+
+    The coverage gap the whole round turned on. Every other density test docks
+    the roster alone, where the arithmetic is trivially right; with a todo
+    panel sharing the band each panel sizes against the other's CURRENT
+    height, so `display = False` made the roster contribute zero rows, the
+    shared transcript floor evaporated, and the todo panel absorbed the rows
+    the user had just asked for — the dock ending TALLER than in `full`
+    (measured 100x24: transcript 8 → 11 → 5, dock 14 → 11 → 17).
+
+    Asserts the invariant rather than three fixed numbers: the exact heights
+    depend on the todo panel's own budget ladder, but "pressing ctrl+g never
+    costs the transcript rows" is the promise the feature makes.
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    session.jobs = _fake_jobs(*[_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        todo = app.query_one(TodoPanel)
+        builtin.TODO_STORE["sess"] = [
+            {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
+        ]
+        # Let the BAND settle before measuring anything. The todo panel walks
+        # to its own budget over a couple of polls, and a baseline captured
+        # mid-walk attributes that panel's convergence to the keypress —
+        # which is a measurement artifact, not the defect under test.
+        for _ in range(3):
+            app._refresh_band()
+            for _ in range(6):
+                await pilot.pause()
+        assert todo.display, "this test is meaningless without a todo panel docked"
+
+        transcript = app.query_one("#transcript")
+
+        async def settled_height() -> int:
+            """The transcript once the band has stopped moving.
+
+            Both panels re-budget against each other over a couple of polls,
+            so every reading here is taken the SAME way — settled — or the
+            comparison measures pump depth rather than the density change.
+            """
+            for _ in range(3):
+                app._refresh_band()
+                for _ in range(6):
+                    await pilot.pause()
+            return transcript.size.height
+
+        heights = [await settled_height()]
+        densities = [panel.density]
+        for _ in range(2):
+            await pilot.press("ctrl+g")
+            for _ in range(4):
+                await pilot.pause()
+            heights.append(await settled_height())
+            densities.append(panel.density)
+
+        assert densities == [Density.FULL, Density.SUMMARY, Density.HIDDEN], densities
+        # The invariant. `>=` rather than `>`: on a short screen a density step
+        # may be absorbed entirely by the floor, which is fine — what must
+        # never happen is the conversation paying for the user's own request
+        # for more room.
+        assert heights[1] >= heights[0], f"summary took transcript rows: {heights}"
+        assert heights[2] >= heights[1], f"hiding took transcript rows: {heights}"
+        # And the dock must not grow across the same presses.
+        assert app.query_one("#input-dock").size.height <= 24, heights
+
+
+@pytest.mark.asyncio
+async def test_children_settling_while_summarised_return_the_dock_to_idle() -> None:
+    """Round 1 F2: a settled dock in `summary` must stop animating.
+
+    `row.running` is written only in `SubagentRow.paint`, which never runs in
+    `summary` because no row is displayed — so the tick's stop condition read
+    a flag frozen at the last `full` frame and kept a 12.5 fps timer on the
+    keyboard thread for the rest of the session (measured 12.7 ticks/sec on a
+    fully settled dock against 1.0/sec in `full`). The children settle AFTER
+    the press here, which is precisely the ordering every existing summary
+    test misses.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)]
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert panel._spinner_timer is not None, "a running roster should animate"
+
+        # Settle every child WHILE summarised: no row repaints, so the rows'
+        # own flags stay stale and only the ledger knows.
+        for job in jobs:
+            job.status = "completed"
+        session.jobs = _fake_jobs(*jobs)
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+
+        assert all(
+            row.running for row in panel._rows.values()
+        ), "precondition: the stale row flags are exactly what made this a bug"
+        assert "3 done" in panel.summary_text(), panel.summary_text()
+
+        # The timer stops itself from INSIDE `_tick`, so wait for that tick to
+        # happen rather than for a pump count: at a 0.08 s interval a fixed
+        # number of `pause()` calls bets on how much wall time a loaded xdist
+        # worker gets, which is the clock-dependence AGENTS.md warns about (it
+        # failed 2 runs in 3 under `-n2` while passing alone every time).
+        for _ in range(60):
+            if panel._spinner_timer is None:
+                break
+            await asyncio.sleep(0.05)
+            await pilot.pause()
+        assert panel._spinner_timer is None, "settled summary is still animating (F2)"
+
+        # And it comes back when work does, rather than being stopped for good.
+        jobs.append(_Job("sub-4", "child task 4"))
+        session.jobs = _fake_jobs(*jobs)
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+        assert panel._spinner_timer is not None, "a new child did not restart the spinner"
+
+
+@pytest.mark.asyncio
+async def test_the_band_counts_queued_children_so_a_hidden_dock_is_never_silent() -> None:
+    """Round 1 U2: hiding is justified by the band, so the band must speak.
+
+    The design lets a LIVE panel disappear because `◍ N agents` still reports
+    the children. That counter excluded queued children, so a hidden dock
+    whose children were all queued reported nothing anywhere — the panel's
+    own stated fallback, empty for exactly the state the panel was showing.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)]
+    for job in jobs:
+        job.queued = True
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert app._job_count("task") == 3, "queued children are still delegated work"
+
+        await pilot.press("ctrl+g")
+        for _ in range(4):
+            await pilot.pause()
+        # Summary names them as queued, which is the state the band must not
+        # then contradict by falling silent.
+        assert "3 queued" in panel.summary_text(), panel.summary_text()
+
+        await pilot.press("ctrl+g")
+        for _ in range(4):
+            await pilot.pause()
+        assert panel.density is Density.HIDDEN
+        # The fallback the design leans on is present rather than empty.
+        assert app._job_count("task") == 3
+        assert format_agents(app._job_count("task")) == "3 agents"
+
+
+@pytest.mark.asyncio
+async def test_the_gate_admitting_a_queued_child_updates_the_summary_caption() -> None:
+    """Round 2 Q2/F7: the counts memo must see a queued→running promotion.
+
+    The one ledger move that changes NEITHER the job's identity nor its
+    status. A queued child already carries ``status == "running"``
+    (`summary_counts` buckets on ``facts.queued`` first), and
+    ``AsyncJobManager.start_queued`` clears ``job.queued`` in place when the
+    capacity gate opens — so a memo keyed on ``(id, status)`` alone returns
+    the pre-admission counts and the caption reports children as queued
+    while they are actually running, indefinitely, until some unrelated job
+    happens to move its status.
+
+    In `summary` that caption is the panel's ONLY representation, which is
+    what made a cheap-path optimisation into a user-visible wrong number.
+    """
+    session = FakeSession()
+    jobs = [_Job(f"sub-{n}", f"child task {n}") for n in range(1, 4)]
+    # One running, two parked behind the gate — `queued` set without touching
+    # `status`, exactly as the manager holds them.
+    jobs[1].queued = True
+    jobs[2].queued = True
+    session.jobs = _fake_jobs(*jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        assert "2 queued" in panel.summary_text(), panel.summary_text()
+        assert "1 running" in panel.summary_text(), panel.summary_text()
+
+        # The gate opens: `start_queued` flips this flag in place and leaves
+        # `status` alone (`harness/jobs.py`, which even guards on the status
+        # already being "running").
+        jobs[1].queued = False
+        jobs[2].queued = False
+        session.jobs = _fake_jobs(*jobs)
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+
+        caption = panel.summary_text()
+        assert "3 running" in caption, caption
+        assert "queued" not in caption, caption

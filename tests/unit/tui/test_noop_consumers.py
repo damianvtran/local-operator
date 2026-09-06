@@ -252,6 +252,110 @@ def test_the_two_types_that_shipped_broken_are_covered() -> None:
     ), "the owner must not reintroduce the unconsumed agent_mutate noop"
 
 
+def _request_carrying_types(source: str) -> set[str]:
+    """Types whose ``SlashResult`` ``data`` dict carries a ``request`` key.
+
+    A ``request`` in the payload is the signature of an ACTION receipt: the
+    owner attached something and expects the invoking terminal to submit that
+    text as a user turn. Detected structurally rather than by name so a
+    receipt invented next year is caught by its shape.
+    """
+    tree = ast.parse(source)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "SlashResult":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "data" or not isinstance(keyword.value, ast.Dict):
+                continue
+            keys = {
+                key.value
+                for key in keyword.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            if "request" not in keys:
+                continue
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if not (isinstance(key, ast.Constant) and key.value == "type"):
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    found.add(value.value)
+                if isinstance(value, ast.IfExp):
+                    for branch in (value.body, value.orelse):
+                        if isinstance(branch, ast.Constant) and isinstance(branch.value, str):
+                            found.add(branch.value)
+    return found
+
+
+def test_every_request_carrying_receipt_is_declared_as_an_action() -> None:
+    """The action-carrying twin of the noop audit, and the reason it exists.
+
+    ``/team lopdev <request>`` was dropped in total silence for a DIFFERENT
+    reason than the noop bug: the receipt WAS rendered, but the request inside
+    it was an instruction to the invoking terminal that an older terminal did
+    not know to follow. The repair (``SLASH_ACTION_RECEIPTS``) only works
+    while the declared set is exactly the produced set — a new
+    ``request``-carrying receipt that nobody adds to the tuple is a runtime
+    that never completes it and a client that never declares it, which is the
+    original silence restored.
+
+    So: every producer emitting a ``request`` must have its type in
+    ``SLASH_ACTION_RECEIPTS``. Static, over the real source, for the same
+    reason the rest of this file is.
+    """
+    from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+
+    produced = _request_carrying_types(_APP.read_text()) | _request_carrying_types(
+        _OWNED.read_text()
+    )
+    undeclared = sorted(produced - set(SLASH_ACTION_RECEIPTS))
+    assert not undeclared, (
+        f"these receipts carry a request for the invoker but are not in "
+        f"SLASH_ACTION_RECEIPTS: {undeclared}. An undeclared action receipt is "
+        "never completed by the runtime and never declared by the viewer, so an "
+        "older client drops the request silently — the /team build-skew incident."
+    )
+    assert produced, "the audit found no request-carrying receipts at all; it has gone blind"
+
+
+def test_every_declared_action_receipt_is_consumed_by_the_renderer() -> None:
+    """The other direction: a declared type the viewer does NOT render.
+
+    The declaration is a promise to the runtime — "I will submit this request
+    myself, do not do it for me". A type in the tuple that
+    ``_render_authoritative_slash`` does not consume means the viewer makes
+    that promise and then breaks it, and the runtime's completion path stands
+    down precisely because the promise was made. That is worse than the bug
+    being fixed: it converts a repaired case back into a silent drop, on the
+    NEW client, where nobody is looking for it.
+    """
+    from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
+
+    rendered = _types_named_by_the_renderer(_APP.read_text())
+    missing = sorted(set(SLASH_ACTION_RECEIPTS) - rendered)
+    assert not missing, (
+        f"{missing} are declared in SLASH_ACTION_RECEIPTS but not consumed by "
+        "_render_authoritative_slash. The viewer tells the runtime it will submit "
+        "these requests itself; the runtime then does not, and the request vanishes."
+    )
+
+
+def test_the_request_extractor_ignores_receipts_without_an_action() -> None:
+    """Mutation guard: the audit must key on the ``request`` KEY, not on the
+    type name, or it degrades into a hardcoded list of the types we happen to
+    know about today — exactly the staleness this file exists to prevent.
+    """
+    source = (
+        "def f():\n"
+        "    a = SlashResult(kind='notice', data={'type': 'acts', 'request': r})\n"
+        "    b = SlashResult(kind='notice', data={'type': 'inert', 'team': t})\n"
+        "    c = SlashResult(kind='block', data={'type': 'listing', 'items': i})\n"
+    )
+    assert _request_carrying_types(source) == {"acts"}
+
+
 def test_the_extractor_sees_a_type_however_it_is_spelled() -> None:
     """The audit must survive the spellings the real code actually uses.
 

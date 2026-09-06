@@ -419,7 +419,7 @@ async def test_rescue_without_aws_secrets_fails_closed(
 
 
 def test_schema_is_1_2_and_secrets_live_only_on_reset_and_rescue() -> None:
-    assert ADAPTER_SCHEMA_VERSION == "1.5"
+    assert ADAPTER_SCHEMA_VERSION == "1.6"
     assert "secrets" in ResetStartParams.model_fields
     assert "secrets" in BeginRescueParams.model_fields
     assert "secrets" not in PrepareParams.model_fields

@@ -22,6 +22,7 @@ from local_operator.providers.registry import get_provider_definition
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
+    USAGE_REPORT_TTL_MS,
     UsageCacheStore,
     account_backoff_ms,
 )
@@ -242,6 +243,9 @@ class TestUsageIsPerAccount:
 
     @staticmethod
     def _account(email: str, account_id: str):
+        # `credential_invalid` is a real `OAuthAccess` field (default False),
+        # and the controller reads it directly; a double that omits it is the
+        # only shape that would ever need a `getattr` fallback (#618 R12).
         return types.SimpleNamespace(
             access_token=f"tok-{account_id}",
             credential_id=0,
@@ -251,6 +255,7 @@ class TestUsageIsPerAccount:
             api_endpoint=None,
             kind="oauth",
             raw=None,
+            credential_invalid=False,
         )
 
     @pytest.mark.asyncio
@@ -723,6 +728,9 @@ class TestUsageCache:
 
     @staticmethod
     def _account(email: str, account_id: str):
+        # `credential_invalid` is a real `OAuthAccess` field (default False),
+        # and the controller reads it directly; a double that omits it is the
+        # only shape that would ever need a `getattr` fallback (#618 R12).
         return types.SimpleNamespace(
             access_token=f"tok-{account_id}",
             credential_id=0,
@@ -732,6 +740,7 @@ class TestUsageCache:
             api_endpoint=None,
             kind="oauth",
             raw=None,
+            credential_invalid=False,
         )
 
     @pytest.mark.asyncio
@@ -948,6 +957,9 @@ class TestPerAccountLastKnown:
 
     @staticmethod
     def _account(email: str, account_id: str):
+        # `credential_invalid` is a real `OAuthAccess` field (default False),
+        # and the controller reads it directly; a double that omits it is the
+        # only shape that would ever need a `getattr` fallback (#618 R12).
         return types.SimpleNamespace(
             access_token=f"tok-{account_id}",
             credential_id=0,
@@ -957,6 +969,7 @@ class TestPerAccountLastKnown:
             api_endpoint=None,
             kind="oauth",
             raw=None,
+            credential_invalid=False,
         )
 
     @staticmethod
@@ -1329,7 +1342,7 @@ class TestPerAccountLastKnown:
 
     @pytest.mark.asyncio
     async def test_the_verdict_clears_on_an_automatic_poll_not_only_on_r(
-        self, controller, store, monkeypatch
+        self, controller, store, usage_cache, monkeypatch
     ) -> None:
         """Review R1/Q1: the panel's own advice must be enough to fix it.
 
@@ -1358,13 +1371,28 @@ class TestPerAccountLastKnown:
         first = await controller.fetch_usage(["anthropic"])
         assert first[0].credential_invalid is True
 
-        # `/login` re-mints the grant. Re-authenticating an already-stored
-        # account keeps the account fingerprint, so the cache key is unchanged
-        # and the row holding the stale verdict would otherwise be served
-        # ahead of any fetch — the login path drops it for exactly this
-        # reason (`_invalidate_cached_usage`).
+        # The grant is re-minted (the store hands back a bearer again), but
+        # the cached row still carries the verdict. It is EXPIRED rather than
+        # invalidated: the round-1 latch lived in `_account_in_backoff`, which
+        # only sees a `prior` when the cache has a (stale) row to hand it.
+        # Invalidating the row here — as this test originally did — emptied
+        # `previous_by_id`, so `prior` was None and the gate short-circuited
+        # before the latch was ever consulted; the test then passed with the
+        # bug restored (#618 R10). Expiring the row is also the state the
+        # panel's own poll cycle reaches: the login path drops the row, but a
+        # row that merely aged out must heal on the next automatic poll too.
         store.oauth_accounts["anthropic"] = [self._account("dead@example.com", "acct-dead")]
-        controller._invalidate_cached_usage("anthropic")
+        real_now = usage_cache._now_ms()
+        monkeypatch.setattr(
+            UsageCacheStore,
+            "_now_ms",
+            staticmethod(lambda: real_now + 2 * USAGE_REPORT_TTL_MS),
+        )
+        # Precondition for the assertion below to mean anything: the flagged
+        # row is still on hand as `previous`, so the gate is actually reached.
+        assert usage_cache.get(controller._usage_cache_key("anthropic")) is None
+        stale = usage_cache.get(controller._usage_cache_key("anthropic"), include_expired=True)
+        assert stale is not None and stale[0].credential_invalid is True
 
         # No `r`: this is the ordinary background poll.
         healed = await controller.fetch_usage(["anthropic"])
@@ -1392,6 +1420,85 @@ class TestPerAccountLastKnown:
         # And with the verdict gone it is an ordinary backoff, not a permanent
         # exclusion from the automatic cycle.
         assert controller._account_in_backoff(marked, now + 10_000_000, force=False) is False
+
+    @pytest.mark.asyncio
+    async def test_login_drops_the_cached_row_carrying_the_verdict(
+        self, controller, store, usage_cache, monkeypatch
+    ) -> None:
+        """QA Q6 on #618: the third leg of the R1 fix, pinned at its call site.
+
+        Re-authenticating an ALREADY-stored account keeps the account
+        fingerprint, so the cache key does not move and the fingerprint-based
+        self-invalidation never fires. `login()` has to drop the row itself,
+        and until this test nothing exercised that wiring: the healing test
+        above went through the helper by hand, so deleting the call from
+        `login()` broke zero tests. Here the login path is driven end to end
+        (a canned OAuth exchange over the same stored identity) and the row
+        is read back from the shared cache.
+        """
+        store.upsert_credential(
+            "anthropic",
+            {"refresh": "r", "access": "a", "email": "dead@example.com", "account_id": "acct-dead"},
+        )
+        dead = self._account("dead@example.com", "acct-dead")
+        dead.access_token = ""
+        dead.credential_invalid = True
+        store.oauth_accounts["anthropic"] = [dead]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            raise AssertionError("a dead grant must not be probed")
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        first = await controller.fetch_usage(["anthropic"])
+        assert first[0].credential_invalid is True
+        key = controller._usage_cache_key("anthropic")
+        assert usage_cache.get(key) is not None, "the verdict is cached and fresh"
+
+        # The same identity logs in again: the fake's upsert appends rather
+        # than replacing, so pin the fingerprint to prove the key is unchanged
+        # and the drop below is the login's own doing, not a key move.
+        async def fake_login(_callbacks):
+            return {
+                "access_token": "t2",
+                "refresh_token": "r2",
+                "email": "dead@example.com",
+                "account_id": "acct-dead",
+            }
+
+        definition = controller.provider("anthropic")
+        assert definition is not None
+        monkeypatch.setattr(
+            "local_operator.providers.controller.get_provider_definition",
+            lambda provider_id: (
+                dataclasses.replace(definition, login=fake_login)
+                if provider_id == "anthropic"
+                else get_provider_definition(provider_id)
+            ),
+        )
+        monkeypatch.setattr(
+            "local_operator.providers.controller.invalidate_listing", lambda provider_id: 1
+        )
+        monkeypatch.setattr(controller, "_account_fingerprint", lambda provider: "pinned")
+        # Re-key under the pinned fingerprint so the row `login()` must drop is
+        # the one that would otherwise be served ahead of the next fetch.
+        reports = usage_cache.get(key, include_expired=True)
+        assert reports is not None
+        usage_cache.set(
+            controller._usage_cache_key("anthropic"),
+            "anthropic",
+            reports,
+            expires_at_ms=usage_cache._now_ms() + USAGE_REPORT_TTL_MS,
+        )
+        pinned_key = controller._usage_cache_key("anthropic")
+        assert usage_cache.get(pinned_key) is not None
+
+        await controller.login("anthropic")
+
+        assert controller._usage_cache_key("anthropic") == pinned_key, "key did not move"
+        assert usage_cache.get(pinned_key, include_expired=True) is None, "login dropped the row"
+        assert controller.usage_cache_age_ms("anthropic") is None
 
     @pytest.mark.asyncio
     async def test_a_dead_grant_is_not_excluded_from_the_automatic_cycle(

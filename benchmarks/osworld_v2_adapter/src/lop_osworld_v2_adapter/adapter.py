@@ -288,6 +288,7 @@ class OSWorldV2Adapter:
             capabilities=AdapterCapabilities(
                 routes=("computer",),
                 ask_user=actions.ACTION_SURFACE.ask_user,  # V2 has user_simulator
+                ask_user_answer_owner="adapter",
                 scoring=True,
                 paste_text=actions.ACTION_SURFACE.paste_text,
                 type_text_mode=actions.ACTION_SURFACE.type_text_mode,
@@ -393,8 +394,16 @@ class OSWorldV2Adapter:
                 instruction="",
                 source_sha256="0" * 64,
             )
-            return RequirementsResult(requirements=requirements_mod.derive_requirements(baseline))
-        return RequirementsResult(requirements=requirements_mod.derive_requirements(self._task))
+            return RequirementsResult(
+                requirements=requirements_mod.derive_requirements(
+                    baseline, infra_values=self._infra_values
+                )
+            )
+        return RequirementsResult(
+            requirements=requirements_mod.derive_requirements(
+                self._task, infra_values=self._infra_values
+            )
+        )
 
     # ------------------------------------------------------------------
     # prepare: declarative, allocates nothing
@@ -407,6 +416,7 @@ class OSWorldV2Adapter:
         # a pure plan (when the task is already known), mints the deterministic
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
+        provisioning.resolve_proxy_policy(params.infra_values)
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
@@ -702,18 +712,22 @@ class OSWorldV2Adapter:
     # ------------------------------------------------------------------
 
     async def ask_user_exchange(self, params: AskUserExchangeParams) -> AskUserExchangeResult:
-        # Two-phase: answer is None = begin, set = finish. When the task
-        # declares no user_simulator, refusing is the honest, recordable
-        # answer — inventing one would be a benchmark violation. Detection is
-        # from the parsed task descriptor, never from probing the provider.
+        # The task's simulator owns generation. A host-supplied finish would
+        # substitute an answer and/or invoke the simulator twice, so reject it.
+        if params.answer is not None:
+            raise ValueError("OSWorld requires adapter-owned answers")
         has_simulator = isinstance(self._task.user_simulator, dict) if self._task else False
-        if params.answer is None:
-            return AskUserExchangeResult(ask_id=params.ask_id, accepted=has_simulator)
-        # Finish phase: the harness's responder already produced the answer
-        # the model sees; we notify the benchmark's simulator for the record.
+        answer = None
         if has_simulator and self._provider is not None:
-            await self._provider.respond(params.prompt)
-        return AskUserExchangeResult(ask_id=params.ask_id, accepted=has_simulator)
+            answer = await self._provider.respond(params.prompt)
+        # None is the provider's clean refusal. Invalid non-None replies fail
+        # protocol validation rather than being silently replaced or regenerated.
+        return AskUserExchangeResult(
+            ask_id=params.ask_id,
+            request_digest=params.request_digest,
+            accepted=answer is not None,
+            answer=answer,
+        )
 
     # ------------------------------------------------------------------
     # score: scored or raise

@@ -44,9 +44,9 @@ names).
 >
 > The agent works in one tab of its own — never the tab you are using. It can
 > only open sites you have allowed. The first time it wants a new one, the
-> extension asks, and you answer once: allow once, always allow, or deny.
-> While the agent drives the tab, the browser shows its own banner on that
-> tab, so you always know.
+> extension asks, and you pick a scope: all pages on this domain, only this
+> site, just this once, or deny. While the agent drives the tab, the browser
+> shows its own banner on that tab, so you always know.
 >
 > **Paired to your app and nothing else.**
 >

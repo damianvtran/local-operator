@@ -243,6 +243,7 @@ async def _dial(
     *,
     client: str | None = None,
     locality: str | None = None,
+    slash_consumers: list[str] | None = None,
 ):
     """Open + auth one connection; consume the welcome projection."""
     reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
@@ -251,6 +252,8 @@ async def _dial(
         auth["client"] = client
     if locality is not None:
         auth["locality"] = locality
+    if slash_consumers is not None:
+        auth["slash_consumers"] = slash_consumers
     writer.write(json.dumps(auth).encode() + b"\n")
     await writer.drain()
     welcome = await asyncio.wait_for(reader.readline(), timeout=5)
@@ -1614,6 +1617,156 @@ async def test_a_handle_that_does_not_take_locality_still_works() -> None:
         await writer.drain()
         frame = await _until(reader, "result", 5)
         assert frame["data"]["text"] == "owner ran /goal"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class _ConsumersHandle(FakeHandle):
+    """Records the ``consumers`` set each routed slash was dispatched with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.consumers: list[Any] = []
+
+    async def run_slash_authoritative(
+        self, command, args, images, *, locality="local", consumers=None
+    ):  # noqa: ANN001, ANN202
+        self.consumers.append(consumers)
+        return {"kind": "notice", "text": f"owner ran /{command}", "style": "info"}
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_declares_slash_consumers_reaches_the_handle() -> None:
+    """The auth frame's declaration must arrive where the decision is made.
+
+    The runtime completes an action-carrying receipt's request only for a
+    client that did NOT declare that type. That decision lives on the handle,
+    so the connection's declaration has to be threaded to it — the same way
+    ``locality`` is, and for the same reason: it is a property of the
+    CONNECTION, not of the frame.
+    """
+    handle = _ConsumersHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(
+            record, client="attach", slash_consumers=["team_attached", "agent_attached"]
+        )
+        writer.write(
+            json.dumps({"op": "slash_result", "req": 7, "command": "team", "args": "x go"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 7)
+        assert handle.consumers == [frozenset({"team_attached", "agent_attached"})]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_omits_slash_consumers_reads_as_none() -> None:
+    """Absent-means-old, and ``None`` is how the handle recognises it.
+
+    This is the incident client on the wire: a viewer built before the field
+    existed sends no declaration at all, and the runtime must read that as
+    "will not submit the request itself" rather than as an empty promise it
+    could mistake for a declaration.
+    """
+    handle = _ConsumersHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps({"op": "slash_result", "req": 8, "command": "team", "args": "x go"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 8)
+        assert handle.consumers == [None]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_handle_that_does_not_take_consumers_still_works() -> None:
+    """Back-compat for the second optional keyword, proven on a real double.
+
+    ``FakeHandle.run_slash_authoritative`` takes three positionals and neither
+    keyword. Passing ``consumers`` unconditionally would raise ``TypeError``
+    inside the dispatch and turn every routed slash into an error frame for
+    any handle not updated in lockstep — including the reduced ones this suite
+    is built on, which is precisely the population the probe protects.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach", slash_consumers=["team_attached"])
+        writer.write(
+            json.dumps({"op": "slash_result", "req": 9, "command": "goal", "args": ""}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        frame = await _until(reader, "result", 9)
+        assert frame["data"]["text"] == "owner ran /goal"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_slash_consumers_value_does_not_refuse_the_client() -> None:
+    """Advisory, never a gate: a bad value degrades to ``None``.
+
+    A client that cannot attach is strictly worse than one whose request the
+    runtime completes on its behalf, so a malformed declaration must not close
+    the connection — it must read as "declared nothing".
+    """
+    handle = _ConsumersHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "slash_consumers": "team_attached",  # a string, not a list
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        welcome = await asyncio.wait_for(reader.readline(), timeout=5)
+        assert json.loads(welcome)["op"] == "projection", "a bad field must not refuse the attach"
+        writer.write(
+            json.dumps(
+                {"op": "slash_result", "req": 10, "command": "team", "args": "x go"}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "result", 10)
+        assert handle.consumers == [None]
     finally:
         if writer is not None:
             writer.close()

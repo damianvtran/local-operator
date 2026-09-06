@@ -1855,6 +1855,13 @@ class SubagentView(Vertical):
             if self._body.is_mounted:
                 self._body.clear_blocks()
         elif transcript_directory != self._history_directory:
+            # Same job, different answer about where its transcript lives.
+            # Load-bearing on a FOLLOWER: the directory arrives on a wire
+            # frame (``JobState.session_dir``), and a page opened off a frame
+            # that had none must not stay "no saved transcript" forever.
+            # ``_reset_history`` un-finalises the absence and issues the
+            # initial tail read itself, because ``on_mount`` — the other
+            # place that read starts — has already run for this page.
             self._reset_history(transcript_directory)
         self._label = strip_control_sequences(label or job_id)
         self._status = status
@@ -1965,6 +1972,14 @@ class SubagentView(Vertical):
         # durable session has nothing to read now and nothing to read later,
         # and no refresh will change that. A directory that exists is a
         # question the page re-asks (``_reconsider_missing_history``).
+        #
+        # "Final" is scoped to THIS directory answer, not to the page: a
+        # follower may open the page off a frame with no directory and learn
+        # it on a later one, and ``show()`` routes that through here again,
+        # which is what un-finalises the absence. It used to be genuinely
+        # permanent on every follower — ``SnapshotSubagentComms`` answered
+        # ``None`` for every child — so an hour-long child showed only its
+        # 500-event live window with the transcript fully on disk.
         self._history_absent_final = not bool(directory)
         # Re-armed on retarget (see ``_history_at_top``): a new job is a new
         # reader at the tail whose first scroll to the top owes a page.

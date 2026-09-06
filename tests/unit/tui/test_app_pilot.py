@@ -55,6 +55,7 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
+from local_operator.tui.widgets.model_picker import PERSIST_HINT_PREFIX
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -2417,6 +2418,291 @@ async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> 
         assert len(hints) == 3, hints
         assert hints[0].startswith("model: openrouter/"), hints[0]
         assert hints[-1].startswith("model: anthropic/claude-opus-5"), hints[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_caret_move_does_not_expire_an_escaped_model_list() -> None:
+    """R10: the dismissal latch must not be caret-anchored.
+
+    `/model ␣`, Esc, `←`, `→` put the list back and re-announced it, because
+    the leave-edge that forgets an Esc was asked of the caret-anchored argument
+    parse — and the terminating space is OUTSIDE the argument span, so a caret
+    resting on it read as having left `/model` entirely. `CommandPicker` on the
+    identical gesture stays dismissed (asserted here as the reference), because
+    its word phase spans the whole word. The question is now asked of the TEXT.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    opens: list[int] = []
+    populate = app._populate_model_picker
+
+    def counted_populate() -> None:
+        opens.append(1)
+        populate()
+
+    app._populate_model_picker = counted_populate  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open()
+        assert len(opens) == 1, opens
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert not editor.model_picker.is_open()
+        # The reported gesture: a caret-only round trip over the space.
+        await pilot.press("left")
+        await pilot.pause()
+        await pilot.press("right")
+        for _ in range(4):
+            await pilot.pause()
+        assert not editor.model_picker.is_open(), editor.text
+        # …and it did not re-announce: no second fill, no second notice.
+        assert len(opens) == 1, opens
+        assert editor.text == "/model ", editor.text
+        transcript = app.query_one(TranscriptView)
+        notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
+        assert len(notices) == 1, [n.text() for n in notices]
+        # Typing still expires the dismissal — the latch holds an Esc, it does
+        # not disable the list.
+        await pilot.press("o")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_model_command_entirely_does_expire_the_escape() -> None:
+    """The control for R10: the latch must still expire, or an Esc would follow
+    the user into their next `/model` and the list would never come back."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(3):
+            await pilot.pause()
+        assert not editor.model_picker.is_open()
+        # The buffer no longer holds a model token at all.
+        editor.clear_content()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open(), editor.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["model", "command", "argument", "skill"])
+async def test_tab_after_an_escape_does_not_type_into_the_query(
+    surface: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U13: a completion key with a latched Esc is a no-op, not a literal tab.
+
+    Esc hides the list but leaves the token in the buffer, so the open-list
+    branches did not run and Tab fell through to ``TextArea``: `/model ` became
+    `/model  ` and `/mod` became `/mod    `, silently corrupting the very word
+    the user had dismissed a list over. Both pickers had it and both are fixed
+    the same way, which is why this is parametrised rather than duplicated.
+
+    EVERY list is parametrised, not a sample (round 2, R14). This test read
+    ``["model", "command"]`` while :meth:`Editor._latched_picker_at_caret`
+    answered for exactly those two phases, so it pinned the gate's
+    implementation instead of its contract and stayed green through a real
+    regression: scoping the gate to ``_picker_phase() == "command"`` dropped
+    the ARGUMENT list — the most common latched list in this widget — and
+    `/theme d` went back to `/theme d    `. ``self._picker`` serves the command
+    word, argument lists, the `$skill` list and the loading reserve; the
+    surfaces below are every phase ``_picker_phase`` can report plus the model
+    picker's own parse, so narrowing the gate to any subset of them now fails
+    here rather than in the composer.
+    """
+    # The `$` list is the one surface with no built-in vocabulary: the hermetic
+    # suite discovers zero skills, and an empty list never opens. Wired in
+    # through the documented env var, as `test_skill_invocation` does.
+    root = tmp_path / "skills"
+    (root / "research").mkdir(parents=True)
+    (root / "research" / "SKILL.md").write_text(
+        "---\nname: research\ndescription: Investigate a question.\n---\n\nRead sources."
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(root))
+    monkeypatch.chdir(tmp_path)
+
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        if surface == "model":
+            await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+            picker = editor.model_picker
+            expected = "/model "
+        elif surface == "command":
+            await pilot.press("slash", "m", "o", "d")
+            picker = editor.picker
+            expected = "/mod"
+        elif surface == "argument":
+            # `/theme` takes an argument, so the space hands the SAME widget a
+            # different list. This is the case R14 regressed.
+            await pilot.press("slash", "t", "h", "e", "m", "e", "space", "d")
+            picker = editor.picker
+            expected = "/theme d"
+        else:
+            # The `$` sigil's list, also `_picker`, reached by its own parse.
+            await pilot.press("dollar_sign")
+            picker = editor.picker
+            expected = "$"
+        # The skill list is populated from an awaited discovery pass rather than
+        # from a synchronous vocabulary, so it needs more settling than the
+        # slash lists; pausing to the open state keeps one body for all four.
+        for _ in range(12):
+            await pilot.pause()
+            if picker.is_open():
+                break
+        assert picker.is_open(), (surface, editor.text)
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert not picker.is_open()
+        for press in range(2):
+            await pilot.press("tab")
+            for _ in range(4):
+                await pilot.pause()
+            # The buffer survives EXACTLY as typed, on every press: the second
+            # Tab is what used to "work", by completing against a query the
+            # first press had corrupted.
+            assert editor.text == expected, (press, editor.text)
+
+
+@pytest.mark.asyncio
+async def test_a_held_model_latch_does_not_swallow_tab_elsewhere_in_the_buffer() -> None:
+    """R1: the U13 no-op belongs to the latched TOKEN, not to the whole buffer.
+
+    The gap the parametrised U13 test could not see. It exercises one picker at
+    a time, so it never puts a live token of one kind alongside a held latch of
+    the other — which is exactly the state R10 newly made reachable by keeping
+    the model latch until the buffer holds no `/model` token ANYWHERE. Gating
+    the Tab branch on latch state alone therefore made Tab a permanent no-op:
+    the command picker below is open and offering `theme`, and Tab did nothing.
+    Reproduced against `f4e9613a9`, where both halves pass.
+
+    The plain-prose half is the second victim of the same gate: this editor is
+    constructed ``tab_behavior="indent"`` precisely so Tab is a literal indent
+    outside a picker, and a held latch three lines up swallowed that too.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        # Latch the MODEL picker, then leave the line without clearing the token.
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_open()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_dismissed()
+
+        # A COMMAND picker on the next line still completes: the model latch
+        # has no claim on a token it was never pressed over.
+        await pilot.press("shift+enter")
+        await pilot.press("slash", "t", "h", "e", "m")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.picker.is_open(), editor.text
+        assert editor.model_picker.is_dismissed(), "the latch must still be held"
+        await pilot.press("tab")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text == "/model \n/theme ", editor.text
+
+        # And plain prose keeps the literal indent while that latch is held.
+        editor.clear_content()
+        await pilot.pause()
+        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.model_picker.is_dismissed()
+        await pilot.press("shift+enter")
+        await pilot.press("h", "i")
+        for _ in range(3):
+            await pilot.pause()
+        before = editor.text
+        await pilot.press("tab")
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text != before, "Tab must still indent in prose"
+        assert editor.text.startswith("/model \nhi"), editor.text
+
+
+@pytest.mark.asyncio
+async def test_the_hint_dedupe_guard_sees_past_a_pinned_working_line() -> None:
+    """R12: the guard reads the last block a caller appended, not the pin.
+
+    A turn in flight pins its working line to the bottom of the transcript and
+    every later append lands BEFORE it, so a guard reading ``blocks()[-1]``
+    matched the working line and never the hint — the deduplication silently
+    stopped applying in exactly the state where re-opening the list mid-turn
+    would stack copies.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        transcript = app.query_one(TranscriptView)
+        # Pin a working line the way a live turn does, so the hint cannot be
+        # the ledger's last block.
+        working = NoticeBlock("working…", "info")
+        app._append_block(working, pin_tail=True)
+        for _ in range(3):
+            await pilot.pause()
+        assert transcript.pinned_tail() is working
+        for cycle in range(1, 4):
+            await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+            for _ in range(4):
+                await pilot.pause()
+            await pilot.press("escape")
+            for _ in range(3):
+                await pilot.pause()
+            editor.clear_content()
+            await pilot.pause()
+        blocks = transcript.blocks()
+        hints = [
+            b for b in blocks if isinstance(b, NoticeBlock) and PERSIST_HINT in (b.text() or "")
+        ]
+        assert len(hints) == 1, [h.text() for h in hints]
+        # The pin really was in the way: the hint is not the last block, which
+        # is the condition the old guard could not see past.
+        assert blocks[-1] is working
+        assert blocks[-1] is not hints[0]
 
 
 @pytest.mark.asyncio
@@ -8800,7 +9086,7 @@ _MODEL_DEFAULT_KEYS = {" ": "space", "/": "slash", "-": "minus"}
 
 
 @pytest.mark.asyncio
-async def test_typing_model_default_letter_by_letter_is_not_eaten_by_the_d_key(
+async def test_typing_model_default_letter_by_letter_reaches_the_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """UX round 1, U8 (QA Q4): the advertised command, typed rather than pasted.
@@ -8921,6 +9207,231 @@ async def test_model_default_and_saved_in_other_setup_variants_fall_to_the_guard
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["no_hosting", "unknown_hosting"])
+async def test_the_model_notice_in_dead_end_setup_variants_names_only_settings(
+    variant: str,
+) -> None:
+    """U12: do not advertise a route that cannot work from where the user is.
+
+    In the no-hosting and unknown-hosting variants EVERY `/model` route refuses
+    with `session is still starting…` (pinned one test above), yet the notice
+    the list prints still led with `/model default …`. `/settings` is the route
+    that actually resolves there, so it is the only one named. The no-model
+    variant is unaffected — it has a real `/model` escape — which the test
+    below this one holds.
+    """
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    async def _bad_hosting_factory():
+        raise HostingUnknownError("…not a known provider.", "anthropicxyq")
+
+    factory = _no_hosting_factory if variant == "no_hosting" else _bad_hosting_factory
+    app = OperatorApp(factory, provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._model_missing_for is None
+        app._run_slash_command("/model")
+        for _ in range(4):
+            await pilot.pause()
+        notices = [b.text() or "" for b in app.query(NoticeBlock)]
+        footer = app.query_one(Editor).model_picker.render_text(98).plain
+    hint = next((n for n in notices if _unwrapped("/settings") in _unwrapped(n)), "")
+    assert hint, notices
+    # The dead ends are not named…
+    assert _unwrapped(PERSIST_HINT) not in _unwrapped(hint), hint
+    assert _unwrapped("/model saved") not in _unwrapped(hint), hint
+    # …and the route that works is.
+    assert _unwrapped("/settings edits the boot default") in _unwrapped(hint), hint
+    # THE FOOTER TOO. It is a second surface printing the same instruction, so
+    # fixing only the notice moves the trap one row down rather than closing it
+    # (the U12 before/after frames show exactly that intermediate state).
+    assert PERSIST_HINT not in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_the_no_model_setup_variant_still_names_its_working_model_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of U12: the variant that DOES have a `/model` escape keeps
+    it. `_cmd_model` writes config and boots when `_model_missing_for` is set,
+    so `/model default` is live advice here and must not be stripped with the
+    genuinely dead routes."""
+    from local_operator.session_factory import ModelNotConfiguredError
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+
+    async def _no_model_factory():
+        raise ModelNotConfiguredError("no model for openrouter", hosting="openrouter")
+
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(_no_model_factory, provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        assert app._model_missing_for == "openrouter"
+        app._run_slash_command("/model")
+        for _ in range(4):
+            await pilot.pause()
+        notices = [b.text() or "" for b in app.query(NoticeBlock)]
+        footer = app.query_one(Editor).model_picker.render_text(98).plain
+    hints = [n for n in notices if _unwrapped(PERSIST_HINT) in _unwrapped(n)]
+    assert len(hints) == 1, notices
+    assert _unwrapped("/settings") in _unwrapped(hints[0]), hints[0]
+    # The footer keeps it here for the same reason the notice does: this is the
+    # variant whose `/model` escape actually writes config and boots.
+    assert PERSIST_HINT in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
+    """D8 + D1/U3: a command name must be readable off ONE row, at every width.
+
+    The finding was measured at 80 and 100 columns for ONE model label, but the
+    row length varies with the label, so a single measurement proves nothing —
+    this asserts over the labels a real catalogue produces (short `xai/grok-4`
+    through long dated Anthropic ids) at the three widths the block renders at.
+    Body budgets come from ``NoticeBlock.body_budget`` rather than being
+    hardcoded, so a change to the block's own fold re-measures instead of
+    silently invalidating the numbers.
+
+    TWO defect classes, because fixing the first created the second (design
+    review round 4 D1, UX round 4 U3). A lone command token on the LAST row is
+    what D8 named; a row ending on a bare `/model` whose next row opens `saved`
+    splits the two-word command NAME across the fold, which costs the reader the
+    same thing. The shipped D8 copy scored 0 on the first and 4 on the second.
+
+    TWO WIDTH FAMILIES, because the block has two (QA round 2, Q3). Earlier
+    rounds measured only the PRISTINE widths a `NoticeBlock` takes in an empty
+    transcript, and reported a clean 0 that held only there. Once the
+    transcript holds any content the block is `cols - 4` — which is the family
+    the hint is normally read at, since a user meets it after they have been
+    working — and the split was still present and visible in a rendered frame.
+    Both families are asserted here so a claim measured at one cannot be
+    reported as holding at both. Confirmed against the real app: at 80/100/120
+    columns the block renders 76/75/82 pristine and 76/96/116 after one turn.
+
+    ASSERTED AGAINST THE STRING THE APP EMITS, not a local rebuild of it (code
+    review round 1, R4). This test previously assembled `routes` as its own
+    literal, so it passed against the pre-fix `app.py` and pinned nothing: the
+    clause order it exists to protect could be reordered in the app and the
+    test stayed green. It now drives the real method, which is what makes a
+    reordering fail here.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock, wrap_cells
+
+    labels = [
+        "xai/grok-4",
+        "openai/gpt-5",
+        "radient/auto",
+        "ollama/qwen3:8b",
+        "openai/gpt-5-codex",
+        "anthropic/claude-opus-5",
+        "openrouter/deepseek/deepseek-chat",
+        "openrouter/moonshotai/kimi-k2-0905",
+        "anthropic/claude-sonnet-4-5-20250929",
+    ]
+    # The three terminal widths the design rounds measure at, at BOTH families
+    # the block renders (Q3). The block is narrower than the terminal
+    # (transcript padding + the hanging glyph field), which is exactly what
+    # `body_budget` accounts for.
+    block_widths = {
+        # pristine transcript
+        (80, "pristine"): 76,
+        (100, "pristine"): 75,
+        (120, "pristine"): 82,
+        # transcript holding any content: the block is `cols - 4`
+        (80, "non-empty"): 76,
+        (100, "non-empty"): 96,
+        (120, "non-empty"): 116,
+    }
+
+    # The sentence under test is the one the app builds, read back from the
+    # real method rather than restated here (R4). The label is stripped so the
+    # matrix below can substitute each of its own.
+    # All THREE sentences this method emits, each read back from the method
+    # itself under the state that produces it (R4). The setup variants drop a
+    # clause (U11/U12) and therefore fold differently, and the dead-end variant
+    # is a single clause whose own tail can orphan — measuring only the
+    # ordinary one is how the shipped copy scored clean while two variants were
+    # not.
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    sentences: dict[str, str] = {}
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        for variant, setup, missing in (
+            ("ordinary", False, None),
+            ("setup", True, "openrouter"),
+            ("deadend", True, None),
+        ):
+            app._setup_state = setup
+            app._model_missing_for = missing
+            notice = app._persist_hint_notice()
+            sentences[variant] = notice.split(" — ", 1)[1] if " — " in notice else notice
+        app._setup_state = False
+        app._model_missing_for = None
+
+    routes = sentences["ordinary"]
+    # The clauses D8/D10/D6 put in the sentence are all still in it: this test
+    # is about where they FOLD, so it must fail loudly if one simply went away.
+    assert PERSIST_HINT in routes, routes
+    assert "/settings" in routes and "boot default" in routes, routes
+    assert "/model saved" in routes, routes
+    # U11/U12: the dead-end variant names /settings and no /model route at all.
+    assert "/model" not in sentences["deadend"], sentences["deadend"]
+    assert "/settings" in sentences["deadend"], sentences["deadend"]
+
+    # The two-word command names a reader must not have to re-join across rows.
+    atoms = ("/model default", "/model saved")
+    splits: dict[str, list[tuple[str, int, str]]] = {"pristine": [], "non-empty": []}
+    for variant, sentence in sentences.items():
+        for label in labels:
+            for (cols, family), block_width in block_widths.items():
+                body = NoticeBlock.body_budget(block_width)
+                rows = wrap_cells(f"model: {label} — {sentence}", body)
+                if len(rows) == 1:
+                    continue
+                # D8: the last row is never a COMMAND NAME standing alone.
+                # Scoped to command tokens on purpose — an ordinary word left
+                # alone by the fold is prose wrapping, not a route the reader
+                # cannot act on, and no phrasing that survived the wider search
+                # avoided it at every label and width (see the docstring in
+                # `_persist_hint_notice`). This holds at BOTH families.
+                last = rows[-1].split()
+                assert not (len(last) == 1 and last[0].startswith("/")), (
+                    variant,
+                    cols,
+                    family,
+                    label,
+                    rows,
+                )
+                # D1/U3: where a fold falls INSIDE a two-word command name.
+                for i, row in enumerate(rows[:-1]):
+                    head, nxt = row.split(), rows[i + 1].split()
+                    if not head or not nxt:
+                        continue
+                    if f"{head[-1]} {nxt[0]}" in atoms:
+                        splits[family].append((variant, cols, label))
+
+    # D1/U3 is CLEAN at the pristine family, which is what the fix bought.
+    assert splits["pristine"] == [], splits["pristine"]
+    # And BOUNDED, not clean, at the non-empty family (QA round 2, Q3). The
+    # 2,240-combination search found no arrangement clean on all three classes,
+    # so asserting 0 here would pin a copy that does not exist. The count is
+    # pinned instead: it may go DOWN freely, and a regression that pushes it up
+    # — the direction D1 was filed about — fails. Recorded as an exact figure
+    # rather than a bound so the next editor sees the real cost of the trade.
+    assert len(splits["non-empty"]) <= 3, splits["non-empty"]
+
+
+@pytest.mark.asyncio
 async def test_every_model_default_surface_says_it_the_same_way() -> None:
     """D14. One instruction had four wordings on four surfaces a user meets
     within two keystrokes. The canonical sentence now names the consequence —
@@ -8929,6 +9440,16 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     The defect is the divergence, so all four surfaces are checked together.
     The footer is checked unwrapped and whole because it is the tightest site:
     an instruction that is consistent only after truncation is not consistent.
+
+    THE `/help` ROW IS THE ONE DOCUMENTED EXCEPTION (design review round 3,
+    D7). It carries the same COMMAND and the same consequence, but not the
+    same sentence: reusing ``PERSIST_HINT`` verbatim there needed a ≤12-cell
+    lead to stay inside the 55-cell description column, and every such lead was
+    a fragment (`Switch;`, `Pick one;`). ``PERSIST_HINT``'s exact length is set
+    by the picker footer's 43-cell budget, which is not a constraint `/help`
+    shares, so the row gets its own carrier and this test asserts the invariant
+    that actually matters — one command, one consequence, no second paraphrase
+    of what is being saved.
     """
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
@@ -8953,9 +9474,14 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     assert _unwrapped(PERSIST_HINT) in _unwrapped(bare_notice), bare_notice
     assert _unwrapped(PERSIST_HINT) in _unwrapped(receipt), receipt
     assert PERSIST_HINT in footer, footer
-    assert _unwrapped(PERSIST_HINT) in _unwrapped(help_text), help_text
     model_row = next(c for c in SLASH_COMMANDS if c.name == "model")
-    assert PERSIST_HINT in model_row.description, model_row.description
+    # `/help` names the same command and the same consequence in its own words
+    # (see the docstring): the command verbatim, and "for new sessions" — the
+    # consequence D14 was raised to make every surface state.
+    assert PERSIST_HINT_PREFIX in model_row.description, model_row.description
+    assert "for new sessions" in model_row.description, model_row.description
+    assert _unwrapped(PERSIST_HINT_PREFIX) in _unwrapped(help_text), help_text
+    assert _unwrapped("for new sessions") in _unwrapped(help_text), help_text
 
     # And the four it replaced are gone from all of them, so there is no second
     # phrasing left for the user to meet.
@@ -9019,6 +9545,357 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
         b for b in notices if "\u2192" in _renderable_plain(getattr(b, "renderable", ""))
     )
     assert qualifier._token == receipt._token, (qualifier._token, receipt._token)
+
+
+class _AsyncLabelSession(FakeSession):
+    """A session whose label follows ``set_model`` only LATER, as ``RemoteSession``'s
+    does: there ``set_model`` schedules the owner request as a task and
+    ``model_label`` reads the frontend-state sync that lands on a later tick.
+    The label here never moves on its own, which is the sharpest form of that
+    gap — a receipt that re-reads the label after the call sees the old model.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._label = "anthropic/claude-opus-5"
+        self.requested: list[tuple[str, str]] = []
+
+    @property
+    def model_label(self) -> str:
+        return self._label
+
+    def set_model(self, model, *, explicit: bool = False) -> None:
+        self.requested.append((model.provider, model.model_id))
+
+
+@pytest.mark.asyncio
+async def test_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The arrow's right-hand side is the model the user ASKED for, even when the
+    session's own label has not caught up yet.
+
+    Operator report: on a terminal attached to another owner's session,
+    ``/model anthropic/claude-fable-5-1`` printed ``model: anthropic/claude-opus-5
+    → anthropic/claude-opus-5 (this session)`` while the band and the
+    model-switch incident correctly showed the new model. The receipt re-read
+    ``session.model_label`` after ``set_model``, which on a ``RemoteSession`` is
+    still the pre-switch value; the destination has to come from the spec the
+    command resolved.
+    """
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert session.model_label == "anthropic/claude-opus-5", "the fake's label must not have moved"
+    assert (
+        _unwrapped("model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)")
+        in text
+    ), text
+    assert _unwrapped("claude-opus-5 → anthropic/claude-opus-5") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_switch_row_prints_before_a_remote_label_lands() -> None:
+    """The mid-turn qualifier fires on a real change of model, judged against the
+    RESOLVED destination — not against a re-read label that, on a remote
+    session, still equals the old one and made the guard read as "no change".
+    """
+    session = _AsyncLabelSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
+
+
+class _ColdAsyncLabelSession(_AsyncLabelSession):
+    """The async-label fake as a COLD viewer: ``RemoteSession.set_model`` with no
+    client returns without sending anything, so nothing here is requested."""
+
+    @property
+    def is_cold(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
+    """A cold viewer has no runtime to switch; the answer names that, not a receipt.
+
+    QA round 1, Q4: before the receipt was built from the resolved spec the
+    cold drop printed ``old → old`` (wrong, but not a claim); built from the
+    spec it would print ``old → new (this session)`` for a switch that reached
+    nothing, with the band still on the old model. ``is_cold`` is the same
+    predicate the facade drops on, so the app asks it before printing.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("no runtime is running for this session") in text, text
+    assert _unwrapped("run /model again") in text, text
+    assert _unwrapped("→") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+class _StoppedFollowerSession(_AsyncLabelSession):
+    """The shape a real follower is in after ``/stop``: the socket is closed
+    (``is_cold``) but ``frontend_state`` still carries the owner's LAST
+    capability list, because the sync that would clear it is never coming. A
+    routed slash therefore reaches ``route_shared_slash``, which refuses with
+    the pre-existing "reconnecting" wording (QA round 2, Q5 measured this on
+    the socket rig: cell C2).
+    """
+
+    def __init__(self, *, cold: bool = True, commands: tuple[str, ...] = ("model",)) -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            CommandScope,
+            FrontendSessionState,
+            SlashCapability,
+        )
+
+        self._cold = cold
+        self.routed: list[tuple[str, str]] = []
+        # ``commands`` is parametrised because the pre-route answer is
+        # COMMAND-AGNOSTIC: the owner advertises ~35 authoritative slashes and
+        # the facade refuses all of them identically once the socket is gone,
+        # so a fixture that can only advertise ``model`` would let the breadth
+        # regress to a `/model` special case unnoticed (review round 3,
+        # MINOR-1).
+        self.frontend_state = FrontendSessionState(
+            session_id=self.session_id,
+            epoch="owner",
+            slash_capabilities=[
+                SlashCapability(
+                    command=name, scope=CommandScope.AUTHORITATIVE_SESSION, operation="slash"
+                )
+                for name in commands
+            ],
+        )
+
+    @property
+    def is_cold(self) -> bool:
+        return self._cold
+
+    async def route_shared_slash(self, command: str, args: str, images=()):  # noqa: ANN001
+        self.routed.append((command, args))
+        if self._cold:
+            raise ConnectionError(f"session is reconnecting; try /{command} again in a moment")
+        return {"kind": "notice", "text": f"owner ran /{command} {args}", "style": "info"}
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_stopped_follower_names_the_reopen_command_before_routing() -> None:
+    """After ``/stop`` a routed ``/model`` answers with ``/resume <id>``, not
+    "reconnecting".
+
+    The stale capability list would route the command to an owner that was
+    stopped on purpose, and the facade's refusal ("session is reconnecting;
+    try /model again in a moment") tells the user to wait for something the
+    row above said is not coming. The stopped id is recorded before the socket
+    closes, so the app consults it ahead of the routing seam.
+    """
+    session = _StoppedFollowerSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_bare_model_on_a_stopped_follower_still_opens_the_picker() -> None:
+    """A bare ``/model`` is not a switch: it opens the INVOKING terminal's own
+    picker, which reads this machine's catalogue and needs no owner at all.
+
+    The round-2 pre-route answer was placed above the picker pullback and so
+    swallowed the bare form (and its ``/models`` alias), painting a refusal
+    where 51dc347cd painted a list — design D1, QA Q9 and review round 3 found
+    the same regression independently. The pullback now sits first, so the
+    stopped answer only ever sees a command carrying an argument.
+    """
+    session = _StoppedFollowerSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model")
+        for _ in range(10):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        text = _unwrapped(_transcript_text(app))
+        picker_open = editor.model_picker.is_open()
+    assert picker_open, editor.text
+    assert session.routed == [], "browsing a local catalogue must not route"
+    assert _unwrapped("this session was stopped") not in text, text
+    # The concrete switch a chosen row submits still gets the stopped answer:
+    # the argument gate moves the bare form only.
+    assert _unwrapped("/resume abc123def456") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_follower_answers_every_routed_command_not_only_model() -> None:
+    """The pre-route answer is command-agnostic by design.
+
+    ``route_shared_slash`` refuses every authoritative slash identically once
+    the client is gone, with the same "reconnecting" wording, so a
+    ``/model``-only guard would have fixed one command and left ``/goal``,
+    ``/rename``, ``/effort`` and ~35 neighbours telling the user to wait for an
+    owner that was stopped on purpose (review round 3 MINOR-1; QA Q8 measured
+    the breadth on the socket rig). Pinned with a SECOND command so the
+    generalisation reads as designed rather than accidental.
+    """
+    session = _StoppedFollowerSession(commands=("model", "goal"))
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/goal ship the receipt fix")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [], session.routed
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("reconnecting") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_cold_viewer_with_a_stopped_id_names_the_reopen_command() -> None:
+    """``_cmd_model``'s own stopped branch, on the shape that actually reaches it.
+
+    The pre-route answer intercepts a follower that still advertises the
+    owner's stale capabilities, so it never enters ``_cmd_model``. The branch
+    is NOT dead in production: a cold viewer advertising NO capabilities plus a
+    recorded stopped id falls through to the local handler and is answered
+    there. Review round 3 MINOR-2 found that shape had lost its last test when
+    the round-1 test was re-pointed at ``_StoppedFollowerSession``; this pins
+    it again by fixture rather than by prose.
+    """
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("this session was stopped") in text, text
+    assert _unwrapped("/resume abc123def456") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_connected_follower_with_a_stale_stopped_id_still_routes() -> None:
+    """The pre-route answer is gated on ``is_cold`` too: a facade that is still
+    connected must keep routing so the owner's own reply lands, even if a
+    stopped id from an earlier life of this app is somehow still set."""
+    session = _StoppedFollowerSession(cold=False)
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = "abc123def456"
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        for _ in range(20):
+            await pilot.pause()
+            if session.routed:
+                break
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.routed == [("model", "anthropic/claude-fable-5-1")], session.routed
+    assert _unwrapped("owner ran /model") in text, text
+    assert _unwrapped("this session was stopped") not in text, text
+
+
+class _RecoveringAsyncLabelSession(_ColdAsyncLabelSession):
+    """Cold because the owner DIED and the facade is redialing it, not because
+    nothing was ever bound: ``_recovering`` is set and the facade's own answer
+    for the gap is ``_unavailable_reason()``."""
+
+    _recovering = True
+
+    def _unavailable_reason(self) -> str:
+        return "session owner is reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_switch_while_the_owner_is_being_recovered_says_reconnecting() -> None:
+    """Review round 2, R2-M1: "send a message to start one" is the wrong lever
+    while the facade is already redialing; the gap's own sentence is used."""
+    session = _RecoveringAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert session.requested == [], session.requested
+    assert _unwrapped("session owner is reconnecting; try /model again in a moment") in text, text
+    assert _unwrapped("send a message to start one") not in text, text
+    assert _unwrapped("(this session)") not in text, text
+
+
+@pytest.mark.asyncio
+async def test_model_default_on_a_cold_viewer_still_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persist form is exempt from the cold refusal: its write is what the
+    NEXT runtime boots on, and its receipt claims a saved default, not a switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _ColdAsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model default anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("no runtime is running") not in text, text
+    assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_routed_switch_receipt_names_the_destination_before_a_remote_label_lands() -> None:
+    """The routed ``/model`` (the owner-loop path a phone or a peer terminal
+    resolves through) formats the same receipt and had the same re-read."""
+    session = _AsyncLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        result = await app.run_slash_authoritative("model", "anthropic/claude-fable-5-1")
+    assert session.requested == [("anthropic", "claude-fable-5-1")], session.requested
+    assert "model: anthropic/claude-opus-5 → anthropic/claude-fable-5-1 (this session)" in (
+        result["text"]
+    ), result
 
 
 @pytest.mark.asyncio
@@ -10413,6 +11290,47 @@ async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_help_model_row_is_a_sentence_and_still_fits_at_80() -> None:
+    """D7: the `/model` row's lead was the fragment `Switch;`.
+
+    Round 1 (D2) shortened the lead because `Switch model; ` + PERSIST_HINT
+    verbatim measured 56 description cells and orphaned "sessions" on its own
+    line. `Switch;` fitted but read as a broken sentence beside its neighbours,
+    which all have an object. The fix is a `/help`-SPECIFIC carrier rather than
+    reusing the picker's footer hint, whose 42-cell length is set by a 43-cell
+    footer budget this row does not share.
+
+    Both halves are asserted, because either alone is satisfiable by the defect
+    the other names: a whole row that is a fragment, or a sentence that wraps.
+    """
+    from rich.console import Group
+    from rich.padding import Padding
+    from rich.text import Text
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        padding = cast(Padding, app._help_block().renderable)
+        group = cast(Group, padding.renderable)
+        rows = [cast(Text, row).plain for row in group.renderables]
+
+    row = next(r for r in rows if r.startswith("/model, /models"))
+    description = row[len("/model, /models") :].strip()
+    # A SENTENCE: the verb has an object, the way `/theme`'s row does.
+    assert description.startswith("Switch model"), row
+    assert not description.startswith("Switch;"), row
+    # It still names the command that persists — that is what the row is for.
+    assert "/model default" in description, row
+    # The same measured 74-cell ceiling the copy/paste rows carry: one more
+    # cell wraps at 80 columns and the tail lands in the name gutter.
+    assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+    # And the description column itself must not wrap: the two-column table
+    # folds a description past ~55 cells regardless of the row total, which is
+    # the orphan D2 fixed and D7 must not reintroduce.
+    assert len(description) <= 55, f"{description!r} is {len(description)} cells"
+
+
+@pytest.mark.asyncio
 async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
     """``/help`` is the in-app key reference (#385). Until these rows
     existed the README was the only channel, and a user already inside
@@ -10503,6 +11421,15 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
         assert keyed, "no key-reference rows found in /help"
         for row in keyed:
             assert len(row) <= 74, f"{row!r} is {len(row)} cells and wraps at 80 columns"
+
+        # #525 case 9: the `ctrl+g` row names the three stops. A user who only
+        # ever read "expand or collapse" would not learn the panel can shrink
+        # to a row or go away; the description is 46 cells against the
+        # 47-cell budget this block's ceiling leaves a key row.
+        ctrl_g = next(row for row in keyed if row[:20].strip() == "ctrl+g")
+        description = ctrl_g[20:].strip()
+        assert description == "cycle the subagent panel: full, summary, hidden", ctrl_g
+        assert len(description) <= 47, (len(description), description)
 
 
 # -- the aside's keyboard scroll chord (D3) --------------------------------

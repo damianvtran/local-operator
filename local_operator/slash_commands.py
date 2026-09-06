@@ -1,12 +1,42 @@
-"""Host-neutral slash metadata shared by terminal and desktop front ends.
+"""Canonical slash metadata shared by terminal and headless frontends.
 
-This is the original terminal registry, not a desktop copy. Argument and echo
-semantics must stay identical across hosts; only each host's action destination
-and presentation differ. Importing this module never loads the Textual app.
+Keep this registry free of widget imports: creating a runtime's first canonical
+snapshot must not import Textual just to learn command names and capabilities.
+The TUI reexports these objects for existing callers.
+
+Argument and echo semantics are the SAME on every host; only the action
+destination and its presentation differ. ``desktop_destination`` carries that
+one host-specific fact per entry so a desktop surface never needs a second
+command registry to diverge from — an entry without one is not offered on the
+desktop at all (see ``/mobile``).
 """
 
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 
+#: ONE sentence for ONE instruction, carried verbatim by every surface that
+#: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
+#: the model picker's footer and the ``/help`` row. They used to say it four
+#: different ways within two keystrokes of each other — "saves this provider and
+#: model as the boot default", "to make it the boot default", "saves the boot
+#: default", "persists it" — so a user met a new phrasing on every surface
+#: instead of learning one string.
+#:
+#: Sized by its TIGHTEST site. The picker footer truncates at the card's width
+#: and this clause sits after the access note, so it has to be complete and short.
+#: "Saves provider and model" named the payload but not why it mattered; "saves
+#: this for new sessions" names the consequence, fits the same slot, and includes
+#: the article the clipped phrase lacked. The budget arithmetic is in the last
+#: paragraph below — one set of figures, so nobody "fixes" the string toward a
+#: stale number.
+#:
+#: REPOINTED BACK at `/model default`, after #369 briefly pointed it at a `d`
+#: key on a picker row. That key is gone: inside a filter every printable
+#: character belongs to the query, so a `d` that saved config on an empty query
+#: and narrowed the list otherwise was a mode with nothing on screen to mark it.
+#: The ambiguity #369 reported is closed by the COMMAND being unambiguous — a
+#: bare `/model default` writes the model the session is already on and switches
+#: nothing — not by moving the write onto a keystroke.
+#:
 #: ONE route named here, not both. The second route (the `/settings` model rows)
 #: does not fit: this string is sized by the picker footer, whose budget is 43
 #: cells at 50 columns (card width minus `_GUTTER_CELLS` + `_EDGE_MARGIN`), and
@@ -17,6 +47,23 @@ from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 #: instead of truncating, and the `/help` row is reachable at any width.
 PERSIST_HINT = "/model default saves this for new sessions"
 
+
+#: Slash commands handled synchronously before any prompt is sent. One
+#: registry entry per command; aliases live on the entry (TUI-014).
+#:
+#: ``echo`` says whether running the command leaves a user row in the visible
+#: ledger. It USED to be unconditional, on the reasoning that typing a command
+#: is the same visible commitment as sending a prompt. That reasoning had the
+#: wrong subject: a prompt is echoed because the transcript is the only record
+#: of what the user said, whereas every handler below already reports what it
+#: did — ``/usage`` opens the panel that IS the answer, ``/provider`` prints the
+#: list, ``/model p/id`` names both labels — so the echo was a row restating a
+#: row underneath it. The reading record kept the keystrokes and gained nothing.
+#:
+#: So the test is not "did the user commit to something" but "would the receipt
+#: be missing something without it", and exactly one thing qualifies: an
+#: argument that becomes part of what the MODEL is told. Comment per entry
+#: below; the table is pinned in ``tests/unit/tui/test_slash_echo.py``.
 SLASH_COMMANDS: list[SlashCommand] = [
     # The help table is the receipt.
     SlashCommand("help", "List all commands", desktop_destination="commands"),
@@ -108,9 +155,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # `<message>` is front-loaded rather than trailing so it survives that
         # truncation: at 60 columns a user still sees that the argument is a
         # message the branch STARTS ON, which is what stops them typing a title
-        # and being billed for a turn in another window. `docs/fork.md` carries
+        # and being billed for a turn in the fork. `docs/fork.md` carries
         # the rest.
-        "Branch this conversation; /fork <message> starts it on that",
+        "Branch this chat; --switch here, --window elsewhere; <message> starts work",
         echo=True,
         consumes_prompt=True,
         desktop_destination="session.fork",
@@ -119,16 +166,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # typed selector, which may have been elided to `default`.
     SlashCommand(
         "model",
-        # Terse by necessity — the description column wraps past ~55 cells at 80
-        # columns, and `Switch model; ` + the 42-cell hint measured 56 and
-        # orphaned "sessions" on its own line (design review D2). "Switch" alone
-        # keeps the row whole at 80 (49 cells) and still carries PERSIST_HINT
-        # verbatim rather than a fifth paraphrase; the command name beside it
-        # already says what is being switched. The `<provider>/<id>` shape it
-        # used to show moved to the tip pool, which has the room (`welcome.TIPS`).
-        # `/model saved` is not here for the same reason: the notice a bare
-        # `/model` prints is the surface with room for the third command.
-        f"Switch; {PERSIST_HINT}",
+        # A `/help`-specific carrier, NOT `PERSIST_HINT` verbatim: the footer
+        # hint is sized by the picker (42 cells), and every ≤12-cell lead that
+        # kept it whole here left the row a fragment (`Switch;` was 49 cells
+        # and stayed whole, but read as a broken sentence beside the
+        # `Switch color theme; …` neighbour — design review round 2, D7).
+        # `Switch model; ` + the hint measured 56 cells at 80 columns and
+        # orphaned "sessions" on its own line (D2), so the answer is a shorter
+        # sentence of its own: name the thing being switched and drop the
+        # "saves this" carrier the footer needs for its 43-cell budget. The
+        # notice a bare `/model` prints is the surface with room for the full
+        # three-route sentence; `/help` needs only the persist command's name.
+        "Switch model; /model default saves it for new sessions",
         aliases=("models",),
         desktop_destination="session.model",
     ),
@@ -228,6 +277,19 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "context",
         "Show prompt, tool-schema and message token usage",
         desktop_destination="session.context",
+    ),
+    # `session.diagnostics` rather than a reuse of `analytics`: both read the
+    # same ledger, but this one is scoped to the CURRENT session id and the
+    # analytics view is explicitly all-sessions (`daily_scope`), so pointing
+    # them at one destination would make the desktop render a whole-install
+    # total for a command documented as current-session only. The host already
+    # has the session-scoped read it needs (`/v1/desktop/analytics?session_id=`);
+    # like `/context`, it is a read-only view with no owner execution, so it
+    # needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    SlashCommand(
+        "session",
+        "Current-session usage, cost and request diagnostics",
+        desktop_destination="session.diagnostics",
     ),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
@@ -363,10 +425,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # serves account, billing, usage and agent catalogue only), so a desktop
     # host would have to invent an upstream contract. The terminal command is
     # untouched and still does the whole job.
-    SlashCommand(
-        "mobile",
-        "Radient phone access: status, enable, stop, billing",
-    ),
+    SlashCommand("mobile", "Radient phone access: status, enable, stop, billing"),
     # The listing (or the masked paste prompt) is the receipt. The argument is
     # a KEY NAME, never the secret, so echoing it would only restate the
     # notice that already names what was stored or forgotten.

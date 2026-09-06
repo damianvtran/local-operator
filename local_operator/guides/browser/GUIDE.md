@@ -203,10 +203,12 @@ the normalized authority, so a nondefault port is visible:
    Chrome's own notification frequently never reaches the user (macOS
    Notification Center authorization is commonly missing), and the numbered
    toolbar badge only reports the pending count. Tell them the origin and that
-   the buttons are in the extension popup
-   (toolbar icon → **Allow once** / **Always allow** / **Deny**). Literal
-   `localhost`, `127.0.0.1`, and `[::1]` instead show **Always this port** and
-   a separate **Always all ports** choice.
+   the controls are in the extension popup
+   (toolbar icon → a scope dropdown with **Allow** and **Deny** buttons).
+   The dropdown offers **All pages on this domain** (the default when a
+   registrable domain exists), **Only this site** (exact origin and port),
+   and **Just this once**. Literal loopback hosts (`localhost`, `127.0.0.1`,
+   `[::1]`) offer **Any port on this host** instead of a domain option.
 3. **`await_access` (url, timeout_s — default 120, max 240)** waits for the
    decision and returns a terminal or pending state:
    - `allowed` — proceed; your next navigation to the origin succeeds.
@@ -221,16 +223,21 @@ the normalized authority, so a nondefault port is visible:
 4. **`cancel_access` (url)** removes only your own pending exact-origin request
    and returns `cancelled`; it never dismisses another session's request.
 
-After `allowed`, the next `open`/`goto` to that origin succeeds. **Allow
+After `allowed`, the next `open`/`goto` to that origin succeeds. **Just this
 once** mints a single-use grant bound to YOUR session — another session
 cannot spend it, it covers exactly one navigation, and it expires if left
-unspent for ~10 minutes (navigate promptly after approval). **Always allow**
-persists the exact origin forever (revocable in the extension's Settings →
-Allowed sites). On literal loopback hosts, **Always all ports** is an explicit
-same-scheme, exact-host grant across ports. It does not cover HTTPS, another
+unspent for ~10 minutes (navigate promptly after approval). **Only this site**
+persists the exact origin (scheme, host, and port) forever. **All pages on
+this domain** persists the registrable domain (e.g. `gominerva.com`), covering
+every subdomain, both schemes, and any port — it is the broadest standing
+grant and is the dropdown's default when the hostname has a registrable
+domain. On literal loopback hosts, **Any port on this host** covers every
+port on both schemes for that exact hostname; it does not cover another
 loopback address, a localhost subdomain, private-network hosts, or names that
-merely resolve to loopback. Settings lists and revokes both grant scopes
-independently.
+merely resolve to loopback. Settings lists and revokes every scope
+independently (Settings → Allowed sites). A separate **Dangerously allow all
+websites** switch in Settings skips the site prompt entirely; it requires an
+explicit confirmation dialog and is off by default.
 
 Other rules:
 

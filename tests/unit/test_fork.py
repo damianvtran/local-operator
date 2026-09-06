@@ -1470,6 +1470,8 @@ def _band():
     band._spinner_index = 0
     band._subagent = None
     band._title = None
+    # The Herdr reporter, which `_sync_terminal_title` consults on every call.
+    band._herdr = None
     return band
 
 

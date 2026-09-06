@@ -95,8 +95,19 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 ).status_code == 403
             client.headers["Authorization"] = "Bearer " + token
             catalog = (await client.get("/v1/desktop/commands")).json()["result"]["commands"]
-            assert {row["name"] for row in catalog} == {spec.name for spec in SLASH_COMMANDS}
-            assert len(catalog) == 35
+            # The catalogue is the registry MINUS the entries deliberately not
+            # offered on the desktop (no `desktop_destination` — today just
+            # `/mobile`, whose provisioning has no desktop proxy). Derived from
+            # the registry rather than pinned as a literal, because the equality
+            # against EVERY registry name could only ever hold if the withheld
+            # commands were offered, which is the bug the field exists to
+            # prevent; the withheld set is asserted separately so silently
+            # dropping a command from the desktop still fails here.
+            offered = {spec.name for spec in SLASH_COMMANDS if spec.desktop_destination}
+            withheld = {spec.name for spec in SLASH_COMMANDS if not spec.desktop_destination}
+            assert {row["name"] for row in catalog} == offered
+            assert withheld == {"mobile"}
+            assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             assert sum(len(row["aliases"]) for row in catalog) == 8
             created = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
@@ -130,10 +141,20 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 assert result.status_code == 200, result.text
                 return result.json()["result"]["result"]
 
-            # Every canonical name and alias is admitted. Native receipts must
-            # carry a destination; owner receipts are not counted as UI proof.
+            # Every OFFERED canonical name and alias is admitted. Native
+            # receipts must carry a destination; owner receipts are not counted
+            # as UI proof. A withheld command is asserted the other way round:
+            # the route refuses it, which is what keeps "not offered" from
+            # degrading into "offered and broken".
             for spec in SLASH_COMMANDS:
                 for name in (spec.name, *spec.aliases):
+                    if not spec.desktop_destination:
+                        refused = await client.post(
+                            target + "/commands",
+                            json={"request_id": request_id(), "command": name, "args": ""},
+                        )
+                        assert refused.status_code == 422, refused.text
+                        continue
                     result = await command(name)
                     if result["kind"] == "native_action":
                         assert result["destination"] == spec.desktop_destination
@@ -141,8 +162,9 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             assert not stream.requests
             print(
                 (
-                    "Command census: all35 canonical +8 aliases HTTP200; actionable "
-                    "native destinations, no model prompts"
+                    f"Command census: all {len(catalog)} offered canonical +8 "
+                    "aliases HTTP200; actionable native destinations, no model "
+                    "prompts"
                 )
             )
 

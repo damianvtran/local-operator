@@ -82,6 +82,15 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # UNFOCUSED, so a user watching the session is never interrupted; the env
     # kill switch is `LOCAL_OPERATOR_NO_NOTIFICATIONS`.
     "display.notifications": True,
+    # The dock subagent panel's density when a session STARTS: `full` (one
+    # row per child), `summary` (one row of counts) or `hidden`. Defaults to
+    # full, today's shape. It seeds the panel and nothing more — `ctrl+g`
+    # cycles from it and never writes it back, because a setting that pinned
+    # the density would make the key a no-op again, the exact defect #525
+    # fixed. Read by `widgets/subagent_panel.py` on the first non-empty
+    # roster and on a live edit (applied only if the user has not cycled it
+    # this session). Unknown strings read as full.
+    "display.dock": "full",
 }
 
 _cache: dict[str, Any] | None = None

@@ -2910,6 +2910,18 @@ class TranscriptView(ScrollableContainer):
         """Blocks in append order (live and finalized)."""
         return list(self._blocks)
 
+    def pinned_tail(self) -> TranscriptBlock | None:
+        """The block held last by :meth:`pin_tail`, if a turn is in flight.
+
+        Exposed because "the last block" and "the last block a caller appended"
+        are different questions while a working line is pinned: every mid-turn
+        append is inserted BEFORE the pin, so a caller inspecting the ledger's
+        tail has to know which occupant to skip. Reading ``blocks()[-1]``
+        without it silently answers about the working line instead (see
+        ``on_model_query_opened``'s dedupe guard).
+        """
+        return self._tail
+
     def clear_blocks(self) -> None:
         """Remove every block (the ``/clear`` command)."""
         for block in self._blocks:

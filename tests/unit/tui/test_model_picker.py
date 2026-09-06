@@ -8,12 +8,15 @@ list that is longer than the window without saying so.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
+    _PERSIST_KEYWORDS,
     MAX_VISIBLE_ROWS,
     PERSIST_HINT_PREFIX,
     ModelPicker,
@@ -575,6 +578,175 @@ def test_an_empty_result_says_so_rather_than_rendering_nothing() -> None:
     picker.set_rows(_rows())
     picker.open("zzzznope")
     assert "no matching models" in picker.render_text(90).plain
+
+
+@pytest.mark.parametrize("keyword", sorted(_PERSIST_KEYWORDS))
+def test_a_command_keyword_is_not_reported_as_a_failed_search(keyword: str) -> None:
+    """U3: the empty state must not contradict the hint one row below it.
+
+    `/model default` is what the footer advertises, and typing it narrowed the
+    catalogue to `no matching models` — the list calling its own instruction a
+    dead end. No row can ever be named `default` or `saved`: they are command
+    words `_cmd_model` consumes before any ranking happens, so an empty list is
+    the correct state for them, not a report about the catalogue.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open(keyword)
+    plain = picker.render_text(90).plain
+    assert "no matching models" not in plain, plain
+    assert f"{keyword} is a command — enter runs it" in plain, plain
+    # The protected hint row still renders: the two rows must not be traded off
+    # against each other, since together they are the whole explanation.
+    picker.set_rows(_rows(), status=_PERSIST_CLAUSE)
+    assert PERSIST_HINT_PREFIX in picker.render_text(90).plain
+
+
+def test_a_keyword_with_a_selector_after_it_is_still_an_ordinary_search() -> None:
+    """The keyword branch is EXACT, not a prefix.
+
+    `/model default anthropic/claude-opus-5` is a selector being typed: it has
+    no matches until it resolves, and reporting "default is a command" there
+    would describe the wrong half of what the user wrote.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open("default zzzznope")
+    plain = picker.render_text(90).plain
+    assert "no matching models" in plain, plain
+    assert "is a command" not in plain, plain
+
+
+@pytest.mark.parametrize("keyword", sorted(_PERSIST_KEYWORDS))
+def test_no_prefix_of_a_keyword_reports_a_failed_search(keyword: str) -> None:
+    """U1: U3's contradiction must not be reachable on the way to the word.
+
+    The exact-match test fixed the settled state only. Typing `/model default`
+    one character at a time printed `no matching models` directly above a
+    footer advertising that exact phrase for four consecutive keystrokes,
+    resolving only on the final `t` — the same pairing U3 was filed against,
+    still reachable by the user who types deliberately rather than at speed.
+
+    Asserted over every prefix that actually EMPTIES the list, which is the
+    only place the defect can appear: a short prefix like `d` still ranks real
+    models (`deepseek…`), and a list with rows in it is an ordinary search, not
+    a contradiction. The empty ones are `defau`+ and `sav`+ against this
+    fixture, and they are found rather than hardcoded so a fixture change
+    cannot quietly empty the matrix.
+    """
+    picker = ModelPicker(lambda row: None)
+    checked = 0
+    for stop in range(1, len(keyword)):
+        prefix = keyword[:stop]
+        picker.set_rows(_rows())
+        picker.open(prefix)
+        if picker.suggestions():
+            continue  # still a real search: the empty state is not reached
+        checked += 1
+        plain = picker.render_text(90).plain
+        assert "no matching models" not in plain, (prefix, plain)
+        # Named, and in the settled row's own shape, so the row does not change
+        # its subject on the keystroke that completes the word.
+        assert f"{keyword} is a command" in plain, (prefix, plain)
+        # The promise `enter runs it` is NOT made while the word is partial:
+        # Enter there is an ordinary failed search, not the command.
+        assert "enter runs it" not in plain, (prefix, plain)
+    assert checked, f"no empty-list prefix of {keyword!r} was exercised"
+
+
+def test_the_keyword_row_fits_the_narrow_footer() -> None:
+    """D2: the row must survive whole at the width where it matters most.
+
+    The first version read `default is a command, not a model — enter runs it`
+    at 49 cells against a 47-cell budget at 50 columns, so it truncated to
+    `…not a model — enter…` — cutting the actionable half and leaving only the
+    negative clause. ``PERSIST_HINT`` is held to 42 cells for exactly this
+    budget; this row is on the same surface and is held to the same one.
+
+    BOTH rows are measured (code review round 2, R17). U1 made this empty state
+    two rows — the settled `enter runs it` and the partial `keep typing` — and
+    only the one with a helper had a ceiling, so the row a user sees while
+    typing was unpinned. It fits today; the point is that it cannot stop
+    fitting silently.
+    """
+    from local_operator.tui.widgets.model_picker import (
+        _EDGE_MARGIN,
+        _GUTTER_CELLS,
+        _keyword_row,
+        _partial_keyword_row,
+    )
+
+    budget = 50 - _GUTTER_CELLS - _EDGE_MARGIN
+    for keyword in sorted(_PERSIST_KEYWORDS):
+        assert cell_len(_keyword_row(keyword)) <= budget, keyword
+        assert cell_len(_partial_keyword_row(keyword)) <= budget, keyword
+        # And it really does render whole, not merely measure short.
+        picker = ModelPicker(lambda row: None)
+        picker.set_rows(_rows())
+        picker.open(keyword)
+        assert "…" not in picker.render_text(50).plain, keyword
+        assert "enter runs it" in picker.render_text(50).plain, keyword
+
+    # The partial row through the real render, at the same floor: a prefix that
+    # names one keyword but is not yet the whole word.
+    for prefix in ("defaul", "sav"):
+        picker = ModelPicker(lambda row: None)
+        picker.set_rows(_rows())
+        picker.open(prefix)
+        plain = picker.render_text(50).plain
+        assert "…" not in plain, prefix
+        assert "keep typing" in plain, prefix
+
+
+def test_persist_keywords_match_the_words_the_command_actually_consumes() -> None:
+    """The widget cannot import ``app`` (``app`` imports it), so the keyword set
+    is a copy — and a copy is only safe while something asserts it is current.
+
+    Mirrors ``test_persist_hint_prefix_matches_app``: both guard a constant this
+    module holds because of the import direction, not because the vocabulary is
+    the picker's to define.
+
+    PINS THE DISPATCH, NOT THE PROSE (code review round 1, R5; corrected in
+    round 2, R15). This asserted `f'"{keyword}"' in inspect.getsource(...)`,
+    and `getsource` returns the comments and docstring too. The original
+    justification claimed deleting the `if lowered == "saved":` dispatch left
+    that guard green; it did not, and the mutant was run to check. On THIS
+    function every prose mention of the two words is bare or backticked, so the
+    only DOUBLE-QUOTED occurrences are the two dispatch lines themselves —
+    which is why the old guard happened to fail on that mutant.
+
+    The weaker true claim is the reason to keep the AST form: the old guard was
+    satisfiable by prose in principle, and stayed correct only by the accident
+    of how these comments are punctuated. Rewording one comment to double-quote
+    the word would have made it green on a deleted dispatch, with nothing to
+    say so. Matching executable literals removes the accident: comments are not
+    in the AST at all, so the assertion can only be satisfied by code.
+    """
+    import ast
+    import textwrap
+
+    from local_operator.tui import app as app_mod
+
+    source = textwrap.dedent(inspect.getsource(app_mod.OperatorApp._cmd_model))
+    function = ast.parse(source).body[0]
+    assert isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)), function
+    # Comments are not in the AST at all, and the docstring is the one string
+    # node to drop explicitly — what remains is the code's own literals.
+    literals = {
+        node.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    # `clean=False` is load-bearing (round 2, R16): `ast.get_docstring` defaults
+    # to running `inspect.cleandoc`, so it returns a DEDENTED string that never
+    # equals the raw `ast.Constant` still sitting in the set — the discard was a
+    # silent no-op, leaving a guard whose whole purpose is to be unsatisfiable
+    # by prose satisfiable by this function's own docstring.
+    literals.discard(ast.get_docstring(function, clean=False))
+    for keyword in _PERSIST_KEYWORDS:
+        # The handler dispatches on the lowered argument, so each keyword must
+        # survive as a string literal the CODE compares against.
+        assert keyword in literals, (keyword, sorted(literals))
 
 
 # -- the buffer parse that drives it -----------------------------------------

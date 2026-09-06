@@ -52,6 +52,133 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.8 — submitted 2026-09-06, pending review as of 2026-09-06
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.8 (submitted; **not yet the approved version**) |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `ff9b16b5` (`feat(extension): scoped Allow (domain/site/once) and dangerous allow-all setting (0.1.8)`, PR #672, squash-merged to `main`) |
+| `extension/` tree hash | `0605d9a5c34a2681c49665a8b9e8aaaada89c50b` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not recoverable — see note below* |
+| Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 34000911184](https://github.com/damianvtran/local-operator/actions/runs/34000911184), dispatched with `ref=main` `version=0.1.8` |
+| Store state | `PENDING_REVIEW`, 100% deployment |
+| State last checked | 2026-09-06 |
+| Approval timestamp | *pending — append when review completes* |
+| Previously published | v0.1.7, live at 100% during review (promoted 2026-09-04, run 33926643637) |
+
+**Second release to go out through the automated path**; v0.1.7 was the first
+(staged run 33815585846, promoted run 33926643637). Every release *before v0.1.7*
+was a manual dashboard upload. The workflow validated and submitted in one run:
+`validated Chrome Web Store package v0.1.8 (12 files, no source maps)`, then
+`submitted ... v0.1.8 with STAGED_PUBLISH (PENDING_REVIEW)`.
+
+**Why there is no artifact hash for this entry.** The automated path builds the
+zip on an ephemeral GitHub runner, uploads it straight to the store, and retains
+nothing — the run publishes no build artifact and logs no digest, so no local
+copy of the uploaded file exists to hash. Do **not** fill this row in by running
+`pnpm --dir extension build:zip` here: as the audit note above explains, `zip`
+stamps entries with current mtimes, so a rebuild's hash would be a *different*
+number that never identified the uploaded file, and the rebuild would also
+overwrite `extension/local-operator-extension.zip`. Audit this release by its
+`extension/` tree hash (step 1 above), which pins the build input exactly and
+needs no artifact. Recording the digest in the workflow output is the durable
+fix, and it is a natural companion to the deterministic-`build:zip` follow-up
+noted under v0.1.5.
+
+**Permissions: byte-identical to the v0.1.7 base.** QA verified that the only
+diff in the built manifest is the version string and re-indentation — no
+permission added, removed, or changed. That is why the automated path applied:
+the standing rule in `submission-checklist.md` sends any permission-adding
+package to a human in the dashboard, because the Chrome Web Store API cannot set
+permission justifications.
+
+---
+
+## v0.1.7 — submitted 2026-09-03, published 2026-09-04
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.7 (**the live published version** as of 2026-09-06) |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `63d1f175` (`fix(release): make store environment verification reachable from the workflow token`, PR #589) |
+| `extension/` tree hash | `c8b694bb2a06213cff4786fe6f844538986afbaa` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not recoverable — see note below* |
+| Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 33815585846](https://github.com/damianvtran/local-operator/actions/runs/33815585846), dispatched with `ref=main` `version=0.1.7` |
+| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 33926643637](https://github.com/damianvtran/local-operator/actions/runs/33926643637) |
+| Store state | `PUBLISHED`, 100% deployment |
+| State last checked | 2026-09-06 |
+| Approval timestamp | *exact time not available — bounded below* |
+| Previously published | v0.1.0 (v0.1.5 was submitted but superseded before it went live) |
+
+**Recorded retrospectively on 2026-09-06**, while adding the v0.1.8 entry. This
+entry was missed at release time, which is the gap it exists to close: the file
+had gone straight from v0.1.8 to v0.1.5 while v0.1.7 was the version actually
+live. Every field above is derived from the workflow logs and the git object DB
+rather than from memory; the fields those sources cannot establish say so
+instead of carrying a plausible number.
+
+**This was the first release to go out through the automated path**, both
+halves of it — submitted by `chrome-web-store.yml` and published by
+`chrome-web-store-promote.yml`, with no dashboard step. The logs read:
+
+```
+EXPECTED_VERSION: 0.1.7
+validated Chrome Web Store package v0.1.7 (12 files, no source maps)
+submitted Chrome Web Store extension omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.7 with STAGED_PUBLISH (PENDING_REVIEW)
+promoted Chrome Web Store extension omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.7 to PUBLISHED
+```
+
+**Why the source commit is the *staged* run's `headSha`, not the promote run's.**
+The promote run (33926643637) reports `headSha` `5cbea141` — a later `main`
+commit that merely still carried 0.1.7 in the manifest. Promotion publishes the
+already-uploaded revision and builds nothing, so its checkout is not the build
+input. The commit that produced the artifact is the staged run's `headSha`,
+`63d1f175`, whose `extension/manifest.json` and `package.json` both read `0.1.7`
+(verified with `git show`). Use the tree hash above when auditing.
+
+**Why there is no artifact hash for this entry.** Same reason as v0.1.8: the
+automated path builds on an ephemeral runner and retains nothing. Confirmed for
+this release specifically — the artifacts API reports `total_count = 0` for both
+run 33815585846 and run 33926643637, and neither log contains a digest. Audit by
+the `extension/` tree hash, and do not rebuild `build:zip` to manufacture a hash
+(see the audit note above for why a rebuild's hash is a different number).
+
+**Approval timestamp: exact time unknown, bounded to a ~24-hour window.** The
+Chrome Web Store does not report an approval time in either workflow log, and no
+`fetchStatus` call was made at the time. What the run history does establish:
+
+- Submitted 2026-09-03T22:59:35Z (run 33815585846).
+- A promote attempted 2026-09-03T23:01:50Z, ~2 minutes later, **failed** with
+  `Chrome Web Store publish failed: only an approved STAGED revision can be
+  promoted` (run 33815763092) — so the revision was still unapproved then.
+- The promote succeeded 2026-09-04T22:42:40Z, so it was approved by then.
+
+Approval therefore landed between 2026-09-03T23:01:50Z and 2026-09-04T22:42:40Z.
+That failed promote is worth knowing operationally: the promote workflow is not
+idempotent against an unapproved revision and fails closed rather than waiting.
+
+**Permissions: unchanged from the v0.1.5 base.** `git diff 37289774 63d1f175
+-- extension/manifest.json` shows only the version string; the permission array
+(`debugger`, `tabs`, `tabGroups`, `scripting`, `storage`, `alarms`,
+`webNavigation`, `notifications`) and host `<all_urls>` are identical. That is
+why this one could take the automated path — no justification field to fill in
+by hand.
+
+**What shipped in it** (`37289774..63d1f175`, extension-affecting commits):
+session-named tab groups (#555), a browser bridge that stays usable when the
+heartbeat writer dies (#563), and two release-workflow fixes (#585, #589).
+Note **v0.1.6 never shipped** — #555 bumped the manifest to 0.1.6 and #563
+superseded it with 0.1.7 before any submission, so no 0.1.6 entry is owed.
+
+---
+
 ## v0.1.5 — submitted 2026-09-02, pending review as of 2026-09-02
 
 | Field | Value |
