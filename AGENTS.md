@@ -280,6 +280,50 @@ listing out of a catalogue cache that the same session's own earlier live calls
 had written into the real home. Any cell whose point is a cold cache needs a
 **fresh** `HOME` per cell, not merely a fresh config dir.
 
+### Read the committed ref, not the working tree
+
+The section above is about not *writing* into a checkout other agents are
+using. This is the same hazard in the other direction, and it is easier to
+fall into because nothing fails: **when you want to know what the repository
+says, read the ref, not the files on disk.**
+
+```sh
+git -C ~/local-operator show origin/main:AGENTS.md | grep -n 'thing you are checking'
+grep -n 'thing you are checking' ~/local-operator/AGENTS.md   # answers about SOMEONE'S DRAFT
+```
+
+Several agents routinely hold uncommitted work in the root checkout at the
+same time, so a tracked file there is whatever the last writer left mid-task —
+a half-finished edit, a section not yet written, or a revision from a branch
+nobody merged. `grep` reports that state with no indication that it is not the
+repository's.
+
+The failure mode is a **confident false negative**: `grep` finds nothing, and
+"nothing" reads like an answer rather than like a question about which tree you
+just searched. It has already produced a wrong finding on a PR. A reviewer
+checking whether the release procedure was documented grepped the working copy,
+found no match, and reported that the procedure "does not exist in the repo's
+markdown" — while `git show origin/main:AGENTS.md` matched it immediately at
+`### What the release owner does`. A peer session was holding the file 398
+lines shorter than `main`. The claim was reported, believed, and escalated to
+the operator before anyone checked the ref, and the fix it implied was to write
+a section that was already there.
+
+So an absence found in the working tree is not evidence. Confirm it against the
+ref before acting on it, and say which you read when you report it:
+
+```sh
+git -C ~/local-operator status --porcelain AGENTS.md   # 'M'/'MM' => on-disk copy is not main's
+```
+
+This applies to any question about repository content — whether a rule is
+written down, whether a helper exists, whether a test covers a case, what a
+config declares. It does not apply to your own uncommitted work, which is the
+one thing the working tree is authoritative about. When you need several files
+or a whole tree at a known revision, take a throwaway worktree
+(`git worktree add --detach /tmp/lo-read origin/main`) rather than reading the
+shared checkout and hoping it is clean.
+
 ## Releasing the stable `lop` runtime
 
 Development and the global launcher deliberately use different installations:
