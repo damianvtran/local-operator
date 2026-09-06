@@ -1992,6 +1992,15 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        #: How the last logical turn ended, published on the canonical snapshot
+        #: as ``last_turn_outcome``. A viewer that dropped mid-turn and rebinds
+        #: after the turn settled cannot recover this from ``live_events``
+        #: (cleared at ``agent_end``); without it it would synthesise
+        #: ``aborted=True`` and paint a false "interrupted". ``""`` until the
+        #: first turn ends. Set from the emitted end, which is one value per
+        #: user prompt (compaction continuations hold the end until the
+        #: pipeline flushes).
+        self._last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
         # The loop's held end owns billing, but a later post-turn compaction owns
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
@@ -5751,6 +5760,16 @@ class Session:
     async def _emit(self, event: AgentEvent) -> None:
         if isinstance(event, AgentEndEvent):
             self._attention_outcome = event
+            # The emitted end is the logical turn's outcome (held ends flush
+            # here from the pipeline finally; abort/error skip the hold and
+            # emit immediately). The canonical snapshot copies this field so a
+            # rebinding viewer can synthesise the matching AgentEndEvent.
+            if event.error:
+                self._last_turn_outcome = "error"
+            elif event.aborted:
+                self._last_turn_outcome = "aborted"
+            else:
+                self._last_turn_outcome = "completed"
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (

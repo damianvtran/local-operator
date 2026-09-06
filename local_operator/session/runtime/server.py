@@ -205,8 +205,12 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
 
 # A projection is replaceable state. If a peer cannot accept one within this
 # bound, dropping that peer is safer than blocking authority-bearing ACKs for
-# every healthy front end.
+# every healthy front end. Daemon and legacy attach clients still receive
+# full projections; full-TUI clients (events + frontend_state) do not, so
+# they get a longer bound — a 1 s stall on a TUI reflow was dropping a
+# healthy viewer and synthesising a false "interrupted".
 _SEND_TIMEOUT_S = 1.0
+_TUI_SEND_TIMEOUT_S = 5.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
@@ -938,7 +942,7 @@ class RuntimeServer:
             self._server.close()
         clients = list(self._clients.values())
         for conn in clients:
-            self._drop_client(conn)
+            self._drop_client(conn, reason="runtime shutdown")
         await self._await_push_shutdown()
         heartbeat = self._heartbeat_task
         if heartbeat is not None:
@@ -1084,7 +1088,7 @@ class RuntimeServer:
             for other in [
                 c for c in self._clients.values() if c.kind == "daemon" and c.writer is not writer
             ]:
-                self._drop_client(other)
+                self._drop_client(other, reason="daemon replaced")
         else:
             # Attach cap with LRU eviction: the least-recently-seen follower
             # goes. Sending on the evicted socket first (a goodbye) is not
@@ -1094,8 +1098,7 @@ class RuntimeServer:
             attaches = [c for c in self._clients.values() if c.kind == "attach"]
             if len(attaches) >= ATTACH_MAX_CLIENTS:
                 victim = min(attaches, key=lambda c: c.last_seen)
-                logger.info("mobile control: evicting attach client %s (cap)", peer)
-                self._drop_client(victim)
+                self._drop_client(victim, reason="attach cap")
 
         conn = _ClientConn(
             writer=writer,
@@ -1124,7 +1127,7 @@ class RuntimeServer:
         if conn.wants_frontend:
             subscribe_frontend = getattr(self._handle, "subscribe_frontend", None)
             if not callable(subscribe_frontend):
-                self._drop_client(conn)
+                self._drop_client(conn, reason="frontend requested but unsupported")
                 return
 
             def on_update(update: Any) -> None:
@@ -1198,6 +1201,7 @@ class RuntimeServer:
             while not self._closed.is_set():
                 line = await reader.readline()
                 if not line:
+                    self._drop_client(conn, reason="reader eof")
                     return  # client hung up
                 try:
                     frame = json.loads(line.decode("utf-8", "replace"))
@@ -1206,11 +1210,12 @@ class RuntimeServer:
                 conn.last_seen = time.monotonic()
                 await self._on_request(frame, conn)
         except (ConnectionResetError, BrokenPipeError):
+            self._drop_client(conn, reason="reader reset")
             return
         finally:
-            self._drop_client(conn)
+            self._drop_client(conn, reason="reader eof")
 
-    def _drop_client(self, conn: _ClientConn) -> None:
+    def _drop_client(self, conn: _ClientConn, *, reason: str = "unspecified") -> None:
         """Remove one connection from the registry and close its socket.
 
         The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
@@ -1224,6 +1229,20 @@ class RuntimeServer:
         # SERVER-GLOBAL state has to honour that contract, or the late second
         # call reaches across to whatever connection replaced this one.
         was_registered = self._clients.pop(id(conn.writer), None) is not None
+        # One INFO per actual removal. The reader loop's ``finally`` always
+        # calls again after a send-path drop; that second call is a no-op and
+        # must not look like a second failure (DEBUG only).
+        peer = conn.writer.get_extra_info("peername")
+        log = logger.info if was_registered else logger.debug
+        log(
+            "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s",
+            conn.kind,
+            peer,
+            conn.wants_events,
+            conn.wants_frontend,
+            conn.surface,
+            reason,
+        )
         # The other half of the ``detached`` transition: the last terminal
         # leaving is precisely when the picker must start saying "nobody is
         # watching this". Published from the ONE removal path so no exit route
@@ -2206,7 +2225,7 @@ class RuntimeServer:
                 # A join that cannot install its boundary before this many
                 # canonical edges is already stale. Drop and let it reconnect
                 # to one fresh snapshot rather than retain an unbounded suffix.
-                self._drop_client(conn)
+                self._drop_client(conn, reason="frontend pending overflow before ready")
                 return
             conn.frontend_pending.append(data)
             return
@@ -2238,7 +2257,9 @@ class RuntimeServer:
                 except asyncio.QueueFull:
                     compacted = False
             if not compacted:
-                self._drop_client(conn)
+                self._drop_client(
+                    conn, reason="event queue overflow (%d frames)" % _EVENT_QUEUE_MAX
+                )
                 return
         if conn.event_writer_task is None:
             task = asyncio.create_task(self._drain_event_queue(conn))
@@ -2445,19 +2466,39 @@ class RuntimeServer:
         finally:
             self._push_scheduled = False
 
+    def _projection_recipients(self) -> list[_ClientConn]:
+        """Who still wants projection *repaints*.
+
+        A client that declared ``events`` AND ``frontend_state`` is a full-TUI
+        viewer: it consumes ``frontend_sync`` / ``frontend_update`` / ``event``
+        and discards projections (``RemoteSession._dial`` installs
+        ``lambda _projection: None``). Pushing 100–900 KB × ~20 Hz onto that
+        socket is what filled the kernel buffer and tripped ``_SEND_TIMEOUT_S``.
+        The welcome (``_push_to``) still goes to everyone — ``AttachClient.connect``
+        reads it as the identity check. Daemon and legacy v3/v4-only attach
+        clients keep receiving repaints byte-for-byte.
+
+        Desktop uses the same two flags and the same no-op projection
+        callback (confirmed: ``desktop_sessions.py`` consumes events +
+        frontend_state, nothing keys on ``op == "projection"`` after welcome).
+        """
+        return [
+            conn
+            for conn in self._clients.values()
+            if not (conn.wants_events and conn.wants_frontend)
+        ]
+
     async def _push(self) -> None:
         """Broadcast projection repaints, preserving daemon bytes exactly.
 
-        Event clients may need a follower-only gate overlay (currently a TUI
-        approval). Build the ordinary projection once for daemon and legacy
-        attach clients; only event subscribers get the overlaid copy. This is
-        the protocol-v4 promise that phone frames remain byte-identical.
+        Full-TUI attach clients are skipped (see ``_projection_recipients``).
+        Phone daemon frames stay byte-identical.
         """
         ordinary = self._projection_payload()
         await asyncio.gather(
             *(
                 self._send_to(conn, self._projection_frame(conn, ordinary))
-                for conn in list(self._clients.values())
+                for conn in self._projection_recipients()
             )
         )
 
@@ -2506,12 +2547,17 @@ class RuntimeServer:
         """One frame to one connection. A failed send drops ONLY that client
         from the registry (never retried — the reader loop will observe the
         close and its finally is a no-op second removal)."""
+        timeout = (
+            _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
+        )
         async with conn.send_lock:
             try:
                 conn.writer.write(json.dumps(frame).encode() + b"\n")
-                await asyncio.wait_for(conn.writer.drain(), timeout=_SEND_TIMEOUT_S)
-            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
-                self._drop_client(conn)
+                await asyncio.wait_for(conn.writer.drain(), timeout=timeout)
+            except TimeoutError:
+                self._drop_client(conn, reason="send timeout (%.1fs)" % timeout)
+            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                self._drop_client(conn, reason="send failed: %s" % type(exc).__name__)
 
     async def _send(self, frame: dict[str, Any]) -> None:
         """Broadcast alias kept for the pre-v2 call shape (tests, hosts that
