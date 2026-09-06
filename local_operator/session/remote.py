@@ -1799,6 +1799,13 @@ class RemoteSession:
         here rather than painted twice.
         """
         seeded = []
+        # The seed loop runs on EVERY path, including a same-live-turn rebind:
+        # ``live_events`` is the turn AS IT IS NOW, so it carries whatever the
+        # runtime produced while the socket was down. Dropping it lost a tool
+        # that started during the gap (its real end then arrives orphaned and
+        # is discarded unrendered at ``agent_end``) and any gap assistant text
+        # outright — review round 1, MAJOR-1. ``_is_duplicate``/``_track``
+        # below already make re-seeding safe for rows the ledger holds.
         for data in self.frontend_state.live_events:
             event = deserialize_event(data)
             if self._is_duplicate(event):
@@ -1809,7 +1816,15 @@ class RemoteSession:
                 continue
             self._track(event)
             seeded.append(event)
-        if self.frontend_state.streaming:
+        # ONLY the synthetic start is suppressed on a same-live-turn rebind.
+        # ``_handle_agent_start`` clears ``_started_tools``, so a later real
+        # tool_end would miss its card and ``_finalize_turn`` would paint
+        # ⊘ interrupted — the artefact this PR exists to remove. The
+        # controller already holds this generation, applied from the
+        # snapshot, so nothing needs re-stamping. Deviation from the
+        # design's "seed as today", proven by the reviewer's counterfactual.
+        same_live_turn, self._same_live_turn = self._same_live_turn, False
+        if self.frontend_state.streaming and not same_live_turn:
             seeded.insert(0, AgentStartEvent(generation=self.frontend_state.generation))
         # Durable-before-live is the transcript's paint invariant. On
         # reconnect the buffer's head can hold the gap's HistoryDeltaEvent
@@ -2419,6 +2434,13 @@ class RemoteSession:
           away. ``live_events`` is emptied at ``agent_end``, so synthesise
           from ``last_turn_outcome`` (additive; ``""`` from an old runtime
           keeps today's aborted synthesis).
+
+        The ``error`` case synthesises the placeholder ``"turn failed"``.
+        ``last_turn_outcome`` is a four-value enum that deliberately carries
+        no message — transporting the owner's error text would mean a second,
+        unbounded field on every snapshot — so that string is a CLASS marker,
+        never the owner's actual diagnostic, and nothing downstream should
+        read it as authoritative (review round 1, MINOR-2).
         """
         suspect = self._suspect_generation
         self._suspect_generation = None
@@ -2647,9 +2669,15 @@ class RemoteSession:
         if self._stopped_announced:
             return
         self._stopped_announced = True
-        # A stop found during recovery (the on-disk marker, not the
-        # ``stopping`` frame) never went through ``_on_disconnected``'s
-        # deliberate-stop branch, so the suspect turn is still open.
+        # TWO ENTRY POINTS, and only one of them has already ended the turn.
+        # ``_on_disconnected``'s deliberate-stop branch calls
+        # ``_end_turn_locally()`` immediately before this, so the call here is
+        # a no-op for it (no ``force``, and ``_streaming`` is already False).
+        # The path this exists for is the wake-marker inference inside
+        # ``_recover_owner``, which never passed through that branch and would
+        # otherwise leave the suspect turn open forever. Do NOT add ``force``
+        # here without splitting the two callers: it would double-end the
+        # first one (review round 1, MINOR-1).
         self._end_turn_locally(direct=True)
         callback = self._stopped_callback
         if callback is None:
@@ -2681,14 +2709,36 @@ class RemoteSession:
         cold_deadline = time.monotonic() + COLD_FALLBACK_S
         try:
             while not self._disposed:
-                if self._can_go_cold and time.monotonic() >= cold_deadline:
-                    logger.info(
-                        "no runtime for %s after %.0fs; the viewer is going cold",
-                        self._session_id,
-                        COLD_FALLBACK_S,
-                    )
-                    self._go_cold()
-                    return
+                if time.monotonic() >= cold_deadline:
+                    if self._can_go_cold:
+                        logger.info(
+                            "no runtime for %s after %.0fs; the viewer is going cold",
+                            self._session_id,
+                            COLD_FALLBACK_S,
+                        )
+                        self._go_cold()
+                        return
+                    # The LEGACY attach surface has no cold state to fall into
+                    # (``_can_go_cold`` is desktop-only) and its contract is to
+                    # keep chasing a successor. But the turn must still reach a
+                    # verdict: with the abort deferred to recovery, a genuine
+                    # owner death whose takeover keeps failing (lease held by
+                    # another follower, or any raise — both retry forever by
+                    # design) left the working line spinning with nothing able
+                    # to clear it. That is strictly worse than the false
+                    # "interrupted" this PR removes — review round 1,
+                    # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
+                    # after this long with no runtime, an in-flight turn is
+                    # honestly aborted. ``_end_turn_locally`` clears
+                    # ``_suspect_generation``, so this fires at most once and
+                    # the retry loop continues underneath it.
+                    if self._suspect_generation is not None:
+                        logger.info(
+                            "no runtime for %s after %.0fs; ending the in-flight turn",
+                            self._session_id,
+                            COLD_FALLBACK_S,
+                        )
+                        self._end_turn_locally(direct=True)
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
