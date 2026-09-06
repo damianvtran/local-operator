@@ -2820,6 +2820,13 @@ class OperatorApp(App[None]):
             set_stopped = getattr(session, "set_stopped_callback", None)
             if callable(set_stopped):
                 set_stopped(self._on_watched_session_stopped)
+            # The third outcome, and the only one that is housekeeping rather
+            # than an ending: the runtime retired ITSELF because `lop-update`
+            # put a newer build on disk. Re-engage at once so the band never
+            # shows the cold state for a refresh nobody asked for.
+            set_refresh = getattr(session, "set_refresh_callback", None)
+            if callable(set_refresh):
+                set_refresh(self._on_runtime_refreshed)
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
@@ -8497,6 +8504,27 @@ class OperatorApp(App[None]):
         before the user commits to a message.
         """
         self._start_runtime_engage(reason="draft")
+
+    def _on_runtime_refreshed(self) -> None:
+        """The bound runtime retired itself for a newer build; re-engage now.
+
+        Eager rather than lazy (design-runtime-autorefresh §2.3): the next
+        prompt would have engaged anyway (``_ensure_bound``), but the band
+        would show the cold state until the user typed, and the mount path
+        already engages eagerly for exactly that band-completeness reason.
+        The latch is reset because it was set by the engage that bound the
+        runtime that just left — without the reset the first keystroke after
+        ``lop-update`` would pay, in the foreground, a cold start this could
+        have paid in the background. No notice is painted: the operator's bar
+        is "never see this message", the band's ``starting…`` state covers
+        the ~1 s the re-engage takes, and a line of prose for a background
+        housekeeping event is noise. After the bind ``_check_build_skew``
+        runs again and, with a fresh runtime, the owner stamp equals the disk
+        stamp and stays silent.
+        """
+        logger.debug("runtime retired for a newer build; re-engaging")
+        self._warm_engage_started = False
+        self._start_runtime_engage(reason="refresh")
 
     def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
@@ -14889,10 +14917,15 @@ class OperatorApp(App[None]):
         * **owner skew** \u2014 the runtime this session is bound to reports a
           different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
-          construction). ``/stop`` then sending again is the remedy: the bare
-          ``/stop`` on a follower asks the owner to stop, and the next prompt
-          engages a fresh runtime from the current install. Both keep working
-          in the meantime.
+          construction). The remedy is the RUNTIME's, never the user's: an
+          idle stale runtime is asked to retire now (``request_refresh``, the
+          belt for the reaper's own self-refresh) and this viewer re-engages
+          a fresh one on its ``retiring`` frame with no notice at all. Every
+          other outcome \u2014 a busy runtime, a ``kept`` answer, an old runtime
+          that does not know the op \u2014 is a runtime that is STAYING on the old
+          build, and earns one ``note`` line saying it will move over when its
+          current work finishes. No notice ever asks the user to ``/stop``
+          (design-runtime-autorefresh \u00a73.3/\u00a73.5).
 
         The COPY deliberately says "session" and "window" rather than
         "runtime" and "terminal": the runtime/terminal split is real and
@@ -14922,7 +14955,15 @@ class OperatorApp(App[None]):
             # only produce false alarms.
             return
 
-        def announce(kind: str, before: str, after: str, body: str, scope: str = "") -> None:
+        def announce(
+            kind: str,
+            before: str,
+            after: str,
+            body: str,
+            scope: str = "",
+            *,
+            notice_kind: NoticeKind = "warning",
+        ) -> None:
             # ``scope`` narrows the debounce from per-process to per-SUBJECT
             # where the subject is what varies: an owner notice describes ONE
             # session's runtime, so a second stale session adopted in the same
@@ -14935,7 +14976,7 @@ class OperatorApp(App[None]):
                 return
             self._skew_notice_shown.add(key)
             logger.debug("build skew (%s) noticed at %s: %s -> %s", kind, reason, before, after)
-            self._system_notice(body, "warning")
+            self._system_notice(body, notice_kind)
 
         # --- A: has the install on disk moved under this process? ----------
         try:
@@ -14981,34 +15022,127 @@ class OperatorApp(App[None]):
         # see; "this session" survives only as the fallback for an unnamed one.
         title = str(getattr(session, "conversation_name", "") or "").strip()
         subject = f"\u201c{title}\u201d" if title else "this session"
-        if not owner_version:
-            # A runtime older than the field itself. It cannot tell us what it
-            # is running, but the absence is informative: the field ships in
-            # this build, so anything without it is older than this window.
-            # Every resident runtime legitimately trips this once in the
-            # release window, and it is telling the truth each time.
-            announce(
-                "owner-unknown",
-                "",
-                loaded.label(),
-                f"{subject} is running an older version than this window \u2014 some "
-                f"commands may not work. /stop, then send again to restart it.",
-                scope,
-            )
-            return
         from local_operator.update import BuildStamp
 
-        owner = BuildStamp(version=owner_version, source_ref=owner_ref)
-        if owner != loaded:
+        owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
+        if owner is not None and owner == loaded:
+            return
+        # Stale owner, and what the user is told depends on what the RUNTIME
+        # does about it, not on what this viewer guessed.
+        #
+        # IDLE: ask it to retire now (the belt for its own reaper) and say
+        # nothing YET. Only an answer of ``retiring`` earns silence: the
+        # ``retiring`` frame re-engages this viewer onto a fresh runtime
+        # (``_on_runtime_refreshed``) and the bind that follows re-runs this
+        # check against a matching stamp, so the notice would describe a state
+        # that no longer exists by the time it was read.
+        #
+        # Any other answer paints C\u2032. ``kept: \u2026`` means the runtime is
+        # STAYING on the old build \u2014 it became busy between our reading and
+        # its own, or (the upgrade-window population) it predates the op
+        # entirely and answered unknown-op, which is a runtime that can never
+        # self-refresh. Staying silent there left a resume onto a pre-refresh
+        # runtime with no explanation at all, and no later seam would repair
+        # it: an idle seam would take this same branch again (review round 1,
+        # R1-1). Design \u00a73.3 spells out the same rule \u2014 an old runtime's
+        # unknown-op answer is ``kept`` and MUST paint C\u2032.
+        #
+        # BUSY: paint C\u2032 directly, without asking. One ``note`` line (never a
+        # warning: nothing is wrong and nothing is asked of the user; not
+        # ``info`` either, whose dim ink the widget reserves for a receipt
+        # nobody has to read \u2014 this answers "why is my session on an older
+        # version?") saying it will move over when its work finishes, which
+        # the runtime's own reaper does.
+        idle_probe = getattr(session, "owner_idle", None)
+        ask = getattr(session, "request_refresh", None)
+        owner_idle = bool(idle_probe()) if callable(idle_probe) else False
+
+        def announce_stale() -> None:
+            """C\u2032: this session is on an older build and will move on its own.
+
+            One function, two callers (the busy branch and the ``kept`` answer
+            of the idle branch) so the two states cannot drift into two
+            wordings. The version pair goes through ``_build_change``, the same
+            formatter notice A uses one block higher: hand-rolling
+            ``old.label() \u2192 new.label()`` rendered this host's HEADLINE drift
+            \u2014 a ``lop-update`` rebuild from ``main`` with no version bump \u2014 as
+            ``0.49.0@aaaaaaa \u2192 0.49.0@bbbbbbb``, restating the version while
+            the seven characters that actually differ were the least prominent
+            thing on the line, and left the two notices naming one fact two
+            ways on one screen (review round 2, R2-2 / design round 2, D3).
+            The arrow form (rather than a parenthetical) is what keeps the pair
+            on ONE row: the parenthetical wrapped BETWEEN the two stamps on an
+            80- and 100-column splash, which is where a resume paints it
+            (design review round 1, D1). ``_build_change``'s collapsed form is
+            shorter still, so D1's fix holds a fortiori.
+            """
+            if owner is None:
+                # A runtime older than the field itself. It cannot tell us what
+                # it is running, but the absence is informative: the field ships
+                # in this build, so anything without it is older than this
+                # window.
+                announce(
+                    "owner-unknown",
+                    "",
+                    loaded.label(),
+                    f"{subject} is running an older version than this window \u2014 it "
+                    f"will move to the new version when its current work finishes.",
+                    scope,
+                    notice_kind="note",
+                )
+                return
             announce(
                 "owner",
                 owner.label(),
                 loaded.label(),
-                f"{subject} is running {owner.label()} but this window is "
-                f"{loaded.label()} \u2014 some commands may not work. /stop, then send "
-                f"again to restart it.",
+                f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
+                f"move to the new version when its current work finishes.",
                 scope,
+                notice_kind="note",
             )
+
+        if owner_idle and callable(ask):
+            logger.debug(
+                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                reason,
+                owner.label() if owner is not None else "<unstamped>",
+                loaded.label(),
+            )
+
+            async def request() -> None:
+                # Painted from the worker rather than awaited inline: this seam
+                # runs on the bind path and must not block it on a socket
+                # round-trip. The debounce key is unchanged by the deferral, so
+                # a later seam that finds the same state still speaks at most
+                # once \u2014 and a runtime that answered ``retiring`` and then
+                # failed to leave is re-examined by the next bind, which sees a
+                # stale owner again and asks again.
+                try:
+                    detail = await cast(Callable[[], Awaitable[str]], ask)()
+                except Exception:  # noqa: BLE001 \u2014 a failed ask is a runtime that stays
+                    logger.debug("refresh request failed", exc_info=True)
+                    announce_stale()
+                    return
+                logger.debug("refresh request answered: %s", detail)
+                # COERCED, not trusted. ``ask`` is a duck-typed ``getattr``
+                # probe against arbitrary hosts \u2014 an older runtime facade, an
+                # embedder, a reduced test double \u2014 which is the very
+                # population this notice exists for, and the two in-tree
+                # implementations being annotated ``-> str`` says nothing about
+                # them. Calling ``.strip()`` on the raw answer put an
+                # ``AttributeError`` inside a Textual worker, which runs with
+                # ``exit_on_error=True``: a ``None`` answer ENDED THE SESSION
+                # (``WorkerFailed``) where the previous head merely logged it
+                # (review round 2, R2-1). Everything else this seam probes
+                # degrades rather than raises; a build diagnostic must never be
+                # able to close the window it is diagnosing.
+                if str(detail or "").strip().startswith("retiring"):
+                    return
+                announce_stale()
+
+            self.run_worker(request(), group="refresh-request", exclusive=False)
+            return
+        announce_stale()
 
     def _echo_user_command(self, text: str) -> None:
         """Write a slash command into the ledger as the user's own row, IF its
@@ -15119,10 +15253,20 @@ class OperatorApp(App[None]):
                 # Adding a consumer for a type nothing produces does not
                 # disturb ``test_noop_consumers``, which maps producers onto
                 # consumers rather than the reverse.
+                # Two facts, and only the first is a warning: the attach did
+                # NOT happen (the user's request evaporated), which they must
+                # know. The second half used to end in a chore \u2014 "send the
+                # request again then" \u2014 in the same yellow as notice A, whose
+                # ``/reload`` genuinely is an action. Since this build the
+                # runtime refreshes itself, so the resend is not something the
+                # user has to remember: the next message is the natural retry
+                # against whatever runtime is live by then (design review
+                # round 1, D2). Kept ``warning`` because the lost attach is
+                # still the headline; the tail states the automatic repair.
                 self._notice(
                     "this session is running a version too old to attach a team "
-                    "(before 0.46.25); nothing was attached. /stop, then send again "
-                    "to restart it.",
+                    "(before 0.46.25); nothing was attached. It will move to the new "
+                    "version on its own when its current work finishes.",
                     "warning",
                 )
                 return

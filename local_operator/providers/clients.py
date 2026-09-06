@@ -3784,12 +3784,29 @@ class GoogleClient:
 # ---------------------------------------------------------------------------
 
 
+def _mock_bash_sleep(text: str) -> int | None:
+    """The ``N`` of a ``[bash:N]`` marker, bounded to a minute, else ``None``.
+
+    Only the LAST user message is consulted by the caller, for the same
+    reason ``[tool]`` is: the marker stays in history forever, and a mock
+    that re-read it would re-issue the call on every later turn.
+    """
+    match = re.search(r"\[bash:(\d{1,2})\]", text)
+    if match is None:
+        return None
+    return min(int(match.group(1)), 60)
+
+
 class MockClient:
     """Deterministic canned stream for ``--hosting test``.
 
     Emits two text deltas + usage + end; when the last user message contains
     ``[tool]`` it emits one tool call (``echo`` with ``{"text": "hi"}``) and
-    stops with ``toolUse`` instead. ``[refuse]`` ends the stream as a refusal
+    stops with ``toolUse`` instead. ``[bash:N]`` calls the REAL ``bash`` tool
+    with ``sleep N`` — the one way to make an assembled runtime genuinely busy
+    for a known duration from outside (``echo`` is not a production tool, so
+    ``[tool]`` errors and completes at once); the e2e stage uses it to prove
+    a refresh never fires mid-turn. ``[refuse]`` ends the stream as a refusal
     with a canned provider message — the only way to exercise the whole
     refusal path (loop → event → TUI notice → transcript replay) against a
     real running app without needing a provider to actually decline.
@@ -3821,6 +3838,25 @@ class MockClient:
         # analogue is the newest instruction.
         last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
         wants_tool = last_user is not None and "[tool]" in last_user.text
+        # ``[bash:N]`` fires ONCE per prompt: only when the newest message is
+        # the user's. After the tool result comes back the newest message is
+        # the tool row, and the mock answers with text so the turn completes
+        # instead of sleeping again forever.
+        sleep_for = (
+            _mock_bash_sleep(last_user.text)
+            if last_user is not None and request.messages and request.messages[-1] is last_user
+            else None
+        )
+        if sleep_for is not None:
+            yield StreamToolCallDelta(index=0, id="call_mock_bash", name="bash")
+            yield StreamToolCallDelta(
+                index=0, argument_delta=json.dumps({"command": f"sleep {sleep_for}"})
+            )
+            yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=5))
+            yield StreamEndEvent(
+                stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5)
+            )
+            return
         if wants_tool:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")
             yield StreamToolCallDelta(index=0, argument_delta=json.dumps({"text": "hi"}))

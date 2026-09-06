@@ -572,6 +572,39 @@ def installed_build(prefix: str | Path | None = None) -> BuildStamp:
     return BuildStamp(version=installed_version(), source_ref=source_ref(prefix))
 
 
+def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
+    """Seconds since the install on disk was last written, or ``None``.
+
+    The settle input for a runtime's self-refresh (``process._build_changed``):
+    ``lop-update`` runs ``uv tool install --force`` — which rewrites
+    site-packages over several seconds — and only THEN writes ``.lop-source``,
+    so the marker's mtime is the moment the install became whole. A runtime
+    that acted on a marker younger than ``BUILD_SETTLE_S`` could spawn a
+    successor that imports a torn tree. When there is no marker (a PyPI or
+    pipx install) the ``dist-info`` directory's mtime plays the same role; it
+    is written last by every installer. ``None`` when neither can be read —
+    an editable checkout has no dist-info of its own and no marker, and the
+    caller treats "unknown" as "not settled", which is the safe side.
+    """
+    root = Path(prefix) if prefix is not None else Path(sys.prefix)
+    marker = root / ".lop-source"
+    try:
+        mtime = marker.stat().st_mtime
+    except OSError:
+        try:
+            dist = distribution("local-operator")
+        except PackageNotFoundError:
+            return None
+        located = getattr(dist, "_path", None)
+        if located is None:
+            return None
+        try:
+            mtime = Path(located).stat().st_mtime
+        except OSError:
+            return None
+    return max(0.0, time.time() - mtime)
+
+
 def installer_argv(
     kind: InstallKind,
     *,

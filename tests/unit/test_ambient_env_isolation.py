@@ -82,6 +82,8 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_CONTEXT_FILES": "extra context file names, read relative to cwd",
     "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS": "extra skill roots; read-only directories",
     "LOP_SESSION_GRACE_S": "runtime residency grace; a duration",
+    "LOP_BUILD_SETTLE_S": "runtime self-refresh settle; a duration",
+    "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",
     "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch",
     "LO_MOBILE_NO_DIAL": "disables the mobile dial-out; safer ON",
     # -- evaluation adapter fds: only meaningful inside a spawned adapter ----
