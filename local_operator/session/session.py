@@ -6196,19 +6196,38 @@ class Session:
     ) -> None:
         """Retire a turn that would have been born aborted, without running it.
 
-        The arriving messages are still made DURABLE and still reach the model
-        on the session's next real turn — this drops the model call, never the
+        The arriving messages are still made DURABLE — here, before this
+        method returns, not on some later turn — and still reach the model on
+        the session's next real turn. This drops the model call, never the
         message. That is the same guarantee the record-only delivery path gives
-        a busy session (see ``receive_peer_message``), which is why the message
-        is appended to the transcript here and handed to
-        ``_append_or_park_journal`` for the live context rather than being
-        appended straight onto ``_context.messages``: the caller holds
-        ``_turn_lock``, so a bare append is the tool-batch splice hazard that
-        method documents.
+        a busy session (see ``receive_peer_message``).
+
+        Durability cannot wait for the next turn, because there may not be one:
+        ``dispose()`` consumes the steering queue and rejects what it finds
+        without persisting, so a message left queue-resident is destroyed when
+        the session ends. Deferring the write is what turned exactly-once into
+        exactly-zero for held peer/wake traffic.
+
+        The LIVE-context half is separate and does not write: a
+        ``CustomMessage`` goes through ``_append_or_park_journal`` and a plain
+        ``Message`` through the steering queue, rather than straight onto
+        ``_context.messages``, because the caller holds ``_turn_lock`` and a
+        bare append is the tool-batch splice hazard that method documents.
+        ``_drain_steering`` skips anything the transcript already holds, so the
+        row is written once.
 
         No ``AgentStartEvent``/``AgentEndEvent`` pair is emitted. A dropped
         turn never started, and emitting the pair is precisely what painted a
         row of identical ``interrupted`` entries for turns that did no work.
+
+        ``admitted``/``admitted_id``/``producer_command_id`` are currently
+        UNREACHABLE: the only caller that supplies admission is ``prompt()``,
+        which passes ``may_drop=False`` and so never lands here. They are kept
+        because they are the correct handling if any admitting caller ever
+        becomes droppable — resolving the future, and stamping the provenance
+        marker replay needs — and getting that wrong is a hung producer or a
+        re-admitted command rather than a visible bug. Treat them as a
+        contract, not as live behaviour.
         """
         self._pre_aborted_drops += 1
         for message in initial:
@@ -6225,28 +6244,31 @@ class Session:
             #   twice and sent it to the model twice. This is the same
             #   contract ``receive_peer_message``'s mid-turn steer path relies
             #   on: queue it, and let the drain be the single writer.
+            # DURABLE HERE, ON BOTH BRANCHES. Deferring the write to the
+            # steering drain made the held message durable NOWHERE until a turn
+            # that may never come: ``dispose()`` consumes the same queue and
+            # rejects without persisting, so ending the session destroyed a
+            # held peer/wake message outright. Exactly-once must not become
+            # exactly-zero, and this method's contract is that the message
+            # survives even though its turn did not.
+            await self._transcript.append_message(
+                message,
+                producer_command_id=(producer_command_id if message.id == admitted_id else None),
+            )
             if isinstance(message, CustomMessage):
-                await self._transcript.append_message(
-                    message,
-                    producer_command_id=(
-                        producer_command_id if message.id == admitted_id else None
-                    ),
-                )
                 self._append_or_park_journal(message)
             else:
-                # Provenance rides with the message rather than being dropped:
-                # the drain reads this map and stamps the row, which is what
-                # ``_producer_command_id_from_entry`` needs on replay to
-                # recognise an already-admitted command. Without it a producer
-                # that redialled could re-admit the same command.
-                if producer_command_id is not None and message.id == admitted_id:
-                    self._steering_producers[id(message)] = producer_command_id
+                # Queued for the live context only — the write above already
+                # made it durable, and ``_drain_steering`` skips a message the
+                # transcript already holds, so this is not the double-persist
+                # round 1 fixed. Provenance is stamped on the row above rather
+                # than through ``_steering_producers``, which exists for steers
+                # whose write the drain still owns.
                 self._steering_queue.put_nowait(message)
             if admitted is not None and message.id == admitted_id and not admitted.done():
                 # The producer's durability contract is about the APPEND, not
                 # about a turn running: the row is on disk under Transcript's
-                # fsync boundary (or, on the steering branch, guaranteed by the
-                # drain that owns it), so the producer may discard its retained
+                # fsync boundary, so the producer may discard its retained
                 # command exactly as it would on the normal path. Leaving this
                 # future unresolved would hang the producer forever.
                 admitted.set_result(None)
@@ -6893,6 +6915,17 @@ class Session:
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
             producer_command_id = self._steering_producers.get(id(message))
+            if self._transcript.has_entry(message.id):
+                # ALREADY DURABLE, so this drain is not its writer. A turn
+                # dropped as pre-aborted persists its held message at the drop
+                # (it must survive a ``dispose()`` that never runs another
+                # turn) and queues it here only to reach live context. Writing
+                # it again produced two identical rows that survived into
+                # replayed history. Constant-time check on the transcript's id
+                # set, so the ordinary steer pays effectively nothing.
+                self._steering_producers.pop(id(message), None)
+                messages.append(message)
+                continue
             try:
                 await self._transcript.append_message(
                     message,
