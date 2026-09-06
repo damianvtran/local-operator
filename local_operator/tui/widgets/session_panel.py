@@ -100,6 +100,16 @@ _MIN_CARD_WIDTH = 38
 _BAR_MIN = 8
 _BAR_MAX = 24
 
+#: Width of the percentage cell: a leading space, the estimate mark, and the
+#: widest figure ``format_percent`` can return. That figure is ``100%`` — FOUR
+#: characters, not three (design D1). Budgeting three overflowed every
+#: full-share row by one cell, and the crop landed on the rightmost column: the
+#: ``warning``-coloured failure tally, which rendered as ``2 faile``. A single-
+#: model or single-purpose session is 100% by construction, so this was not an
+#: edge case. Derived from the formatter rather than restated as a literal, so
+#: a future change to ``format_percent`` cannot silently reintroduce the crop.
+_PCT_CELL = 2 + max(len(format_percent(f)) for f in (0.0, 0.5, 1.0, None))
+
 #: Value cell for the Totals ``kv`` rows, matching ``build_report``'s so the two
 #: screens' headline blocks have the same rhythm.
 _VALUE_CELL = 11
@@ -227,7 +237,11 @@ def _measure_columns(rows: list[_BarRow], width: int, *, show_pct: bool = True) 
     the fact stays.
     """
     show_pct = show_pct and width >= _PCT_MIN
-    pct_col = 5 if show_pct else 0
+    pct_col = _PCT_CELL if show_pct else 0
+    # The ``default=0`` arms describe an EMPTY row list, whose measurements no
+    # caller draws with (review n1): the empty-report path measures ``[]`` when
+    # there is no gauge and then renders no rows at all. They keep this total
+    # rather than making the caller special-case a section it is about to skip.
     value_col = max((len(r.value) for r in rows), default=0)
     natural = max((len(r.label) for r in rows), default=0) + 2
     note_col = max((sum(len(text) for text, _ in r.note) for r in rows), default=0)
@@ -295,9 +309,13 @@ def _render_rows(
             # A bar-less row has no share to state, so it prints neither a
             # percentage nor the ``~`` estimate mark — marking a blank as
             # "modelled" would attach an honesty flag to nothing.
-            mark = ("~" if estimated else " ") if row.bar else " "
+            mark = "~" if (estimated and row.bar) else ""
             pct = format_percent(row.fraction) if row.bar else ""
-            line.append(f" {mark}{pct:>3}", style=dim)
+            # The mark and its figure are right-aligned as ONE unit inside the
+            # cell ``_measure_columns`` reserved, so a ``100%`` row cannot push
+            # the note past the frame (design D1) and the ``~`` still hugs the
+            # number it qualifies instead of floating a space away from it.
+            line.append(f" {mark + pct:>{_PCT_CELL - 1}}", style=dim)
         if cols.show_note and row.note:
             line.append("  ")
             for text, token in row.note:
@@ -359,6 +377,18 @@ def _group_rows(
     ``(cost_micro, total_tokens)`` key ``_group_section`` sorts by, so an
     unpriced group falls back to token order rather than collapsing into one
     indistinguishable $0 bucket.
+
+    **In cost mode a group with no published price gets no bar and no
+    percentage** (QA Q1 / design D2). Its ``cost_micro`` is 0 because the price
+    is UNKNOWN, not because it spent nothing, so dividing it by the session
+    total yields a 0% that reads as a measured zero share — beside another
+    row's real ``100%``, in the same column. QA's case: a local model taking 9
+    of 10 requests and 99% of the tokens rendered an empty track at 0% while a
+    single priced call read as the entire spend. ``bar=False`` is the primitive
+    the residual row already uses; it suppresses the track and the percentage
+    and leaves the honest ``$—``, which is the only figure here we can stand
+    behind. This is the same rule as ``_timing_rows`` and ``_gauge_row``: an
+    absent measurement is never drawn as a measured zero.
     """
     total = sum(_metric_value(agg, metric) for _, agg in groups)
     ordered = sorted(
@@ -376,13 +406,14 @@ def _group_rows(
             # widest column a dim tally reads as decoration.
             note.append((" · ", "dim"))
             note.append((f"{failed} failed", "warning"))
+        measurable = total > 0 and (metric != METRIC_COST or agg.cost_is_known)
         rows.append(
             _BarRow(
                 label=name,
-                fraction=(_metric_value(agg, metric) / total) if total > 0 else 0.0,
+                fraction=(_metric_value(agg, metric) / total) if measurable else 0.0,
                 value=_metric_cell(agg, metric),
                 note=tuple(note),
-                bar=total > 0,
+                bar=measurable,
                 cost=agg if metric == METRIC_COST else None,
             )
         )
@@ -420,6 +451,14 @@ def _component_rows(aggregate: UsageAggregate) -> tuple[list[_BarRow], int]:
 
     Zero-value components are dropped: a fresh session has no tool results, and
     ``Environment ~0`` / ``Images (est.) ~0`` are rows that say nothing.
+
+    The unattributed residual is built HERE, not appended by the drawing code
+    (review M2). ``_shared_columns`` measures whatever this function returns, so
+    a row added after measurement is the one row outside the shared column set
+    this screen exists to establish — it ellipsised its label with 30 cells of
+    frame unused and landed its value one cell off the shared number column,
+    both on an ordinary 88-cell card. Returning it with its peers is what makes
+    "one function owns the section's rows" true rather than nearly true.
     """
     total = sum(aggregate.components.get(key, 0) for key in COMPONENT_KEYS)
     rows = [
@@ -432,6 +471,21 @@ def _component_rows(aggregate: UsageAggregate) -> tuple[list[_BarRow], int]:
         if total > 0 and aggregate.components.get(key, 0) > 0
     ]
     rows.sort(key=lambda row: -row.fraction)
+    # The residual is what the recorded context exceeds the attributed
+    # components by — a leftover, not a component. It gets no bar: giving it one
+    # in the same denominator would double-count against the rows above it. It
+    # is appended last (not sorted in) because it is not a peer of the rows it
+    # follows, the same fixed position the tool subtotal holds.
+    unattributed = max(0, aggregate.context_tokens - total) if rows else 0
+    if unattributed:
+        rows.append(
+            _BarRow(
+                label="Unattributed (older records)",
+                fraction=0.0,
+                value=format_tokens(unattributed),
+                bar=False,
+            )
+        )
     return rows, total
 
 
@@ -792,6 +846,13 @@ def _draw_recorded_usage(
     # The money footnote is drawn only when a mark is actually on screen, over
     # exactly the scopes this report renders — a footnote for a symbol nobody
     # can see is noise.
+    #
+    # INVARIANT (review m2): this list must name every scope from which a ``$``
+    # figure is drawn. Today those are the Totals ``Est. cost`` row (the
+    # aggregate) and, in cost mode, the by-model and by-purpose cost cells —
+    # so the three sources below are exhaustive. A future section rendering a
+    # cost cell from a scope outside them would silently suppress the legend
+    # for a ``+`` or ``$—`` that is on screen; add its scopes here.
     scopes = [aggregate, *report.by_model.values(), *report.by_purpose.values()]
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
@@ -852,25 +913,14 @@ def _draw_by_purpose(
 
 
 def _draw_input_split(body: _Body, aggregate: UsageAggregate, width: int, cols: _Columns) -> None:
-    rows, total = _component_rows(aggregate)
+    # ``_component_rows`` returns the residual row too, so what is drawn here is
+    # exactly what ``_shared_columns`` measured (review M2).
+    rows, _ = _component_rows(aggregate)
     body.header("Where input went", "≈ estimated split of context tokens", "≈ estimated")
     if not rows:
         body.note("no component data yet")
         body.blank()
         return
-    # The residual is what the recorded context exceeds the attributed
-    # components by — a leftover, not a component. It gets no bar: giving it one
-    # in the same denominator would double-count against the rows above it.
-    unattributed = max(0, aggregate.context_tokens - total)
-    if unattributed:
-        rows = rows + [
-            _BarRow(
-                label="Unattributed (older records)",
-                fraction=0.0,
-                value=format_tokens(unattributed),
-                bar=False,
-            )
-        ]
     body.extend(_render_rows(rows, cols, width, estimated=True))
     body.blank()
 
@@ -911,16 +961,32 @@ def _draw_request_sequence(body: _Body, report: SessionReport, width: int, metri
     In cost mode the bars plot ``duration_ms`` instead, and the meta says so:
     ``SessionRequest`` carries no cost field, and dividing the session total by
     the request count would fabricate a per-request price the ledger never held.
+
+    An UNRECORDED duration stays ``None`` all the way to the row (review M1).
+    The store deliberately produces ``None`` via ``NULLIF(col(name, '-1'), -1)``
+    to keep "not recorded" distinct from a value, so coercing it to ``0.0``
+    here printed a full-strength ``0 ms`` beside an empty track for a legacy
+    ledger — a measured-looking zero for a sample that does not exist, which is
+    ``$0.00`` for time. Such a row draws no bar and reads ``unknown``, matching
+    ``_timing_rows`` ("an absent sample is not a fast one") and ``_gauge_row``.
     """
     if not report.recent:
         return
     series = list(reversed(report.recent))  # the store returns newest-first
     tokens = metric == METRIC_TOKENS
-    values = [
-        float(r.context_tokens + r.output_tokens) if tokens else float(r.duration_ms or 0.0)
+    values: list[float | None] = [
+        (
+            float(r.context_tokens + r.output_tokens)
+            if tokens
+            else (None if r.duration_ms is None else float(r.duration_ms))
+        )
         for r in series
     ]
-    top = max(values) if values else 0.0
+    # An unmeasured request is excluded from the window max as well as from the
+    # bars: it must not be able to define the scale the measured rows are drawn
+    # against.
+    measured = [value for value in values if value is not None]
+    top = max(measured) if measured else 0.0
     rows: list[_BarRow] = []
     for request, value in zip(series, values):
         note: tuple[tuple[str, str], ...] = ((request.purpose, "dim"),)
@@ -929,9 +995,14 @@ def _draw_request_sequence(body: _Body, report: SessionReport, width: int, metri
         rows.append(
             _BarRow(
                 label=_clock(request.ts_ms),
-                fraction=(value / top) if top > 0 else 0.0,
-                value=format_tokens(int(value)) if tokens else _milliseconds(value),
+                fraction=(value / top) if value is not None and top > 0 else 0.0,
+                value=(
+                    format_tokens(int(value))
+                    if tokens and value is not None
+                    else _milliseconds(value)
+                ),
                 note=note,
+                bar=value is not None,
             )
         )
     plural = "request" if len(series) == 1 else "requests"
@@ -1068,14 +1139,18 @@ class SessionScreen(ModalScreen[None]):
         derived arithmetically, gutter included.
         """
         scroll = getattr(self, "_scroll", None)
+        if scroll is not None and scroll.is_mounted and scroll.size.width:
+            # The gutter is reserved whether or not the thumb is showing, so
+            # subtracting it unconditionally matches the painted box. NOT inside
+            # the guard below (review n2): once mounted this is a plain
+            # measurement, and swallowing a failure here would silently pin the
+            # report at the fallback width forever instead of surfacing a real
+            # geometry bug.
+            return max(_MIN_CARD_WIDTH, scroll.size.width - 1)
         try:
-            if scroll is not None and scroll.is_mounted and scroll.size.width:
-                # The gutter is reserved whether or not the thumb is showing,
-                # so subtracting it unconditionally matches the painted box.
-                return max(_MIN_CARD_WIDTH, scroll.size.width - 1)
             card = min(140, int(self.app.size.width * 0.9))
             return max(_MIN_CARD_WIDTH, card - 7)  # 4 padding + 2 border + 1 gutter
-        except Exception:  # noqa: BLE001 — before mount, a sane default
+        except Exception:  # noqa: BLE001 — before mount there is no app size
             return _DEFAULT_CARD_WIDTH
 
     def _title_text(self) -> Text:
