@@ -540,6 +540,10 @@ def cap_projection_frame(
                 value = entry.get(field)
                 if isinstance(value, str) and len(value) > text_limit:
                     entry[field] = _compact_multiline(value, text_limit)
+                    if field == "text":
+                        # Keep this fact across runtime -> relay serialization.
+                        # The retained ID names a prefix, not the final result end.
+                        entry["text_complete"] = False
         if _frame_bytes(data) <= cap_bytes:
             return data, True
         if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:

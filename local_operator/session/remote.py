@@ -2418,6 +2418,17 @@ class RemoteSession:
             on_delta(answer)
         return answer
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        return dict(self.frontend_state.attention)
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        # Capture this binding; a takeover cannot redirect an old render callback.
+        client = self._client
+        if client is None or not client.connected or self._recovering:
+            raise ConnectionError("session is reconnecting")
+        await client.acknowledge_attention(token)
+        return dict(self.frontend_state.attention)
+
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """The owner serializes the copy; a viewer never raw-copies a live store."""
         await self._ensure_bound()

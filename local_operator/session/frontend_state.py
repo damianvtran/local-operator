@@ -1399,6 +1399,8 @@ class FrontendSessionState(BaseModel):
     model_catalogue_truncated: bool = False
     history_cursor: str | None = None
     attachment_root: str | None = None
+    # Durable receipts are independent of owner epoch and pending action gates.
+    attention: dict[str, Any] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -2581,6 +2583,7 @@ class FrontendStateStore:
             and receipt_context == current_receipt_context
         )
         changes = dict(
+            attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             conversation_title=title,
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),

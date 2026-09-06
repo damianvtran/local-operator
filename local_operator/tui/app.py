@@ -2686,6 +2686,7 @@ class OperatorApp(App[None]):
         editor.focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
+        self.set_interval(1.0, self._poll_completion_attention)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
         # driver. A tty can EOF before the first interval tick, and requiring a
@@ -4028,6 +4029,7 @@ class OperatorApp(App[None]):
                 self._replay_bang_pending = False
                 if text:
                     block = AssistantBlock()
+                    block.completion_anchor_id = str(getattr(message, "id", ""))
                     block.update_text(text)
                     block.finalize_text()
                     self._append_block(block)
@@ -11460,20 +11462,111 @@ class OperatorApp(App[None]):
             logger.debug("notification delivery failed", exc_info=True)
         return False
 
+    def _completion_anchor_visible(self, anchor: str) -> bool:
+        from local_operator.tui.widgets.transcript import TranscriptBlock
+
+        if len(self.screen_stack) != 1 or not self.app_focus:
+            return False
+        transcript = self._transcript_view()
+        if not transcript.display or not transcript.is_near_bottom():
+            return False
+        viewport = transcript.content_region
+        for block in transcript.query(TranscriptBlock):
+            if block.completion_anchor_id == anchor and block.display:
+                end = block.region.bottom - 1
+                if not (viewport.y <= end < viewport.bottom and block.region.width > 0):
+                    return False
+                top, _ = self.screen.get_widget_at(block.region.x + block.region.width // 2, end)
+                return top is block or block in top.ancestors
+        return False
+
+    async def _poll_completion_attention(self) -> None:
+        from local_operator.tui.attention import terminal_is_foreground
+
+        if getattr(self, "_attention_poll_pending", False):
+            return
+        session = self._session
+        refresh = getattr(session, "refresh_attention", None)
+        acknowledge = getattr(session, "acknowledge_attention", None)
+        if not callable(refresh) or not callable(acknowledge):
+            return
+        self._attention_poll_pending = True
+        try:
+            state = await cast(Any, refresh)()
+            token, anchor = state.get("completion_token"), state.get("anchor_id")
+            if self._session is not session:
+                return
+            if getattr(session, "is_streaming", False):
+                # A resumed follower can first encounter an older outcome while
+                # a retry is already running. Do not later insert that historical
+                # failure at the retry's tail if it settles without a new outcome.
+                self._attention_retry_token = (id(session), token)
+                return
+            if (
+                anchor
+                and state.get("unseen")
+                and state.get("kind") in {"error", "interrupted"}
+                and getattr(self, "_attention_retry_token", None) != (id(session), token)
+            ):
+                transcript = self._transcript_view()
+                if not any(
+                    getattr(block, "completion_anchor_id", "") == anchor
+                    for block in transcript.children
+                ):
+                    block = NoticeBlock(
+                        "Stopped with an error" if state["kind"] == "error" else "Interrupted"
+                    )
+                    block.completion_anchor_id = anchor
+                    self._append_block(block)
+                    return  # Let the committed frame paint before measuring it.
+            if (
+                not state.get("unseen")
+                or not token
+                or not anchor
+                or not getattr(self, "_attention_focus_observed", False)
+                or getattr(session, "is_streaming", False)
+                or not self._completion_anchor_visible(anchor)
+            ):
+                return
+            # Twenty open sessions need no twenty-process focus poll: only a
+            # positively focused surface with a still-unread rendered result
+            # reaches this bounded off-loop host probe.
+            focused = await asyncio.to_thread(terminal_is_foreground)
+            if (
+                focused
+                and self._session is session
+                and getattr(self, "_attention_focus_observed", False)
+                and not getattr(session, "is_streaming", False)
+                and self._completion_anchor_visible(anchor)
+            ):
+                current = await cast(Any, refresh)()
+                if (
+                    self._session is session
+                    and current.get("completion_token") == token
+                    and getattr(self, "_attention_focus_observed", False)
+                    and not getattr(session, "is_streaming", False)
+                    and self._completion_anchor_visible(anchor)
+                ):
+                    await cast(Any, acknowledge)(token)
+        except Exception:
+            logger.debug("completion receipt deferred", exc_info=True)
+        finally:
+            self._attention_poll_pending = False
+
     def on_app_focus(self, event: AppFocus) -> None:
         """The terminal regained OS focus \u2014 stop notifying, resume animating.
 
-        Textual reports focus only on a CHANGE, which is why the notifier
-        starts out focused: the app is launched from the terminal the user is
-        typing in, and assuming otherwise would notify on the very first turn
-        of every session.
+        This positive event, unlike Textual's initial reactive default, can
+        support a read receipt once the host and rendered anchor also agree.
         """
+        self._attention_focus_observed = True
         if self._notifier is not None:
             self._notifier.set_focused(True)
         self._set_animation_focused(True)
 
     def on_app_blur(self, event: AppBlur) -> None:
         """The terminal lost OS focus \u2014 notify, and slow every animation."""
+        self._attention_focus_observed = False
         self._set_animation_focused(False)
         if self._notifier is None:
             return
@@ -24249,6 +24342,7 @@ class OperatorApp(App[None]):
         block = self._ensure_streaming_block()
         # TUI-020: adopt the authoritative text carried by the event.
         block.update_text(message.text)
+        block.completion_anchor_id = message.message_id
         block.finalize_text()
         self._streaming_block = None
         # The prose is settled, so "responding…" is over: whatever the turn does

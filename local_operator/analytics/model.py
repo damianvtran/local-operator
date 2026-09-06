@@ -530,6 +530,13 @@ class SessionReport:
     available: bool = True
     aggregate: UsageAggregate = field(default_factory=UsageAggregate)
     by_model: dict[tuple[str, str], UsageAggregate] = field(default_factory=dict)
+    # Consumption grouped by the ``purpose`` column (``turn``, ``compaction``,
+    # ``aside``, ``naming``, ``compaction_advisor``). Distinct from
+    # ``by_purpose_outcome``, which is COUNT(*) only: a count cannot answer
+    # "what did compaction cost me", which is the question the /session screen's
+    # by-purpose chart exists to answer. Both are kept because they carry
+    # different facts — this one the consumption, that one the failure tally.
+    by_purpose: dict[str, UsageAggregate] = field(default_factory=dict)
     by_purpose_outcome: dict[tuple[str, str], int] = field(default_factory=dict)
     missing_usage_calls: int = 0
     unknown_usage_calls: int = 0

@@ -1,4 +1,12 @@
-"""Per-session "last seen by phone" state for the mobile daemon.
+"""Legacy phone timestamp format, retained for migration compatibility.
+
+New frontends use ``session.attention.AttentionStore``. The daemon no longer
+calls ``mark_seen`` or ``touch_watched`` in its read/subscribe paths; this file
+is read only by the explicit historical bootstrap. The older implementation
+below remains available to older callers and timestamp fixtures.
+
+Historical format description follows:
+Per-session "last seen by phone" state for the mobile daemon.
 
 The phone's session list needs an unread indicator: a session is UNSEEN when
 it has user-visible activity newer than the last time the phone looked at it.
