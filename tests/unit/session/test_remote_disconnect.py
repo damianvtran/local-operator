@@ -101,8 +101,12 @@ async def test_rebind_to_the_same_live_generation_synthesises_nothing(
     assert starts == [], f"same-live-turn rebind re-seeded starts {starts}"
     assert remote.is_streaming is True
     assert remote._suspect_generation is None
+    # The gap's own rows DO come through — only the synthetic start is
+    # suppressed (review round 1, MAJOR-1; the sibling test below pins the
+    # positive case). ``_is_duplicate`` keeps rows the ledger already holds
+    # from painting twice.
     types = [getattr(event, "type", None) for event in received]
-    assert "tool_execution_start" not in types
+    assert "agent_start" not in types
 
 
 @pytest.mark.asyncio
@@ -241,3 +245,153 @@ async def test_rebind_after_an_idle_runtime_posts_turn_ended(tmp_path, monkeypat
     assert len(ends) == 1, f"band never learned the turn ended: {app.posted}"
     assert ends[0].aborted is False
     assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
+async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, BLOCKER-1: a real death must not spin forever on the TUI.
+
+    The 8 s cold deadline only fired for ``_can_go_cold`` (desktop). The
+    ordinary TUI attach viewer — ``tui/app.py`` calls ``connect()`` without
+    ``surface``, so ``surface == "terminal"`` and ``_can_go_cold`` is False —
+    could therefore never reach a verdict once the abort moved to recovery:
+    a takeover that keeps failing retries forever by design, so nothing was
+    left to end the turn.
+
+    THIS TEST LETS THE REAL LOOP RUN. Every other verdict test here hand-calls
+    ``_settle_suspect_turn`` / ``_go_cold``, and that test shape is what let
+    the blocker through — ``_facade`` defaults ``can_go_cold=False`` and no
+    test ever drove ``_recover_owner`` itself on that surface.
+
+    ``COLD_FALLBACK_S`` is monkeypatched so the bound is exercised in
+    milliseconds; the assertion is on the VERDICT, never on elapsed time.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+    takeover_attempts: list[int] = []
+
+    async def failing_takeover() -> Any:
+        takeover_attempts.append(1)
+        raise RuntimeError("the lease is held by another follower")
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=failing_takeover,
+    )
+    # The surface the operator actually uses: RemoteSession.connect defaults
+    # to "terminal", so this is what a real TUI viewer looks like.
+    assert remote._can_go_cold is False
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    received: list[Any] = []
+    remote.subscribe(received.append)
+    went_cold: list[str] = []
+    remote.set_went_cold_callback(lambda: went_cold.append("cold"))
+
+    remote._on_disconnected("owner exited")
+    assert remote._recovery_task is not None
+    # Wait on the PUBLICATION (the synthesised end), never on the clock.
+    for _ in range(400):
+        if any(isinstance(event, AgentEndEvent) for event in received):
+            break
+        await asyncio.sleep(0.01)
+    await _cancel_recovery(remote)
+
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1, (
+        "a dead runtime on the terminal surface left the turn spinning: "
+        f"ends={ends} attempts={len(takeover_attempts)}"
+    )
+    assert ends[0].aborted is True and ends[0].error is None
+    assert remote.is_streaming is False
+    assert remote._suspect_generation is None
+    # The legacy contract is preserved: the loop keeps CHASING a successor
+    # instead of taking the desktop-only cold exit, which would have stopped
+    # recovery and fired the went-cold callback.
+    assert went_cold == [], "the terminal surface took the desktop cold exit"
+    assert takeover_attempts, "the loop stopped retrying after ending the turn"
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_bound_does_not_fire_when_no_turn_was_live(
+    tmp_path, monkeypatch
+) -> None:
+    """The bound ends a SUSPECT turn only: an idle viewer synthesises nothing."""
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+
+    async def failing_takeover() -> Any:
+        raise RuntimeError("no successor yet")
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=failing_takeover,
+    )
+    remote._ready_for_events = True
+    remote._streaming = False  # nothing was running when the socket dropped
+    received: list[Any] = []
+    remote.subscribe(received.append)
+
+    remote._on_disconnected("owner exited")
+    for _ in range(30):
+        await asyncio.sleep(0.01)
+    await _cancel_recovery(remote)
+
+    assert [event for event in received if isinstance(event, AgentEndEvent)] == []
+    assert remote._suspect_generation is None
+
+
+@pytest.mark.asyncio
+async def test_a_same_live_turn_rebind_still_seeds_what_the_gap_produced(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, MAJOR-1: only the synthetic start is suppressed.
+
+    ``live_events`` is the turn AS IT IS NOW, so a tool that started while
+    the socket was down is in the snapshot and must paint. Dropping the whole
+    seed meant its later real ``tool_end`` arrived orphaned and was discarded
+    unrendered at ``agent_end`` — the user permanently lost that card.
+
+    The ⊘ interrupted trap the deviation identified is still covered: the
+    start event must NOT be re-seeded, because ``_handle_agent_start`` clears
+    ``_started_tools``. Both halves are asserted here.
+    """
+    remote = _facade(tmp_path, monkeypatch)
+    received: list[Any] = []
+    remote.subscribe(received.append)
+    remote._on_disconnected("send timeout")
+    await _cancel_recovery(remote)
+
+    remote._install_frontend(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="e1",
+            streaming=True,
+            generation=7,
+            live_events=[
+                {
+                    "type": "tool_execution_start",
+                    "tool_call_id": "gap-tool",
+                    "tool_name": "hang",
+                    "args": {},
+                }
+            ],
+        )
+    )
+    remote._settle_suspect_turn()
+    remote._finish_sync()
+
+    types = [getattr(event, "type", None) for event in received]
+    assert (
+        "tool_execution_start" in types
+    ), f"the gap's tool was dropped instead of painted: {types}"
+    assert (
+        "agent_start" not in types
+    ), f"re-seeding the start clears _started_tools and orphans the card: {types}"
+    assert [event for event in received if isinstance(event, AgentEndEvent)] == []
+    assert remote.is_streaming is True

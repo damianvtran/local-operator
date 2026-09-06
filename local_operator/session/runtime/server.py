@@ -2257,9 +2257,7 @@ class RuntimeServer:
                 except asyncio.QueueFull:
                     compacted = False
             if not compacted:
-                self._drop_client(
-                    conn, reason="event queue overflow (%d frames)" % _EVENT_QUEUE_MAX
-                )
+                self._drop_client(conn, reason=f"event queue overflow ({_EVENT_QUEUE_MAX} frames)")
                 return
         if conn.event_writer_task is None:
             task = asyncio.create_task(self._drain_event_queue(conn))
@@ -2555,9 +2553,9 @@ class RuntimeServer:
                 conn.writer.write(json.dumps(frame).encode() + b"\n")
                 await asyncio.wait_for(conn.writer.drain(), timeout=timeout)
             except TimeoutError:
-                self._drop_client(conn, reason="send timeout (%.1fs)" % timeout)
+                self._drop_client(conn, reason=f"send timeout ({timeout:.1f}s)")
             except (ConnectionResetError, BrokenPipeError, OSError) as exc:
-                self._drop_client(conn, reason="send failed: %s" % type(exc).__name__)
+                self._drop_client(conn, reason=f"send failed: {type(exc).__name__}")
 
     async def _send(self, frame: dict[str, Any]) -> None:
         """Broadcast alias kept for the pre-v2 call shape (tests, hosts that
