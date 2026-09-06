@@ -301,6 +301,35 @@ releasing. The sections below say why, then how.
 fix branch. A PR never touches it, and the reviewer round treats a version
 change inside a feature PR as a finding.
 
+**CI checks this**, in the `version-bump-guard` job. A pull request whose diff
+changes the `version =` line fails unless its title starts with
+`chore(release):`. Dependency and metadata edits to `pyproject.toml` are
+unaffected — the guard reads the version line, not the file.
+
+It makes the violation loud; it does not make it impossible. `main`'s ruleset
+requires a code-owner approval but configures **no required status checks**, and
+admins hold a configured bypass (see "Who may merge: two tiers, by code
+ownership"), so an `--admin` merge lands over a red guard. Treat a failing
+`version-bump-guard` as a stop signal rather than an obstacle to route around:
+the job is the reviewer's missing memory, not a lock.
+
+Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
+`404 Branch not protected` here. That endpoint reports only **legacy** branch
+protection and 404s even while a modern ruleset is actively enforcing the
+branch, so it is the wrong probe and reading it as "unprotected" is a mistake
+this paragraph made once already. Query
+`gh api repos/<owner>/<repo>/rules/branches/main` instead.
+
+The job exists because the prose above was not enough. It was already written,
+and it already told reviewers to treat a bump as a finding, when #701 and #706
+each landed one inside a feature PR and both review rounds passed anyway. The
+result was that `main` advertised `0.50.2` while the newest tag, GitHub Release
+and PyPI artifact were all still `0.50.0`: `0.50.1` and `0.50.2` were consumed
+without ever being built or published, and the v0.50.3 window had to skip both
+numbers rather than reuse a version `main` had already claimed. A rule that
+depends on every reviewer remembering to look is a rule that fails on the day
+someone does not.
+
 This replaces the earlier practice of each PR bumping its own patch, which
 failed in a measurable way on 2026-09-05: with ten sessions each holding a
 reserved patch number, `0.47.1` → `0.48.0` took close to five hours of agents
