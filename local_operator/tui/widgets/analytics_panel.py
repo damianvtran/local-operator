@@ -52,7 +52,7 @@ from local_operator.tui import theme as theme_mod
 class _CostLike(Protocol):
     """The cost interface both a scope and a calendar bucket expose.
 
-    ``format_cost``/``_append_cost`` render the same ``$—``/``$X.XX``/``$X+``
+    ``format_cost``/``append_cost`` render the same ``$—``/``$X.XX``/``$X+``
     honesty for a :class:`UsageAggregate` (a provider/session scope) AND a
     :class:`UsagePeriod` (a day/month bucket). Rather than duplicate the money
     formatter or widen the annotation to a lie, this Protocol names the three
@@ -142,8 +142,14 @@ def format_cost(aggregate: "_CostLike") -> str:
     return body + ("+" if aggregate.cost_is_partial else "")
 
 
-def _append_cost(block: Text, aggregate: "_CostLike", cell: int, fg: Style, dim: Style) -> None:
+def append_cost(block: Text, aggregate: "_CostLike", cell: int, fg: Style, dim: Style) -> None:
     """Append a right-aligned cost cell, with the lower-bound ``+`` in ``dim``.
+
+    Public (it was ``_append_cost``) because ``session_panel`` renders the same
+    money cells: one screen showing ``$1.20+`` and its sibling showing a plain
+    ``$1.20`` for the same partial sum would be two honesty vocabularies. An
+    underscore name imported across modules is a private contract in all but
+    spelling, so the name says what the visibility already is.
 
     The ``+`` is a STATUS FLAG, not a digit (review D1): rendering it in the same
     full-strength weight as the number let it read as part of the figure, so a
@@ -161,6 +167,17 @@ def _append_cost(block: Text, aggregate: "_CostLike", cell: int, fg: Style, dim:
         block.append(text, style=fg)
 
 
+def scope_needs_cost_legend(scope: "_CostLike") -> bool:
+    """Whether ONE scope renders a ``+`` (partial) or a ``$—`` (unknown).
+
+    The predicate, not the loop: ``/session`` decides the same question over a
+    different set of scopes (its per-model and per-purpose groups), and two
+    copies of "what counts as a marked figure" would eventually disagree about
+    when the footnote is owed.
+    """
+    return (scope.cost_is_partial and scope.cost_is_known) or not scope.cost_is_known
+
+
 def _needs_cost_legend(aggregate: "UsageAggregate") -> bool:
     """Whether any scope on screen shows a ``+`` (partial) or ``$—`` (unknown).
 
@@ -169,7 +186,7 @@ def _needs_cost_legend(aggregate: "UsageAggregate") -> bool:
     noise.
     """
     scopes = [aggregate, *aggregate.by_provider.values(), *aggregate.by_session.values()]
-    return any((s.cost_is_partial and s.cost_is_known) or not s.cost_is_known for s in scopes)
+    return any(scope_needs_cost_legend(s) for s in scopes)
 
 
 def proportion_bar(fraction: float, width: int) -> str:
@@ -224,7 +241,13 @@ def _component_rows(aggregate: UsageAggregate) -> list[_Row]:
     return rows
 
 
-def _semantic(name: str) -> Style:
+def semantic_style(name: str) -> Style:
+    """A ``rich`` style for one semantic theme token.
+
+    Public (it was ``_semantic``) so ``session_panel`` resolves its row colours
+    through the same one-line helper rather than re-spelling
+    ``Style(color=theme_mod.semantic_color(...))`` at every call site.
+    """
     return Style(color=theme_mod.semantic_color(name))
 
 
@@ -237,8 +260,13 @@ def _semantic(name: str) -> Style:
 _SECTION_MARK = "▌"
 
 
-def _section_header(title: str, meta: str = "") -> Text:
+def section_header(title: str, meta: str = "") -> Text:
     """A section header in the app's own voice: title-case, bold ``fg``, marked.
+
+    Public (it was ``_section_header``) for the same reason as
+    :func:`append_cost`: ``/session`` draws the identical ``▌``-marked headers,
+    and forking the glyph or the meta styling would give the two diagnostics
+    screens two visual languages.
 
     NOT all-caps (review: the app uses that pattern nowhere else). The ``▌``
     accent bar in the left margin is the delineation — it gives a scrolling
@@ -266,6 +294,10 @@ def _section_header(title: str, meta: str = "") -> Text:
 #: legal values.
 METRIC_COST = "cost"
 METRIC_TOKENS = "tokens"
+
+#: The footnote explaining the two money marks. One string so ``/analytics`` and
+#: ``/session`` cannot drift into two different explanations of the same glyph.
+COST_LEGEND = "+ lower bound (some calls unpriced)   $— no published price"
 
 
 def _month_name(mm: int) -> str:
@@ -366,11 +398,11 @@ def _series_chart(
     Pure: returns ``Text`` lines so ``render_lines_for_test`` reads the chart
     back as plain strings, exactly like the rest of ``build_report``.
     """
-    fg = _semantic("fg")
-    dim = _semantic("dim")
-    accent = _semantic("accent")
+    fg = semantic_style("fg")
+    dim = semantic_style("dim")
+    accent = semantic_style("accent")
 
-    lines: list[Text] = [_section_header(title, meta)]
+    lines: list[Text] = [section_header(title, meta)]
     if not periods:
         empty = Text()
         empty.append(f"  {empty_note}", style=dim)
@@ -439,9 +471,9 @@ def build_report(
     report.
     """
     width = max(40, width)
-    fg = _semantic("fg")
-    dim = _semantic("dim")
-    accent = _semantic("accent")
+    fg = semantic_style("fg")
+    dim = semantic_style("dim")
+    accent = semantic_style("accent")
 
     lines: list[Text] = []
 
@@ -465,7 +497,7 @@ def build_report(
         # Failed-call count is real information, not chrome — keep it in the meta.
         calls_meta += f" ({aggregate.calls - aggregate.ok_calls} failed)"
     calls_meta += " · measured"
-    lines.append(_section_header("Totals", calls_meta))
+    lines.append(section_header("Totals", calls_meta))
 
     # Value cells share a gutter so notes line up even when compact figures
     # differ in width (``3M`` vs ``387k``). 11 cells matches the existing
@@ -571,13 +603,13 @@ def build_report(
         cost_note = "no published price"
     # Built directly (not via ``kv``) so the lower-bound ``+`` is dimmed like the
     # table cells (review D1) — the figure reads as a number, the ``+`` as a flag.
-    # ``_append_cost`` right-aligns (table cells); here we pass the figure's own
+    # ``append_cost`` right-aligns (table cells); here we pass the figure's own
     # width so it left-aligns with the token values, then pad out to
     # ``_VALUE_CELL`` so the cost note shares the gutter (D2).
     cost_text = format_cost(aggregate)
     cost_row = Text()
     cost_row.append(f"  {'Est. cost':<22}", style=dim)
-    _append_cost(cost_row, aggregate, len(cost_text), fg, dim)
+    append_cost(cost_row, aggregate, len(cost_text), fg, dim)
     cost_row.append(" " * max(0, _VALUE_CELL - len(cost_text)))
     cost_row.append(f"  {cost_note}", style=dim)
     lines.append(cost_row)
@@ -646,7 +678,7 @@ def build_report(
     # word "estimated" is why this section reads differently from Totals, and it
     # is ALSO carried at the data level — the ``≈`` mark and the ``~`` on every
     # percentage below — so the distinction survives the heading scrolling away.
-    lines.append(_section_header("Where input went", "≈ estimated split of context tokens"))
+    lines.append(section_header("Where input went", "≈ estimated split of context tokens"))
 
     rows = _component_rows(aggregate)
     if not rows:
@@ -704,7 +736,7 @@ def build_report(
     if _needs_cost_legend(aggregate):
         lines.append(Text())
         legend = Text()
-        legend.append("  + lower bound (some calls unpriced)   $— no published price", style=dim)
+        legend.append("  " + COST_LEGEND, style=dim)
         lines.append(legend)
 
     return lines
@@ -737,11 +769,11 @@ def _group_section(
     cache; a narrow one drops the cache column (see ``_WIDE_TABLE_MIN``) so the
     cost column this feature adds always survives.
     """
-    fg = _semantic("fg")
-    dim = _semantic("dim")
+    fg = semantic_style("fg")
+    dim = semantic_style("dim")
 
     # Same marked, title-case header as every other section (no all-caps).
-    block = _section_header(title)
+    block = section_header(title)
 
     # Sort by cost when any of these groups is priced, else by tokens. Keyed on
     # the tuple so an unpriced group sorts by tokens as a tiebreak rather than
@@ -763,9 +795,9 @@ def _group_section(
         block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.
-        # The lower-bound ``+`` is dimmed by ``_append_cost`` (review D1).
+        # The lower-bound ``+`` is dimmed by ``append_cost`` (review D1).
         block.append("   ")
-        _append_cost(block, agg, cost_col, fg, dim)
+        append_cost(block, agg, cost_col, fg, dim)
         block.append(f"   {agg.calls:>4} calls", style=dim)
         if show_cache:
             block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
