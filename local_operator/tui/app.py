@@ -17566,8 +17566,47 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), self._footer_persist_hint()),
+            status=_status_line(
+                note,
+                _catalogue_status(statuses),
+                self._owner_catalogue_clipped_note(),
+                self._footer_persist_hint(),
+            ),
         )
+
+    def _owner_catalogue_clipped_note(self) -> str:
+        """Footer clause for an owner catalogue the attach frame could not carry.
+
+        A follower's picker offers the OWNER's rows, and the wire clips that
+        list when the frame would otherwise exceed the socket's line limit
+        (``frontend_state.MODEL_CATALOGUE_FLOOR_ROWS``). Without this clause the
+        clipped list renders exactly like a complete one, so a user hunting for
+        a model the owner really does offer would conclude it does not exist —
+        the same false-completeness failure the `stale list:` clause exists to
+        prevent, and the reason the wire sets a flag rather than clipping
+        silently.
+
+        Owner-side and older-owner cases are both silent: the flag is absent
+        (``getattr`` default) on a facade that has no frontend state and on an
+        owner running a build without the field, and an unclipped catalogue is
+        the overwhelmingly common case — a footer that always says something is
+        a footer nobody reads (``_catalogue_status``).
+        """
+        state = getattr(self._session, "frontend_state", None)
+        if not getattr(state, "model_catalogue_truncated", False):
+            return ""
+        # Parallel to `stale list:` and sized like it: the clause sits after the
+        # access note in the same budgeted footer, and it names the CONSEQUENCE
+        # (the list is incomplete) rather than the mechanism (a frame budget),
+        # which is the half a user hunting for a model needs.
+        #
+        # 26 cells, matching `stale list: anthropic, xai` — the sibling clause
+        # this slot was budgeted around (39 cells after the access note at 100
+        # columns). The fuller `partial list — some models not shown` measured
+        # 36 and fit at 100, but clipped mid-word to `some models no…` at 60,
+        # losing the negation and inverting the meaning at exactly the width
+        # where the reader most needs it whole.
+        return "partial list — not all models"
 
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).

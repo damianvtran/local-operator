@@ -9,6 +9,7 @@ list that is longer than the window without saying so.
 from __future__ import annotations
 
 import inspect
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
@@ -1051,3 +1052,51 @@ async def test_the_held_row_is_paid_for_out_of_the_row_budget_when_mounted(heigh
     # would get its row back and the card would grow by a line.
     assert checking_budget == max(1, cap - 2), (checking_budget, cap)
     assert budgets == [cap - 2, cap - 1, cap - 1], (cap, budgets)
+
+
+def test_a_clipped_owner_catalogue_says_so_in_the_footer() -> None:
+    """A short list must never render as the whole one.
+
+    The attach frame clips the owner's catalogue when the session's state
+    cannot fit the control socket's line
+    (``frontend_state._bound_model_catalogue_in_place``). A follower's picker
+    offers the OWNER's rows, so without this clause the clipped list looks
+    exactly like a complete one and a user hunting for a model the owner really
+    does offer concludes it does not exist — the same false completeness the
+    ``stale list:`` clause exists to prevent.
+
+    Pinned at the picker rather than only at the wire because a flag nothing
+    renders is not honesty, it is an unused field.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.tui.app import OperatorApp
+
+    clipped = FrontendSessionState(session_id="s1", epoch="e1", model_catalogue=[{"provider": "p"}])
+    clipped.model_catalogue_truncated = True
+    app = OperatorApp.__new__(OperatorApp)
+
+    # `cast(Any, ...)` for the reason the pilot tests use it: these stubs carry
+    # the one attribute the method reads, not the whole `SessionProtocol`.
+    app._session = cast(Any, type("S", (), {"frontend_state": clipped})())
+    note = app._owner_catalogue_clipped_note()
+    assert note, "a clipped catalogue must produce a footer clause"
+
+    # Inside the slot's documented budget: the access note (28 cells) leads the
+    # footer, leaving 39 cells for this clause at 100 columns (see
+    # `app._catalogue_status`, which sizes the sibling `stale list:` the same
+    # way). The budget matters because a clause that clips mid-word loses the
+    # negation — "not all models" becoming "not…" inverts its own meaning.
+    assert cell_len(note) <= 39
+
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), current="", status=note)
+    picker.open("")
+    assert note in picker.render_text(80).plain
+
+    # Silent in the ordinary case: an unclipped catalogue, an owner too old to
+    # publish the field, and a facade with no frontend state at all.
+    whole = FrontendSessionState(session_id="s1", epoch="e1")
+    app._session = cast(Any, type("S", (), {"frontend_state": whole})())
+    assert app._owner_catalogue_clipped_note() == ""
+    app._session = cast(Any, type("S", (), {"frontend_state": None})())
+    assert app._owner_catalogue_clipped_note() == ""
