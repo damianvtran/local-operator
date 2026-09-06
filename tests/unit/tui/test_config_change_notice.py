@@ -746,6 +746,89 @@ async def test_a_loosening_does_not_revoke_an_explicit_approvals_ask(monkeypatch
         # The saved default DID follow the file — the pair is allowed to
         # disagree, which is what `/approvals` now reports.
         assert app._approvals_default_auto is True
+        # ...AND THE KEY IS NOT REPORTED AS APPLIED (design round 2, D8).
+        # `applied:` is a claim about which keys MOVED, and the whole point of
+        # the row above is that this one did not. Printed anyway, the keep
+        # notice was followed one row later by `config.yml changed: applied:
+        # tool_approval_mode` — two adjacent dim rows stating opposite facts
+        # about one key, leaving a user scanning for "did my hardening survive?"
+        # unable to tell which won without running `/approvals`. Since it was
+        # the only live key here, the generic line must not print at all, which
+        # is exactly what the refusing `model` section already does.
+        assert not [n for n in _notices(app) if "config.yml changed" in n], _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_loosening_drops_only_its_own_key_from_applied(
+    monkeypatch, tmp_path
+) -> None:
+    """Design round 2, D8 — the keep path inside a BATCHED edit.
+
+    The sibling test covers the lone-key case, where the whole line disappears.
+    This is the other half of the same rule and the one a naive fix breaks: a
+    poll carrying a refused ``tool_approval_mode`` beside a live key that DID
+    apply must still print, naming the applied key and only that key. Dropping
+    the whole line would lose a true receipt for ``compaction.enabled``;
+    keeping the key would restore the contradiction the round found.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        app._cmd_approvals("ask", app._notice)
+        assert app._explicit_approvals_mode == "ask"
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        _write_elsewhere(tmp_path, "compaction.enabled", False)
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        assert app._approve_all is False, "a file write revoked a hardening the human typed"
+        notices = [n for n in _notices(app) if "config.yml changed" in n]
+        assert notices == ["config.yml changed: applied: compaction.enabled"], notices
+        assert [n for n in _notices(app) if "keeping tool approvals" in n], _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_only_the_owning_process_prints_the_keep_notice(monkeypatch, tmp_path) -> None:
+    """Design round 2, D8, second half — one keep receipt, like every other event.
+
+    The keep branch returned before ``_gate_is_owned_elsewhere()``, so the D1
+    single-receipt fix did not cover it. With a runtime attached both carriers
+    legitimately hold ``"ask"`` — ``/approvals`` routes to the runtime, which
+    records its own, while the viewer records one for its ``/settings`` page —
+    so both keep-branches fired on one poll and the same 118-character sentence
+    printed twice, with the (then also wrong) ``applied:`` line wedged between:
+    five visual rows for one non-event. The runtime owns the gate, so its notice
+    is the one that speaks, exactly as with the value clause.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("hosting", "")
+    _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
+
+    class AttachedSession(FakeSession):
+        is_remote = True
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _adopted(app, pilot)
+        app._cmd_approvals("ask", app._notice)
+        assert app._explicit_approvals_mode == "ask"
+
+        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
+        process_watcher(tmp_path).poll_now()
+        await pilot.pause()
+
+        # Silent HERE: the runtime's own keep notice reaches this transcript as
+        # a NoticeEvent, and printing a local copy is the one event told twice.
+        assert not [n for n in _notices(app) if "keeping tool approvals" in n], _notices(app)
+        # The refusal still happened — this pane's gate did not follow the file.
+        assert app._approve_all is False
+        # ...and it is still not claimed as applied.
+        assert not [n for n in _notices(app) if "config.yml changed" in n], _notices(app)
 
 
 @pytest.mark.asyncio

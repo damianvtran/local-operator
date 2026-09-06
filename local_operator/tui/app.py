@@ -1331,6 +1331,27 @@ class _ProviderRows(NamedTuple):
     problem: str
 
 
+class _ApprovalsFollow(NamedTuple):
+    """What ``_follow_configured_approvals`` did, for a caller that must report it.
+
+    Two fields rather than the bare clause string it used to return, because
+    "the gate moved and another process is announcing it" and "the gate did NOT
+    move" both produce an empty clause and are not the same news (design round
+    2, D8). Only the caller knows about the ``applied:`` key list, and only this
+    method knows whether the write was refused, so the verdict has to cross that
+    boundary explicitly — read as a bare string it printed ``applied:
+    tool_approval_mode`` one row under a notice saying the gate was kept.
+
+    ``kept`` is specifically the KEEP path (a loosening refused on behalf of a
+    mode a human typed here), not "nothing to say": a mode that failed to parse
+    and a value the gate already held both leave ``kept`` False, because in
+    neither case did this listener refuse a change the file asked for.
+    """
+
+    clause: str
+    kept: bool
+
+
 #: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
 #: that card and no other. One `Toast` slot serves every caller, and a receipt
 #: may be SHOWING or HELD behind an actionable notice; the tag rides the card
@@ -14510,6 +14531,23 @@ class OperatorApp(App[None]):
                 relaunch.append(key)
             else:
                 new_sessions.append(key)
+        # The gate decision is taken BEFORE the `applied:` list is assembled,
+        # because on the keep path the key must not appear in it (design round
+        # 2, D8). Read after assembly — which is how it used to run — the keep
+        # notice was followed one row later by `applied: tool_approval_mode`,
+        # two dim rows stating opposite facts about the same key, and a user
+        # scanning for "did my hardening survive?" could not tell which won.
+        #
+        # The refusing MODEL section is the standard this follows: it `continue`s
+        # above, prints no `config.yml changed:` line at all, and leaves the
+        # session's own receipt to speak. An `applied:` clause is a claim about
+        # keys that MOVED, so a key this listener just refused to move has no
+        # place in it.
+        follow = _ApprovalsFollow("", False)
+        if "tool_approval_mode" in changed:
+            follow = self._follow_configured_approvals(change, announce=True)
+            if follow.kept:
+                live = [key for key in live if key != "tool_approval_mode"]
         parts: list[str] = []
         if live:
             # "applied:" leads rather than trailing as "— applied" (design
@@ -14536,9 +14574,12 @@ class OperatorApp(App[None]):
                 "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
             )
             parts.append(f"{', '.join(retired)} {tail}")
-        if not parts:
-            # Only ``model`` keys moved: nothing this process can truthfully
-            # say, and the session's receipt is already on its way.
+        if not parts and not follow.clause:
+            # Only ``model`` keys moved, or the sole live key was the approval
+            # mode this listener just REFUSED to move: nothing this process can
+            # truthfully say, and the receipt that matters (the session's, or the
+            # keep notice) is already on its way. `follow.clause` is checked too
+            # so a lone loosening that DID apply still prints its value clause.
             return
         # The approval mode names its VALUE and raises the severity (design
         # review round 1, D2). "changed" is not actionable for a two-valued
@@ -14560,10 +14601,11 @@ class OperatorApp(App[None]):
             # the `model` section already follows above, and for the same
             # stated reason.
             #
-            # `tool_approval_mode` stays in the `applied:` key list either way:
-            # that clause is about WHICH KEYS moved, not about what the gate
-            # now does, so it does not duplicate the runtime's line.
-            spoken = self._follow_configured_approvals(change, announce=True)
+            # `tool_approval_mode` stays in the `applied:` key list whenever the
+            # gate MOVED — that clause is about WHICH KEYS moved, not about what
+            # the gate now does, so it does not duplicate the runtime's line. On
+            # the keep path it moved nothing and was dropped from `live` above.
+            spoken = follow.clause
             if spoken:
                 parts.append(spoken)
                 # Amber on the LOOSENING only (design round 1, D6). The house
@@ -14619,13 +14661,19 @@ class OperatorApp(App[None]):
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
 
-    def _follow_configured_approvals(self, change: Any, *, announce: bool) -> str:
+    def _follow_configured_approvals(self, change: Any, *, announce: bool) -> _ApprovalsFollow:
         """Move this app's gate to ``tool_approval_mode``. THE one apply path.
 
-        Returns the value clause the caller should add to its line, or ``""``
-        when this process has nothing to say — either because the mode did not
-        parse, or because the gate did not move, or because another process
-        owns the gate and its own receipt is already on its way.
+        Returns an :class:`_ApprovalsFollow`: the value clause the caller should
+        add to its line (``""`` when this process has nothing to say — the mode
+        did not parse, the gate did not move, or another process owns the gate
+        and its own receipt is already on its way), plus ``kept``, which is True
+        only on the KEEP path below.
+
+        The caller needs ``kept`` separately from the clause because both a
+        refusal and a silent success return no clause, and only the refusal must
+        strike ``tool_approval_mode`` from the ``applied:`` key list (design
+        round 2, D8).
 
         **The rule is asymmetric** (review round 1 R1, UX round 1 U1), and it
         is the same rule ``OwnedSessionHandle.follow_config`` applies, stated
@@ -14663,7 +14711,11 @@ class OperatorApp(App[None]):
             # A typo on disk is not "ask" by accident: the watcher only
             # delivers parseable files, so the safe answer is to keep the mode
             # in force rather than guess. Same policy as the runtime's.
-            return ""
+            #
+            # `kept=False`: nothing was refused on a human's behalf here, so the
+            # caller's `applied:` list is not this method's business — an
+            # unparseable value never reached the point of moving anything.
+            return _ApprovalsFollow("", False)
         wanted_auto = mode == "auto"
         # The SAVED default follows the file in every case, including the one
         # where the live gate does not: the file IS the saved default, and
@@ -14671,7 +14723,7 @@ class OperatorApp(App[None]):
         self._approvals_default_auto = wanted_auto
         if wanted_auto == self._approve_all:
             self._set_approve_all(self._approve_all)  # re-assert the band's `always` marker
-            return ""
+            return _ApprovalsFollow("", False)
         if announce and wanted_auto and self._explicit_approvals_mode == "ask":
             # Loosening against this pane's own deliberate hardening: keep the
             # gate. Shaped like the model half's keep notice — what is kept,
@@ -14679,13 +14731,23 @@ class OperatorApp(App[None]):
             #
             # `== "ask"` rather than a bare truth test (review round 2, R6):
             # only a typed `ask` is a hardening worth refusing the file for.
-            self._system_notice(
-                "keeping tool approvals: ask — set with /approvals in this session; "
-                "config.yml now says auto, /approvals auto adopts it",
-                "info",
-            )
+            #
+            # The NOTICE is gated on ownership for the same reason the value
+            # clause below is (design round 1 D1, extended to this branch by
+            # round 2 D8): with a runtime attached, both carriers hold the typed
+            # `ask`, both keep-branches fire on one poll, and the identical
+            # 118-character sentence printed twice in one viewport. The runtime
+            # owns the gate, so the runtime's keep notice is the one that speaks;
+            # this branch still returns `kept=True` because the local `applied:`
+            # list is this process's to correct either way.
+            if not self._gate_is_owned_elsewhere():
+                self._system_notice(
+                    "keeping tool approvals: ask — set with /approvals in this session; "
+                    "config.yml now says auto, /approvals auto adopts it",
+                    "info",
+                )
             self._set_approve_all(self._approve_all)
-            return ""
+            return _ApprovalsFollow("", True)
         if not announce:
             # A page write in this pane is a choice made here, so it REPLACES
             # whatever `/approvals` had recorded rather than being refused by
@@ -14705,11 +14767,11 @@ class OperatorApp(App[None]):
         if wanted_auto:
             self._note_approvals_on_parked_prompt()
         if not announce or self._gate_is_owned_elsewhere():
-            return ""
+            return _ApprovalsFollow("", False)
         return (
-            "tool approvals now auto — every tool runs without asking"
+            _ApprovalsFollow("tool approvals now auto — every tool runs without asking", False)
             if wanted_auto
-            else "tool approvals now ask — tools prompt before running"
+            else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
 
     def _gate_is_owned_elsewhere(self) -> bool:
