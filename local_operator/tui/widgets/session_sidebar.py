@@ -21,7 +21,7 @@ from textual.widget import Widget
 from local_operator.resume import format_age
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
-from local_operator.tui.terminal_title import SPINNER_INTERVAL_S
+from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
 from local_operator.tui.widgets.session_picker import row_state_mark
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -56,7 +56,7 @@ class SessionSidebar(Widget, can_focus=True):
         self.requested_id = ""
         self.cursor_id = ""
         self.error = ""
-        self.loading = True
+        self._catalog_loading = True
         self._offset = 0
         self._frame = 0
         self._timer: Timer | None = None
@@ -80,7 +80,10 @@ class SessionSidebar(Widget, can_focus=True):
             self._deferred = ordered
             return
         self.entries = ordered
-        self.loading = False
+        # A stationary pointer may now cover a different row. Do not advertise
+        # its old identity until a new pointer event resolves the current row.
+        self.tooltip = None
+        self._catalog_loading = False
         self.error = ""
         if not any(entry.id == self.cursor_id for entry in ordered):
             self.cursor_id = self.current_id or (ordered[0].id if ordered else "")
@@ -91,7 +94,7 @@ class SessionSidebar(Widget, can_focus=True):
     def show_error(self, message: str) -> None:
         # A refresh error does not erase the last usable catalog.
         self.error = message
-        self.loading = False
+        self._catalog_loading = False
         self.refresh()
 
     def set_open(self, opened: bool) -> None:
@@ -106,7 +109,10 @@ class SessionSidebar(Widget, can_focus=True):
     def _sync_animation(self) -> None:
         if self._timer is None:
             return
-        if self.display and any(entry.row.live_state == "busy" for entry in self.visible_entries):
+        if self.display and (
+            self._catalog_loading
+            or any(entry.row.live_state == "busy" for entry in self.visible_entries)
+        ):
             self._timer.resume()
         else:
             self._timer.pause()
@@ -209,10 +215,10 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n")
             current = entry.id == self.current_id
             cursor = self.has_focus and entry.id == self.cursor_id
-            background = "tint-select" if cursor else "surface" if current else "bg"
+            background = "tint-select" if cursor else "surface" if current else None
             style = Style(
                 color=theme_mod.semantic_color("fg"),
-                bgcolor=theme_mod.semantic_color(background),
+                bgcolor=theme_mod.semantic_color(background) if background else None,
                 bold=current,
             )
             line = Text(style=style, no_wrap=True)
@@ -242,14 +248,20 @@ class SessionSidebar(Widget, can_focus=True):
             text = (
                 "Could not load conversations"
                 if self.error
-                else "Loading conversations…" if self.loading else "No conversations yet"
+                else (
+                    f"{SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]} Loading conversations…"
+                    if self._catalog_loading
+                    else "No conversations yet"
+                )
             )
             result.append("\n" + truncate_cells(text, width), style=theme_mod.semantic_color("dim"))
         while result.plain.count("\n") < self.size.height - 2:
             result.append("\n")
-        footer = (
-            "Refresh failed" if self.error else "Opening…" if self.requested_id else "ctrl+b hide"
-        )
+        hint = "esc return" if self.has_focus else "f9 focus · ctrl+b hide"
+        if len(self.entries) > self.page_size:
+            last = min(len(self.entries), self._offset + self.page_size)
+            hint = f"{self._offset + 1}–{last}/{len(self.entries)} · ctrl+b hide"
+        footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
         result.append(
             "\n" + truncate_cells(footer, width),
             style=theme_mod.semantic_color("warning" if self.error else "dim"),

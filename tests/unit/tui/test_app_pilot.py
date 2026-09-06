@@ -1335,8 +1335,12 @@ async def test_every_authoritative_slash_routes_to_owner_with_supported_images()
             arg = "coder inspect [Image #1]" if attachments else "value"
             app._run_slash_command(f"/{capability.command} {arg}", attachments)
             await pilot.pause()
+    # A legacy owner's loop classification cannot move the terminal's local
+    # source-bound scheduler to the owner (which explicitly refuses /loop).
     assert [name for name, _, _ in routed] == [
-        capability.command for capability in session.frontend_state.slash_capabilities
+        capability.command
+        for capability in session.frontend_state.slash_capabilities
+        if capability.command != "loop"
     ]
     assert [(name, count) for name, _, count in routed if name in {"agent", "team"}] == [
         ("agent", 1),
@@ -5876,9 +5880,9 @@ async def test_loop_goal_stop_cancels() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_goal_reload_safety() -> None:
-    # Swapping app._session mid-loop must stop the worker cleanly and reset all
-    # three fields (esp. the suppress flag, which would otherwise mute the NEXT
-    # session's completion toasts).
+    # Reload explicitly retires the source; an ordinary sidebar selection must
+    # NOT cancel its loop. All source fields still reset and a late TurnEnded
+    # must not notify the newly selected conversation.
     session = GoalSession()
     session.prompt_gate = asyncio.Event()
     app = OperatorApp(lambda: _factory(session))
@@ -5891,12 +5895,16 @@ async def test_loop_goal_reload_safety() -> None:
         session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
         await _type_command(pilot, app, "loop do the thing")
         assert app._loop_running is True
-        # Simulate a reload: the session the worker captured is no longer live.
+        # Mirror _reload_session's explicit retirement, not a sidebar switch.
+        source = app._interaction
+        source.retired = True
         app._session = GoalSession()
         session.prompt_gate.set()
         await _settle_loop(pilot, app)
         for _ in range(6):
             await pilot.pause()
+        # This reduced host still displays the retired source until adoption;
+        # its receipt must say stopped, never that the goal was achieved.
         text = _transcript_text(app)
     assert "stopped by reload" in text
     assert app._loop_running is False

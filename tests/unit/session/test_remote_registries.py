@@ -177,10 +177,9 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         "journal_credential_change",
         # Guarded fallbacks in app.py that degrade to a documented default
         # (fork clones from disk, routing reads config.yml, usage/context
-        # measurement is skipped, bang-mode results are not journalled).
+        # measurement is skipped).
         "has_pending_fork",
         "routing_settings",
-        "record_shell",
         "measure_preloaded_context",
         "preflight_usage",
         "refresh_frontend_usage",

@@ -224,7 +224,15 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "fork_snapshot", "credential"}
+_PAYLOAD_OPS = {
+    "slash_result",
+    "cancel_subagents",
+    "job_trajectory",
+    "fork_snapshot",
+    "credential",
+    "history_page",
+    "record_shell",
+}
 
 
 def _accepts_kw(fn: Any, name: str) -> bool:
@@ -547,6 +555,7 @@ class RuntimeServer:
                 [DESKTOP_WATCH_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
+                + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
             ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
@@ -1130,7 +1139,14 @@ class RuntimeServer:
                 sync_wire_payload,
             )
 
-            outcome = subscribe_frontend(on_update)
+            window_requested = bool(frame.get("display_window")) and (
+                "display-history-window-v1" in self._record.capabilities
+            )
+            outcome = (
+                subscribe_frontend(on_update, display_window=True)
+                if window_requested
+                else subscribe_frontend(on_update)
+            )
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             subscription = cast(FrontendSubscription, outcome)
@@ -1152,6 +1168,21 @@ class RuntimeServer:
             # the next unbounded list is one log line to find rather than a
             # profiling session.
             oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None and sync.display_history is not None:
+                # The budget covers the WHOLE frame, not just history. A busy
+                # canonical state may leave too little room even for our page.
+                # Request the existing exact local replay, never truncate prose.
+                fallback = sync.display_history.model_copy(
+                    update={
+                        "status": "full_required",
+                        "messages": [],
+                        "durable_seed_ids": [],
+                        "before_token": None,
+                        "snapshot_token": None,
+                    }
+                )
+                sync_payload["display_history"] = fallback.model_dump(mode="json")
+                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
                 logger.error("session runtime: frontend_sync will not fit — %s", oversize)
             await self._send_to(conn, sync_frame)
@@ -2064,6 +2095,34 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result if isinstance(result, int) else 0
+        if op == "record_shell":
+            from local_operator.harness.types import ToolResult
+
+            record = getattr(h, "record_shell", None)
+            command = frame.get("command")
+            if not callable(record) or not isinstance(command, str) or not command.strip():
+                raise ValueError("invalid shell receipt")
+            result = ToolResult.model_validate(frame.get("result"))
+            if (
+                result.tool_name != "bash"
+                or not result.tool_call_id
+                or len(result.tool_call_id) > 128
+            ):
+                raise ValueError("invalid shell receipt identity")
+            outcome = record(command, result)
+            if inspect.isawaitable(outcome):
+                await outcome
+            return "accepted"
+        if op == "history_page":
+            fetch = getattr(h, "history_page", None)
+            before = frame.get("before")
+            anchor = frame.get("anchor", "")
+            if not callable(fetch) or not isinstance(before, str) or not isinstance(anchor, str):
+                raise ValueError("invalid history page request")
+            if len(before) > 4096 or len(anchor) > 512:
+                raise ValueError("invalid history page request")
+            result = fetch(before, anchor)
+            return await result if inspect.isawaitable(result) else result
         if op == "job_trajectory":
             # The other half of the frame-size fix: the attach snapshot omits
             # trajectories, so a viewer opening a child page pulls that one

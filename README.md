@@ -452,6 +452,10 @@ with its title and age:
   same TUI. `cmd+b` is also accepted when the terminal forwards the Super
   modifier. `/settings` → **Session sidebar** and **Sidebar position** control
   visibility and left/right placement; the defaults are hidden and left.
+  `f9` or `/sidebar focus` opens and focuses the list without changing your
+  draft. Arrow keys choose a row, Enter opens it, and Escape returns to the
+  previous input surface. F9 also returns focus without hiding a pinned list.
+  On narrow terminals, selecting a conversation dismisses the overlay drawer.
 - `f8` — open an aside (side question) without losing what you were typing;
   `ctrl+f` promotes the aside into the conversation.
 - `shift+tab`: cycle reasoning effort.

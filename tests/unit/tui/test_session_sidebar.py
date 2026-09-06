@@ -115,8 +115,65 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         assert len(sidebar.visible_entries) <= sidebar.page_size
         lines = sidebar.render().plain.splitlines()
         assert len(lines) <= sidebar.size.height
-        assert lines[-1] == "ctrl+b hide"
+        assert lines[-1] == f"1–{sidebar.page_size}/101 · ctrl+b hide"
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         sidebar.show_error("read failed")
         assert sidebar.entries
         assert sidebar.render().plain.splitlines()[-1] == "Refresh failed"
+
+
+@pytest.mark.asyncio
+async def test_focus_shortcut_preserves_draft_and_returns_to_editor():
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app._editor()
+        editor.load_text("draft")
+        await pilot.press("f9")
+        assert app._session_sidebar.display
+        assert app._session_sidebar.has_focus
+        assert editor.text == "draft"
+        await pilot.press("f9", "x")
+        assert app.focused is editor
+        assert "x" in editor.text
+        assert app._session_sidebar.display
+
+
+@pytest.mark.asyncio
+async def test_loading_keeps_sidebar_chrome_without_textual_loading_overlay():
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_open(True)
+        sidebar.entries = ()
+        sidebar._catalog_loading = True
+        await pilot.pause()
+        assert sidebar.loading is False
+        text = sidebar.render().plain
+        assert "Sessions" in text
+        assert "Loading conversations" in text
+        assert "f9 focus" in text
+
+
+@pytest.mark.asyncio
+async def test_sidebar_escape_restores_settings_and_current_narrow_selection_closes(monkeypatch):
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    monkeypatch.setattr(app, "_refresh_sidebar", lambda: None)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.action_toggle_sidebar()
+        app._cmd_settings(app._notice)
+        await pilot.pause()
+        settings_focus = app.focused
+        assert settings_focus is not None and settings_focus is not app._editor()
+        await pilot.click("#session-sidebar", offset=(2, 0))
+        await pilot.press("escape")
+        assert app.focused is settings_focus
+        app._close_settings_view()
+        await pilot.resize_terminal(80, 24)
+        app.action_toggle_sidebar()
+        app._session_sidebar.set_entries([CatalogEntry(SessionRow("sess", 1, "Current"))])
+        await pilot.pause()
+        await pilot.click("#session-sidebar", offset=(4, 1))
+        assert not app._session_sidebar.display

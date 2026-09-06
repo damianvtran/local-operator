@@ -251,9 +251,10 @@ class HistoryRowsSettled(SessionEvent):
     (review round 3, MAJOR-1/U7/D1).
     """
 
-    def __init__(self, messages: list[Any]) -> None:
+    def __init__(self, messages: list[Any], *, reset: bool = False) -> None:
         super().__init__()
         self.messages = messages
+        self.reset = reset
 
 
 class ToolComposing(SessionEvent):
@@ -543,6 +544,20 @@ class EventController:
         finally:
             self._restoring_projection = False
 
+    def register_restored_tools(self, call_ids: set[str]) -> None:
+        """A replayed call row is a valid start counterpart for a later result.
+
+        A gate may precede tool_execution_start, and the owner can omit already
+        durable call messages from its live seed. Without this registration the
+        controller buffers the eventual end forever despite a real card already
+        being present in the restored viewport.
+        """
+        self._started_tools.update(call_ids)
+        for call_id in call_ids:
+            buffered = self._pending_tool_ends.pop(call_id, None)
+            if buffered is not None:
+                self._post(ToolEnded(buffered))
+
     def subscribe(self) -> None:
         """Register with the session; the returned callable unsubscribes."""
         self._unsubscribe = self._session.subscribe(self._on_event)
@@ -735,7 +750,7 @@ class EventController:
         # Settled history, not a live stream: nothing here touches the
         # assistant buffer or the flush timer, because these rows were never
         # streaming in THIS frontend. The app owns the role-aware projection.
-        self._post(HistoryRowsSettled(list(event.messages)))
+        self._post(HistoryRowsSettled(list(event.messages), reset=event.reset))
 
     def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
         self._post(ToolComposing(event))

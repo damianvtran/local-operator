@@ -53,6 +53,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -478,6 +479,10 @@ _FRONTEND_LOCAL_SLASHES = {
     "help",
     "exit",
     "clear",
+    # The terminal schedules source-bound iterations and owns sidebar focus;
+    # each iteration still submits through that conversation's real owner.
+    "loop",
+    "sidebar",
     # The clipboard is the machine the USER IS SITTING AT, and every part of
     # this command is already here: the transcript it reads is painted by this
     # frontend, the picker it opens is painted by this frontend, and the OSC 52
@@ -1492,6 +1497,7 @@ class FrontendSync(BaseModel):
     sequence: int
     snapshot: FrontendSessionState
     live_cursor: str | None = None
+    display_history: DisplayHistoryWindow | None = None
 
 
 class FrontendUpdate(BaseModel):

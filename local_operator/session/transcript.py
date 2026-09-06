@@ -351,6 +351,10 @@ class Transcript:
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
+        # Paging tokens survive appends, but not a replay-changing mutation or
+        # a new owner. The signing key never leaves this resident transcript.
+        self._history_generation = 0
+        self._history_page_key = os.urandom(32)
         # Derived indexes only describe durable rows. They are updated after
         # fsync, rebuilt after a file fold, and never published from a worker.
         self._entry_ids: set[str] = set()
@@ -645,6 +649,8 @@ class Transcript:
                 raise
 
     def _index_entry(self, entry: TranscriptEntry) -> None:
+        if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
+            self._history_generation += 1
         self._entry_ids.add(entry.id)
         self._latest_by_type[entry.type] = entry
         if entry.type == ENTRY_CUSTOM:
@@ -814,7 +820,7 @@ class Transcript:
             if entry.type == ENTRY_PRUNE and entry.payload.get("target")
         }
 
-    def build_llm_history(self) -> list[AgentMessage]:
+    def build_llm_history(self, *, through_id: str | None = None) -> list[AgentMessage]:
         """Replay the transcript into LLM-visible messages.
 
         Latest compaction entry wins: a marker for its summary followed by the
@@ -826,6 +832,16 @@ class Transcript:
         output compaction already decided was dead weight.
         """
         entries = self._entries
+        if through_id is not None:
+            # Select the journal cut BEFORE compaction/prune interpretation.
+            # Filtering materialized message IDs afterwards resurrects future
+            # prunes and drops the compaction marker/preserved user turns.
+            for index in range(len(entries) - 1, -1, -1):
+                if entries[index].id == through_id:
+                    entries = entries[: index + 1]
+                    break
+            else:
+                raise ValueError("history cursor is no longer retained")
         compaction_index: int | None = None
         for i in range(len(entries) - 1, -1, -1):
             if entries[i].type == ENTRY_COMPACTION:
@@ -842,6 +858,7 @@ class Transcript:
                 details["preserve_data"] = preserve_data
             prefix.append(
                 CustomMessage(
+                    id=compaction.id,
                     custom_type="compaction_summary",
                     attribution="system",
                     details=details,
@@ -898,7 +915,11 @@ class Transcript:
                         first_kept_id,
                     )
 
-        prunes = self.pending_prunes()
+        prunes = {
+            str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
+            for entry in entries
+            if entry.type == ENTRY_PRUNE and entry.payload.get("target")
+        }
         out: list[AgentMessage] = list(prefix)
         for entry in entries[start:]:
             if entry.type != ENTRY_MESSAGE:
@@ -1075,6 +1096,7 @@ class Transcript:
                         worker.result()
                         break
             self._entries = folded
+            self._history_generation += 1
             self._entry_ids.clear()
             self._latest_by_type.clear()
             self._latest_custom_entries.clear()

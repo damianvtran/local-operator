@@ -149,6 +149,7 @@ class AttachClient:
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
+        display_window: bool = False,
         locality: str = "local",
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
@@ -179,6 +180,7 @@ class AttachClient:
         # different from ``[]`` only to a reader of the frame -- both mean the
         # type was not declared, which is the one rule the runtime applies.
         self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
+        self._display_window = display_window
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         self._frontend_epoch: str | None = None
@@ -246,6 +248,8 @@ class AttachClient:
             # field and behaves as it always did, and no PROTOCOL_VERSION bump
             # is warranted for a field nobody is required to read.
             auth["slash_consumers"] = list(self._slash_consumers)
+        if self._display_window and "display-history-window-v1" in record.capabilities:
+            auth["display_window"] = True
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         # The welcome projection doubles as the identity check: it names the
@@ -626,6 +630,13 @@ class AttachClient:
         answers the unknown-op error, which the caller reads as kept.
         """
         return await self._request("refresh_if_idle")
+
+    async def record_shell(self, command: str, result: dict[str, Any]) -> str:
+        return str(await self._request_payload("record_shell", command=command, result=result))
+
+    async def history_page(self, before: str, anchor: str = "") -> Any:
+        """Read a signed canonical display page on the authenticated socket."""
+        return await self._request_payload("history_page", before=before, anchor=anchor)
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         """Fetch one page of a child job's retained events from the owner.

@@ -107,7 +107,6 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
-    ToolCall,
     ToolContext,
     ToolExecutionEndEvent,
     ToolResult,
@@ -5501,7 +5500,7 @@ class Session:
         """Current canonical state for any full terminal frontend."""
         return self._frontend_state_store.state
 
-    def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
+    def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
         """Atomically refresh, snapshot and subscribe on the session loop.
 
         The refresh must go through the PUBLISHING path: silently replacing
@@ -5511,7 +5510,60 @@ class Session:
         is reserved for store construction, before any subscriber exists.
         """
         self._frontend_state_store.refresh_from_session(self)
-        return self._frontend_state_store.subscribe(handler)
+        subscription = self._frontend_state_store.subscribe(handler)
+        if display_window:
+            from local_operator.session.history_window import (
+                display_window as capture_window,
+            )
+
+            sync = subscription.sync
+            try:
+                window = capture_window(
+                    self._transcript,
+                    conversation_id=sync.snapshot.session_id,
+                    owner_epoch=sync.epoch,
+                    through_id=sync.live_cursor,
+                )
+                window.durable_seed_ids = [
+                    str(event["message"]["id"])
+                    for event in sync.snapshot.live_events
+                    if isinstance(event.get("message"), dict)
+                    and self._transcript.has_entry(str(event["message"].get("id", "")))
+                ]
+                seed_tools = {
+                    str(event.get("tool_call_id", ""))
+                    for event in sync.snapshot.live_events
+                    if event.get("type") == "tool_execution_end"
+                }
+                if seed_tools:
+                    window.durable_seed_tool_ids = [
+                        str(message.tool_call_id)
+                        for message in self._transcript.build_llm_history(
+                            through_id=sync.live_cursor
+                        )
+                        if isinstance(message, Message)
+                        and message.role == "tool"
+                        and message.tool_call_id in seed_tools
+                    ]
+                sync.display_history = window
+            except BaseException:
+                subscription.unsubscribe()
+                raise
+        return subscription
+
+    def history_page(self, before: str, anchor: str = ""):  # type: ignore[no-untyped-def]
+        """Authenticated reads reuse the resident replay at the signed sync cut."""
+        from local_operator.session.history_window import display_window
+
+        state = self.frontend_state
+        return display_window(
+            self._transcript,
+            conversation_id=state.session_id,
+            owner_epoch=state.epoch,
+            through_id=state.history_cursor,
+            before=before,
+            anchor=anchor,
+        ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
         """Publish non-event source changes through the canonical contract.
@@ -9586,6 +9638,10 @@ class Session:
         the user can see disappear on resume. The lock owner flushes the FIFO at
         its safe boundary before another prompt can start.
         """
+        if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
+            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+        ):
+            return
         if self._is_streaming or self._turn_lock.locked():
             self._pending_shell_records.append((command, result))
             return
@@ -9606,13 +9662,11 @@ class Session:
         # TUI's resume replay already knows how to mount a ToolCard from a
         # call and its result, and a wall of stdout attributed to the user
         # would read as something they typed.
-        user = Message.user(f"! {command}")
-        assistant = Message.assistant("")
-        assistant.tool_calls = [
-            ToolCall(id=result.tool_call_id, name="bash", arguments={"command": command})
-        ]
-        tool = Message.tool_result(result)
-        messages = [user, assistant, tool]
+        from local_operator.session.shell_record import shell_record_messages
+
+        messages = shell_record_messages(command, result)
+        if self._transcript.has_entry(messages[-1].id):
+            return
         # The synthetic assistant/tool exchange is one fork-visible unit.
         await self._transcript.append_messages(messages)
         self._context.messages.extend(messages)

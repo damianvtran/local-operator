@@ -960,7 +960,9 @@ class OwnedSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients."""
         return self._session.frontend_state
 
-    async def subscribe_frontend(self, on_update: Callable[[Any], None]) -> Any:
+    async def subscribe_frontend(
+        self, on_update: Callable[[Any], None], *, display_window: bool = False
+    ) -> Any:
         """Snapshot and subscribe atomically, on the loop that publishes.
 
         ``Session.subscribe_frontend`` refreshes through the publishing path
@@ -968,7 +970,13 @@ class OwnedSessionHandle(SessionHandle):
         every client's exact-``+1`` gap check detect transport loss. Awaited
         rather than wrapped because the caller is already on this loop.
         """
-        return self._session.subscribe_frontend(on_update)
+        return self._session.subscribe_frontend(on_update, display_window=display_window)
+
+    async def record_shell(self, command: str, result: Any) -> None:
+        await self._session.record_shell(command, result)
+
+    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+        return self._session.history_page(before, anchor)
 
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.

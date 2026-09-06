@@ -43,6 +43,7 @@ from typing import (
     TypeGuard,
     cast,
 )
+from weakref import ReferenceType, ref
 
 from rich.console import Group
 from rich.padding import Padding
@@ -1538,6 +1539,7 @@ class OperatorApp(App[None]):
         # terminal modifier encoding and leaves every TextArea editing key alone.
         Binding("f8", "aside", "Aside", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
+        Binding("f9", "focus_sidebar", "Focus sessions", show=False),
         # Textual decodes Kitty's Super modifier. Terminals that intercept Cmd+B
         # never deliver it, so Ctrl+B and /sidebar remain unconditional routes.
         *(
@@ -2543,7 +2545,7 @@ class OperatorApp(App[None]):
             None
         )
         self._sidebar_frame_pending = False
-        self._sidebar_focus_restore: Widget | None = None
+        self._sidebar_focus_restore: ReferenceType[Widget] | None = None
         self._sidebar_presentations: dict[str, SessionPresentation] = {}
         self._sidebar_sources: dict[str, SessionInteraction] = {}
         self._sidebar_drafts = SessionDraftStore()
@@ -3069,7 +3071,7 @@ class OperatorApp(App[None]):
             revision=self._interaction.presentation_revision,
             source_stamp=self._sidebar_source_stamp(self._interaction),
             source_token=self._interaction.token,
-            history_size=len(self._session.history()) if self._session is not None else 0,
+            history_size=self._history_length(),
             needs_live_projection=False,
             streaming_block=self._streaming_block,
             tool_cards=self._tool_cards,
@@ -3143,7 +3145,11 @@ class OperatorApp(App[None]):
 
         if record is not None and owner is not None:
             remote = await RemoteSession.connect(
-                record, session_id, config_dir=directory, takeover_factory=no_takeover
+                record,
+                session_id,
+                config_dir=directory,
+                takeover_factory=no_takeover,
+                display_window=True,
             )
         else:
             if speculative:
@@ -3232,7 +3238,13 @@ class OperatorApp(App[None]):
             replay = PreparedReplay()
             welcome: WelcomeView | None = None
             revision = source.presentation_revision
-            history = list(session.history())
+            if not source.draft.following_tail and source.draft.scroll_anchor_id:
+                if not await session.ensure_display_anchor(source.draft.scroll_anchor_id):
+                    # A canonical compaction can remove an old anchor. The owner
+                    # explicitly reset that seek; never pretend another row is it.
+                    source.draft.following_tail = True
+                    source.draft.scroll_anchor_id = ""
+            history = session.display_history_window()
             source_stamp = self._sidebar_source_stamp(source)
             replay.prepare(
                 history,
@@ -3278,7 +3290,7 @@ class OperatorApp(App[None]):
                 revision=revision,
                 source_stamp=source_stamp,
                 source_token=source.token,
-                history_size=len(history),
+                history_size=session.history_message_count,
                 working_fallback=DEFAULT_ACTIVITY,
                 welcome=welcome,
                 welcome_visible=welcome is not None,
@@ -3662,10 +3674,11 @@ class OperatorApp(App[None]):
             if factory is not None:
                 self._session_factory = lambda: factory(session_id)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
-            history = list(session.history())
-            if len(history) > incoming.history_size:
-                self._project_settled_rows(history[incoming.history_size :])
-            elif len(history) < incoming.history_size:
+            history = session.display_history_window()
+            total = session.history_message_count
+            if total > incoming.history_size:
+                self._project_settled_rows(history[-(total - incoming.history_size) :])
+            elif total < incoming.history_size:
                 # A compaction/recovery changed the snapshot while its widgets
                 # were preparing. Reconcile the viewport without invoking the
                 # ordinary /clear hook, which would settle this source's gates.
@@ -3682,6 +3695,13 @@ class OperatorApp(App[None]):
             if incoming.needs_live_projection and self._controller is not None:
                 self._controller.restore_live_projection(
                     session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
+                )
+                self._controller.register_restored_tools(
+                    {
+                        block.tool_call_id
+                        for block in incoming.replay.view.blocks()
+                        if isinstance(block, ToolCard)
+                    }
                 )
             editor.load_text(source.draft.text)
             editor.adopt_attachments(source.draft.attachments)
@@ -3727,6 +3747,8 @@ class OperatorApp(App[None]):
         if self._session is not None and self._session.session_id == message.session_id:
             if self._sidebar_navigation.requested_id:
                 self._sidebar_navigation.cancel()
+            if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+                self._set_sidebar_open(False)
             self._editor().focus()
             return
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
@@ -3744,6 +3766,21 @@ class OperatorApp(App[None]):
         else:
             self._sync_sidebar_layout(self.size)
 
+    def action_focus_sidebar(self) -> None:
+        if self._session_sidebar.has_focus:
+            self._restore_sidebar_focus()
+            return
+        self._sidebar_focus_restore = ref(self.focused) if self.focused is not None else None
+        self._set_sidebar_open(True)
+        self._session_sidebar.focus()
+
+    def _restore_sidebar_focus(self) -> None:
+        target = self._sidebar_focus_restore() if self._sidebar_focus_restore is not None else None
+        if target is not None and target.is_mounted and target.can_focus and target.display:
+            target.focus()
+        else:
+            self._editor().focus()
+
     def action_toggle_sidebar(self) -> None:
         if not self._session_sidebar.display:
             self._close_subagent_view()
@@ -3754,7 +3791,7 @@ class OperatorApp(App[None]):
     def _set_sidebar_open(self, opened: bool) -> None:
         sidebar = self._session_sidebar
         if opened and not sidebar.display:
-            self._sidebar_focus_restore = self.focused
+            self._sidebar_focus_restore = ref(self.focused) if self.focused is not None else None
             self._sidebar_last_prefetch = ""
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
@@ -3775,11 +3812,7 @@ class OperatorApp(App[None]):
                     if source is not None:
                         self.run_worker(self._release_sidebar_preparation((source, presentation)))
         if not opened and sidebar.has_focus:
-            target = self._sidebar_focus_restore
-            if target is not None and target.is_mounted:
-                target.focus()
-            else:
-                self._editor().focus()
+            self._restore_sidebar_focus()
 
     def _sync_sidebar_layout(self, size: Size) -> None:
         sidebar = self._session_sidebar
@@ -5011,6 +5044,11 @@ class OperatorApp(App[None]):
         """
         if self._status is None or session.conversation_name or self._provisional_name:
             return
+        opener = getattr(session, "history_opener_text", None)
+        if isinstance(opener, str):
+            if opener.strip():
+                self._show_provisional_name(opener)
+            return
         try:
             history = list(session.history())
         except Exception:
@@ -5224,7 +5262,7 @@ class OperatorApp(App[None]):
         where a slow `/resume` actually goes.
         """
         try:
-            history = list(session.history())
+            history = self._display_history(session)
         except Exception:
             return  # defensive: reduced hosts may lack the accessor
         # A previous resume's deferred head must not leak into this one: /resume
@@ -5326,6 +5364,32 @@ class OperatorApp(App[None]):
             view.remove_block(notice)
             self._resume_tail_notice = None
 
+    async def _fetch_older_display_page(self, source: SessionInteraction) -> None:
+        session = source.session
+        try:
+            from local_operator.session.remote import RemoteSession
+
+            if not isinstance(session, RemoteSession):
+                return
+            rows = await session.load_older_display_page()
+            source.presentation_revision += 1
+            if not self._is_current(source):
+                return
+            self._resume_pending_head = rows + self._resume_pending_head
+            for message in rows:
+                if getattr(message, "role", "") == "tool" and getattr(
+                    message, "tool_call_id", None
+                ):
+                    self._resume_results[message.tool_call_id] = message
+            self._resume_paging = False
+            self._mount_older_resume_page()
+        except Exception as exc:
+            if self._is_current(source):
+                self._notice(f"Could not load earlier messages: {exc}", "error")
+        finally:
+            if self._is_current(source):
+                self._resume_paging = False
+
     def _transcript_scrolled(self, *_args: Any, continuous: bool = False) -> None:
         """Mount the next older page when the reader reaches the top.
 
@@ -5367,6 +5431,20 @@ class OperatorApp(App[None]):
             self._mount_newer_resume_page()
             return
         if not self._resume_pending_head:
+            session = self._session
+            if (
+                session is not None
+                and getattr(session, "history_before_token", None)
+                and not self._resume_paging
+                and view.scroll_y <= RESUME_PAGE_TRIGGER_ROWS
+                and (not continuous or self._resume_in_zone)
+            ):
+                self._resume_paging = True
+                self._resume_in_zone = False
+                self.run_worker(
+                    self._fetch_older_display_page(self._interaction),
+                    group=self._interaction.worker_group("history-page"),
+                )
             return
         if self._resume_paging:
             # A page this same gesture requested is still mounting. The
@@ -6278,13 +6356,21 @@ class OperatorApp(App[None]):
         session = self._session
         return getattr(session, "session_id", "") if session is not None else ""
 
+    @staticmethod
+    def _display_history(session: Any) -> list[Any]:
+        accessor = getattr(session, "display_history_window", None)
+        return list(
+            cast(Callable[[], list[Any]], accessor)() if callable(accessor) else session.history()
+        )
+
     def _history_length(self) -> int:
         """How many messages the model currently has, as the session reports it."""
         session = self._session
         if session is None:
             return 0
         try:
-            return len(session.history())
+            count = getattr(session, "history_message_count", None)
+            return count if isinstance(count, int) else len(session.history())
         except Exception:  # reduced hosts (embedders, pilot fakes) may lack it
             return 0
 
@@ -8657,7 +8743,8 @@ class OperatorApp(App[None]):
         if detail:
             self._system_notice(detail, "warning")
         goal = str(getattr(session, "goal", "") or "").strip()
-        if goal:
+        if goal and goal != self._interaction.restored_goal_notice:
+            self._interaction.restored_goal_notice = goal
             from local_operator.tui.widgets.tool_card import truncate_cells
 
             # Capped so a goal written up to MAX_GOAL_CHARS (2000) cannot turn
@@ -9752,8 +9839,9 @@ class OperatorApp(App[None]):
         if entry is None:
             return False
         name = entry.name
-        if name == "credential":
-            # Its masked interaction is local but its in-memory store is not.
+        if name in {"credential", "loop"}:
+            # The credential store and each locally scheduled loop iteration
+            # belong to the owner, even though their invoking UI is local.
             return True
         if name in _FRONTEND_LOCAL_SLASHES:
             return False
@@ -10268,6 +10356,7 @@ class OperatorApp(App[None]):
             and self.focused is event.widget
             and event.widget is not self._session_sidebar
         ):
+            self._sidebar_focus_restore = ref(event.widget)
             view = self._transcript
             if view is not None and (event.widget is view or view in event.widget.ancestors):
                 self._interaction.draft.focus_id = "@transcript"
@@ -13311,6 +13400,7 @@ class OperatorApp(App[None]):
         self._shell_card = card
         card_ref = weakref.ref(card)
         source.shell.call_id = call_id
+        source.shell.result = None
         session = source.session
         cwd = os.getcwd()
         session_cwd = getattr(session, "_cwd", None) if session is not None else None
@@ -13345,13 +13435,21 @@ class OperatorApp(App[None]):
         async def persist(result: ToolResult) -> None:
             """One persistence hop; a spawn failure is still a completed
             command, so the "never dropped" invariant covers it too."""
+            source.shell.result = result
+            source.presentation_revision += 1
             record = getattr(session, "record_shell", None) if session is not None else None
             if not callable(record):
+                self._notice_for(
+                    source, "Shell finished, but this owner cannot save its receipt", "error"
+                )
                 return
             try:
                 await cast(Callable[..., Awaitable[None]], record)(command, result)
             except Exception:
                 logger.debug("could not persist bang-mode result", exc_info=True)
+                self._notice_for(
+                    source, "Shell finished, but its receipt could not be saved", "error"
+                )
 
         def _nonzero_exit(res: ToolResult) -> bool:
             # execute_bash reports a nonzero exit as a SUCCESSFUL tool result
@@ -14097,6 +14195,9 @@ class OperatorApp(App[None]):
         count matches exactly what :func:`naming.build_theme_context` samples
         from. Mirrors omp's ``#titleTurnCount``.
         """
+        count = getattr(session, "history_theme_turn_count", None)
+        if isinstance(count, int):
+            return count
         history = session.history() if hasattr(session, "history") else []
         return sum(1 for turn in history if getattr(turn, "role", "") in ("user", "assistant"))
 
@@ -14169,7 +14270,13 @@ class OperatorApp(App[None]):
         # submitted rather than as it may look after the turn it kicked off has
         # written more history. `history()` returns the live list; a shallow
         # copy is enough because the sampler only reads role/text off each entry.
-        turns = list(session.history()) if hasattr(session, "history") else []
+        # Full-trajectory naming is explicitly hydrated in its background worker,
+        # never sampled from a partial tail or charged to a sidebar click.
+        turns = (
+            None
+            if hasattr(session, "materialize_history")
+            else (list(session.history()) if hasattr(session, "history") else [])
+        )
         self.run_worker(
             self._retitle_conversation_worker(
                 session,
@@ -14190,7 +14297,7 @@ class OperatorApp(App[None]):
         current: str,
         text: str,
         generation: int,
-        turns: list[AgentMessage],
+        turns: list[AgentMessage] | None,
         turn_count: int,
         source: SessionInteraction | None = None,
     ) -> None:
@@ -14219,6 +14326,8 @@ class OperatorApp(App[None]):
         source.active_workers += 1
         try:
             try:
+                if turns is None:
+                    turns = await getattr(session, "materialize_history")()
                 title = await naming.generate_retitle(
                     current, text, session.complete_once, turns=turns
                 )
@@ -16878,6 +16987,11 @@ class OperatorApp(App[None]):
             )
         }
         remote_capability = remote_capabilities.get(command)
+        if command in {"/loop", "/sidebar"}:
+            # The invoking TUI owns scheduling/interaction, even when a legacy
+            # owner advertises the older authoritative classification. Each
+            # loop iteration still uses the source's real owner prompt route.
+            remote_capability = None
         # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
         # renders locally from the follower's own snapshot facade, while its
         # grant subcommands mutate owner-side OAuth state and must route. The
@@ -17088,7 +17202,12 @@ class OperatorApp(App[None]):
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/sidebar":
-            self.action_toggle_sidebar()
+            if arg.strip().casefold() == "focus":
+                self.action_focus_sidebar()
+            elif arg.strip():
+                notice("Use /sidebar or /sidebar focus", "error")
+            else:
+                self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
         elif command == "/search":
@@ -21640,8 +21759,11 @@ class OperatorApp(App[None]):
 
         turns: list[AgentMessage] = []
         if in_flight.strip():
-            history = session.history()
-            tail = history[-1] if history else None
+            tail_accessor = getattr(session, "history_last_message", None)
+            history = [] if callable(tail_accessor) else session.history()
+            tail = (
+                tail_accessor() if callable(tail_accessor) else (history[-1] if history else None)
+            )
             if getattr(tail, "text", None) != in_flight:
                 turns.append(Message.assistant(in_flight))
         for previous in prior_turns or []:
@@ -26048,7 +26170,28 @@ class OperatorApp(App[None]):
         with their results, custom rows reach their own blocks (review round
         3, MAJOR-1/U7/D1).
         """
-        self._project_settled_rows(message.messages)
+        if message.reset:
+            # Canonical reconciliation is not /clear, which would cancel
+            # source work and settle gates that the owner still owns.
+            view = self._transcript_view()
+            view.set_on_clear(None)
+            view.clear_blocks()
+            view.set_on_clear(self._on_transcript_cleared)
+            self._resume_pending_head = []
+            self._resume_pending_tail = []
+            self._resume_head_notice = None
+            self._resume_tail_notice = None
+            self._resume_results = {}
+            self._resume_mounted_ids.clear()
+            self._tool_cards = {}
+            self._composing_cards = {}
+            self._streaming_block = None
+            self._working_block = None
+            self._shell_card = None
+            self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
+            view.follow_tail()
+        else:
+            self._project_settled_rows(message.messages)
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
         """Move the context reading AND the cost DURING a turn, not only at its end.
@@ -26121,6 +26264,11 @@ class OperatorApp(App[None]):
         # and swapping it out would flicker a row away and an identical row back
         # at the exact moment the call starts running.
         card = self._adopt_composing_card(event.tool_call_id, event.tool_name)
+        if card is None:
+            # A prepared durable/live replay may already own this call's row.
+            # Adopt it when the canonical in-flight seed arrives; a second card
+            # leaves an interrupted ghost behind after the real one completes.
+            card = self._painted_tool_card(event.tool_call_id)
         if card is not None:
             card.begin_running(event.tool_name, event.args, event.intent)
         else:
@@ -26165,6 +26313,8 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        if card is None:
+            card = self._painted_tool_card(event.tool_call_id)
         # Before the early return below: a batch that just lost one of three
         # calls still has to drop its count, and a call that ended with no card
         # on screen still ended.

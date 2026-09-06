@@ -113,6 +113,7 @@ class SessionInteraction:
     controller: Any = None
     retired: bool = False
     presentation_revision: int = 0
+    restored_goal_notice: str = ""
     aside_open: bool = False
     aside_generation: int = 0
     preparations: int = 0

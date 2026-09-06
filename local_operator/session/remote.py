@@ -58,6 +58,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
+    ToolResult,
     TurnEndEvent,
     TurnStartEvent,
     Usage,
@@ -88,6 +89,7 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
 )
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
@@ -292,6 +294,15 @@ class RemoteSession:
         self._subagent_comms = SnapshotSubagentComms()
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
+        self._live_history: dict[str, Any] = {}
+        self._display_window_requested = False
+        self._owner_record: SessionRecord | None = None
+        self._display_refresh_lock = asyncio.Lock()
+        self._hydrated_once = False
+        self._display_history: DisplayHistoryWindow | None = None
+        self._history_hydrated = True
+        self._durable_seed_ids: set[str] = set()
+        self._durable_seed_tool_ids: set[str] = set()
         self._history_ids: set[str] = set()
         #: The durable frontend checkpoint, handed from the threaded history
         #: read to the cold path's restore so the roster/todo/title recovery
@@ -496,6 +507,7 @@ class RemoteSession:
         config_dir: Path,
         takeover_factory: Callable[[], Any],
         surface: str = "terminal",
+        display_window: bool = False,
     ) -> "RemoteSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
@@ -507,11 +519,12 @@ class RemoteSession:
             takeover_factory=takeover_factory,
             surface=surface,
         )
+        self._display_window_requested = display_window
         await self._dial(record)
         try:
             frontend = await self._await_frontend()
             self._install_frontend(frontend.snapshot)
-            await self._load_history(frontend.live_cursor)
+            await self._load_frontend_history(frontend)
         except BaseException:
             # The caller gets the error and no facade — so nothing would ever
             # close the connection ``_dial`` just opened. See
@@ -1166,7 +1179,7 @@ class RemoteSession:
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
-            await self._load_history(frontend.live_cursor)
+            await self._load_frontend_history(frontend)
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._finish_sync()
@@ -1226,6 +1239,7 @@ class RemoteSession:
             logger.debug("closing a rejected owner connection failed", exc_info=True)
 
     async def _dial(self, record: SessionRecord) -> None:
+        self._owner_record = record
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
@@ -1284,6 +1298,7 @@ class RemoteSession:
             # command twice. A viewer that omitted this (every build before
             # the field) is exactly the case the runtime completes for.
             slash_consumers=list(SLASH_ACTION_RECEIPTS),
+            display_window=self._display_window_requested,
             on_frontend_sync=lambda data: (
                 self._on_frontend_sync(data) if self._client is client else None
             ),
@@ -1334,12 +1349,205 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
+    async def _load_frontend_history(self, frontend: FrontendSync) -> None:
+        """Install the durable cut before live replay or command readiness."""
+        window = frontend.display_history if self._display_window_requested else None
+        previous = self._display_history
+        if window is None or window.status != "ok":
+            # Legacy owners and oversized prose keep the honest full replay.
+            self._display_history = None
+            self._history_hydrated = True
+            self._durable_seed_ids.clear()
+            self._durable_seed_tool_ids.clear()
+            await self._load_history(frontend.live_cursor, strict_cut=window is not None)
+            if previous is not None:
+                self._buffered_events.insert(
+                    0, HistoryDeltaEvent(messages=list(self._history), reset=True)
+                )
+            return
+        self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
+        rows = list(window.messages)
+        page = window
+        reset = self._hydrated_once and (
+            previous is None
+            or previous.owner_epoch != window.owner_epoch
+            or previous.history_generation != window.history_generation
+        )
+        if previous is not None and self._hydrated_once and not reset:
+            # Reconnect must include ALL rows since the last durable frontier,
+            # not just a recent tail. Appends preserve signed snapshot positions.
+            while page.start > previous.total_message_count and page.before_token:
+                page = await self._fetch_history_page(
+                    page.before_token, frontend.epoch, frontend.live_cursor
+                )
+                if page.status != "ok":
+                    raise ConnectionError("history changed during reconnect; retry attachment")
+                rows[:0] = page.messages
+        self._display_history = window.model_copy(
+            update={
+                "messages": rows,
+                "start": page.start,
+                "before_token": page.before_token,
+                "has_more": page.has_more,
+            }
+        )
+        self._history = rows
+        self._live_history.clear()
+        self._history_hydrated = page.start == 0 and len(rows) == window.total_message_count
+        self._history_ids = {m.id for m in rows}
+        self._durable_seed_ids = set(window.durable_seed_ids)
+        self._durable_seed_tool_ids = set(window.durable_seed_tool_ids)
+        if reset:
+            self._message_events.clear()
+            self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
+        elif self._hydrated_once and previous is not None:
+            self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
+        # Loaded rows suppress duplicate relay, but are not all painted: the
+        # TUI mounts only its viewport and pages older rows later.
+        self._live_message_phase.clear()
+        if not self._hydrated_once:
+            self._filter_known_messages()
+        self._hydrated_once = True
+
+    def _validate_display_window(
+        self, window: DisplayHistoryWindow, epoch: str, cursor: str | None
+    ) -> None:
+        if (
+            window.conversation_id != self.session_id
+            or window.owner_epoch != epoch
+            or window.through_id != cursor
+        ):
+            raise ConnectionError("display history does not match canonical sync")
+        if window.start < 0 or window.start + len(window.messages) > window.total_message_count:
+            raise ConnectionError("invalid display history range")
+
+    async def _fetch_history_page(
+        self, before: str, epoch: str, cursor: str | None, anchor: str = ""
+    ) -> DisplayHistoryWindow:
+        client = self._client
+        if client is None:
+            raise ConnectionError("history owner is disconnected")
+        page = DisplayHistoryWindow.model_validate(await client.history_page(before, anchor))
+        if page.status != "reset":
+            self._validate_display_window(page, epoch, cursor)
+        return page
+
+    async def history_page(self, before: str, *, anchor: str = "") -> DisplayHistoryWindow:
+        """Read a signed page; reset is explicit and never silently mixed in."""
+        window = self._display_history
+        if window is None:
+            raise RuntimeError("this session uses full-history replay")
+        return await self._fetch_history_page(before, window.owner_epoch, window.through_id, anchor)
+
+    async def _refresh_display_history(self) -> None:
+        """Reattach only this viewer; never restart, stop, or prompt the owner."""
+        async with self._display_refresh_lock:
+            record = self._owner_record
+            if record is None or self._client is None or not self._client.connected:
+                record, _ = await asyncio.to_thread(
+                    find_owner_record, self._config_dir, self._session_id
+                )
+            if record is None:
+                raise ConnectionError("history owner is unavailable")
+            await self._bind_to(record)
+
+    @property
+    def history_before_token(self) -> str | None:
+        window = self._display_history
+        return window.before_token if window is not None and not self._history_hydrated else None
+
+    async def load_older_display_page(self) -> list[Any]:
+        window = self._display_history
+        if window is None or not self.history_before_token:
+            return []
+        page = await self.history_page(self.history_before_token)
+        if self._display_history is not window:
+            raise RuntimeError("history changed while paging; retry")
+        if page.status == "reset":
+            await self._refresh_display_history()
+            return []
+        if page.status == "full_required":
+            old_ids = set(self._history_ids)
+            return [m for m in await self.materialize_history() if m.id not in old_ids]
+        if page.start + len(page.messages) != window.start:
+            raise ConnectionError("history page is not contiguous with the loaded window")
+        self._history[:0] = page.messages
+        self._history_ids.update(m.id for m in page.messages)
+        self._display_history = window.model_copy(
+            update={
+                "start": page.start,
+                "before_token": page.before_token,
+                "has_more": page.has_more,
+                "messages": list(self._history),
+            }
+        )
+        self._history_hydrated = page.start == 0
+        return list(page.messages)
+
+    async def ensure_display_anchor(self, anchor: str) -> bool:
+        window = self._display_history
+        if window is None or not window.snapshot_token or not anchor:
+            return True
+        page = await self.history_page(window.snapshot_token, anchor=anchor)
+        if page.status == "reset":
+            await self._refresh_display_history()
+            fresh = self._display_history
+            if fresh is None or not fresh.snapshot_token:
+                return False
+            page = await self.history_page(fresh.snapshot_token, anchor=anchor)
+            if page.status == "reset":
+                return False
+        if page.status == "full_required":
+            await self.materialize_history()
+            return True
+        # Keep a contiguous loaded interval: the existing renderer pages both
+        # ways inside it and must never mistake a disjoint anchor/tail for a
+        # complete trajectory. The signed seek determines the exact frontier.
+        while self._display_history is not None and self._display_history.start > page.start:
+            await self.load_older_display_page()
+        return True
+
+    async def materialize_history(self) -> list[Any]:
+        """Explicit full replay, off the click path, at the captured sync cut."""
+        if self._history_hydrated:
+            return self.history()
+        window = self._display_history
+        if window is None:
+            raise RuntimeError("no canonical display history is installed")
+        rows: list[Any] = []
+        token = window.snapshot_token
+        while token:
+            page = await self.history_page(token)
+            if page.status == "reset":
+                raise RuntimeError("history changed while materializing; reconnect")
+            if page.status == "full_required":
+
+                def replay() -> list[Any]:
+                    transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+                    return (
+                        transcript.build_llm_history(through_id=window.through_id)
+                        if window.through_id
+                        else []
+                    )
+
+                rows = await asyncio.to_thread(replay)
+                break
+            rows[:0] = page.messages
+            token = page.before_token
+        if self._display_history is not window:
+            raise RuntimeError("history changed while materializing; retry")
+        self._history = rows
+        self._history_ids = {m.id for m in rows}
+        self._history_hydrated = True
+        return self.display_history_window()
+
     async def _load_history(
         self,
         live_cursor: str | None = None,
         *,
         drop_history_duplicates: bool = True,
         want_checkpoint: bool = False,
+        strict_cut: bool = False,
     ) -> None:
         """Read durable history exactly up to the sync's advertised boundary.
 
@@ -1357,13 +1565,19 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
-        entries, history = await self._read_transcript(want_checkpoint=want_checkpoint)
+        entries, history = await self._read_transcript(
+            want_checkpoint=want_checkpoint, through_id=live_cursor, strict_cut=strict_cut
+        )
         self._bind_history(
             entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
         )
 
     async def _read_transcript(
-        self, *, want_checkpoint: bool = False
+        self,
+        *,
+        want_checkpoint: bool = False,
+        through_id: str | None = None,
+        strict_cut: bool = False,
     ) -> tuple[list[Any], list[Any]]:
         """Parse the durable transcript off-loop, once per sync.
 
@@ -1395,7 +1609,12 @@ class RemoteSession:
                 # would re-read and re-parse the whole file (0.68 s on the
                 # largest observed session).
                 self._cold_checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-            return transcript.entries(), transcript.build_llm_history()
+            cut = through_id
+            if cut is not None and not transcript.has_entry(cut) and not strict_cut:
+                # Older owners used best-effort cursors; preserve that fallback
+                # only for legacy full replay, never the negotiated window cut.
+                cut = None
+            return transcript.entries(), transcript.build_llm_history(through_id=cut)
 
         return await asyncio.to_thread(_replay)
 
@@ -1407,24 +1626,14 @@ class RemoteSession:
         *,
         drop_history_duplicates: bool,
     ) -> None:
-        """Adopt one parsed transcript as ``_history``, bounded by the cursor."""
-        if live_cursor is not None:
-            # Keep only the message entries at or before the advertised cursor.
-            # The cursor names a transcript ENTRY id (any type); walk to it and
-            # drop the durable suffix past the boundary the sync already sealed.
-            boundary_index = None
-            for index, entry in enumerate(entries):
-                if entry.id == live_cursor:
-                    boundary_index = index
-                    break
-            if boundary_index is not None:
-                kept_ids = {entry.id for entry in entries[: boundary_index + 1]}
-                history = [
-                    message
-                    for message in history
-                    if not getattr(message, "id", None) or str(message.id) in kept_ids
-                ]
+        """Adopt canonical replay already selected at the journal cut.
+
+        Filtering materialized IDs here used to lose synthetic compaction
+        markers and could apply prunes newer than the cut. The parser now
+        selects journal entries before running the shared replay semantics.
+        """
         self._history = history
+        self._live_history.clear()
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
@@ -1463,6 +1672,10 @@ class RemoteSession:
         for data in self.frontend_state.live_events:
             event = deserialize_event(data)
             if self._is_duplicate(event):
+                # Already painted is not the same as durable. Rebuild source
+                # display storage from the canonical seed even when no event
+                # should be re-emitted into an already-painted live surface.
+                self._remember_live(event)
                 continue
             self._track(event)
             seeded.append(event)
@@ -1567,7 +1780,11 @@ class RemoteSession:
         if isinstance(event, (MessageStartEvent, MessageEndEvent)):
             # Durable or already-painted-complete: a replayed row, never the
             # same live message's first/last beat.
-            if message_id in self._message_events:
+            if (
+                message_id in self._message_events
+                or message_id in self._history_ids
+                or message_id in self._durable_seed_ids
+            ):
                 return True
         phase = _MESSAGE_PHASE.get(type(event))
         if phase is None:
@@ -1584,7 +1801,29 @@ class RemoteSession:
         return False
 
     def _track(self, event: AgentEvent[Any]) -> None:
-        """Record a painted live message id so a later sync/durable row skips it."""
+        """Record painted identity separately from complete source display data."""
+        self._remember_live(event)
+        message = getattr(event, "message", None)
+        message_id = str(getattr(message, "id", "") or "")
+        if message_id and (
+            isinstance(event, MessageEndEvent)
+            or (
+                isinstance(event, MessageStartEvent)
+                and bool(getattr(message, "text", "") or getattr(message, "tool_calls", None))
+            )
+        ):
+            self._message_events.add(message_id)
+
+    def _remember_live(self, event: AgentEvent[Any]) -> None:
+        if isinstance(event, ToolExecutionEndEvent):
+            if event.tool_call_id in self._durable_seed_tool_ids:
+                return
+            # Tool results arrive as execution events rather than message_end.
+            # Keep a LIVE pairing dependency until its real durable message ID
+            # arrives at the next sync; never claim this synthetic ID as durable.
+            result = Message.tool_result(event.result)
+            result.id = f"live-tool:{event.tool_call_id}"
+            self._live_history[result.id] = result
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
@@ -1607,7 +1846,14 @@ class RemoteSession:
             isinstance(event, MessageStartEvent)
             and bool(getattr(message, "text", "") or getattr(message, "tool_calls", None))
         ):
-            self._message_events.add(message_id)
+            if message_id in self._history_ids or message_id in self._durable_seed_ids:
+                return
+            # Paint dedupe is not presentation storage. A source can leave the
+            # screen while this row is in the live seed but not in its durable
+            # attach window. Retain the complete row for the next prepared view.
+            if isinstance(message, Message) and message.role == "tool":
+                self._live_history.pop(f"live-tool:{message.tool_call_id}", None)
+            self._live_history[message_id] = message
 
     def _drain_buffered_events(self) -> None:
         """Deliver buffered sync frames once both ordering and a subscriber exist."""
@@ -2275,14 +2521,21 @@ class RemoteSession:
                         # follower has not painted; the bind afterwards brings
                         # ``_history`` to the same point and the live seed
                         # dedupes against the ids the replay just claimed (M4).
-                        entries, history = await self._read_transcript()
-                        self._replay_durable_suffix(history)
-                        self._bind_history(
-                            entries,
-                            history,
-                            frontend.live_cursor,
-                            drop_history_duplicates=False,
-                        )
+                        if self._display_window_requested and frontend.display_history is not None:
+                            await self._load_frontend_history(frontend)
+                        else:
+                            entries, history = (
+                                await self._read_transcript(through_id=frontend.live_cursor)
+                                if frontend.live_cursor is not None
+                                else await self._read_transcript()
+                            )
+                            self._replay_durable_suffix(history)
+                            self._bind_history(
+                                entries,
+                                history,
+                                frontend.live_cursor,
+                                drop_history_duplicates=False,
+                            )
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
@@ -2541,8 +2794,69 @@ class RemoteSession:
 
     # -- history / host errands --------------------------------------------
 
+    async def record_shell(self, command: str, result: ToolResult) -> None:
+        from local_operator.session.shell_record import shell_record_messages
+
+        await self._ensure_bound()
+        client = self._client
+        if client is None:
+            raise ConnectionError("shell receipt owner is disconnected")
+        await client.record_shell(command, result.model_dump(mode="json"))
+        # The owner may queue persistence behind a running turn. These are
+        # accepted LIVE display rows, not a fabricated durable cursor or ACK.
+        for message in shell_record_messages(command, result):
+            self._live_history[message.id] = message
+
     def history(self) -> list[Any]:
-        return list(self._history)
+        if not self._history_hydrated:
+            raise RuntimeError(
+                "display-window history is not hydrated; await materialize_history()"
+            )
+        return self.display_history_window()
+
+    def display_history_window(self) -> list[Any]:
+        """Loaded durable rows plus canonical live rows, in display order."""
+        durable_results = {
+            m.tool_call_id for m in self._history if isinstance(m, Message) and m.role == "tool"
+        }
+        return [self._live_history.get(m.id, m) for m in self._history] + [
+            m
+            for key, m in self._live_history.items()
+            if key not in self._history_ids
+            and not (
+                isinstance(m, Message) and m.role == "tool" and m.tool_call_id in durable_results
+            )
+        ]
+
+    @property
+    def history_message_count(self) -> int:
+        durable = (
+            self._display_history.total_message_count
+            if self._display_history
+            else len(self._history)
+        )
+        return durable + len(self.display_history_window()) - len(self._history)
+
+    @property
+    def history_theme_turn_count(self) -> int:
+        if self._display_history is not None:
+            return self._display_history.theme_turn_count + sum(
+                key not in self._history_ids and getattr(m, "role", "") in ("user", "assistant")
+                for key, m in self._live_history.items()
+            )
+        return sum(
+            getattr(m, "role", "") in ("user", "assistant") for m in self.display_history_window()
+        )
+
+    @property
+    def history_opener_text(self) -> str:
+        if self._display_history is not None:
+            return self._display_history.opener_text
+        return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
+
+    def history_last_message(self) -> Any:
+        rows = self.display_history_window()
+        return rows[-1] if rows else None
 
     def context_breakdown(self) -> dict[str, int]:
         return dict(self.frontend_state.context_breakdown or {})
@@ -2799,7 +3113,7 @@ class RemoteSession:
         await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
-        if self._history:
+        if self.history_message_count:
             return
         self._history = list(messages)
 
