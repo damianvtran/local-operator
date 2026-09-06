@@ -39,6 +39,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Iterable,
     NamedTuple,
     Protocol,
     TypeGuard,
@@ -2490,6 +2491,29 @@ class OperatorApp(App[None]):
         #: binding. Reset by a session swap (`/new`, `/resume`), because the
         #: new binding is cold again and owes its own warm-up.
         self._warm_engage_started = False
+        #: What build THIS process loaded. App construction is process start
+        #: for a TUI, so this is the honest "what is running in here" token,
+        #: and it can never be refreshed — already-imported modules do not get
+        #: younger. Every later comparison is against this snapshot.
+        #:
+        #: Read lazily (``update`` is stdlib-only, but the house style keeps it
+        #: off the import graph) and never allowed to raise: a build stamp is a
+        #: diagnostic, and a TUI that will not boot because it could not read
+        #: its own version number is a far worse failure than undetected skew.
+        try:
+            from local_operator import update as _update_mod
+
+            self._loaded_build = _update_mod.installed_build()
+        except Exception:  # noqa: BLE001 — see above; degrade to "unknown"
+            self._loaded_build = None
+        #: Debounce for :meth:`_check_build_skew`. Keyed on the whole
+        #: ``(kind, from, to, scope)`` key rather than on the kind alone, so a
+        #: SECOND drift (two ``lop-update`` runs while this terminal lives) is
+        #: still announced while the mount engage, the draft warm-up and the
+        #: slash engage together cost exactly one notice. ``scope`` is the
+        #: session id for the owner notices and empty for disk drift — see
+        #: :meth:`_check_build_skew` for why the two differ.
+        self._skew_notice_shown: set[tuple[str, str, str, str]] = set()
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -2991,6 +3015,14 @@ class OperatorApp(App[None]):
             self._measure_preloaded_context(session)
         elif getattr(session.frontend_state, "context_tokens", None) is None:
             self._measure_preloaded_context(session)
+        # LAST, and after the history is on screen: adoption covers `/new`,
+        # `/resume`, `/fork`, `/login` and the initial mount — every path that
+        # takes a session, and therefore every path that can pair this
+        # terminal with a runtime built from a different install. Placed at
+        # the tail so a skew notice lands under the replayed transcript rather
+        # than being scrolled away by it, the same ordering constraint
+        # ``_report_attachment_restore`` documents above.
+        self._check_build_skew(reason="adopt")
 
     def _invalidate_pending_frontend_state(self) -> None:
         """Retire queued paints before another session becomes authoritative."""
@@ -8542,6 +8574,11 @@ class OperatorApp(App[None]):
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
             return
+        # BEFORE the spawn, which is the moment the disk build matters: the
+        # runtime is started from ``sys.executable``, resolved fresh, so a
+        # terminal that has drifted behind the install is about to pair itself
+        # with a NEWER runtime. That pairing is the incident.
+        self._check_build_skew(reason=reason)
         if not self._runtime_can_start():
             # First run, or `hosting`/`model_name` cleared: there is nothing to
             # spawn against. The cold viewer opens on an empty config on
@@ -8570,8 +8607,18 @@ class OperatorApp(App[None]):
                 # to retry.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                return
             finally:
                 self._set_starting(False)
+            # AFTER a successful bind, which is the only moment the OWNER's
+            # build is knowable: the pre-spawn check above runs while the
+            # facade is still cold, so its C branch always returns at the
+            # ``is_cold`` guard and only disk drift can be reported there.
+            # Without this second call the mechanism misses the case it exists
+            # for — ``engage_runtime`` finding an EXISTING resident record and
+            # binding to it without spawning, i.e. an ordinary first prompt
+            # against a stale runtime (review round 1, R1-4).
+            self._check_build_skew(reason=f"{reason}-bound")
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -8701,6 +8748,11 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
+            # The bind resolved, so ``owner_version`` now holds the runtime's
+            # own stamp: this is the first moment the owner-skew comparison
+            # has anything to compare. Before the command runs, because a
+            # routed command is exactly what skew distorts.
+            self._check_build_skew(reason="slash-engage")
             operation = self._run_slash_command(text, attachments, _inline_remote=True)
             if operation is not None:
                 # Stay in the worker that joined the bind at commitment time.
@@ -14506,6 +14558,149 @@ class OperatorApp(App[None]):
         # the terminal resizes across the threshold and when the splash retires.
         self._append_block(block, ends_empty_state=False)
 
+    def _check_build_skew(self, *, reason: str) -> None:
+        """Warn when this terminal and the code around it are different builds.
+
+        Two long-lived populations coexist on a developer host: viewer TUIs
+        and the runtime processes they spawn. ``lop-update`` replaces the
+        on-disk install under both, often several times a day, and neither
+        side could see it. The concrete cost was a silent one: a TUI running
+        pre-#624 code spawned a runtime from the NEW install (the spawn
+        resolves ``sys.executable`` fresh), routed ``/team <name> <request>``
+        to it, printed the receipt, and dropped the request because that
+        build of the renderer had no consumer for it.
+
+        Two comparisons, both cheap and both advisory \u2014 nothing here blocks a
+        command or refuses an attach:
+
+        * **disk drift** \u2014 the install on disk is no longer the one this
+          process loaded, so any runtime started from here will be NEWER than
+          this window. ``/reload`` is the remedy because it restarts the
+          window on the current install and picks the session back up.
+        * **owner skew** \u2014 the runtime this session is bound to reports a
+          different build than this window, or reports none at all (which
+          means it predates the field, and is therefore older by
+          construction). ``/stop`` then sending again is the remedy: the bare
+          ``/stop`` on a follower asks the owner to stop, and the next prompt
+          engages a fresh runtime from the current install. Both keep working
+          in the meantime.
+
+        The COPY deliberately says "session" and "window" rather than
+        "runtime" and "terminal": the runtime/terminal split is real and
+        load-bearing for us, but the notice never explains it, so to a reader
+        the two words collapse into one thing they can see (design review
+        round 1, D2). The owner notices name the session by its title for the
+        same reason \u2014 see the ``subject`` construction below.
+
+        Called at the seams that spawn or bind a runtime (adopt, engage, the
+        tail of a successful bind) \u2014 the moments the answer can change and the
+        moments the user is about to depend on it. Debounced on the whole
+        (kind, from, to, scope) key so those seams together cost at most one
+        notice per distinct skew, while a genuinely new drift still speaks up.
+        Disk drift carries no scope: it is a fact about THIS process against
+        the disk, once per from/to pair whichever session is open. The owner
+        notices are scoped BY SESSION, so a terminal that adopts two different
+        stale runtimes hears about both \u2014 \"once per session per process\", which
+        is what design \u00a76.7 states.
+
+        ``reason`` names the calling seam for logs only; the copy is chosen by
+        WHICH skew was found, not by where it was noticed.
+        """
+        loaded = self._loaded_build
+        if loaded is None:
+            # This process could not read its own build (see ``__init__``);
+            # every comparison below would be against an unknown, which can
+            # only produce false alarms.
+            return
+
+        def announce(kind: str, before: str, after: str, body: str, scope: str = "") -> None:
+            # ``scope`` narrows the debounce from per-process to per-SUBJECT
+            # where the subject is what varies: an owner notice describes ONE
+            # session's runtime, so a second stale session adopted in the same
+            # terminal is a different fact and must speak. Disk drift takes no
+            # scope because it describes THIS process against the disk and is
+            # genuinely once per (from, to) pair whichever session is open
+            # (review round 1, R1-5).
+            key = (kind, before, after, scope)
+            if key in self._skew_notice_shown:
+                return
+            self._skew_notice_shown.add(key)
+            logger.debug("build skew (%s) noticed at %s: %s -> %s", kind, reason, before, after)
+            self._system_notice(body, "warning")
+
+        # --- A: has the install on disk moved under this process? ----------
+        try:
+            from local_operator import update as update_mod
+
+            on_disk = update_mod.installed_build()
+        except Exception:  # noqa: BLE001 — diagnostics never break a seam
+            on_disk = None
+        if on_disk is not None and on_disk != loaded:
+            announce(
+                "disk",
+                loaded.label(),
+                on_disk.label(),
+                f"local-operator was updated after this window opened "
+                f"({_build_change(loaded, on_disk)}) \u2014 this window is still on the "
+                f"old version. /reload updates it and picks this session back up.",
+            )
+
+        # --- C: is the bound runtime a different build than this terminal? --
+        session = self._session
+        if session is None or not bool(getattr(session, "is_remote", False)):
+            return
+        # Only a BOUND follower has an owner to compare against. A cold viewer
+        # has not dialled anything yet, and reading its empty stamp would
+        # report every cold session as a prehistoric runtime.
+        if bool(getattr(session, "is_cold", False)):
+            return
+        owner_version = str(getattr(session, "owner_version", "") or "")
+        owner_ref = str(getattr(session, "owner_source_ref", "") or "")
+        # The subject of an owner notice is the SESSION, so the debounce is
+        # keyed by it: "once per session per process", which is what design
+        # §6.7 and this method's own contract say. Keyed on the session id
+        # rather than the facade object so a takeover that swaps the object
+        # under one conversation does not re-announce the same runtime.
+        scope = str(getattr(session, "session_id", "") or id(session))
+        # NAME the session these notices are about. Two stale sessions in one
+        # terminal each legitimately get a notice (that is what the per-session
+        # debounce buys), but with a deictic "this session" in both they render
+        # as two byte-identical paragraphs — which reads as the app printing
+        # one warning twice, i.e. exactly the duplicate-notice bug the re-key
+        # fixed, and leaves ``/stop`` ambiguous about which session it acts on
+        # (design review round 1, D1). The title is what the user named and can
+        # see; "this session" survives only as the fallback for an unnamed one.
+        title = str(getattr(session, "conversation_name", "") or "").strip()
+        subject = f"\u201c{title}\u201d" if title else "this session"
+        if not owner_version:
+            # A runtime older than the field itself. It cannot tell us what it
+            # is running, but the absence is informative: the field ships in
+            # this build, so anything without it is older than this window.
+            # Every resident runtime legitimately trips this once in the
+            # release window, and it is telling the truth each time.
+            announce(
+                "owner-unknown",
+                "",
+                loaded.label(),
+                f"{subject} is running an older version than this window \u2014 some "
+                f"commands may not work. /stop, then send again to restart it.",
+                scope,
+            )
+            return
+        from local_operator.update import BuildStamp
+
+        owner = BuildStamp(version=owner_version, source_ref=owner_ref)
+        if owner != loaded:
+            announce(
+                "owner",
+                owner.label(),
+                loaded.label(),
+                f"{subject} is running {owner.label()} but this window is "
+                f"{loaded.label()} \u2014 some commands may not work. /stop, then send "
+                f"again to restart it.",
+                scope,
+            )
+
     def _echo_user_command(self, text: str) -> None:
         """Write a slash command into the ledger as the user's own row, IF its
         registry entry permits one.
@@ -14602,6 +14797,26 @@ class OperatorApp(App[None]):
                     self._notice("no agents yet. Ask the agent to create one.")
                 else:
                     self._append_block(self._agent_list_block(rows))
+                return
+            if data.get("type") in ("team_mutate", "agent_mutate"):
+                # The LAST silent quadrant, and it is reachable only through
+                # the version dimension the static audit cannot see: no
+                # current producer emits these, but a runtime resident from
+                # before #624 still does, and this terminal is new enough to
+                # be talking to one. Without this arm the attach never
+                # happened AND nothing was printed — the original defect,
+                # arriving from the other side.
+                #
+                # Adding a consumer for a type nothing produces does not
+                # disturb ``test_noop_consumers``, which maps producers onto
+                # consumers rather than the reverse.
+                self._notice(
+                    "this session is running a version too old to attach a team "
+                    "(before 0.46.25); nothing was attached. /stop, then send again "
+                    "to restart it.",
+                    "warning",
+                )
+                return
             return
         if kind == "block":
             block_type = data.get("type")
@@ -14631,6 +14846,14 @@ class OperatorApp(App[None]):
         # terminal's own images and paste expansion, and so the transcript row
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
+        # Spelled as LITERALS, deliberately, and kept in step with
+        # ``SLASH_ACTION_RECEIPTS`` — the set ``RemoteSession`` declares in its
+        # auth frame — by ``test_noop_consumers``, which reads these strings
+        # statically out of this function. Importing the constant here would
+        # blind that audit to the very seam it guards: a type declared on the
+        # wire but not consumed here is a request the runtime deferred to this
+        # terminal and this terminal then dropped, which is the original
+        # defect wearing a new hat.
         if data.get("type") in ("team_attached", "agent_attached"):
             # Each receipt syncs ITS OWN segment (review round 1, N1): the
             # post-op push repaints both from ``frontend_state`` a tick later
@@ -21263,6 +21486,7 @@ class OperatorApp(App[None]):
         images: list[Any] | None = None,
         *,
         locality: str = "local",
+        consumers: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -21284,9 +21508,74 @@ class OperatorApp(App[None]):
 
         Only the commands a follower routes land here; process/terminal
         commands stay local and never reach this dispatcher.
+
+        ``consumers`` is which action-carrying receipts the invoking client
+        renders itself; see :meth:`_complete_unconsumed_action`.
         """
         result = await self._slash_result(command, args, images, locality)
+        result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
+
+    def _complete_unconsumed_action(
+        self,
+        result: Any,
+        wire_images: list[Any] | None,
+        consumers: Iterable[str] | None,
+    ) -> Any:
+        """The TUI-hosted owner's half of the runtime's completion path.
+
+        A session is owned either by a detached runtime or by THIS app, and
+        both hosts must agree — the same mirror contract
+        ``_team_attach_slash_result`` keeps with ``owned.py``. So the rule is
+        identical to ``OwnedSessionHandle._complete_unconsumed_action``: a
+        request-carrying attach receipt whose type the client did NOT declare
+        is submitted here, because that client will not submit it and would
+        otherwise drop it in silence.
+
+        Submission goes through :meth:`_submit_prompt` rather than
+        :meth:`_submit_command_prompt`, and that choice is load-bearing.
+        ``_submit_command_prompt`` re-resolves ``[Image #N]`` markers against
+        the COMPOSER's attachment map, which owner-side does not exist for a
+        request typed in another terminal — it would drop the wire images
+        entirely. ``_submit_prompt`` takes decoded image blocks directly,
+        paints the user row once, and keeps the echo registry consistent. Its
+        own streaming branch steers when a turn is running, so the busy
+        behaviour matches the runtime's for free.
+
+        Synchronous because every step is: this already runs on the app loop,
+        and ``_submit_prompt`` dispatches its own worker.
+        """
+        # Imported here rather than at module scope: both live under the
+        # runtime package, which the TUI otherwise touches only lazily (the
+        # handle at ``_mobile_handle`` does the same), and this method runs
+        # only when a follower routes a slash command to a TUI-hosted owner.
+        from local_operator.session.runtime.server import image_blocks
+        from local_operator.session.runtime.types import runtime_must_complete
+
+        if getattr(result, "kind", None) != "notice":
+            return result
+        data = getattr(result, "data", None) or {}
+        receipt_type = data.get("type")
+        # THE SAME predicate the runtime host applies, imported rather than
+        # restated: the two hosts must answer identically, and a second copy
+        # is free to drift toward double-submitting on this path alone.
+        if not runtime_must_complete(receipt_type, consumers):
+            return result
+        request = str(data.get("request") or "")
+        if not request:
+            return result
+        try:
+            images = image_blocks(wire_images)
+            self._submit_prompt(request, images, None, typed=request)
+        except Exception as exc:  # noqa: BLE001 — the attach landed; name what did not
+            logger.debug("completing an unconsumed slash action failed", exc_info=True)
+            return result.model_copy(
+                update={
+                    "text": f"{result.text} — but the request was not sent: {exc}",
+                    "style": "warning",
+                }
+            )
+        return result
 
     async def _slash_result(
         self, command: str, args: str, images: list[Any] | None, locality: str = "local"
@@ -24424,6 +24713,28 @@ def _canonical_frontend(session: Any) -> bool:
     """
     attributes = getattr(session, "__dict__", {})
     return "_frontend_state_store" in attributes or "_frontend_store" in attributes
+
+
+def _build_change(before: Any, after: Any) -> str:
+    """How one build differs from another, without repeating what they share.
+
+    The headline case for drift is ``lop-update`` rebuilding from ``main``
+    WITHOUT a version bump, so both sides carry the same version and differ
+    only in the recorded commit. Two full labels then spend the sentence's most
+    prominent parenthetical restating one version:
+    ``0.48.0@aaaaaaa → 0.48.0@bbbbbbb``. The refs are the only distinguishing
+    fact there and must stay, but the version belongs outside the arrow:
+    ``0.48.0, aaaaaaa → bbbbbbb`` (design review round 1, D3).
+
+    When the versions genuinely differ the two-arm form is the honest one and
+    is kept. Deliberately a CALL-SITE formatter rather than a change to
+    ``BuildStamp.label()``: that method has other callers whose single-build
+    rendering is correct as it is.
+    """
+    same_version = before.version and before.version == after.version
+    if same_version and before.source_ref and after.source_ref:
+        return f"{before.version}, {before.source_ref[:7]} \u2192 {after.source_ref[:7]}"
+    return f"{before.label()} \u2192 {after.label()}"
 
 
 def _model_spec(session) -> Any | None:

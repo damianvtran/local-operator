@@ -86,6 +86,45 @@ ClientLocality = Literal["local", "remote"]
 #: which liveness detection cannot see.
 ATTACH_MAX_CLIENTS = 4
 
+#: ``SlashResult`` ``data.type`` values that carry an ACTION for the invoking
+#: terminal: the owner attached a team or an agent profile, and the invoker is
+#: expected to submit ``data["request"]`` as a user turn of its own.
+#:
+#: This exists because that expectation used to be implicit, and an older
+#: viewer that did not hold it dropped the request in total silence: the
+#: runtime attached the team, returned "sending to <team>. <manager> is
+#: coordinating.", and the pre-#624 renderer printed the line and had no
+#: consumer for ``data.request``. No user row, no turn, no error.
+#:
+#: So a client that renders these DECLARES them in its auth frame's
+#: ``slash_consumers``; an undeclared (older) client means the RUNTIME admits
+#: the request itself. Absent-means-old, exactly like ``ClientKind`` above.
+#: The list is the single source of truth for both sides of that seam, and
+#: ``tests/unit/tui/test_noop_consumers.py`` fails CI if a producer emits a
+#: ``request``-carrying receipt whose type is missing here.
+SLASH_ACTION_RECEIPTS: tuple[str, ...] = ("team_attached", "agent_attached")
+
+
+def runtime_must_complete(receipt_type: Any, consumers: Any) -> bool:
+    """Whether the OWNER must submit this receipt's request itself.
+
+    The one rule, in one place: a client completes a receipt only if it
+    DECLARED that type, so ``type not in declared`` — never ``declared is
+    None``. Both ``None`` (a client built before the field) and ``[]``
+    (declared, consumes nothing) mean undeclared and therefore admit here.
+
+    Extracted because the predicate has two hosts by contract — a session is
+    owned either by a detached runtime or by a TUI, and both must answer
+    identically. Hand-duplicating it left the two copies free to drift, where
+    a drift toward ``declared is None`` silently double-submits on one host
+    only (review round 1, NIT-2). Living beside ``SLASH_ACTION_RECEIPTS``
+    keeps the rule next to the list it is applied to; this module is
+    import-light by contract and this adds no imports.
+    """
+    if receipt_type not in SLASH_ACTION_RECEIPTS:
+        return False
+    return receipt_type not in (consumers or ())
+
 
 # ---------------------------------------------------------------------------
 # Discovery record
@@ -159,6 +198,26 @@ class SessionRecord:
     #: cost has to be findable — this field is what puts it in `lop sessions`
     #: and sorts it first in the picker.
     pending: str | None = None
+
+    # -- build stamp --------------------------------------------------------
+    # Same additive contract as the live-state block above, and for the same
+    # reason: PROTOCOL_VERSION deliberately does not move for a field nobody
+    # is required to read.
+    #
+    # The record IS the version channel between a viewer and a runtime. An
+    # attach client reads it before dialing (``find_owner_record``) and holds
+    # it at bind, so one comparison there is complete — a runtime's build
+    # cannot change while the process lives.
+
+    #: What build this runtime is running (``update.installed_version()``).
+    #: ``""`` means a runtime older than this field, which by construction is
+    #: older than any terminal that can read it. A viewer compares this with
+    #: its own build to NAME skew rather than fail silently under it.
+    version: str = ""
+    #: The git ref of that install when ``lop-update`` recorded one; ``""``
+    #: for PyPI/pipx/editable installs. Needed because same-version rebuilds
+    #: are this host's common drift — see ``update.BuildStamp``.
+    source_ref: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
