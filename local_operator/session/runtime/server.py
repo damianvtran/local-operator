@@ -98,6 +98,85 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+
+
+def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
+    """Return ``frame``, or a small stand-in when it cannot be read.
+
+    WHY A FRAME THIS BIG IS NOT MERELY LARGE. The attach client dials with
+    ``limit=_READ_LIMIT_BYTES`` (the same 1 MiB as ``cap_bytes``), so an
+    oversized line makes its ``readline`` raise ``LimitOverrunError``. That is
+    unrecoverable rather than lossy: the overrun does NOT consume the buffer,
+    so every later read re-raises on the same bytes. The client's pump
+    therefore dies, and the viewer paints "owner sent a frame too large to
+    read" — the message the operator hit — losing the whole connection over one
+    delta. ``frontend_sync`` has been guarded since it caused exactly this
+    (see ``oversized_frame_report``); ``frontend_update`` and ``event`` were
+    not, and a single 1,039,374-byte transcript row produced a 1,129,319-byte
+    ``event`` frame that killed the socket.
+
+    DEGRADING ONE DELTA IS SAFE; KILLING THE SOCKET IS NOT. Both relay frame
+    types are deltas over state the viewer can recover by other means: it holds
+    durable history and re-syncs through ``frontend_sync``, which carries the
+    canonical snapshot. Dropping the payload costs one animation step that the
+    next snapshot supersedes. Killing the connection costs the session.
+
+    THE STAND-IN MUST STILL BE A VALID FRAME OF ITS OWN OP, which is why this
+    is not one generic placeholder:
+
+    * ``event`` — the payload is deserialized by ``deserialize_event``, which
+      REQUIRES ``type``. A bare marker raises there, and although the client
+      swallows callback failures (so the pump survives), the viewer would then
+      silently miss the frame with nothing said. It degrades to a ``notice``
+      instead: a real event type, rendered, and honest about what happened.
+    * ``frontend_update`` — canonical deltas are NOT replacement-safe. The
+      client checks ``epoch``/``sequence`` and closes the connection on a gap
+      by design, precisely so canonical state can never drift. A placeholder
+      that dropped the sequence would trip that check and kill the connection
+      this function exists to save, so the sequencing fields are carried
+      through and only the oversized BODY is shed. The viewer sees a
+      well-sequenced delta whose payload says it was degraded.
+
+    Cheap on the hot path: relay frames are ordinary-sized, so the common case
+    pays one ``len(json.dumps(...))`` — the same measurement the send would
+    perform anyway.
+    """
+    encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded <= cap_bytes:
+        return frame
+    op = frame.get("op", "frame")
+    logger.error(
+        "session runtime: %s frame is %d bytes, over the %d-byte socket line limit; "
+        "relaying a degraded placeholder instead of killing the connection "
+        "(the viewer recovers this state through frontend_sync + durable history)",
+        op,
+        encoded,
+        cap_bytes,
+    )
+    text = (
+        "A live update was too large to send and was dropped; "
+        "the view refreshes from the session's own history."
+    )
+    if op == "frontend_update":
+        data = frame.get("data")
+        data = data if isinstance(data, dict) else {}
+        # Sequencing preserved (see above): shed the body, never the epoch or
+        # the sequence number the client's gap check depends on.
+        return {
+            "op": op,
+            "data": {
+                "epoch": data.get("epoch"),
+                "sequence": data.get("sequence"),
+                "degraded": True,
+                "degraded_reason": text,
+            },
+        }
+    return {
+        "op": op,
+        "data": {"type": "notice", "text": text, "kind": "warning"},
+    }
+
+
 # A projection is replaceable state. If a peer cannot accept one within this
 # bound, dropping that peer is safer than blocking authority-bearing ACKs for
 # every healthy front end.
@@ -1891,6 +1970,12 @@ class RuntimeServer:
 
     def _enqueue_client_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
         """Queue one state/event frame on the connection's sole ordered FIFO."""
+        # THE chokepoint for both relay frame types: ``frontend_update`` and
+        # ``event`` both arrive here, so guarding once covers both and no
+        # future relay caller can bypass it by forgetting to check. (The
+        # ``frontend_sync`` frame does not come through here — it is written
+        # directly at connect time and carries its own report.)
+        frame = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
         try:
             conn.event_queue.put_nowait(frame)
         except asyncio.QueueFull:
