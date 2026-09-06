@@ -306,9 +306,15 @@ the workflows** — submitted 2026-09-03 (run 33815585846) and published
 2026-09-04 (run 33926643637), no dashboard step in either half. **v0.1.8**
 followed on 2026-09-06 (run 34000911184), validating and submitting with
 `STAGED_PUBLISH`. Every release before v0.1.7 went out by hand. The workflow
-fails closed before uploading anything — two earlier staged attempts (33793517588,
-33766746870) died on a 403 during authentication without touching the store — so
-a surprise there is recoverable.
+fails closed before uploading anything, and the two earlier staged attempts both
+stopped well short of the store: run 33766746870 never started a single step,
+sitting 4h29m awaiting environment approval before its pending deployment failed
+(annotation: `The deployment was rejected or didn't satisfy other protection
+rules`) seconds after #585 removed the required-reviewer gate it was queued
+behind; run 33793517588 got as far as `Verify protected environment
+configuration` and exited 22 on a GitHub API 403, with the authenticate and
+upload steps skipped — the failure #589 then fixed. Neither reached the Chrome
+Web Store, so a surprise there is recoverable.
 
 The workflows use Chrome Web Store API v2 directly with `curl` and exchange a
 GitHub OIDC token for a short-lived service-account access token through
