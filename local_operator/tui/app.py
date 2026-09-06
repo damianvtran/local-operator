@@ -15062,11 +15062,19 @@ class OperatorApp(App[None]):
 
             One function, two callers (the busy branch and the ``kept`` answer
             of the idle branch) so the two states cannot drift into two
-            wordings. The version pair is rendered with the same ``old \u2192 new``
-            arrow the drift notice uses (``_build_change``): the parenthetical
-            form wrapped BETWEEN the two stamps on an 80- and 100-column splash,
-            which is where a resume paints it, splitting the one fact the line
-            exists to carry across two rows (design review round 1, D1).
+            wordings. The version pair goes through ``_build_change``, the same
+            formatter notice A uses one block higher: hand-rolling
+            ``old.label() \u2192 new.label()`` rendered this host's HEADLINE drift
+            \u2014 a ``lop-update`` rebuild from ``main`` with no version bump \u2014 as
+            ``0.49.0@aaaaaaa \u2192 0.49.0@bbbbbbb``, restating the version while
+            the seven characters that actually differ were the least prominent
+            thing on the line, and left the two notices naming one fact two
+            ways on one screen (review round 2, R2-2 / design round 2, D3).
+            The arrow form (rather than a parenthetical) is what keeps the pair
+            on ONE row: the parenthetical wrapped BETWEEN the two stamps on an
+            80- and 100-column splash, which is where a resume paints it
+            (design review round 1, D1). ``_build_change``'s collapsed form is
+            shorter still, so D1's fix holds a fortiori.
             """
             if owner is None:
                 # A runtime older than the field itself. It cannot tell us what
@@ -15087,7 +15095,7 @@ class OperatorApp(App[None]):
                 "owner",
                 owner.label(),
                 loaded.label(),
-                f"{subject} is running {owner.label()} \u2192 {loaded.label()} \u2014 it will "
+                f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
                 f"move to the new version when its current work finishes.",
                 scope,
                 notice_kind="note",
@@ -15116,7 +15124,19 @@ class OperatorApp(App[None]):
                     announce_stale()
                     return
                 logger.debug("refresh request answered: %s", detail)
-                if detail.strip().startswith("retiring"):
+                # COERCED, not trusted. ``ask`` is a duck-typed ``getattr``
+                # probe against arbitrary hosts \u2014 an older runtime facade, an
+                # embedder, a reduced test double \u2014 which is the very
+                # population this notice exists for, and the two in-tree
+                # implementations being annotated ``-> str`` says nothing about
+                # them. Calling ``.strip()`` on the raw answer put an
+                # ``AttributeError`` inside a Textual worker, which runs with
+                # ``exit_on_error=True``: a ``None`` answer ENDED THE SESSION
+                # (``WorkerFailed``) where the previous head merely logged it
+                # (review round 2, R2-1). Everything else this seam probes
+                # degrades rather than raises; a build diagnostic must never be
+                # able to close the window it is diagnosing.
+                if str(detail or "").strip().startswith("retiring"):
                     return
                 announce_stale()
 
