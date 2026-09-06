@@ -71,6 +71,8 @@ class DesktopSessionBridge:
         self.watch_lock = asyncio.Lock()
         self.unsubscribers: list[Any] = []
         self.watch_task: asyncio.Task[None] | None = None
+        self.attention_task: asyncio.Task[None] | None = None
+        self.attention: dict[str, Any] = {}
 
     async def acquire(self) -> RemoteSession:
         async with self.lock:
@@ -97,6 +99,8 @@ class DesktopSessionBridge:
                         remote.subscribe_frontend(self._frontend).unsubscribe,
                     ]
                 await self.remote.attach_existing()
+                if self.attention_task is None:
+                    self.attention_task = asyncio.create_task(self._poll_attention())
                 return self.remote
             except BaseException:
                 self.users -= 1
@@ -112,6 +116,11 @@ class DesktopSessionBridge:
                 await self._detach()
 
     async def _detach(self) -> None:
+        if self.attention_task is not None:
+            self.attention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.attention_task
+            self.attention_task = None
         if self.watch_task is not None:
             self.watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -172,6 +181,10 @@ class DesktopSessionBridge:
         # Trajectories are intentionally opt-in on the runtime and absent here;
         # large roster/usage fields still pass through the shared wire budget.
         payload = update.model_dump(mode="json")
+        # Receipt revisions outlive an owner epoch. Only the independent durable
+        # projection below may update them; a delayed owner delta must not undo
+        # a read made through another process while this stream stays mounted.
+        payload["changes"].pop("attention", None)
         payload["job_trajectory_appends"] = {}
         payload["job_trajectory_replacements"] = []
         if {"jobs", "usage_components"} & update.changes.keys():
@@ -181,9 +194,36 @@ class DesktopSessionBridge:
                     payload["changes"][key] = bounded[key]
         self.publish("frontend.update", payload)
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        from local_operator.session.attention import AttentionStore
+
+        state = await asyncio.to_thread(
+            AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
+        )
+        remote = self.remote
+        state["supported"] = bool(
+            remote is not None
+            and (remote.is_cold or getattr(remote, "supports_completion_ack", False))
+        )
+        if state != self.attention:
+            previous = self.attention
+            self.attention = state
+            # The initial snapshot owns the baseline; later changes have their
+            # own receipt clock rather than borrowing a runtime owner sequence.
+            if previous:
+                self.publish("attention", state)
+        return state
+
+    async def _poll_attention(self) -> None:
+        # Read-only polling is shared by every subscriber of this bridge and
+        # independent of watch leases. It also works while no owner is running.
+        while True:
+            await self.refresh_attention()
+            await asyncio.sleep(1)
+
     def state(self) -> dict[str, Any]:
         assert self.remote is not None
-        state = self.remote.frontend_state
+        state = self.remote.frontend_state.model_copy(update={"attention": self.attention})
         return sync_wire_payload(
             FrontendSync(
                 epoch=state.epoch,
@@ -194,6 +234,7 @@ class DesktopSessionBridge:
         )
 
     async def snapshot(self) -> dict[str, Any]:
+        await self.refresh_attention()
         state = self.state()
         seq, epoch = self.sequence, self.epoch
         cursor = state["snapshot"].get("history_cursor")
@@ -345,6 +386,27 @@ class DesktopSessions:
         self.bridges: dict[str, DesktopSessionBridge] = {}
         self.lock = asyncio.Lock()
 
+    async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
+        """A read receipt never admits work, binds a viewer, or starts an owner.
+
+        Validate the same durable user-session namespace as the bridge, but do
+        not enter its acquire path: a completed cold conversation is readable
+        even when its owner and the mobile daemon are both stopped.
+        """
+        from local_operator.session.attention import AttentionStore
+
+        def acknowledge() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return AttentionStore(self.root / "attention.db").acknowledge(
+                f"session/{session_id}", token
+            )
+
+        return await asyncio.to_thread(acknowledge)
+
     async def create(self, cwd: str) -> str:
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
@@ -377,8 +439,15 @@ class DesktopSessions:
             # runs once per row the caller will actually see rather than once
             # per session on disk. Measured 0.10 ms per row on a 38-session
             # store; the whole call already runs on a worker thread.
+            from local_operator.session.attention import AttentionStore
+
+            # One read connection per list, never one per row or an owner bind.
+            attention = AttentionStore(self.root / "attention.db").state_many(
+                f"session/{row['id']}" for row in visible
+            )
             for row in visible:
                 row["preview"] = session_preview(self.root / "sessions" / row["id"])
+                row["attention"] = attention[f"session/{row['id']}"]
             return visible
 
         return await asyncio.to_thread(rows)

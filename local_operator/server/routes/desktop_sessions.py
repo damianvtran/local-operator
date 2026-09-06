@@ -55,6 +55,12 @@ class Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class Seen(Input):
+    # A durable completion UUID is the only admission: timestamps or a caller's
+    # owner epoch could accidentally acknowledge a later, unseen outcome.
+    completion_token: RequestID
+
+
 class CreateSession(Input):
     request_id: RequestID
     cwd: str = Field(min_length=1, max_length=4096)
@@ -360,6 +366,12 @@ async def answer(session_id: str, body: Answer, request: Request):
         except RuntimeError:
             raise HTTPException(409, "This question or approval is no longer pending") from None
         return reply({"detail": detail})
+
+
+@router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[dict[str, Any]])
+async def seen(session_id: str, body: Seen, request: Request):
+    async with errors():
+        return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

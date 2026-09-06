@@ -26,6 +26,8 @@ async def capabilities():
                 "commands": 1,
                 "catalogues": 1,
                 "lifecycle": 1,
+                # Watch leases route notification delivery; they never mark read.
+                "completion-ack-v1": 1,
                 "mcp": 1,
                 "radient": 1,
             },
