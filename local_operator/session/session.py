@@ -5816,6 +5816,14 @@ class Session:
         # frontend that joins mid-turn"), and a mid-turn drop is exactly when a
         # frontend joins. Bounded to a live turn, so a genuinely unobserved
         # idle session still does no work.
+        #
+        # This does mean the fold now also runs for a session NO viewer has
+        # ever attached to — every subagent — which is a real cost and the
+        # reason ``live_events`` needed its own wire bound (see
+        # ``LIVE_EVENT_END_ROWS_MAX``). Kept deliberately: "has a viewer right
+        # now" is not knowable at fold time in any useful way, since the whole
+        # point is to have the seed ready for a viewer that has not arrived
+        # yet. Bounded retention is the cheaper guarantee.
         store = getattr(self, "_frontend_state_store", None)
         if store is not None and (self._has_ui or store.has_subscribers or self._is_streaming):
             # Replay-changing commits precede their public events. Publish the

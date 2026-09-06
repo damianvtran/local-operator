@@ -30,10 +30,14 @@ from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
+    LIVE_EVENT_END_ROWS_MAX,
+    LIVE_EVENT_TEXT_FLOOR_CHARS,
+    LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS,
     MODEL_CATALOGUE_FLOOR_ROWS,
     USAGE_COMPONENT_CAP,
     FrontendSessionState,
     FrontendStateStore,
+    FrontendSync,
     FrontendUsage,
     JobState,
     McpServerState,
@@ -336,7 +340,16 @@ _BOUNDED_COLLECTION_FIELDS = {
     "context_breakdown": "one entry per tool; bounded by the tool inventory",
     "child_costs": "one float per job; O(1) bytes each",
     "queued_steering": "drains every turn",
-    "live_events": "explicitly bounded by _fold_live_event",
+    # Was "explicitly bounded by _fold_live_event", which stopped being true the
+    # moment a `tool_execution_end` began RETAINING its row instead of erasing
+    # it (so a viewer reconnecting mid-turn can settle a card for work that
+    # finished while it was away). The fold self-bounded only because completed
+    # calls left nothing behind; with the end retained the field accumulates one
+    # full tool result per call and measured 2 MB on a 1 MiB frame. Now bounded
+    # at the WIRE like `model_catalogue`: oldest ends evicted past
+    # LIVE_EVENT_END_ROWS_MAX, remaining result text clipped to a shared frame
+    # budget. Every retained row keeps the identity and outcome a card needs.
+    "live_events": "clipped at the wire: end rows capped newest-first, result text budgeted",
     "todos": "the user's own list, written by hand",
     "wakes": "the user's own schedules",
     "mcp_servers": "one row per configured server",
@@ -629,7 +642,36 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
         "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
-        "live_events": [{"type": "message_update", "text": "e" * 200} for index in range(200)],
+        # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
+        # 200 `message_update`s, which `_fold_live_event` dedupes to a single
+        # row by phase — so it could never exercise the shape that actually
+        # accumulates, and the whole suite passed while `live_events` was
+        # contributing 2 MB to a 1 MiB frame. A retained `tool_execution_end`
+        # is the row that grows one-per-call with a full tool result attached;
+        # this fixture is what makes `assert_frame_fits` able to see it.
+        "live_events": [
+            row
+            for index in range(1_000)
+            for row in (
+                {
+                    "type": "tool_execution_start",
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "read",
+                },
+                {
+                    "type": "tool_execution_end",
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "read",
+                    "is_error": False,
+                    "result": {
+                        "tool_call_id": f"call-{index}",
+                        "tool_name": "read",
+                        "content": [{"type": "text", "text": "e" * 60_000}],
+                        "is_error": False,
+                    },
+                },
+            )
+        ],
         "todos": [
             TodoPhaseState(
                 name=f"phase {index}",
@@ -1384,6 +1426,21 @@ def _oversized_event_frame() -> dict[str, Any]:
     }
 
 
+def _live_end(call_id: str, *, text: str) -> dict[str, Any]:
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "text", "text": text}],
+            "is_error": False,
+        },
+    }
+
+
 def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
     """``event`` is guarded the way ``frontend_sync`` already was.
 
@@ -1513,3 +1570,129 @@ async def test_compaction_never_assembles_an_unreadable_frame() -> None:
     # against a compaction that keeps the first frame and discards 63 deltas.
     # The delta stream is append-only, so concatenating it must be unchanged.
     assert "".join(str(f["data"]["delta"]) for f in out) == before
+
+
+def _live_start(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_execution_start", "tool_call_id": call_id, "tool_name": "read"}
+
+
+def _bounded_live_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run rows through the real wire boundary and hand back what survived."""
+    state = FrontendSessionState(session_id="s1", epoch="e1", live_events=rows)
+    payload = sync_wire_payload(
+        FrontendSync(epoch=state.epoch, sequence=state.sequence, snapshot=state, live_cursor=None)
+    )
+    return payload["snapshot"]["live_events"]
+
+
+def test_a_retained_tool_end_keeps_what_settles_the_card() -> None:
+    """Truncation may take the payload, never the identity or the outcome.
+
+    The seed exists so a viewer that reconnects mid-turn can settle a card for
+    a call that finished while it was away. A bound that dropped ``is_error``
+    or the id would leave the card live and hand it back to the retirement
+    pass as ``⊘ interrupted`` — the artefact the retention removes.
+    """
+    survivors = _bounded_live_events([_live_start("c1"), _live_end("c1", text="R" * 500_000)])
+
+    ends = [row for row in survivors if row["type"] == "tool_execution_end"]
+    assert len(ends) == 1
+    assert ends[0]["tool_call_id"] == "c1"
+    assert ends[0]["is_error"] is False
+    text = ends[0]["result"]["content"][0]["text"]
+    assert text.endswith("…"), "a clipped preview must be marked as clipped"
+    # A lone row gets the WHOLE frame budget; the floor is the guarantee for a
+    # turn of many calls, not a ceiling for one.
+    assert len(text) <= LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
+    assert text.startswith("RRR"), "the surviving preview must be the head of the result"
+
+
+def test_the_text_floor_holds_when_a_turn_has_very_many_calls() -> None:
+    """Every retained end stays legible however many calls the turn ran.
+
+    A share divided by call count alone would shrink to nothing on a long
+    turn, leaving cards that settle with an empty result. The floor is what
+    keeps a clipped card readable rather than merely present.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(LIVE_EVENT_END_ROWS_MAX):
+        rows.append(_live_end(f"c{index}", text="y" * 50_000))
+
+    survivors = _bounded_live_events(rows)
+    lengths = [len(row["result"]["content"][0]["text"]) for row in survivors]
+
+    assert len(lengths) == LIVE_EVENT_END_ROWS_MAX
+    assert min(lengths) >= LIVE_EVENT_TEXT_FLOOR_CHARS
+
+
+def test_an_evicted_tool_end_takes_its_start_with_it() -> None:
+    """Never leave a start whose end was dropped: that is a stranded spinner.
+
+    Evicting the end alone would leave a card the viewer paints live and can
+    never settle, which is the same ``⊘ interrupted`` outcome by another route.
+    A start with NO end is a call still running and must always survive.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(LIVE_EVENT_END_ROWS_MAX + 50):
+        rows.append(_live_start(f"done-{index}"))
+        rows.append(_live_end(f"done-{index}", text="x" * 100))
+    rows.append(_live_start("still-running"))
+
+    survivors = _bounded_live_events(rows)
+    ends = {row["tool_call_id"] for row in survivors if row["type"] == "tool_execution_end"}
+    starts = {row["tool_call_id"] for row in survivors if row["type"] == "tool_execution_start"}
+
+    assert len(ends) == LIVE_EVENT_END_ROWS_MAX
+    # Newest kept: those are the cards most likely still on screen unsettled.
+    assert "done-149" in ends and "done-0" not in ends
+    # No start outlives its own end...
+    assert starts - ends == {"still-running"}
+    # ...and the call that never ended keeps its card.
+    assert "still-running" in starts
+
+
+@pytest.mark.asyncio
+async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end over a real socket: a heavy in-flight seed still attaches.
+
+    The serialization tests above measure the frame; this one proves the claim
+    that matters. A viewer reconnecting into a long turn is the exact case the
+    retained ``tool_execution_end`` was added for, so it is the case that must
+    not be broken by the retention's own weight: without the wire bound this
+    ``frontend_sync`` runs to megabytes, the reader refuses the line, and the
+    connect degrades to the cold session the whole PR exists to prevent.
+
+    The surviving seed is asserted to be USABLE, not merely present — each end
+    keeps the id and outcome ``on_tool_ended`` needs to settle its card.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    seed: list[dict[str, Any]] = []
+    for index in range(600):
+        seed.append(_live_start(f"call-{index}"))
+        seed.append(_live_end(f"call-{index}", text="R" * 20_000))
+    handle._frontend.mutate(jobs=_jobs(200, 500), live_events=seed)
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        # Connecting at all is the assertion the bound exists to protect.
+        live = remote.frontend_state.live_events
+        ends = [row for row in live if row.get("type") == "tool_execution_end"]
+        assert 0 < len(ends) <= LIVE_EVENT_END_ROWS_MAX
+        # Newest survive: those are the cards still unsettled on screen.
+        assert ends[-1]["tool_call_id"] == "call-599"
+        # And every survivor can still settle its card.
+        assert all(row["tool_call_id"] and "is_error" in row for row in ends)
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
