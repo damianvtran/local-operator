@@ -394,10 +394,10 @@ class SessionSidebar(Widget, can_focus=True):
             cursor = self.has_focus and entry.id == self.cursor_id
             hovered = entry.id == self._hover_id and entry.id != ""
             # The row a click asked for, until it becomes current. It shares
-            # the cursor's ground and `›` so the eye reads "this one is being
-            # opened" where it just clicked, and stays distinct from current
-            # (bold on `surface`) because it is NOT current yet — readiness
-            # is a separate, later fact that only commit may assert.
+            # the cursor's ground so the eye reads "this one is being opened"
+            # where it just clicked, and stays distinct from current (bold on
+            # `surface`) because it is NOT current yet — readiness is a
+            # separate, later fact that only commit may assert.
             requested = entry.id == self._requested_id and entry.id != "" and not current
             # Three states have to stay separable, so they occupy three
             # different grounds: the keyboard cursor keeps `tint-select` (the
@@ -418,7 +418,16 @@ class SessionSidebar(Widget, can_focus=True):
                 bold=current,
             )
             line = Text(style=style, no_wrap=True)
-            line.append("› " if cursor or requested else "  ")
+            # The requested row gets a caret the cursor does not have. Sharing
+            # BOTH `tint-select` and `›` made the two indistinguishable, and
+            # they are reachable on opposite rows from real bindings (focus the
+            # list, ctrl+shift+down, or press down before commit) — the frame
+            # then could not say which row was opening (round 5, D6). `»` is
+            # the doubled form of the same caret: one cell, same ink, same
+            # column, so nothing reflows and the ramp is untouched. Requested
+            # wins when a row is both, because "this is opening" is the fact
+            # the user is waiting on.
+            line.append("» " if requested else "› " if cursor else "  ")
             mark, ink = row_state_mark(entry.row, self._frame)
             if requested and self._requested_spinning():
                 # Same ink a busy row's spinner uses (``row_state_mark``), so one

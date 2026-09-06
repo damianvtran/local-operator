@@ -3925,6 +3925,10 @@ class OperatorApp(App[None]):
         if self._session is not None and self._session.session_id == message.session_id:
             if self._sidebar_navigation.requested_id:
                 self._sidebar_navigation.cancel()
+            # Selecting the attached session is a no-op navigation, so nothing
+            # downstream will clear the intent published for it. Drop it here
+            # or the next burst would step from an id no switch is pursuing.
+            self._sidebar_navigation.intend("")
             if self.query_one("#session-workspace").has_class("sidebar-overlay"):
                 self._set_sidebar_open(False)
             self._editor().focus()
@@ -3996,10 +4000,20 @@ class OperatorApp(App[None]):
     def _switch_session_from(self, entries: Sequence[CatalogEntry], delta: int) -> None:
         # Step from where the user is HEADED, not where they are: a second
         # press before the first commits used to read ``_session`` (still the
-        # old one) and recompute the same target, so a burst of three presses
-        # collapsed into one hop (round 4, U6 / MINOR-1). The requested id is
-        # the honest origin while a switch is in flight.
-        origin = self._sidebar_navigation.requested_id or (
+        # old one) and recompute the same target, so a burst collapsed into
+        # one hop (round 4, U6 / MINOR-1).
+        #
+        # ``requested_id`` was the wrong publication point (round 5, U7): it is
+        # only set inside ``select``, which runs when the posted ``Selected``
+        # message DISPATCHES. A held key auto-repeats into a single event
+        # batch, so press 2 ran before press 1's message was delivered and read
+        # the pre-press origin again. ``intent_id`` is set synchronously below,
+        # in the same batch, which is the only value a burst can rely on.
+        # Stepping from ``cursor_id`` was the alternative and is rejected: the
+        # cursor is a LIST-focus concept that arrow keys move without
+        # attaching, so a user who moved the cursor and then pressed the
+        # shortcut would hop from a row they never opened.
+        origin = self._sidebar_navigation.intent_id or (
             self._session.session_id if self._session is not None else ""
         )
         index = next((i for i, entry in enumerate(entries) if entry.id == origin), None)
@@ -4012,6 +4026,9 @@ class OperatorApp(App[None]):
         if target.id == origin:
             return
         self._session_sidebar.cursor_id = target.id
+        # Synchronous, BEFORE the post: the next press in the same batch reads
+        # this, not the message queue (round 5, U7).
+        self._sidebar_navigation.intend(target.id)
         self.post_message(SessionSidebar.Selected(target.id))
 
     async def _switch_session_cold(self, delta: int) -> None:

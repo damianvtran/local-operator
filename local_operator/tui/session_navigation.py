@@ -33,11 +33,30 @@ class SessionNavigation(Generic[Prepared]):
         self._failed = failed
         self.generation = 0
         self.requested_id = ""
+        #: Where the user is HEADED, published SYNCHRONOUSLY — before the
+        #: ``Selected`` message that starts the navigation has been dispatched.
+        #: ``requested_id`` only becomes true inside :meth:`select`, which runs
+        #: on message dispatch; a held key auto-repeats into ONE event batch,
+        #: so a second press read the pre-press origin and both presses
+        #: computed the same target (round 5, U7). Anything choosing a target
+        #: relative to "where I am going" must read this, not ``requested_id``.
+        self.intent_id = ""
         self.committed_id = ""
         self._task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._preparation_lock = asyncio.Lock()
         self._closed = False
+
+    def intend(self, session_id: str) -> None:
+        """Publish the target synchronously, before ``select`` can dispatch.
+
+        Separate from :meth:`select` because a caller that posts a message to
+        reach ``select`` has already decided; the decision must be readable in
+        the same event batch, or the next press in an auto-repeat burst steps
+        from a stale origin. Deliberately does NOT raise the input boundary or
+        touch ``generation``: intent is not a commitment to prepare anything.
+        """
+        self.intent_id = session_id
 
     def select(self, session_id: str) -> asyncio.Task[None]:
         if self._closed:
@@ -45,6 +64,7 @@ class SessionNavigation(Generic[Prepared]):
         self.generation += 1
         generation = self.generation
         self.requested_id = session_id
+        self.intent_id = session_id
         if self._task is not None:
             self._task.cancel()
         # The boundary is raised before yielding: a following Enter cannot
@@ -98,6 +118,7 @@ class SessionNavigation(Generic[Prepared]):
             finally:
                 if not self._closed and generation == self.generation:
                     self.requested_id = ""
+                    self.intent_id = ""
                     self._pending("")
 
     def cancel(self) -> None:
@@ -105,6 +126,7 @@ class SessionNavigation(Generic[Prepared]):
         if self._task is not None:
             self._task.cancel()
         self.requested_id = ""
+        self.intent_id = ""
         self._pending("")
 
     async def close(self) -> None:
@@ -118,3 +140,4 @@ class SessionNavigation(Generic[Prepared]):
             # preparations prevents callbacks touching an already closed app.
             await asyncio.gather(*tasks, return_exceptions=True)
         self.requested_id = ""
+        self.intent_id = ""

@@ -409,6 +409,10 @@ def read_replay_suffix(
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         position = handle.tell()
+        # EOF as the handle saw it. Re-stat'ing after the close would measure a
+        # file an appending owner may have grown in between, reporting bytes
+        # this call never read (round 5, NIT).
+        end_of_file = position
         # Invariant: ``pending`` is the bytes after ``position`` that have NOT
         # yet been split into rows. It only ever grows by one chunk and is
         # split exactly once, when a row boundary lands inside it — so a row
@@ -483,7 +487,7 @@ def read_replay_suffix(
         entries=tuple(parsed),
         through_present=through_id is None or through_id in seen_ids,
         checkpoint=checkpoint,
-        bytes_read=os.path.getsize(path) - position,
+        bytes_read=end_of_file - position,
     )
 
 

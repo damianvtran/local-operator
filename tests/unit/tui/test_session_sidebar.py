@@ -254,7 +254,16 @@ async def test_switch_session_attaches_from_the_composer_and_wraps(position):
         editor.focus()
         await pilot.pause()
         order = [entry.id for entry in sidebar.entries]
-        with patch.object(app._sidebar_navigation, "select", side_effect=attached.append):
+
+        def settle(session_id: str) -> None:
+            # Stands in for a whole navigation: the real ``select`` prepares,
+            # commits, and then clears the in-flight intent. Each case below
+            # then starts from a settled app, which is what moving
+            # ``session_id`` by hand is pretending happened.
+            attached.append(session_id)
+            app._sidebar_navigation.intent_id = ""
+
+        with patch.object(app._sidebar_navigation, "select", side_effect=settle):
             for start, key, expected in (
                 (order[1], "ctrl+shift+down", order[2]),
                 (order[1], "ctrl+shift+up", order[0]),
@@ -311,13 +320,51 @@ async def test_closed_list_switch_reads_a_fresh_ranking():
 
 
 @pytest.mark.asyncio
-async def test_switch_burst_steps_from_the_requested_target():
-    """Three presses before the first commit are three hops, not one.
+async def test_switch_burst_in_one_event_batch_steps_once_per_press():
+    """A HELD key is many Key events in one batch, and each must hop.
 
-    The origin used to be ``_session`` — still the old session until commit
-    — so every press in a burst recomputed the same target (round 4, U6 /
-    MINOR-1). While a switch is in flight the requested id is the origin.
+    The shape matters and the earlier regression test had the wrong one.
+    ``pilot.press(k, k)`` drains the event loop between keys, so the posted
+    ``Selected`` message dispatches and ``select`` sets ``requested_id``
+    before the next press reads it — that shape passed while the user's did
+    not (round 5, U7). Auto-repeat delivers the events back-to-back with NO
+    drain, so the origin has to be published synchronously by the action
+    itself. These events are posted straight at the driver, without the
+    ``wait_for_idle`` ``press`` inserts, to reproduce that exactly.
     """
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._session_sidebar.set_entries(_hover_entries(("a", "sess", "c", "d")))
+        hops: list[str] = []
+
+        def select(session_id: str) -> None:
+            hops.append(session_id)
+            app._sidebar_navigation.requested_id = session_id
+
+        driver = app._driver
+        assert driver is not None
+        with patch.object(app._sidebar_navigation, "select", side_effect=select):
+            for _ in range(3):
+                event = events.Key("ctrl+shift+down", None)
+                event.set_sender(app)
+                driver.send_message(event)
+            await pilot.pause()
+            await pilot.pause()
+        app._sidebar_navigation.requested_id = ""
+        app._sidebar_navigation.intent_id = ""
+        assert hops == ["c", "d", "a"], hops
+
+
+@pytest.mark.asyncio
+async def test_switch_burst_with_a_drain_between_presses_still_steps_once_each():
+    """The separated shape keeps working — intent is set on both paths."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -337,6 +384,7 @@ async def test_switch_burst_steps_from_the_requested_target():
                 await pilot.press("ctrl+shift+down")
             await pilot.pause()
         app._sidebar_navigation.requested_id = ""
+        app._sidebar_navigation.intent_id = ""
         assert hops == ["c", "d", "a"], hops
 
 
@@ -484,3 +532,44 @@ async def test_speculative_prepare_does_not_ensure_bound_on_a_cold_owner():
         with pytest.raises(RuntimeError, match="no longer ready"):
             await app._prepare_sidebar_session("other", speculative=True)
         bound.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
+    """The frame must say WHICH row is opening when the two are not the same.
+
+    Requested and cursor shared both signals — `tint-select` and `›` — so
+    rendering the mirror case (cursor on one row, requested on another) and
+    its swap produced identical frames: the display could not answer "which
+    one is opening" (round 5, D6). Reachable from real bindings: focus the
+    list, then ctrl+shift+down, or press down before the switch commits.
+    """
+    from textual.geometry import Region
+
+    async def grid(cursor: str, requested: str) -> list[str]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            sidebar = app._session_sidebar
+            sidebar.set_entries(_hover_entries(("alpha", "sess", "gamma")))
+            sidebar.focus()
+            await pilot.pause()
+            sidebar.cursor_id = cursor
+            sidebar.requested_id = requested
+            sidebar.refresh()
+            await pilot.pause()
+            lines = sidebar.render_lines(Region(0, 0, sidebar.size.width, sidebar.size.height))
+            return ["".join(segment.text for segment in line) for line in lines]
+
+    straight = await grid("alpha", "gamma")
+    mirrored = await grid("gamma", "alpha")
+    assert straight != mirrored, "requested and cursor render identically"
+    # And the distinction is the caret, in the same two columns as before, so
+    # nothing reflows: the title still starts where it always did.
+    assert straight[1].startswith(" ›   Session alpha"), repr(straight[1])
+    assert straight[3].startswith(" »   Session gamma"), repr(straight[3])
+    assert mirrored[1].startswith(" »   Session alpha"), repr(mirrored[1])
