@@ -16,6 +16,15 @@ class SessionRow(BaseModel):
     id: str
     name: str
     mtime: float
+    #: The session's most recent assistant reply, condensed for a list row, or
+    #: ``""`` when it has none yet.
+    #:
+    #: Read from the canonical transcript, which is where a canonical session's
+    #: conversation actually lives. A conversation list that rendered the legacy
+    #: agent record's ``last_message`` said "No messages yet" about sessions
+    #: holding a full transcript, because nothing on this path ever writes that
+    #: field (design D19).
+    preview: str = ""
 
 
 class SessionList(BaseModel):
