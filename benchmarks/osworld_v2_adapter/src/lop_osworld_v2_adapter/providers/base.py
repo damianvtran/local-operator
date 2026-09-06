@@ -28,6 +28,85 @@ from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 # drifting apart is precisely the defect that cost two episodes.
 GUEST_COMMAND_TIMEOUT_S = 90.0
 
+# Transport margin between OUR socket deadline and the GUEST's own subprocess
+# deadline, and the reason the two must be ordered rather than merely close.
+#
+# The guest's ``/execute`` route reads ``timeout`` from the request body and
+# defaults it to 120 (osworld-server @ a3cc3f0, ``execute_command``). Sending no
+# ``timeout`` therefore put the guest's deadline (120 s) OUTSIDE our socket read
+# deadline (90 s) — two deadlines governing one command with nothing relating
+# them. In that ordering a slow command always resolves the WRONG way: our
+# socket expires first, ``requests`` raises a ReadTimeout, and the command is
+# STILL RUNNING in the guest. That branch is unrecoverable by construction — a
+# transport error cannot distinguish "never started" from "half-applied", so
+# ``execute`` can only report an unknown outcome, and the no-retry policy that
+# correctly refuses to replay a possibly-committed batch then ends the episode.
+# Those ReadTimeouts are an observed episode-killer, not a hypothesis.
+#
+# Putting the guest's deadline strictly INSIDE ours inverts the race so it
+# resolves the RIGHT way: the guest reaches its own deadline first and ANSWERS.
+# ``execute_command`` catches the resulting ``TimeoutExpired`` and returns an
+# HTTP 500 error body, so a command that outlives its budget becomes a definite,
+# attributable failure rather than an ambiguous silence. Converting an unknown
+# outcome into a known one is the entire point: the episode still fails, but it
+# fails legibly and without the no-retry policy having to assume the worst.
+#
+# The margin pays for the round trip that answer still has to make — request
+# transmission, the guest's Flask dispatch, and the error response coming back —
+# so it is sized for TRANSPORT, not for command work. 10 s against the same
+# regression that measured 3.6 s of fixed per-command overhead (see
+# ``GUEST_TYPE_DEADLINE_FRACTION``) is ~2.8x that figure, deliberately generous
+# because the AMI is burstable and the margin only has to be big enough to carry
+# a small error response home. Too small and a loaded guest's answer misses our
+# socket anyway, losing the very determinism this ordering buys.
+GUEST_TRANSPORT_MARGIN_S = 10.0
+
+# Floor below which subtracting the full margin stops making sense, and the
+# share of an already-tight socket deadline the guest gets instead. Both exist
+# only for the squeezed tail: they keep the derived deadline positive AND
+# strictly inside the socket deadline when the caller's remaining budget is
+# smaller than the margin itself. The fraction is well under 1 so the ordering
+# survives; its exact value matters little because a command with under a second
+# of budget is failing regardless.
+_MIN_GUEST_DEADLINE_S = 1.0
+_SQUEEZED_DEADLINE_FRACTION = 0.5
+
+
+def guest_deadline_for(socket_timeout_s: float) -> float:
+    """The guest's subprocess deadline for a command we wait ``socket_timeout_s`` on.
+
+    The relationship, not a constant, because callers do not all wait the same
+    time: ``guest_disk`` shrinks its socket deadline as its own budget drains,
+    and the guest's deadline has to stay inside WHICHEVER deadline actually
+    applies. Expressing it as a function is what stops a second literal being
+    written next to the first.
+
+    The result is ALWAYS strictly less than ``socket_timeout_s``, which is the
+    invariant the whole fix rests on — a guest deadline at or beyond ours
+    restores the ambiguous ordering this function exists to prevent.
+
+    Subtracting the margin is the normal case. A caller whose socket deadline is
+    already at or under the margin (``guest_disk`` shrinks its own toward zero as
+    its budget drains) would derive a non-positive deadline, which the guest
+    reads as "kill this immediately". Such a call is close to doomed either way,
+    but it must not be converted into a guaranteed instant kill, so it falls back
+    to a fraction of the socket deadline: still strictly inside, still positive,
+    and it degrades smoothly instead of stepping off a cliff.
+    """
+
+    inner = socket_timeout_s - GUEST_TRANSPORT_MARGIN_S
+    if inner < _MIN_GUEST_DEADLINE_S:
+        return min(_MIN_GUEST_DEADLINE_S, socket_timeout_s * _SQUEEZED_DEADLINE_FRACTION)
+    return inner
+
+
+# The deadline sent with a command run at the DEFAULT socket timeout, named so
+# the canonical pair is greppable and the ordering invariant is assertable.
+# DERIVED, never written as a literal: the invariant this file exists to hold is
+# ``GUEST_EXECUTE_TIMEOUT_S < GUEST_COMMAND_TIMEOUT_S``, and a hand-written
+# second number is exactly how that invariant was lost the first time.
+GUEST_EXECUTE_TIMEOUT_S = guest_deadline_for(GUEST_COMMAND_TIMEOUT_S)
+
 # Budgeted cost of delivering ONE character through the guest's X11 synthetic
 # key path, with pyautogui's default (zero) inter-key interval.
 #

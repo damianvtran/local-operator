@@ -50,6 +50,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -67,7 +68,7 @@ from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_TERMINATE_DENIED,
     EVIDENCE_TERMINATE_UNCONFIRMED,
 )
-from lop_osworld_v2_adapter.providers.base import GUEST_COMMAND_TIMEOUT_S
+from lop_osworld_v2_adapter.providers.base import GUEST_COMMAND_TIMEOUT_S, guest_deadline_for
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -116,6 +117,37 @@ class AllocationError(RuntimeError):
 
 class GuestExecutionError(RuntimeError):
     """Input may have partially committed; never replay the failed batch."""
+
+
+def _exit_description(returncode: int) -> str:
+    """Describe a guest exit status: an ordinary code, or death by signal.
+
+    ``subprocess`` reports a signal-killed child as a NEGATIVE returncode, so
+    ``exit -15`` in a diagnostic is really "SIGTERM killed it" wearing a
+    misleading costume. A reader who does not know that convention reads -15 as
+    an exit code and looks for a program that returned one; naming the signal
+    removes a research step that has already cost a full investigation.
+
+    Deliberately says WHAT happened and not WHY. A signal death has many
+    possible originators — the OS, a supervisor, another process, or the
+    command's own actions — and this layer cannot distinguish them. Naming a
+    specific cause here would encode a guess into every future incident report,
+    which is the failure mode that made the last one expensive.
+
+    Leaks nothing: the output is a signal NAME from the stdlib's fixed
+    enumeration or a bare integer, never command text, guest stdout, or stderr.
+    That is the same discipline ``execute`` applies to transport errors.
+    """
+
+    if returncode >= 0:
+        return f"exit {returncode}"
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        # An unrecognised signal number is still worth reporting as a signal
+        # rather than as a negative exit code.
+        return f"terminated by signal {-returncode}"
+    return f"terminated by signal {name}"
 
 
 class ReadinessTimeout(AllocationError):
@@ -425,8 +457,22 @@ class AwsProvider:
         """
 
         url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
+        # ``timeout`` is sent in the BODY as well as applied to the socket, and
+        # the two are deliberately NOT the same number. The body value is the
+        # guest's own ``subprocess.run`` deadline; omitting it let the guest
+        # default to 120 s, outside our socket deadline, so a slow command
+        # expired on our side while still running on the guest's — an unknown
+        # outcome the no-retry policy can only turn into a dead episode.
+        # ``guest_deadline_for`` keeps the guest strictly first for whatever
+        # socket deadline this caller actually passed.
         body = self._clients.http_post_json(
-            url, {"command": list(command), "shell": False}, timeout
+            url,
+            {
+                "command": list(command),
+                "shell": False,
+                "timeout": guest_deadline_for(timeout),
+            },
+            timeout,
         )
         returncode = body.get("returncode")
         return guest_disk.CommandResult(
@@ -789,7 +835,7 @@ class AwsProvider:
                     ) from None
                 if result.returncode != 0:
                     raise GuestExecutionError(
-                        f"guest action {index + 1} failed (exit {result.returncode}); "
+                        f"guest action {index + 1} failed ({_exit_description(result.returncode)}); "
                         "input may be partial; batch not retried"
                     )
             # Let the desktop settle after the batch, exactly as OSWorld's
