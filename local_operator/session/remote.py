@@ -2822,27 +2822,31 @@ class RemoteSession:
 
     @property
     def model_label(self) -> str:
-        return self._read_state_field("model_label")
+        return self.frontend_state.model_label
 
     @property
     def model(self) -> ModelSpec:
-        model = self._read_state_field("selected_model")
+        # Through the COPYING path deliberately: a spec is a non-frozen model,
+        # and handing out the store's own instance let a caller rewrite
+        # canonical state in place (review round 2, Q6/F4).
+        model = self.frontend_state.selected_model
         if model is None:
             raise RuntimeError("owner has no selected model spec")
         return model
 
     @property
     def effective_model(self) -> ModelSpec:
-        model = self._read_state_field("effective_model") or self._read_state_field(
-            "selected_model"
-        )
+        # One snapshot, not two reads: the fallback must not be able to pair a
+        # spec with a newer state's selection. Copying path, per `model`.
+        state = self.frontend_state
+        model = state.effective_model or state.selected_model
         if model is None:
             raise RuntimeError("owner has no effective model spec")
         return model
 
     @property
     def effective_model_label(self) -> str:
-        return self._read_state_field("effective_model_label")
+        return self.frontend_state.effective_model_label
 
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         old = self.model
@@ -3344,7 +3348,9 @@ class RemoteSession:
         return self.frontend_state.active_team
 
     def restored_usage(self) -> Usage | None:
-        return self._read_state_field("last_usage")
+        # Copying path: `Usage` is accumulated in place elsewhere in the
+        # harness, so a shared instance is one `+=` from corrupting state.
+        return self.frontend_state.last_usage
 
     def running_subagents(self) -> int:
         return sum(

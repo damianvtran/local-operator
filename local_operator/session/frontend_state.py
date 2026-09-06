@@ -191,32 +191,51 @@ _MODEL_CATALOGUE_LINE_LIMIT = 1 << 20
 #: whole-state deep copy — see that method for the measurement that motivates
 #: it.
 #:
-#: The membership test is the SAFETY ARGUMENT, not a convenience list. Two
-#: properties are required of every name here, and both were checked against
-#: the reducer rather than assumed:
+#: The membership test is the SAFETY ARGUMENT, not a convenience list, and the
+#: bar is DEEP IMMUTABILITY OF THE HANDED-OUT VALUE — not "the reducer replaces
+#: it".
 #:
-#: 1. IMMUTABLE OR REPLACED WHOLESALE. A `str`/`bool`/`None` cannot be mutated
-#:    by a caller at all; `FrontendModelSpec` and `FrontendUsage` are Pydantic
-#:    shells the reducer swaps out via `mutate()` rather than editing in place,
-#:    so handing out the instance cannot corrupt the store.
-#: 2. NOT A MUTABLE COLLECTION. `jobs`, `usage_components`, `child_costs`,
-#:    `attention` and `context_breakdown` are deliberately EXCLUDED even though
-#:    single-field readers exist for some of them: a `dict`/`list` handed out
-#:    unguarded can be mutated by its caller, which is exactly the corruption
-#:    `state`'s deep copy exists to prevent. Those reads keep paying for it.
+#: An earlier version of this set admitted `selected_model`, `effective_model`
+#: and `last_usage` on the reducer-replacement argument. That argument is
+#: wrong, and review round 2 (Q6/F4) demonstrated it: `ModelSpec` and `Usage`
+#: are ordinary NON-FROZEN pydantic models, so `read_field` handed out the
+#: store's own instance and a caller writing `spec.model_id = ...` or
+#: `usage.input_tokens += n` rewrote canonical session state in place. Nothing
+#: shipped did that — but this codebase accumulates `Usage` with `+=` in
+#: `harness/jobs.py` and `harness/subagent.py`, so it was one ordinary edit
+#: from silent corruption, and `state` DOES protect those fields by returning a
+#: fresh object per read. Admitting them removed an existing invariant.
+#:
+#: They are therefore back on the copying path. Freezing the two models was the
+#: alternative and was rejected here: 13 in-place mutation sites across the
+#: harness rely on them being writable, which is a refactor well outside the
+#: change that introduced this accessor. The measured saving is nearly all in
+#: the scalars regardless (a per-read `model_copy` costs ~0.0075 ms against
+#: ~0.0001 ms shared, versus ~0.15 ms for the whole-state clone at a 19-job
+#: roster), so the fast path keeps the reads that are genuinely free.
+#:
+#: What remains admitted satisfies both requirements:
+#:
+#: 1. DEEPLY IMMUTABLE. Every entry is a `str`, `bool`, `int`, `float` or
+#:    `None`. A caller cannot mutate any of them, so sharing the value cannot
+#:    reach the store at all.
+#: 2. NOT A MUTABLE CONTAINER. `jobs`, `usage_components`, `child_costs`,
+#:    `attention`, `context_breakdown` and `todos` are excluded even though
+#:    single-field readers exist for some: a `dict`/`list` handed out unguarded
+#:    can be mutated by its caller, which is exactly what `state`'s deep copy
+#:    exists to prevent. Those reads keep paying for it.
+#:
+#: `test_shareable_state_fields_are_real_and_immutable` asserts both properties
+#: against `model_fields`, so neither a renamed field nor a newly mutable type
+#: can silently re-enter this set.
 _SHAREABLE_STATE_FIELDS = frozenset(
     {
-        "model_label",
-        "effective_model_label",
-        "selected_model",
-        "effective_model",
-        "last_usage",
         "streaming",
         "session_id",
         "epoch",
         "sequence",
         "history_generation",
-        "conversation_name",
+        "conversation_title",
         "goal",
         "active_agent",
         "active_team",
@@ -2269,12 +2288,14 @@ class FrontendStateStore:
         all of it from single-field reads like `model_label` and
         `effective_model`.
 
-        RESTRICTED TO FIELDS THAT ARE SAFE TO SHARE, and the restriction is
-        enforced rather than documented: the reducer REPLACES these values
-        instead of mutating them in place, so a caller cannot reach the store's
-        instance through them. `jobs`, `usage_components` and the other mutable
-        collections are deliberately absent — reading those still goes through
-        `state` and still pays for its protection.
+        RESTRICTED TO DEEPLY IMMUTABLE FIELDS, and the restriction is enforced
+        rather than documented. The value is the store's OWN object, so the bar
+        is that a caller cannot mutate it at all — every admitted field is a
+        `str`/`bool`/`int`/`float`/`None`. Model-valued fields and mutable
+        collections are deliberately absent: reading those still goes through
+        `state` and still pays for the deep copy that protects them. See
+        :data:`_SHAREABLE_STATE_FIELDS` for why "the reducer replaces it" was
+        NOT a sufficient bar.
         """
         if name not in _SHAREABLE_STATE_FIELDS:
             raise KeyError(
