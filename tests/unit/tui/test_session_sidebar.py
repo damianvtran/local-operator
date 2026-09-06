@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -17,6 +18,10 @@ from local_operator.tui.session_catalog import (
     rank_entries,
 )
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.session_sidebar import (
+    SIDEBAR_GUTTER,
+    SIDEBAR_MAIN_MIN_WIDTH,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -92,6 +97,147 @@ async def test_toggle_preserves_draft_and_full_width_when_hidden(size, position)
             assert editor.region.width == before
             assert app.screen.virtual_size == app.screen.size
             assert not app.screen.show_vertical_scrollbar
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (150, 40)])
+@pytest.mark.parametrize("position", ["left", "right"])
+async def test_gutter_faces_the_conversation_at_either_position(size, position):
+    """The gap belongs on the edge facing the transcript, and must swap sides.
+
+    The list's age column previously sat one cell from the transcript's first
+    character, which read as one crowded block rather than two regions. The
+    separation is only worth anything on the side the conversation is on, so a
+    hardcoded edge would fix the left dock and leave the right one tight.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._sidebar_settings = SidebarSettings(False, position)
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        outer, content = sidebar.region, sidebar.content_region
+        leading = content.x - outer.x
+        trailing = outer.right - content.right
+        gutter, edge = (trailing, leading) if position == "left" else (leading, trailing)
+        assert gutter == SIDEBAR_GUTTER, f"{position}: conversation-facing gap is {gutter}"
+        assert edge == 1, f"{position}: outer edge should keep the 1-cell inset, got {edge}"
+        # Whitespace has to come from the width, not from the title column: at
+        # 28 cells titles already ellipsize, so paying for the gap out of the
+        # content would spend the one thing the list exists to show.
+        assert content.width >= 28
+        if size[0] > 80:
+            assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_MIN_WIDTH
+
+
+def _hover_entries(ids: tuple[str, ...] = ("alpha", "sess", "gamma")) -> list[CatalogEntry]:
+    now = time.time()
+    return [
+        CatalogEntry(SessionRow(sid, now - 60 * (index + 1), f"Session {sid}"))
+        for index, sid in enumerate(ids)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tooltip_persists_while_the_pointer_rests_on_a_row():
+    """A description must stay up while the pointer rests, not blink out.
+
+    Textual hides a showing tooltip on the next mouse move over the SAME
+    widget. Every row here lives inside ONE widget, so ordinary within-row
+    movement looked like that repeat and the description vanished after about
+    a second of hovering.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30), tooltips=True) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_hover_entries())
+        await pilot.hover("#session-sidebar", offset=(8, 2))
+        resting = sidebar.tooltip
+        assert resting is not None
+        for x in (9, 10, 11):
+            await pilot.hover("#session-sidebar", offset=(x, 2))
+        assert sidebar.tooltip == resting, "description dropped while the pointer rested"
+        await pilot.hover("#session-sidebar", offset=(8, 3))
+        assert sidebar.tooltip != resting, "description did not follow the pointer to a new row"
+
+
+@pytest.mark.asyncio
+async def test_hover_reresolves_when_a_refresh_reorders_under_the_pointer():
+    """A reorder must relabel the row the pointer is actually over.
+
+    The ranking moves rows beneath a stationary pointer, so an identity
+    remembered from the last mouse event would light and describe whichever
+    session slid into that slot.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30), tooltips=True) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_hover_entries(("a", "b", "c")))
+        await pilot.hover("#session-sidebar", offset=(8, 2))
+        sidebar.set_entries(_hover_entries(("c", "b", "a")))
+        await pilot.pause()
+        under_pointer = sidebar._entry_at(2)
+        assert under_pointer is not None
+        assert sidebar._hover_id == under_pointer.id
+        assert under_pointer.row.name in str(sidebar.tooltip or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("position", ["left", "right"])
+async def test_switch_session_attaches_from_the_composer_and_wraps(position):
+    """The shortcut ATTACHES, keeps the caret, and wraps at both ends.
+
+    Distinct from F9's focus-then-arrow flow: this is the one-press form for
+    moving between live conversations. Wrapping follows the convention that a
+    discrete deliberate press wraps while wheel and page movement clamp.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        attached: list[str] = []
+        app._sidebar_settings = SidebarSettings(False, position)
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_hover_entries())
+        editor = app.query_one(Editor)
+        editor.text = "keep my draft"
+        editor.focus()
+        await pilot.pause()
+        order = [entry.id for entry in sidebar.entries]
+        with patch.object(app._sidebar_navigation, "select", side_effect=attached.append):
+            for start, key, expected in (
+                (order[1], "ctrl+shift+down", order[2]),
+                (order[1], "ctrl+shift+up", order[0]),
+                (order[0], "ctrl+shift+up", order[-1]),
+                (order[-1], "ctrl+shift+down", order[0]),
+            ):
+                # The action reads the ATTACHED session, which a real attach
+                # would have moved; the list's own cursor is not the source of
+                # truth for "where am I".
+                with patch.object(
+                    type(app._session), "session_id", property(lambda _s, v=start: v)
+                ):
+                    attached.clear()
+                    await pilot.press(key)
+                    await pilot.pause()
+                    assert attached == [expected], f"{start} + {key} attached {attached}"
+        # The composer must keep both the focus and the unsent draft.
+        assert app.focused is editor
+        assert editor.text == "keep my draft"
 
 
 @pytest.mark.asyncio

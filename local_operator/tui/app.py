@@ -232,7 +232,9 @@ from local_operator.tui.widgets.session_picker import (
     SessionPickerScreen,
 )
 from local_operator.tui.widgets.session_sidebar import (
+    SIDEBAR_GUTTER,
     SIDEBAR_MAIN_MIN_WIDTH,
+    SIDEBAR_MIN_CONTENT_WIDTH,
     SIDEBAR_WIDTH,
     SessionSidebar,
 )
@@ -1540,6 +1542,20 @@ class OperatorApp(App[None]):
         Binding("f8", "aside", "Aside", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
+        # Chosen after auditing the table: `up`/`down`, `pageup`/`pagedown`,
+        # `home`/`end` and `shift+up`/`shift+down` are TextArea cursor or
+        # selection keys, `ctrl+u`/`ctrl+d` are destructive in the composer,
+        # `alt+up`/`alt+down` are rewritten by `Editor.VERTICAL_CHORD_KEYS`,
+        # `ctrl+up`/`ctrl+down` page the todos, `ctrl+home`/`ctrl+end` page the
+        # transcript and `ctrl+pageup`/`ctrl+pagedown` scroll the aside. That
+        # leaves `ctrl+shift+up`/`ctrl+shift+down`, which nothing in
+        # `local_operator/` binds and `TextArea` does not claim. `priority`
+        # because the composer holds focus in the common case and must not
+        # swallow them.
+        Binding(
+            "ctrl+shift+up", "switch_session(-1)", "Previous session", show=False, priority=True
+        ),
+        Binding("ctrl+shift+down", "switch_session(1)", "Next session", show=False, priority=True),
         # Textual decodes Kitty's Super modifier. Terminals that intercept Cmd+B
         # never deliver it, so Ctrl+B and /sidebar remain unconditional routes.
         *(
@@ -3789,6 +3805,76 @@ class OperatorApp(App[None]):
         else:
             self._editor().focus()
 
+    def action_switch_session(self, delta: int) -> None:
+        """``ctrl+shift+up``/``ctrl+shift+down`` — attach the adjacent session.
+
+        Distinct from `F9`, which focuses the list so the arrows move a cursor
+        and `enter` commits: this is the one-press form that ATTACHES, for
+        moving between two or three live conversations without a detour
+        through the list's focus.
+
+        The order is the list's own ranking, so what the user sees is what they
+        traverse — including while the list is closed, which is why the
+        catalog is read rather than the widget's rendered window. Wrapping is
+        deliberate: the convention here is that a discrete, deliberate press
+        wraps while wheel and page movement clamp, and stopping dead at the end
+        of a three-session list would make the shortcut feel broken.
+
+        Focus is untouched: the composer keeps the caret and the draft, so
+        switching mid-sentence does not cost the sentence.
+        """
+        entries = self._session_sidebar.entries
+        if not entries:
+            # The catalog is only polled while the list is open, so a closed
+            # list has nothing to traverse. Load it once, then switch — the
+            # shortcut is meant to work without opening the drawer first.
+            self.run_worker(self._switch_session_cold(delta), group="sidebar-switch")
+            return
+        current = self._session.session_id if self._session is not None else ""
+        index = next((i for i, entry in enumerate(entries) if entry.id == current), None)
+        if index is None:
+            # Attached to something outside the list (or nothing yet): enter at
+            # the nearest end rather than refusing to move.
+            target = entries[0] if delta > 0 else entries[-1]
+        else:
+            target = entries[(index + delta) % len(entries)]
+        if target.id == current:
+            return
+        self._session_sidebar.cursor_id = target.id
+        self.post_message(SessionSidebar.Selected(target.id))
+
+    async def _switch_session_cold(self, delta: int) -> None:
+        """Populate the catalog for a switch pressed while the list is closed.
+
+        Reuses the list's own loader and ranking so a closed-list switch
+        traverses exactly the order an open list would show; anything else
+        would be a second, silently diverging notion of "next".
+        """
+
+        def collect() -> list[CatalogEntry]:
+            from local_operator.paths import config_dir
+            from local_operator.tui.session_catalog import load_catalog
+
+            return load_catalog(config_dir())
+
+        try:
+            entries = await asyncio.to_thread(collect)
+        except Exception:
+            logger.debug("sidebar switch catalog load failed", exc_info=True)
+            return
+        if self._session_sidebar.entries:
+            # A concurrent refresh won the race and its entries are current;
+            # adopting this older read would step from a stale order.
+            pass
+        elif entries:
+            self._session_sidebar.current_id = str(getattr(self._session, "session_id", ""))
+            self._session_sidebar.set_entries(entries)
+        else:
+            # Nothing to traverse. Returning here is also what stops the
+            # re-entry below from recursing on an empty catalog.
+            return
+        self.action_switch_session(delta)
+
     def action_toggle_sidebar(self) -> None:
         if not self._session_sidebar.display:
             self._close_subagent_view()
@@ -3826,18 +3912,26 @@ class OperatorApp(App[None]):
         sidebar = self._session_sidebar
         if not sidebar.is_mounted:
             return
-        narrow = size.width < SIDEBAR_WIDTH + SIDEBAR_MAIN_MIN_WIDTH + 2
+        position = self._sidebar_settings.position
+        # The gutter faces the CONVERSATION, so it swaps sides with the dock:
+        # right edge when docked left, left edge when docked right. Applied as
+        # padding on the widget rather than a margin on the main lane so the
+        # overlay case (where nothing is displaced) gets the same separation.
+        total_width = SIDEBAR_WIDTH + SIDEBAR_GUTTER
+        narrow = size.width < total_width + SIDEBAR_MAIN_MIN_WIDTH + 2
         workspace = self.query_one("#session-workspace")
         workspace.set_class(narrow, "sidebar-overlay")
-        sidebar.styles.dock = self._sidebar_settings.position
-        sidebar.styles.width = min(SIDEBAR_WIDTH, max(16, size.width - 2))
-        if narrow:
-            # The small-screen list floats over the transcript, never over the
-            # composer or a pending prompt. The conversation retains its width.
-            dock = self.query_one("#input-dock")
-            sidebar.styles.height = max(3, size.height - dock.outer_size.height - 2)
-        else:
-            sidebar.styles.height = "1fr"
+        sidebar.styles.dock = position
+        # Squeezed terminals give the gutter back before the list: separation
+        # is worthless once there is no room left to read a title in.
+        available = max(16, size.width - 2)
+        width = min(total_width, available)
+        gutter = max(0, min(SIDEBAR_GUTTER, width - SIDEBAR_MIN_CONTENT_WIDTH))
+        sidebar.styles.width = width
+        sidebar.styles.padding = (0, gutter, 0, 1) if position == "left" else (0, 1, 0, gutter)
+        # The workspace clips overlay height against the dock's same-frame
+        # arrangement, including draft wrapping and gates, without a reflow.
+        sidebar.styles.height = "1fr"
 
     def _refresh_sidebar(self) -> None:
         if not self._session_sidebar.display or self._sidebar_refresh_pending:

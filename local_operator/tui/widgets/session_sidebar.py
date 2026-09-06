@@ -26,6 +26,32 @@ from local_operator.tui.widgets.session_picker import row_state_mark
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
+
+#: Blank cells between the list and the conversation it sits beside.
+#:
+#: The list's right-hand age column ("6m", "23h", "1d") ended one cell from the
+#: transcript's first character, which read as two columns jammed together
+#: rather than two regions — the user's report was that it "looks overcrowded".
+#: Three cells is what actually separates them at a glance; two still reads as
+#: tight against a full-bleed transcript.
+#:
+#: ADDED TO THE WIDTH rather than taken out of the content, because the content
+#: has none to give: at 28 cells the title column is already 20 after the
+#: cursor, state mark and age, and real titles ellipsize there today. Spending
+#: the gutter from that budget would have paid for whitespace with the one
+#: thing the list exists to show. The main lane can afford it — at 100 columns
+#: it keeps 65, above the 60-column floor `SIDEBAR_MAIN_MIN_WIDTH` sets, and
+#: below that threshold the drawer is an overlay that does not displace the
+#: conversation at all.
+#:
+#: Whitespace, not a rule: the chrome is borderless, so the gap IS the
+#: separator (see the stylesheet's own note on the app's outer inset).
+SIDEBAR_GUTTER = 3
+
+#: Below this the gutter is surrendered before the list narrows further. A
+#: squeezed terminal needs the cells for a legible title far more than it needs
+#: the separation the gutter buys.
+SIDEBAR_MIN_CONTENT_WIDTH = 24
 SIDEBAR_MAIN_MIN_WIDTH = 60
 
 
@@ -62,6 +88,13 @@ class SessionSidebar(Widget, can_focus=True):
         self._timer: Timer | None = None
         self._pressed_id: str | None = None
         self._deferred: tuple[CatalogEntry, ...] | None = None
+        #: Row under the pointer, by identity rather than by row index: a
+        #: catalog refresh reorders rows beneath a stationary pointer, and a
+        #: remembered index would light (and describe) whichever session slid
+        #: into that slot. `_hover_y` is what re-resolves the identity when the
+        #: order changes without the mouse moving.
+        self._hover_id: str = ""
+        self._hover_y: int | None = None
         self.display = False
 
     @property
@@ -80,14 +113,17 @@ class SessionSidebar(Widget, can_focus=True):
             self._deferred = ordered
             return
         self.entries = ordered
-        # A stationary pointer may now cover a different row. Do not advertise
-        # its old identity until a new pointer event resolves the current row.
-        self.tooltip = None
         self._catalog_loading = False
         self.error = ""
         if not any(entry.id == self.cursor_id for entry in ordered):
             self.cursor_id = self.current_id or (ordered[0].id if ordered else "")
         self._offset = min(self._offset, max(0, len(ordered) - self.page_size))
+        # Re-resolve against the NEW order at the pointer's unchanged position:
+        # a reorder under a resting pointer must relabel the row it is actually
+        # over, not keep describing the session that moved away. Blanking it
+        # instead left the affordance and description dark until the user
+        # jiggled the mouse.
+        self._set_hover(self._hover_y)
         self._sync_animation()
         self.refresh()
 
@@ -179,9 +215,47 @@ class SessionSidebar(Widget, can_focus=True):
             self.set_entries(deferred)
         event.stop()
 
+    def _describe(self, entry: CatalogEntry | None) -> str | None:
+        return f"{entry.row.name}\n{entry.status}\n{entry.id}" if entry else None
+
+    def _set_hover(self, y: int | None) -> bool:
+        """Point the hover affordance and the tooltip at the row under `y`.
+
+        Called both from pointer movement and from a catalog refresh, because a
+        stationary pointer covers a DIFFERENT session once the ranking
+        reorders — the row must re-resolve without waiting for a mouse event.
+
+        Returns whether the hovered identity changed, so the caller can repaint
+        exactly once instead of on every pointer move within a row.
+        """
+        self._hover_y = y
+        entry = self._entry_at(y) if y is not None else None
+        hover_id = entry.id if entry is not None else ""
+        description = self._describe(entry)
+        # Textual hides a showing tooltip on the next move over the SAME widget
+        # (`Screen._handle_mouse_move`), which is why it vanished after about a
+        # second of resting on a row. Rows live inside ONE widget, so every
+        # in-row move looked like that repeat. Re-arming only when the row
+        # identity actually changes keeps the description up while the pointer
+        # rests, and still swaps it the moment a different row is under it.
+        changed = hover_id != self._hover_id
+        if changed or self.tooltip != description:
+            self._hover_id = hover_id
+            self.tooltip = description
+        return changed
+
     def on_mouse_move(self, event: events.MouseMove) -> None:
-        entry = self._entry_at(event.y)
-        self.tooltip = f"{entry.row.name}\n{entry.status}\n{entry.id}" if entry else None
+        if self._set_hover(event.y):
+            self.refresh()
+
+    def on_leave(self, event: events.Leave) -> None:
+        # The pointer left the list: drop both the affordance and the
+        # description rather than leaving a row lit under an absent cursor.
+        if self._hover_id or self._hover_y is not None:
+            self._hover_id = ""
+            self._hover_y = None
+            self.tooltip = None
+            self.refresh()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         self._scroll(1)
@@ -215,7 +289,20 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n")
             current = entry.id == self.current_id
             cursor = self.has_focus and entry.id == self.cursor_id
-            background = "tint-select" if cursor else "surface" if current else None
+            hovered = entry.id == self._hover_id and entry.id != ""
+            # Three states have to stay separable, so they occupy three
+            # different grounds: the keyboard cursor keeps `tint-select` (the
+            # only tinted one), the attached session keeps `surface` plus bold,
+            # and hover is `overlay` — the SAME ground `ToolCard:hover` and
+            # `SubagentRow:hover` use, because pointing at a row should look
+            # the same everywhere in this app. Hover yields to both of the
+            # other two: it is transient pointer feedback, and must not
+            # overpaint the identity of where you ARE or where the keyboard is.
+            background = (
+                "tint-select"
+                if cursor
+                else "surface" if current else "overlay" if hovered else None
+            )
             style = Style(
                 color=theme_mod.semantic_color("fg"),
                 bgcolor=theme_mod.semantic_color(background) if background else None,

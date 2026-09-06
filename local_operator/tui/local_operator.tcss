@@ -99,13 +99,27 @@
     height: 1fr;
 }
 
+/* Width and horizontal padding are set by `_sync_sidebar_layout`, not here:
+ * the gutter that separates the list from the conversation has to MIRROR with
+ * `tui.sidebar_position` (right edge when docked left, left edge when docked
+ * right), which a static rule cannot express. The values below are the
+ * left-docked resting state so the widget still renders sanely before the
+ * first layout pass. */
 SessionSidebar {
-    width: 30;
+    width: 33;
     height: 1fr;
-    padding: 0 1;
+    padding: 0 3 0 1;
     background: $lo-bg;
     color: $lo-fg;
     overflow: hidden;
+    /* Every row is a click target that attaches that session, so the pointer
+     * says so before the click does — the same affordance `SubagentRow` and
+     * the subagent-view hints carry. Textual emits this as an OSC pointer
+     * shape; a terminal without the Kitty pointer-shape protocol ignores it
+     * and loses nothing, which is why the row's hover tint (painted in
+     * `render`, since rows are Text spans in ONE widget and cannot be reached
+     * by `:hover`) is the affordance that does not depend on it. */
+    pointer: pointer;
 }
 
 /* Small terminals keep the conversation's full line length. Each layer lays
