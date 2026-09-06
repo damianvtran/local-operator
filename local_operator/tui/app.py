@@ -8629,6 +8629,51 @@ class OperatorApp(App[None]):
             "agent",
         }
 
+    def _dispatchable_slash(self, text: str) -> bool:
+        """Whether ``text`` names a command SOMETHING here can run.
+
+        The union of two vocabularies, because :meth:`_run_slash_command`
+        resolves routes from both and the submit gate must agree with the
+        dispatcher it guards or a line is claimed by neither:
+
+        * this build's registry (:func:`slash_command_for`), and
+        * the commands the session's OWNER advertises in its capability list.
+
+        The second term is the load-bearing one. ``slash_command_for`` answers
+        "does *this build* know the word", which is not the same question as
+        "can this word run": a viewer attached to an owner on a newer build
+        gets the owner's capabilities in ``frontend_state``, and the dispatch
+        at ``remote_capabilities.get(command)`` routes them even though no
+        registry entry exists — ``command`` deliberately falls back to
+        ``parts[0].lower()`` for exactly that case. Gating submit on the
+        registry alone therefore turned an advertised-but-unknown command into
+        PROSE, silently spending a model turn on a line the owner would have
+        run (review round 1, M1). Build skew is a live condition here, not a
+        hypothetical: see :meth:`_check_build_skew`, where ``lop-update``
+        replaces the install under a running viewer several times a day.
+
+        Kept as an app method rather than folded into ``slash_command_for``:
+        the resolver is a module-level pure function over the static registry —
+        the ONE authority on what a word MEANS — while owner capabilities are
+        per-session mutable state only the app can see. Merging them would give
+        the resolver a session dependency and make ``/x`` mean different things
+        in the same process.
+        """
+        if slash_command_for(text) is not None:
+            return True
+        token = text.split(maxsplit=1)[0].lower() if text.strip() else ""
+        if not token.startswith("/"):
+            return False
+        # Matched on the same key the dispatch builds its map with, so the two
+        # cannot disagree about spelling: `f"/{cap.command}"` there, the typed
+        # first token here, both case-folded.
+        return any(
+            f"/{capability.command}".lower() == token
+            for capability in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        )
+
     def _bind_then_dispatch(
         self, text: str, attachments: Mapping[int, Marked] | None = None
     ) -> None:
@@ -8870,7 +8915,69 @@ class OperatorApp(App[None]):
                 return
             self._run_shell_command(text)
             return
-        if text.startswith("/"):
+        if self._dispatchable_slash(text):
+            # RESOLVES, not merely slash-SHAPED. A leading `/` is a command only
+            # when the word after it is one; anything else is an ordinary
+            # character and the line is a prompt.
+            #
+            # It used to be the shape alone, which made the composer contradict
+            # itself. `Editor._compute_slash_runs` paints an unrecognised
+            # leading word with `text-area--slash-unknown` — its docstring says
+            # that muted treatment means "text that WILL be sent" — and then
+            # Enter answered `unknown command: /tmp/test — try /help` and threw
+            # the draft away. The reported case is the one a path makes
+            # unavoidable:
+            #
+            #     /tmp/test
+            #
+            #     The above is a test file path
+            #
+            # There is no way to type that message. The word is unknown, so no
+            # handler wants it; the old branch still claimed it, and the only
+            # workaround was to retype the message with the path moved off the
+            # front. Every absolute path, `/etc`, `//` in prose and a Windows
+            # share fell in the same hole.
+            #
+            # Asking `_dispatchable_slash` rather than re-deriving "is this a
+            # command" here is what keeps the two answers identical: it tests
+            # the same two vocabularies the dispatch below resolves against
+            # (this build's registry AND the owner's advertised capabilities),
+            # so a line cannot be claimed by a branch that then has no handler
+            # for it — in either direction.
+            #
+            # The vocabularies DO overlap, and the rule is a trade rather than a
+            # partition. `/new`, `/copy`, `/search`, `/context`, `/session` and
+            # `/skills` are all registry names AND valid bare absolute paths, so
+            # a message opening with one of those as a bare path still
+            # dispatches. What cannot collide is a path with a SECOND segment:
+            # the token is split on whitespace, so `/new/year/plan.md` is one
+            # word matching no name and stays prose. The trade is deliberate —
+            # a bare `/new` opening a message is vanishingly rare next to
+            # `/tmp/...` (review round 1, m1).
+            #
+            # The cost is that a genuine TYPO is now sent to the model rather
+            # than warned about — but the composer's muted paint is NOT what
+            # covers the common case, and believing it does is a trap for
+            # anyone later touching the picker. Measured on the running app
+            # (design D3 / UX U-round, 140 cases): a NEAR-MISS like `/usge`
+            # keeps the command picker OPEN, and `_compute_slash_runs`
+            # deliberately suppresses the unknown paint while the picker is
+            # choosing — so `/usge` gets no muted treatment at all. What saves
+            # it is that Enter on an open picker ACCEPTS the highlighted row:
+            # `/usge` runs `/usage` and nothing is sent. Only a FAR miss
+            # (`/xyzzy`) closes the picker, and that is the case the muted paint
+            # signals before Enter. The two mechanisms partition the space
+            # exactly — 82 picker-rescued, 58 dim-painted, 0 both, 0 neither —
+            # so changing the picker's Enter handling would remove the ONLY
+            # signal on the near-miss half.
+            #
+            # Either way one wasted turn on a misspelling is recoverable (Up
+            # arrow returns the text verbatim) where an unsendable message is
+            # not. The unknown-command notice still guards
+            # `_run_slash_command`'s other callers, which name a command
+            # explicitly (mobile `slash()`, the inline splice) and so have no
+            # prose to fall back to.
+            #
             # Nothing but dispatch. A slash command writes its own rows: the
             # ledger row for the one command permitted one (``SLASH_COMMANDS``,
             # ``echo``) is written by its HANDLER, at the point its effect
