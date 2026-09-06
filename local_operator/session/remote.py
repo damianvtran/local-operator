@@ -64,6 +64,7 @@ from local_operator.harness.types import (
     WakeDeliveredEvent,
 )
 from local_operator.mobile.attach_client import (
+    RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
     find_owner_record,
@@ -259,6 +260,11 @@ class RemoteSession:
         self.degraded_reason: str = ""
         #: Told when the runtime vanished for good; see ``_go_cold``.
         self._went_cold_callback: Callable[[], Any] | None = None
+        #: Told when the runtime retired ITSELF for a newer build (the
+        #: ``retiring`` frame): the app re-engages eagerly so the band never
+        #: shows the cold state for a refresh the user did not ask for. See
+        #: ``_go_cold(refresh=True)``.
+        self._refresh_callback: Callable[[], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -1253,6 +1259,14 @@ class RemoteSession:
         # missing stamp degrades to "unknown", never to a refused attach.
         self.owner_version = getattr(record, "version", "") or ""
         self.owner_source_ref = getattr(record, "source_ref", "") or ""
+        # The runtime's working directory, kept so a viewer that was ATTACHED
+        # (``connect``, the `lop --resume` path) can engage a successor after
+        # its owner retires for a refresh. Only ``cold()`` used to set ``_cwd``;
+        # an attached viewer had none, so ``_ensure_bound`` would have spawned
+        # the successor in the wrong directory. Never overwrites a cwd the
+        # viewer was constructed with — that one is the user's choice.
+        if not self._cwd:
+            self._cwd = str(getattr(record, "cwd", "") or "")
         client = AttachClient(
             lambda _projection: None,
             on_disconnected,
@@ -1836,6 +1850,16 @@ class RemoteSession:
         # the cases the local flag cannot: another TUI's /stop all, or a shell
         # `lop stop`, hitting a session THIS viewer merely watches — including
         # a session with no wakes, which leaves no on-disk marker to consult.
+        if _reason == RETIRING_REASON:
+            # A planned refresh, not owner death and not a stop: the runtime
+            # left so the next engage runs the build now on disk. Nothing to
+            # recover — the successor does not exist yet, and chasing the
+            # record for 8 s would end in "runtime exited" for a housekeeping
+            # event — and nothing was interrupted (the runtime retires only
+            # when idle, so there is no turn to end). Go cold NOW and tell
+            # the app so it can re-engage eagerly.
+            self._go_cold(refresh=True)
+            return
         if _reason == STOPPED_REASON:
             self._deliberate_stop = True
         if self._deliberate_stop:
@@ -1959,13 +1983,22 @@ class RemoteSession:
             return "this session was stopped"
         return "session owner is reconnecting"
 
-    def _go_cold(self) -> None:
+    def _go_cold(self, *, refresh: bool = False) -> None:
         """Unbind from a runtime that is gone, keeping the conversation.
 
         The viewer stays exactly as it is on screen; only its binding drops.
         ``_owner_ready`` is SET rather than left clear because a cold viewer is
         ready — the next prompt engages a runtime through ``_ensure_bound``
         instead of waiting for one that is never coming back.
+
+        ``refresh`` is the planned-retirement variant (``RETIRING_REASON``):
+        the runtime was idle by contract when it left, so there is no turn to
+        end — ``_end_turn_locally`` is skipped, which is what keeps a refresh
+        from ever painting ``interrupted`` — and the REFRESH callback fires
+        instead of the went-cold one, so the app re-engages rather than
+        reporting "runtime exited". If the runtime lied and a turn WAS live,
+        ``_end_turn_locally`` would have produced a false abort anyway; the
+        successor's snapshot re-seeds whatever is actually running.
 
         A turn still in flight is ENDED through the event path, not merely
         flagged off (#642, UX U11). Clearing ``_streaming`` alone told the
@@ -1995,18 +2028,87 @@ class RemoteSession:
         # cost — must not propagate out of teardown and skip `_owner_ready`,
         # which would leave the prompt path waiting on an event nothing else
         # will set (review round 1, MINOR-1).
-        try:
-            self._end_turn_locally(direct=True)
-        except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
-            logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
+        if refresh:
+            if self._streaming:
+                # Should be unreachable (the runtime retires only when idle);
+                # logged rather than asserted because the honest repair is
+                # the successor's snapshot, not a false abort here.
+                logger.warning("runtime retired for a refresh while a turn looked live")
+            # A viewer that ATTACHED (``connect``) rather than started cold
+            # keeps the legacy "recover by taking over" contract for owner
+            # DEATH — but a refresh is not a death, and taking the lease into
+            # this process would make the terminal the runtime for a session
+            # that retired precisely so a fresh runtime could run it. From
+            # here on this facade is a viewer: it engages a successor
+            # (``_ensure_bound`` is gated on this flag) and, should THAT one
+            # die, goes cold rather than taking over. The `lop --resume` TUI
+            # is exactly this case (design-runtime-autorefresh §1.1).
+            self._can_go_cold = True
+        else:
+            try:
+                self._end_turn_locally(direct=True)
+            except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
+                logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
         self._owner_ready.set()
-        callback = self._went_cold_callback
+        callback = self._refresh_callback if refresh else self._went_cold_callback
         if callback is None:
             return
         try:
             callback()
         except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
-            logger.debug("went-cold callback failed", exc_info=True)
+            logger.debug("%s callback failed", "refresh" if refresh else "went-cold", exc_info=True)
+
+    def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
+        """Told when the runtime retired itself for a newer build.
+
+        The viewer re-engages at once (``OperatorApp._on_runtime_refreshed``);
+        the conversation is untouched and no notice is painted — the band's
+        ``starting…`` state covers the ~1 s the re-engage takes.
+        """
+        self._refresh_callback = callback
+
+    def owner_idle(self) -> bool:
+        """Whether the bound runtime is doing nothing a refresh would lose.
+
+        Read off the canonical snapshot rather than asked over the wire, so
+        the build-skew seam can decide synchronously whether to REQUEST a
+        refresh (idle) or paint the busy notice (not idle). The runtime is
+        the authority — ``refresh_if_idle`` re-asks ``may_refresh`` — and
+        this is only the viewer's best reading: streaming, a running job, or
+        a parked gate each mean "busy". A cold viewer is not idle; it has no
+        owner to refresh.
+        """
+        if self.is_cold or self._streaming:
+            return False
+        store = self._frontend_store
+        if store is None:
+            return False
+        state = store.state
+        if getattr(state, "streaming", False) or getattr(state, "pending_gate", None) is not None:
+            return False
+        for job in getattr(state, "jobs", ()) or ():
+            if str(getattr(job, "status", "")) == "running":
+                return False
+        return True
+
+    async def request_refresh(self) -> str:
+        """Ask the bound runtime to retire now if idle and stale; see
+        ``AttachClient.request_refresh``. Never raises: every failure means
+        "the runtime stays", which the reaper's own check repairs within
+        ``BUILD_CHECK_S + BUILD_SETTLE_S + stagger``."""
+        client = self._client
+        if client is None or not client.connected:
+            return "kept: no runtime attached"
+        ask = getattr(client, "request_refresh", None)
+        if not callable(ask):
+            return "kept: client cannot ask for a refresh"
+        try:
+            return str(await cast(Callable[[], Awaitable[str]], ask)())
+        except Exception as exc:  # noqa: BLE001 — the reaper is the fallback
+            # An owner too old to know the op answers the unknown-op error;
+            # that is the honest "kept" for a runtime predating the refresh.
+            logger.debug("refresh request failed", exc_info=True)
+            return f"kept: {exc}"
 
     def set_went_cold_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime went away and no successor arrived.

@@ -308,6 +308,26 @@ class OwnedSessionHandle(SessionHandle):
         #: process's stop event so a socket ``stop`` op exits the way SIGTERM
         #: does. ``None`` under a host that has no process to exit.
         self.on_stop_requested: Callable[[], None] | None = None
+        # The record's ``busy`` bit must settle when the LAST turn settles, and
+        # the per-event path cannot say that: the final AgentEndEvent is
+        # delivered while the turn still counts as busy (the held end is
+        # flushed under ``_turn_lock``; an abort's end is emitted while
+        # ``_is_streaming`` is True). ``_observe_prompt_drain`` covered turns
+        # that ran through the prompt queue; every other opener (peer wake,
+        # scheduled wake, background result delivery, resume catch-up) left
+        # the record saying ``busy: true`` for hours (design §1.2). The
+        # session's turn-boundary hook fires for all of them.
+        #
+        # DEFERRED by one loop iteration rather than published inline: the
+        # hook runs inside ``_run_turn_pipeline``'s ``finally``, which is still
+        # UNDER ``_turn_lock`` (the caller releases it on the way out), and
+        # ``is_busy()`` reads that lock. ``call_soon`` runs after the pipeline
+        # coroutine has returned and the ``async with`` released the lock
+        # synchronously, so the publish reads the settled state
+        # (``test_busy_settles`` pins the ordering). Probed so reduced
+        # sessions in tests that never grew the attribute keep working.
+        if hasattr(session, "on_turn_settled"):
+            session.on_turn_settled = self._publish_busy_soon
         self._install_gates()
 
     # -- gates -----------------------------------------------------------------
@@ -758,6 +778,47 @@ class OwnedSessionHandle(SessionHandle):
             logger.debug("pristine probe: history unreadable", exc_info=True)
             return False
         return True
+
+    def may_refresh(self) -> str:
+        """Why this runtime must NOT retire for a newer build right now, or
+        ``""`` when it may.
+
+        ONE predicate shared by the reaper's self-refresh branch
+        (``process._should_refresh``) and the viewer-driven ``refresh_if_idle``
+        op, so the two paths can never disagree about what "idle" means. Two
+        terms, deliberately the first two of ``process._should_exit`` and NOT
+        the third:
+
+        * ``is_busy()`` False — the same authority the reaper uses, never the
+          record's derived ``busy`` bit. Covers a live turn, a parked gate, a
+          running goal loop, live subagents and background jobs.
+        * no wake due inside the warm window — a wake about to fire would be
+          paid twice (this runtime retires, the supervisor spawns a successor
+          for the wake), and ``WARM_WINDOW_S`` exists to avoid exactly that.
+
+        An attached viewer does NOT hold. That is the operator's rule and the
+        point of the whole mechanism: the viewer re-engages a fresh runtime on
+        its own when it reads ``retiring``, and holding for it is precisely
+        what kept a five-hour-stale runtime resident (design §1.1). Pristine
+        runtimes are not exempt either — a pristine stale runtime is the
+        cheapest possible refresh.
+
+        Returns the REASON rather than a bool because the viewer paints a
+        notice off the ``kept: <reason>`` answer and the log line names it.
+        """
+        try:
+            if self.is_busy():
+                return "busy"
+        except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+            return "busy probe failed"
+        # Term 2 is the reaper's own helper, not a re-derivation: one place
+        # decides what "inside the warm window" means. Lazy import — the
+        # process module imports this one inside ``amain``, never at load.
+        from local_operator.session.runtime.process import _wake_within_window
+
+        if _wake_within_window(self):
+            return "wake due within the warm window"
+        return ""
 
     def next_wake_due_at(self) -> int | None:
         """Epoch-ms of the earliest armed wake, or ``None`` when none is set.
@@ -3164,6 +3225,14 @@ class OwnedSessionHandle(SessionHandle):
         self._publish_pending_gate()
         if self._on_projection is not None:
             self._on_projection()
+
+    def _publish_busy_soon(self) -> None:
+        """``_publish_busy`` on the next loop iteration; see ``__init__``."""
+        try:
+            self._loop.call_soon(self._publish_busy)
+        except RuntimeError:
+            # Loop closed under a disposing session: nothing left to publish.
+            return
 
     def _publish_busy(self) -> None:
         """Keep the record's ``busy`` bit in step with the session.
