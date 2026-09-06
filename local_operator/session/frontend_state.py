@@ -1618,9 +1618,14 @@ def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str,
     :data:`MODEL_CATALOGUE_FLOOR_ROWS` for the arithmetic and for why this
     budget is residual rather than a constant like the job-text one.
 
-    The flag is set BEFORE the rows are cut, and only when rows are actually
-    dropped, so ``model_catalogue_truncated`` always describes the list that
-    shipped. A silently short catalogue is the failure mode this closes.
+    The flag is set BEFORE the search so every measurement pays for the key
+    that actually ships, then CLEARED again when the search kept every row --
+    clearing can only shrink the line, so a frame that fit with the flag still
+    fits without it. What the reader sees is therefore true in both
+    directions: ``model_catalogue_truncated`` is set exactly when rows were
+    dropped. A silently short catalogue is the failure mode this closes, and a
+    complete list that claims to be partial is the same lie inverted -- it
+    sends the user hunting for a model that was never omitted.
     """
     rows = snapshot.get("model_catalogue")
     if not isinstance(rows, list) or not rows:
@@ -1655,6 +1660,12 @@ def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str,
     # session can switch to nothing, which is a lie the reader cannot detect,
     # and a frame this large is unsendable for reasons the catalogue cannot fix.
     snapshot["model_catalogue"] = rows[:low]
+    # An oversized frame does not imply a clipped catalogue. When the overflow
+    # comes from other fields and the catalogue is already at or below the
+    # floor, the search keeps every row -- and the flag set above would then
+    # tell the reader models are missing when none are. Withdraw it.
+    if low >= len(rows):
+        snapshot.pop("model_catalogue_truncated", None)
 
 
 def _frame_line_bytes(payload: dict[str, Any]) -> int:

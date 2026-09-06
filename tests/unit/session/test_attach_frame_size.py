@@ -1192,6 +1192,44 @@ def test_an_untruncated_catalogue_leaves_the_flag_alone() -> None:
     assert snapshot["model_catalogue"] and snapshot["model_catalogue_truncated"] is False
 
 
+def test_an_oversized_frame_does_not_call_a_complete_catalogue_partial() -> None:
+    """An oversized frame is not evidence that the catalogue was clipped.
+
+    When the overflow comes from other fields and the catalogue already sits at
+    or below :data:`MODEL_CATALOGUE_FLOOR_ROWS`, the search keeps every row. The
+    flag is set before the search so each measurement pays for the key that
+    ships, so without withdrawing it the reader would be told models are missing
+    when none are -- the same lie as a silently short list, inverted, sending
+    the user hunting for a model that was never omitted.
+    """
+    # The overflow has to come from a field the wire does NOT budget, or the
+    # branch under test is never entered: the roster is text-budgeted, so even
+    # 800 jobs reach only ~519 KB. Todos are unbounded, which is also how a
+    # real session gets here.
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        todos=[
+            TodoPhaseState(
+                name="p" * 200,
+                items=[TodoItemState(text="t" * 300) for _ in range(6)],
+            )
+            for _ in range(600)
+        ],
+        model_catalogue=[_catalogue_row(index) for index in range(MODEL_CATALOGUE_FLOOR_ROWS)],
+    )
+    store = FrontendStateStore(state)
+    payload = sync_wire_payload(store.subscribe(lambda _update: None).sync)
+    snapshot = payload["snapshot"]
+
+    # The fixture must actually overflow, or this test proves nothing.
+    frame_bytes = len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
+    assert frame_bytes > _MODEL_CATALOGUE_LINE_LIMIT, frame_bytes
+
+    assert len(snapshot["model_catalogue"]) == MODEL_CATALOGUE_FLOOR_ROWS
+    assert snapshot.get("model_catalogue_truncated", False) is False
+
+
 def test_the_catalogue_budget_tracks_the_socket_line_limit() -> None:
     """The mirrored limit must equal the reader's, or the budget is fiction.
 
