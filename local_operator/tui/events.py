@@ -226,9 +226,10 @@ class UserMessageStart(Message):
 class AssistantMessageEnd(Message):
     """The streaming assistant message is complete."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, message_id: str = "") -> None:
         super().__init__()
         self.text = text
+        self.message_id = message_id
 
 
 class HistoryRowsSettled(Message):
@@ -670,7 +671,7 @@ class EventController:
         self._assistant_buffer = text
         self._flush_assistant()
         self._stop_flush_timer()
-        self._post(AssistantMessageEnd(text))
+        self._post(AssistantMessageEnd(text, event.message.id))
         # Keep the context reading live THROUGH the turn, not just after it.
         # One agentic turn is many model calls; each reports the context size
         # it ran against, and that is the only signal the band can move on

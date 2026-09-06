@@ -104,14 +104,12 @@ export function startSession(input: {
 	});
 }
 
-/** Mark a session's finished activity as viewed. Fire-and-forget from the
-    session view's mount: the daemon clears `unseen` and repaints the list,
-    but the client store clears its own copy optimistically (markSessionSeen)
-    so back-navigation never flashes a stale mark while this POST is in
-    flight. The response body carries nothing the UI needs. */
-export function markSessionSeen(sessionId: string): Promise<{ ok: boolean }> {
+/** A receipt names what was rendered, not whichever completion exists on arrival. */
+export function markSessionSeen(sessionId: string, completionToken: string): Promise<{ ok: boolean }> {
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/seen`, {
 		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ completion_token: completionToken }),
 	});
 }
 

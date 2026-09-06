@@ -61,6 +61,8 @@ export interface PeerSender {
 }
 
 export interface TranscriptEntry {
+	/** Explicitly true only when transport caps retained the real row ending. */
+	text_complete?: boolean;
 	id: string;
 	kind: EntryKind;
 	text: string;
@@ -164,7 +166,17 @@ export interface PendingRequest {
 	question_total: number;
 }
 
+export interface CompletionAttention {
+	conversation_id: string;
+	completion_token: string | null;
+	anchor_id: string | null;
+	kind: "complete" | "error" | "interrupted" | null;
+	unseen: boolean;
+	revision: [number, number];
+}
+
 export interface SessionProjection {
+	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;
 	kind: string;
