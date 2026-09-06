@@ -36,6 +36,7 @@ from local_operator.evaluation.runner.provider_client import (
     MAX_TOLERATED_TRAILING_CHARS,
     DecisionParseError,
     ProviderModelClient,
+    ProviderStreamAbortedError,
     build_system_prompt,
     parse_decision,
 )
@@ -110,12 +111,18 @@ class ScriptedStream:
         stop_reason: str = "stop",
         chunk: int = 7,
         provider_payload: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> None:
         self.text = text
         self.usage = usage
         self.stop_reason = stop_reason
         self.chunk = chunk
         self.provider_payload = provider_payload
+        # The provider's own words about an abnormal end. Scripted here because
+        # the wire clients are the only layer that sees the real terminal
+        # marker, so a fake that cannot carry one cannot exercise the refusal
+        # path at all -- which is how that path shipped unhandled.
+        self.error = error
         self.requests: list[Any] = []
 
     def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
@@ -134,6 +141,7 @@ class ScriptedStream:
             stop_reason=self.stop_reason,
             usage=self.usage,
             provider_payload=self.provider_payload,
+            error=self.error,
         )
 
 
@@ -579,6 +587,221 @@ async def test_client_raises_on_an_unparseable_reply() -> None:
     assert rejected.provider_request_id == "chatcmpl-REJ"
     assert rejected.route == ROUTE
     assert rejected.diagnostic.startswith("Your previous reply was rejected:")
+
+
+# ---------------------------------------------------------------------------
+# Abnormal stream ends. A provider that refused (or died mid-stream) without
+# producing content is NOT a model that replied badly: there is no reply to
+# correct, so re-prompting for better JSON cannot converge and the failure
+# belongs to the provider. Observed on a paid run whose three refusals were
+# recorded as "decision is not valid JSON: Unterminated string".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_refusal_with_prose_to_the_provider() -> None:
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=11, output_tokens=0),
+        error="model refused: I can't help with that (stop_reason=refusal)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    # The provider's own marker reaches the diagnostic verbatim: it is the only
+    # thing that says WHICH mechanism fired, and the bundle is unreadable
+    # without it.
+    assert "stop_reason=refusal" in str(info.value)
+    assert "I can't help with that" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_wordless_zero_token_refusal_to_the_provider() -> None:
+    """The exact observed case: ``refusal``, no prose, zero tokens both ways.
+
+    Nothing was streamed and nothing was billed, so there is no model output to
+    blame and no reply a correction prompt could repair.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    # Never the JSON diagnosis the old path produced against an empty string.
+    assert "JSON" not in str(info.value)
+    assert "refusal" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_wordless_mid_stream_error_to_the_provider() -> None:
+    current = observation()
+    stream = ScriptedStream("   \n  ", stop_reason="error")
+
+    with pytest.raises(ProviderStreamAbortedError):
+        await _client(stream).decide(current, _turns(current))
+
+
+@pytest.mark.asyncio
+async def test_client_still_rejects_a_reply_the_provider_cut_short() -> None:
+    """An abnormal end AFTER real text is the model's output, not an outage.
+
+    A safety stop that truncates a partially-streamed batch leaves bytes the
+    model actually wrote, so it stays on the correctable rejection path where
+    the runner can feed the defect back and re-prompt.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        '{"actions": [{"kind": "click", "observation',
+        stop_reason="refusal",
+        usage=Usage(input_tokens=12, output_tokens=9),
+        error="model refused and cut the reply short (stop_reason=refusal)",
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert isinstance(info.value.__cause__, DecisionParseError)
+    assert info.value.stop_reason == "refusal"
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_normal_stop_carrying_an_error_to_the_provider() -> None:
+    """A NORMAL stop and a set ``error`` together, which only the first half of
+    the guard's condition catches.
+
+    Real and reachable: a provider whose content filter fires after it has
+    committed to a normal terminal marker reports ``stop`` and puts the reason
+    in ``error``, so the stop alone says the turn was fine while the stream in
+    fact delivered nothing. Dropping the ``stream_error or`` half of the
+    condition leaves every other case in this file passing, so without this
+    test that half is unpinned and the empty reply goes back to being reported
+    as bad JSON.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="stop",
+        usage=Usage(input_tokens=48_000, output_tokens=0),
+        error="content filter blocked the response (stop_reason=content_filter)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert "content filter blocked the response" in str(info.value)
+    # The normal marker is reported as-is; the abort is justified by the error,
+    # not by rewriting what the provider said it did.
+    assert info.value.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_client_treats_a_length_end_with_no_text_as_a_correctable_rejection() -> None:
+    """``length`` is in the allow-list, and its membership is load-bearing.
+
+    A token cap that truncates before any parseable JSON is a MODEL problem the
+    runner can correct by re-prompting -- not an outage. Dropping ``length``
+    from ``_NORMAL_CONTENT_STOPS`` would convert every legitimate cap-truncated
+    turn into a sealed unscored infrastructure failure, and no other test in
+    this file notices, because the allow-list is otherwise only exercised
+    through ``stop``.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="length",
+        usage=Usage(input_tokens=48_000, output_tokens=4_096),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.stop_reason == "length"
+    assert info.value.diagnostic.startswith("Your previous reply was rejected:")
+
+
+@pytest.mark.asyncio
+async def test_client_does_not_normalize_an_absent_stop_marker_into_a_normal_stop() -> None:
+    """An empty ``stop_reason`` is an ABSENT marker, not a normal content stop.
+
+    ``event.stop_reason or "stop"`` coerced it into one, punching a fail-OPEN
+    hole through an allow-list built to fail closed: a stream that said nothing
+    about how it ended took the parse path and produced exactly the "not valid
+    JSON" misdiagnosis this guard removes.
+    """
+
+    current = observation()
+    stream = ScriptedStream("", stop_reason="", usage=Usage(input_tokens=48_000, output_tokens=0))
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert "JSON" not in str(info.value)
+    # Recorded verbatim rather than laundered into a stop the provider never
+    # sent, and a valid ``StrictIdentifier`` so the bundle can carry it.
+    assert info.value.stop_reason == "unspecified"
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_stream_carries_the_usage_the_refused_turn_was_billed() -> None:
+    """A refusal is unanswered, not unbilled.
+
+    The provider read the whole prompt before declining, so the episode owes
+    for those input tokens. Carrying nothing meant a refused episode sealed
+    with no usage event at all and reported that zero as a MEASURED spend.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=48_000, output_tokens=0),
+        provider_payload={"id": "req-refused-1"},
+        error="model refused: I can't help with that (stop_reason=refusal)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.usage.input_tokens == 48_000
+    assert info.value.usage.output_tokens == 0
+    assert info.value.route == ROUTE
+    assert info.value.stop_reason == "refusal"
+    assert info.value.provider_request_id == "req-refused-1"
+
+
+@pytest.mark.asyncio
+async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> None:
+    """Regression guard on the fix's blast radius.
+
+    A normal ``stop`` carrying an unparseable reply must keep raising
+    ``DecisionRejected`` -- widening the provider path to swallow it would
+    convert every recoverable formatting mistake into a sealed unscored
+    episode.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        '{"actions": [',
+        usage=Usage(input_tokens=11, output_tokens=4),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.stop_reason == "stop"
+    assert info.value.diagnostic.startswith("Your previous reply was rejected:")
 
 
 # ---------------------------------------------------------------------------

@@ -811,6 +811,7 @@ class EpisodeRunner:
         # carry its response and usage before any terminal (verify.py:760) --
         # so recording it eagerly would make the failure path unsealable.
         rejected: DecisionRejected | None = None
+        aborted: BaseException | None = None
         try:
             decision = await self._model.decide(
                 observation, tuple(self._turns), action_surface=self._action_surface
@@ -827,6 +828,7 @@ class EpisodeRunner:
         except BaseException as error:
             from local_operator.evaluation.runner.provider_client import (
                 ContextUnrecoverableError,
+                ProviderStreamAbortedError,
             )
 
             # The client could not fit the context into the window even after
@@ -840,12 +842,28 @@ class EpisodeRunner:
             # one-step-per-batch rule forbids amending it.
             if isinstance(error, ContextUnrecoverableError):
                 raise
-            # Scanned HERE, not only where the message is published: this
-            # rendering is truncated on the way into ``_ProviderFailure``, and
-            # ``_finalize_failure`` later seals it. A cut applied before any
-            # scan severs the canary, so forwarding the redaction set only at
-            # the publish site arrives too late to matter.
-            raise _ProviderFailure(_diagnostic(error, self._redactions)) from error
+            if isinstance(error, ProviderStreamAbortedError):
+                # A refusal (or an abnormal end) is a BILLED call that produced
+                # no reply: the provider read the whole prompt -- 48,000 input
+                # tokens in the observed case -- and then declined to answer.
+                # So it takes the same path a rejection does and falls THROUGH
+                # to the triple below, carrying its own usage. Skipping that
+                # wrote no ``usage_cost`` event at all, and ``_reconcile`` then
+                # published the resulting zero as an AVAILABLE (measured)
+                # figure: a bundle whose only job is honest accounting claiming
+                # a spend of nothing for a turn that was paid for. The episode
+                # still seals as a provider failure -- that is re-raised after
+                # the evidence is written, below.
+                aborted = error
+                decision = error
+            else:
+                # Scanned HERE, not only where the message is published: this
+                # rendering is truncated on the way into ``_ProviderFailure``,
+                # and ``_finalize_failure`` later seals it. A cut applied
+                # before any scan severs the canary, so forwarding the
+                # redaction set only at the publish site arrives too late to
+                # matter.
+                raise _ProviderFailure(_diagnostic(error, self._redactions)) from error
         if decision.compaction is not None:
             # Declared BEFORE the request triple: the client rebuilt its
             # context on the way to this request, so the compaction belongs
@@ -952,6 +970,20 @@ class EpisodeRunner:
             self._usage_totals[name] = self._usage_totals.get(name, 0) + getattr(
                 decision.usage, name
             )
+        if aborted is not None:
+            # Evidence first, failure second. Everything above ran exactly as it
+            # does for a billed decision, so the attempt's request/response/usage
+            # triple is now in the journal and the counters include its spend;
+            # only now is the episode allowed to die. No ``error`` event is
+            # written here because this raise reaches ``_finalize_failure``,
+            # which writes the terminal ``category="provider"`` one -- a second
+            # would double-count the same failure.
+            #
+            # The redaction set is forwarded for the reason ``_diagnostic``
+            # documents: this message quotes the provider's own prose verbatim,
+            # unbounded and unscanned by the client that raised it, so the scan
+            # has to happen before the 500-char bound is applied here.
+            raise _ProviderFailure(_diagnostic(aborted, self._redactions)) from aborted
         if rejected is not None:
             # The diagnostic is what the model will be shown; it is published
             # as an artifact rather than squeezed into the identifier-shaped
