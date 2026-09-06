@@ -201,6 +201,65 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "cumulative_parent_cost",
     }
 )
+#: Wire budget for the in-flight seed's retained tool results.
+#:
+#: ``live_events`` used to bound itself: every ``tool_execution_end`` ERASED its
+#: call's row, so a turn of completed calls left zero rows behind and the field
+#: could not grow. Retaining the end (so a viewer that reconnects mid-turn can
+#: settle a card for work that finished while it was away) removed that bound
+#: and made the field accumulate one whole tool result per completed call —
+#: measured at 2,028,680 B over 100 calls, putting the ``frontend_sync`` frame
+#: at 2,029,839 B against the socket's 1,048,576-byte line limit. Overflow
+#: began at ~18 completed calls returning 60 KB each, which is an ordinary
+#: heavy turn rather than a pathological one.
+#:
+#: This is the third instance of the shape :func:`sync_wire_payload` documents
+#: after trajectories and ``usage_components``, and the consequence is the one
+#: ``server.py`` records: an oversized sync is UNREADABLE rather than merely
+#: large, so the viewer waits out its sync timeout and degrades to a cold
+#: session with no roster and no todos.
+#:
+#: Bounded by TRUNCATING result text rather than by dropping rows, because the
+#: seed's job is to say WHICH calls ended and HOW — ``on_tool_ended`` needs
+#: ``tool_call_id``, ``is_error`` and a first line to settle the card, and
+#: dropping a row would strand the card live and re-open the very
+#: ``⊘ interrupted`` artefact the retention exists to close. The full result is
+#: never lost: it is in the durable transcript, and the live relay delivers it
+#: untouched to a viewer that stayed connected. Only the RECONNECT seed is
+#: clipped, and only its text.
+#:
+#: A shared frame budget rather than a per-row cap, for the reason
+#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` gives: "bounded per row, unbounded in
+#: total" is the same defect one level up, and call count per turn has no cap.
+#: The floor keeps every retained end legible — a card that says how it ended
+#: is what stops the retirement pass marking it interrupted.
+LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 60_000
+LIVE_EVENT_TEXT_FLOOR_CHARS = 200
+
+#: Cap on retained ``tool_execution_end`` rows in the seed, newest kept.
+#:
+#: The text budget above bounds what a row COSTS; it does not bound how many
+#: rows there are, and "bounded per row, unbounded in total" is exactly the
+#: defect the budget exists to answer. The floor makes that gap reachable: at
+#: :data:`LIVE_EVENT_TEXT_FLOOR_CHARS` every row still costs ~500 B, and even
+#: stripped to bare identity a row is ~300 B, so 5,000 completed calls in one
+#: turn measured 2,528,943 B — back over the line limit with the text budget
+#: fully applied. A cap is the only thing that closes it.
+#:
+#: 100 holds the field's worst case to ~71 KB — the same order as
+#: ``usage_components`` (69 KB), and a fair share of a frame whose roster alone
+#: can run to 620 KB. The all-year fixture is what set the number, and it had
+#: to be set twice: at 400 the seed took 255 KB and at 150 it took 107 KB, both
+#: of which put the frame back over the limit once stacked on that roster. With
+#: every other field at its own maximum the fixture leaves ~99 KB here, so
+#: "bounded" is not sufficient on its own — the bound has to be small enough to
+#: COEXIST. A viewer needs the seed only for the CURRENT turn's unsettled
+#: cards, and 100 completed calls in one turn is already far beyond that.
+#:
+#: Dropping OLDEST-first is what makes the cap safe: the newest calls are the
+#: ones most likely to still be on screen unsettled, and a dropped row costs
+#: nothing durable — the transcript replay repaints those cards regardless.
+LIVE_EVENT_END_ROWS_MAX = 100
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
 #:
@@ -1649,6 +1708,12 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
       undercount money, while folding is lossless. See
       :func:`_folded_components`.
 
+    * ``snapshot.live_events`` — the in-flight seed. It bounded itself while a
+      ``tool_execution_end`` erased its call's row; once the end is RETAINED so
+      a reconnecting viewer can settle the card, one whole tool result per
+      completed call accumulates for the turn. See
+      :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS`.
+
     :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
     field appears.
     """
@@ -1658,6 +1723,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         components = snapshot.get("usage_components")
         if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
             snapshot["usage_components"] = _capped_components(components)
+        _bound_live_events_in_place(snapshot)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
             # Share one text budget across the roster so the frame does not grow
@@ -1761,6 +1827,92 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     budget for a line nobody sends.
     """
     return len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
+
+
+def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
+    """Clip the in-flight seed's retained tool results to their wire bound.
+
+    See :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` for why the seed grew a
+    bound at all and why it clips TEXT instead of dropping rows: every retained
+    end must survive as a row, because the row is what settles the card.
+
+    The budget is shared only across the rows that actually carry result text,
+    for the reason :func:`_bound_job_text_in_place` gives — the common row
+    contributes nothing, and dividing by it would starve the few that do. The
+    floor wins over an arithmetically smaller share so a turn with very many
+    calls still hands each card a legible line rather than an empty one; that
+    trades an exactly-proportional budget for a guarantee the card can settle,
+    which is the property this field exists to provide.
+
+    Truncation is marked with an ellipsis, as the neighbouring text bounds do
+    it, so a reader can tell a clipped preview from a tool that really did
+    return that little.
+    """
+    events = snapshot.get("live_events")
+    if not isinstance(events, list):
+        return
+    # Row COUNT first, then per-row text: see :data:`LIVE_EVENT_END_ROWS_MAX`
+    # for why the text budget alone leaves the frame reachable.
+    #
+    # An evicted end takes its START with it. Evicting the end alone would
+    # leave the start behind as a card the viewer paints LIVE and can never
+    # settle — a stranded spinner, and then an `⊘ interrupted` at retirement on
+    # a call that succeeded. That is the precise artefact this retention was
+    # added to remove, so the cap must not reintroduce it by the back door.
+    # A start with no end is a call still RUNNING and is always kept: that card
+    # is the one the viewer most needs.
+    end_positions = [
+        index
+        for index, item in enumerate(events)
+        if isinstance(item, dict) and item.get("type") == "tool_execution_end"
+    ]
+    if len(end_positions) > LIVE_EVENT_END_ROWS_MAX:
+        evicted_ends = end_positions[: len(end_positions) - LIVE_EVENT_END_ROWS_MAX]
+        evicted = set(evicted_ends)
+        settled = {
+            str(events[index].get("tool_call_id") or "")
+            for index in evicted_ends
+            if events[index].get("tool_call_id")
+        }
+        for index, item in enumerate(events):
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "tool_execution_start"
+                and str(item.get("tool_call_id") or "") in settled
+            ):
+                evicted.add(index)
+        events = [item for index, item in enumerate(events) if index not in evicted]
+        snapshot["live_events"] = events
+    # Only ``tool_execution_end`` retains a payload; starts and message rows
+    # are already small and are folded by phase, so they are not counted into
+    # the share they would otherwise dilute.
+    texts: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for item in events:
+        if not isinstance(item, dict) or item.get("type") != "tool_execution_end":
+            continue
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        blocks = [
+            block
+            for block in (result.get("content") or [])
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        if blocks:
+            texts.append((result, blocks))
+    if not texts:
+        return
+    share = max(LIVE_EVENT_TEXT_FLOOR_CHARS, LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS // len(texts))
+    for _result, blocks in texts:
+        # Per ROW, not per block: a result of many blocks would otherwise
+        # multiply its own share and reinstate the unbounded shape one level
+        # further down.
+        remaining = share
+        for block in blocks:
+            text = block["text"]
+            if len(text) > remaining:
+                block["text"] = text[:remaining] + "…" if remaining > 0 else "…"
+            remaining = max(0, remaining - len(text))
 
 
 def _bound_job_text_in_place(job: dict[str, Any], *, share: int) -> None:
