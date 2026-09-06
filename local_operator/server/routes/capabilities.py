@@ -27,7 +27,10 @@ async def capabilities():
                 "catalogues": 1,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
-                "completion-ack-v1": 1,
+                # Named for this map's convention (`<subsystem>: <version>`); the
+                # runtime record's capability LIST is a different namespace and
+                # keeps its versioned `completion-ack-v1` string.
+                "completion_ack": 1,
                 "mcp": 1,
                 "radient": 1,
             },

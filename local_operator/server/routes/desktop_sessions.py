@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
@@ -24,6 +25,7 @@ from starlette.background import BackgroundTask
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
+    AttentionState,
     CommandReceipt,
     CreatedSession,
     HistoryPage,
@@ -162,6 +164,14 @@ async def errors() -> AsyncIterator[None]:
         raise HTTPException(404, "Session or subscription not found") from None
     except (ReceiptConflict, ValueError) as error:
         raise HTTPException(409, str(error)) from None
+    except sqlite3.Error:
+        # Contention on the shared receipt store is transient and retryable, so
+        # it gets a vetted sentence rather than a bare 500 carrying SQLite's own
+        # wording. The text is NOT echoed for the same reason the ConnectionError
+        # ladder below refuses to echo: a store error can name file paths.
+        raise HTTPException(
+            503, "Read state is busy right now. It will catch up on its own."
+        ) from None
     except ConnectionError as error:
         # A cold session that cannot start an owner reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
@@ -187,7 +197,12 @@ async def errors() -> AsyncIterator[None]:
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
-    return reply({"sessions": await host(request).list(limit)})
+    # Wrapped like its neighbours: the list gained a receipt-store read, and an
+    # unmapped failure there answered the app's primary navigation surface with
+    # a bare 500. The decoration is already omitted per row inside `list()`;
+    # this ladder covers anything else the pool can raise.
+    async with errors():
+        return reply({"sessions": await host(request).list(limit)})
 
 
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
@@ -368,7 +383,7 @@ async def answer(session_id: str, body: Answer, request: Request):
         return reply({"detail": detail})
 
 
-@router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[dict[str, Any]])
+@router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
 async def seen(session_id: str, body: Seen, request: Request):
     async with errors():
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))

@@ -9,6 +9,8 @@ shared receipt clock depends on.
 """
 
 import asyncio
+import contextlib
+import sqlite3
 import uuid
 
 import pytest
@@ -170,3 +172,139 @@ async def test_concurrent_receipts_and_publications_converge(tmp_path):
     assert final["unseen"] is True and final["anchor_id"] == "result-2"
     for state in receipts:
         assert state["revision"][1] == 1
+
+
+def _break_store(root) -> None:
+    """Drop the table a read needs, leaving a file that still opens.
+
+    Real contention (`database is locked` past the 2 s timeout) cannot be
+    scheduled deterministically in a test; a missing table raises the same
+    `sqlite3.Error` family through the identical call path, which is what the
+    guards are written against.
+    """
+    import sqlite3 as _sqlite3
+
+    with contextlib.closing(_sqlite3.connect(root / "attention.db")) as conn:
+        conn.execute("DROP TABLE completions")
+        conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_store_error_costs_one_poll_not_the_whole_loop(tmp_path):
+    """A transient store failure must not end cross-process read sync.
+
+    The loop was a bare `while True`, so ONE `database is locked` stopped the
+    poller for the life of the bridge: the phone and the TUI would clear an
+    unread completion while the desktop kept showing it, forever and silently.
+    That is a new way to hide an unread result -- the failure this feature
+    exists to prevent.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    token = _publish(tmp_path, sid, "result-1")
+    async with pool.session(sid) as bridge:
+        for _ in range(200):
+            if bridge.attention.get("completion_token"):
+                break
+            await asyncio.sleep(0.01)
+        assert bridge.attention["unseen"] is True
+
+        _break_store(tmp_path)
+        # The fixture must actually reach the failing branch, or this test
+        # passes while exercising nothing.
+        with pytest.raises(sqlite3.Error):
+            AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")
+        bridge.attention_poll_key = None
+        await asyncio.sleep(2.5)
+        assert (
+            bridge.attention_task is not None and not bridge.attention_task.done()
+        ), "the poll loop died on a transient store error"
+
+        # Recovery is the point: once the store is healthy again the loop must
+        # pick the change up on its own, with no remount. Deleting the file is
+        # how the schema is rebuilt from scratch by the store itself.
+        (tmp_path / "attention.db").unlink()
+        recovered = _publish(tmp_path, sid, "result-2")
+        for _ in range(300):
+            if bridge.attention.get("completion_token") == recovered:
+                break
+            await asyncio.sleep(0.01)
+        assert bridge.attention["completion_token"] == recovered
+        assert bridge.attention["unseen"] is True
+    assert token != recovered
+
+
+@pytest.mark.asyncio
+async def test_a_dead_poll_task_can_never_strand_the_session_owner(tmp_path):
+    """Teardown must dispose the owner even when the poller already failed.
+
+    `_detach` awaited the attention task FIRST and suppressed only
+    `CancelledError`, so awaiting an already-failed task re-raised: leaving a
+    conversation raised, `dispose()` never ran, and the owner plus its
+    subscriptions leaked while `users` had already reached 0. A read receipt
+    must never strand a session owner.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _publish(tmp_path, sid, "result-1")
+    disposed: list[bool] = []
+    async with pool.session(sid) as bridge:
+        remote = bridge.remote
+        assert remote is not None
+        original = remote.dispose
+
+        async def record_dispose():
+            disposed.append(True)
+            await original()
+
+        remote.dispose = record_dispose  # type: ignore[method-assign]
+
+        # Kill the task the way a store error would, and PROVE it is dead
+        # before asserting teardown survives it.
+        assert bridge.attention_task is not None
+        bridge.attention_task.cancel()
+        with contextlib.suppress(BaseException):
+            await bridge.attention_task
+
+        async def already_failed() -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        bridge.attention_task = asyncio.create_task(already_failed())
+        await asyncio.sleep(0)
+        assert bridge.attention_task.done() and bridge.attention_task.exception() is not None
+
+    # Leaving the conversation did not raise, and teardown completed.
+    assert disposed == [True], "the owner session was never disposed"
+    assert bridge.attention_task is None
+    assert bridge.remote is None and bridge.users == 0
+    assert not bridge.unsubscribers, "frontend subscriptions leaked"
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_store_never_breaks_opening_or_listing(tmp_path):
+    """Unread badges are decoration; they must not fail primary navigation.
+
+    Before this field existed neither path touched `attention.db`, so letting a
+    busy sidecar 500 the session list and the transcript is a straight
+    availability regression on paths that have nothing to do with receipts.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _publish(tmp_path, sid, "result-1")
+    async with pool.session(sid) as bridge:
+        healthy = await bridge.snapshot()
+        assert healthy["payload"]["frontend"]["snapshot"]["attention"]["unseen"] is True
+        assert (await pool.list(50))[0]["attention"]["unseen"] is True
+
+        _break_store(tmp_path)
+        with pytest.raises(sqlite3.Error):
+            AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")
+
+        # The conversation still OPENS, and the list still lists.
+        degraded = await bridge.snapshot()
+        assert degraded["payload"]["frontend"]["snapshot"]["session_id"] == sid
+        rows = await pool.list(50)
+        assert [row["id"] for row in rows] == [sid]
+        # Omitted rather than fabricated: absent state is "not ackable" on the
+        # client, which is correct. A false "read" would not be.
+        assert "attention" not in rows[0]
