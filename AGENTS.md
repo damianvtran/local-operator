@@ -306,11 +306,19 @@ changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
 
-It makes the violation loud; it does not make it impossible. `main` has no
-branch protection, so no check is *required* and an `--admin` merge lands over
-a red guard. Treat a failing `version-bump-guard` as a stop signal rather than
-an obstacle to route around: the job is the reviewer's missing memory, not a
-lock.
+It makes the violation loud; it does not make it impossible. `main`'s ruleset
+requires a code-owner approval but configures **no required status checks**, and
+admins hold a configured bypass (see "Who may merge: two tiers, by code
+ownership"), so an `--admin` merge lands over a red guard. Treat a failing
+`version-bump-guard` as a stop signal rather than an obstacle to route around:
+the job is the reviewer's missing memory, not a lock.
+
+Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
+`404 Branch not protected` here. That endpoint reports only **legacy** branch
+protection and 404s even while a modern ruleset is actively enforcing the
+branch, so it is the wrong probe and reading it as "unprotected" is a mistake
+this paragraph made once already. Query
+`gh api repos/<owner>/<repo>/rules/branches/main` instead.
 
 The job exists because the prose above was not enough. It was already written,
 and it already told reviewers to treat a bump as a finding, when #701 and #706
