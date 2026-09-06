@@ -69,6 +69,7 @@ from local_operator.mobile.attach_client import (
     find_owner_record,
 )
 from local_operator.mobile.types import (
+    SLASH_ACTION_RECEIPTS,
     ContinuationCommand,
     PendingRequest,
     SessionRecord,
@@ -232,6 +233,14 @@ class RemoteSession:
         #: whose contract is still "recover the conversation into this
         #: process" and whose tests assert exactly that.
         self._can_go_cold = False
+        #: The BUILD the runtime on the other end is running, read off its
+        #: discovery record at dial. ``""`` on a facade that has never bound,
+        #: and on one bound to a runtime older than the field — the TUI treats
+        #: those two the same way (it has no build to compare against) and
+        #: distinguishes them by whether the facade is cold, not by this
+        #: value. See ``app.py::_check_build_skew``.
+        self.owner_version: str = ""
+        self.owner_source_ref: str = ""
         #: Why this viewer opened WITHOUT live state, when that was not the
         #: ordinary "no runtime was running" case. Set by the launcher when an
         #: attach to a live runtime failed and it fell back to cold; the TUI
@@ -1121,12 +1130,28 @@ class RemoteSession:
             if self._client is client:
                 self._on_disconnected(reason)
 
+        # The runtime's build, captured from the record BEFORE the socket is
+        # opened: a runtime's version cannot change while it lives, so one
+        # read at dial is complete. ``""`` means the owner predates the field,
+        # which by construction makes it older than this terminal. The TUI
+        # compares these with its own build and names the skew (see
+        # ``app.py::_check_build_skew``); nothing here decides anything, so a
+        # missing stamp degrades to "unknown", never to a refused attach.
+        self.owner_version = getattr(record, "version", "") or ""
+        self.owner_source_ref = getattr(record, "source_ref", "") or ""
         client = AttachClient(
             lambda _projection: None,
             on_disconnected,
             events=True,
             on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
+            # THE full-TUI viewer is the client that renders action-carrying
+            # receipts: ``_render_authoritative_slash`` submits their
+            # ``request`` as a user turn. Declaring them is what tells the
+            # runtime NOT to admit the request itself, which would run the
+            # command twice. A viewer that omitted this (every build before
+            # the field) is exactly the case the runtime completes for.
+            slash_consumers=list(SLASH_ACTION_RECEIPTS),
             on_frontend_sync=lambda data: (
                 self._on_frontend_sync(data) if self._client is client else None
             ),

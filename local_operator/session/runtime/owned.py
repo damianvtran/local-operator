@@ -29,7 +29,7 @@ from asyncio import InvalidStateError
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
 
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -49,9 +49,33 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import image_blocks as _image_blocks
+from local_operator.session.runtime.types import runtime_must_complete
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
+
+
+#: How many loop turns a dispatched admission is given to surface a SYNCHRONOUS
+#: refusal before it is left to run detached. ``prompt`` raises its reportable
+#: refusals (closing session, full queue, rejected reservation) before its first
+#: await, so one turn suffices; the margin only guards a future edit that adds
+#: another await to that prelude. Turns, not seconds — see
+#: ``_admit_without_waiting_for_the_turn``.
+_ADMISSION_PRELUDE_TURNS = 3
+
+
+def _log_detached_admission(task: "asyncio.Task[str]") -> None:
+    """Never let a dispatched admission become an unretrieved exception.
+
+    The receipt has already been returned by the time this runs, so there is no
+    caller left to tell: a failure here is a log line, and swallowing it
+    silently is what would make the next occurrence undiagnosable.
+    """
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("a completed slash action's turn failed after admission: %s", error)
 
 
 def _resolve_gate_future(future: asyncio.Future[Any], value: Any) -> None:
@@ -1580,6 +1604,7 @@ class OwnedSessionHandle(SessionHandle):
         images: list[dict[str, str]] | None = None,
         *,
         locality: str = "local",
+        consumers: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -1606,11 +1631,162 @@ class OwnedSessionHandle(SessionHandle):
         exists today reaches this runtime over loopback. Only ``/mcp``'s grant
         verbs read it, to decide whether opening a browser here would put the
         tab in front of the person who typed the command.
+
+        ``consumers`` is which action-carrying receipts the invoking client
+        renders itself (``SLASH_ACTION_RECEIPTS``); ``None`` means it declared
+        nothing, which is what every client built before the field looks like
+        on the wire. See :meth:`_complete_unconsumed_action`.
         """
         from local_operator.session.frontend_state import SlashResult
 
         result = await self._slash_result(command, args, SlashResult, locality)
+        result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
+
+    async def _complete_unconsumed_action(
+        self,
+        result: Any,
+        images: list[dict[str, str]] | None,
+        consumers: Iterable[str] | None,
+    ) -> Any:
+        """Run an attach receipt's request here when the client will not.
+
+        THE INCIDENT THIS REPAIRS. ``/team <name> <request>`` on a viewer
+        attaches the team on this runtime and returns a ``team_attached``
+        receipt carrying the request; since #624 the VIEWER is expected to
+        submit that request as a user turn. A viewer older than #624 prints
+        the receipt text and has no consumer for ``data["request"]`` — so the
+        team was attached, "sending to <team>. <manager> is coordinating."
+        was printed, and the request was dropped with no user row, no turn and
+        no error. Skew makes that reachable at any time: the on-disk install
+        is replaced under long-lived TUIs several times a day, and the runtime
+        a stale TUI spawns is built from the NEW install.
+
+        The rule is ``type not in declared``, never "declared is None": a
+        client that declared the type submits the request itself and the
+        runtime must NEVER also run it (that would be a double turn), while
+        both ``None`` (absent field, older viewer) and ``[]`` (declared, but
+        consumes nothing) mean the request has no other home and is admitted
+        here.
+
+        Admission goes through the same ``_PromptCommand`` path the ``prompt``
+        op uses, so the durable append resolves ``admitted``, the drain emits
+        the user ``MessageStartEvent``, and an old viewer — which already
+        subscribes with ``events=True`` — paints the user row from that event
+        through its existing echo path. No renderer change is required on the
+        old viewer, which is the point: the fix reaches TUIs that are already
+        running and cannot be updated in place.
+
+        KNOWN DEGRADATION: the viewer expands collapsed pastes into the
+        request text at submit time, and those payloads live in the VIEWER's
+        composer — they cannot cross the wire retroactively. A request
+        admitted here that cites ``<[Paste #1, 240 lines]>`` reaches the
+        manager as the chip label rather than the body. Images are unaffected
+        (they are already on the wire in the ``slash_result`` frame and are
+        passed into the admission unchanged). That is strictly better than the
+        silent drop, and the skew notice the viewer paints names ``/reload``
+        as the way back to full fidelity.
+        """
+        if getattr(result, "kind", None) != "notice":
+            return result
+        data = getattr(result, "data", None) or {}
+        receipt_type = data.get("type")
+        # The shared predicate, so this host and the TUI-hosted one cannot
+        # drift: not an action receipt, or one the client declared it renders
+        # (admitting that too would double-submit the user's command).
+        if not runtime_must_complete(receipt_type, consumers):
+            return result
+        request = str(data.get("request") or "")
+        if not request:
+            # ``/agent clear`` returns ``agent_attached`` with an empty
+            # request: a detach is a receipt with no action behind it.
+            return result
+        try:
+            # Mirrors the viewer's own submit split (``app.py::_submit_prompt``):
+            # a turn already running is STEERED, because ``prompt`` rejects a
+            # concurrent call outright and the text would be thrown away. The
+            # steer is delivered at the engine's next tool/message boundary,
+            # which is the existing mid-turn channel rather than a new queue.
+            #
+            # ``steer`` is awaited directly because it cannot park: everything
+            # it does is synchronous (reserve, hand the text to the session,
+            # note the echo) and it returns on its first step. ``prompt``
+            # emphatically CAN park — see below.
+            if self._session.is_streaming:
+                await self.steer(request, images=images, command_id=str(uuid.uuid4()))
+            else:
+                await self._admit_without_waiting_for_the_turn(request, images)
+        except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
+            # The attach ALREADY landed and stays; only the turn failed to
+            # start (session closing, queue full, a rejected prompt). Reporting
+            # that as a warning is the whole difference from the original
+            # defect: the user learns the request did not run and can resend,
+            # instead of watching nothing happen.
+            logger.debug("completing an unconsumed slash action failed", exc_info=True)
+            return result.model_copy(
+                update={
+                    "text": f"{result.text} — but the request was not sent: {exc}",
+                    "style": "warning",
+                }
+            )
+        return result
+
+    async def _admit_without_waiting_for_the_turn(
+        self, request: str, images: list[dict[str, str]] | None
+    ) -> None:
+        """Admit ``request`` as a turn, reporting only the IMMEDIATE refusals.
+
+        ``prompt`` resolves its receipt on the durable transcript append, which
+        the drain performs only when it reaches that command — so awaiting it
+        holds this coroutine for the whole of any turn queued ahead. That would
+        be paid on the ``slash_result`` REQUEST/RESPONSE, which is a different
+        thing from the ``prompt`` op's own fire-and-forget wait: the reply frame
+        would be withheld for the duration of the earlier turn, the viewer's
+        ``ACK_TIMEOUT_S`` (15 s) would elapse on anything longer, and the old
+        viewer would print a transport error for a request that WAS admitted —
+        a worse failure than the silent drop this method exists to repair. The
+        per-connection reader is strictly serial, so every later op from that
+        viewer would queue behind the park as well (review round 1, R1-1).
+
+        The ``is_streaming`` branch above does not cover it: the flag is still
+        False during the drain's pre-streaming prelude (lock acquire, record
+        and journal flushes), so a prompt sent moments before this lands in
+        exactly that window.
+
+        So the admission is DISPATCHED and this returns as soon as its outcome
+        can no longer be reported synchronously. The refusals worth reporting —
+        a closing session, a full queue, a rejected reservation — all raise in
+        ``prompt``'s synchronous prelude, before it ever awaits, so they surface
+        here and still become the warning receipt. Anything after that point is
+        a turn that is genuinely running and whose result belongs in the
+        transcript, not in this receipt.
+
+        Bounded in LOOP TURNS rather than seconds deliberately: a wall-clock
+        budget here would be a bet on machine load, whereas "the task has had
+        its synchronous prelude" is a fact about scheduling that holds under any
+        contention (AGENTS.md, "Wait on the event, never on the clock").
+        """
+        task = asyncio.ensure_future(
+            self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+        )
+        # One turn is enough today — nothing before ``prompt``'s first suspension
+        # point yields — but a couple of extra turns costs nothing and keeps this
+        # correct if a future edit puts another await in that prelude.
+        for _ in range(_ADMISSION_PRELUDE_TURNS):
+            if task.done():
+                break
+            await asyncio.sleep(0)
+        if task.done():
+            # Re-raises the synchronous refusal into the caller's warning path.
+            # A cancelled task is not a refusal to report: the session is going
+            # away and the receipt is the least of it.
+            if not task.cancelled():
+                task.result()
+            return
+        # Still parked on the durable append, i.e. genuinely queued behind a
+        # running turn. Let it finish on its own; the user row appears through
+        # the event relay exactly as it would for any other admitted prompt.
+        task.add_done_callback(_log_detached_admission)
 
     async def _slash_result(
         self, command: str, args: str, SlashResult: Any, locality: str = "local"
