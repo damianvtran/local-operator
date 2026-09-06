@@ -181,6 +181,7 @@ class AttachClient:
         self._pending: dict[Any, asyncio.Future[dict[str, Any]]] = {}
         self._req_seq = 0
         self._session_id = ""
+        self._attention_supported = False
         self._connected = False
 
     @property
@@ -200,6 +201,7 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        self._attention_supported = "completion-ack-v1" in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -557,6 +559,11 @@ class AttachClient:
 
     async def abort(self) -> str:
         return await self._request("abort")
+
+    async def acknowledge_attention(self, token: str) -> str:
+        if not self._attention_supported:
+            raise RuntimeError("update the owner to acknowledge completions")
+        return await self._request("acknowledge_attention", completion_token=token)
 
     async def request_stop(self) -> str:
         """Ask the owner to stop itself — the follower's bare ``/stop``.

@@ -53,6 +53,14 @@ def test_exact_session_scope_models_purposes_and_costs(tmp_path):
     assert report.by_model["anthropic", "two"].cost_micro == 0
     assert not report.by_model["other", "one"].cost_is_known
     assert report.by_purpose_outcome == {("turn", "ok"): 2, ("turn", "error"): 1}
+    # by_purpose carries CONSUMPTION, which the count-only cross-tab above
+    # cannot: "what did compaction cost me" is not answerable from a count.
+    # Same `measures` contract as by_model, so the two must agree on the total.
+    assert set(report.by_purpose) == {"turn"}
+    assert report.by_purpose["turn"].calls == 3
+    assert report.by_purpose["turn"].total_tokens == report.aggregate.total_tokens
+    assert report.by_purpose["turn"].cost_micro == report.aggregate.cost_micro
+    assert report.by_purpose["turn"].cost_is_partial
     assert report.missing_usage_calls == 1
     assert report.unknown_usage_calls == 0
     assert report.timings["duration_ms"].samples == 3
@@ -116,6 +124,10 @@ def test_legacy_columns_remain_unknown_and_schema_unchanged(tmp_path):
     assert not report.aggregate.cost_is_known
     assert report.unknown_usage_calls == 1 and report.missing_usage_calls == 0
     assert report.by_purpose_outcome == {("unknown", "unknown"): 1}
+    # No `purpose` column on this ledger: `col()` folds every row into one
+    # honest `unknown` bucket rather than failing the query or inventing labels.
+    assert set(report.by_purpose) == {"unknown"}
+    assert report.by_purpose["unknown"].total_tokens == 120
     assert report.recent[0].duration_ms is None
     assert report.recent[0].usage_reported is None
     assert path.read_bytes() == before
@@ -159,4 +171,32 @@ def test_all_sections_share_snapshot_during_concurrent_commit(tmp_path, monkeypa
     assert sum(g.calls for g in report.by_model.values()) == 1
     assert [r.request_id for r in report.recent] == ["before"]
     assert store.session_report("s1").aggregate.calls == 2
+    store.close()
+
+
+def test_by_purpose_splits_consumption_across_real_purposes(tmp_path):
+    """One GROUP BY on an existing column; the parts must sum to the whole."""
+    store = AnalyticsStore(tmp_path / "ledger.db")
+    base = replace(_snap(), request_id="r0", outcome="ok")
+    store.record_batch(
+        [
+            replace(base, request_id="r1", purpose="turn"),
+            replace(base, request_id="r2", purpose="turn"),
+            replace(base, request_id="r3", purpose="compaction", cost_micro=250),
+            replace(
+                base, request_id="r4", purpose="naming", cost_micro=90, ok=False, outcome="error"
+            ),
+        ]
+    )
+    report = store.session_report("s1")
+    assert set(report.by_purpose) == {"turn", "compaction", "naming"}
+    assert report.by_purpose["turn"].calls == 2
+    # The partition is exact: every purpose's tokens and cost sum to the total,
+    # which is what lets the by-purpose bars carry share-of-session percentages.
+    assert sum(a.calls for a in report.by_purpose.values()) == report.aggregate.calls
+    assert sum(a.total_tokens for a in report.by_purpose.values()) == report.aggregate.total_tokens
+    assert sum(a.cost_micro for a in report.by_purpose.values()) == report.aggregate.cost_micro
+    # The failure annotation still comes from the outcome cross-tab, not here.
+    assert report.by_purpose_outcome[("naming", "error")] == 1
+    assert report.by_purpose["naming"].calls == 1
     store.close()

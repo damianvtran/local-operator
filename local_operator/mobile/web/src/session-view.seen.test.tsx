@@ -1,10 +1,7 @@
 // @vitest-environment happy-dom
 //
-// Seen handshake (spec §3): opening a session — the root route OR a subagent
-// route, both of which render through SessionScreen — must fire
-// POST /api/sessions/{id}/seen once on mount and optimistically clear the
-// client's `unseen` copy so back-navigation never flashes a stale `new` mark.
-import { cleanup, render, waitFor } from "@testing-library/react";
+// Only an uncovered final result in the focused selected conversation is read.
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import type { SessionProjection } from "./types";
@@ -71,23 +68,67 @@ const { clearSessionUnseen } = await import("./store");
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
+	vi.restoreAllMocks();
+	vi.useRealTimers();
 	slot = { projection: null, connected: true };
 });
 
+function focusedResult() {
+	vi.useFakeTimers();
+	const p = projection();
+	p.transcript = [{ id: "result-a", kind: "assistant", text: "Finished result", final: true, text_complete: true,
+		tool_call_id: "", tool_name: "", tool_state: "done", summary: "", intent: "",
+		diff_added: 0, diff_removed: 0, elapsed_s: 0, error: "", details: {} }];
+	p.attention = { conversation_id: "session/s1", completion_token: "token-a", anchor_id: "result-a", kind: "complete", unseen: true, revision: [1, 0] };
+	slot = { projection: p, connected: true };
+	vi.spyOn(document, "hasFocus").mockReturnValue(true);
+	vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+	vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 200, 100));
+	vi.spyOn(document, "elementFromPoint").mockImplementation(() => document.querySelector("[data-completion-anchor]"));
+	return p;
+}
+
+async function sample() {
+	await act(async () => { vi.advanceTimersByTime(600); });
+}
+
 describe("SessionScreen seen handshake", () => {
-	it("fires POST /seen once and clears the store flag on the root route", async () => {
-		slot = { projection: projection(), connected: true };
+	it("acknowledges the rendered token once without optimistic clearing", async () => {
+		focusedResult();
 		render(<SessionScreen sessionId="s1" />);
-		await waitFor(() => expect(markSessionSeen).toHaveBeenCalledWith("s1"));
+		await sample();
+		expect(markSessionSeen).toHaveBeenCalledWith("s1", "token-a");
+		await sample();
 		expect(markSessionSeen).toHaveBeenCalledTimes(1);
-		expect(clearSessionUnseen).toHaveBeenCalledWith("s1");
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 
-	it("fires POST /seen on the agent route too", async () => {
+	it.each(["hidden", "blurred", "covered", "scrollback", "streaming", "disconnected", "truncated", "unknown completeness"])("does not acknowledge %s results", async (reason) => {
+		const p = focusedResult();
+		if (reason === "hidden") vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+		if (reason === "blurred") vi.spyOn(document, "hasFocus").mockReturnValue(false);
+		if (reason === "covered") vi.spyOn(document, "elementFromPoint").mockReturnValue(document.body);
+		if (reason === "scrollback") vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 200, innerHeight + 100));
+		if (reason === "streaming") p.streaming = true;
+		if (reason === "truncated") p.transcript[0].text_complete = false;
+		if (reason === "unknown completeness") delete p.transcript[0].text_complete;
+		if (reason === "disconnected") slot.connected = false;
+		render(<SessionScreen sessionId="s1" />);
+		await sample();
+		expect(markSessionSeen).not.toHaveBeenCalled();
+	});
+
+	it("does not acknowledge an empty mounted root route", async () => {
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(markSessionSeen).not.toHaveBeenCalled();
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
+	});
+
+	it("never acknowledges the parent while a child route is loading", async () => {
 		slot = { projection: projection(), connected: true };
 		render(<SessionScreen sessionId="s1" jobId="job-1" />);
-		await waitFor(() => expect(markSessionSeen).toHaveBeenCalledWith("s1"));
-		expect(markSessionSeen).toHaveBeenCalledTimes(1);
-		expect(clearSessionUnseen).toHaveBeenCalledWith("s1");
+		expect(markSessionSeen).not.toHaveBeenCalled();
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 });

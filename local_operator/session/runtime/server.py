@@ -420,8 +420,18 @@ class RuntimeServer:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
-            capabilities=[DESKTOP_WATCH_CAPABILITY]
-            + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else []),
+            # Three independent capabilities, each gated by its own condition.
+            # The desktop watch surface is unconditional (this server always
+            # serves it), while the frontend and completion-ack capabilities
+            # are advertised only when the handle actually implements them --
+            # advertising one the handle cannot honour is worse than omitting
+            # it, because the client then negotiates a surface that is not
+            # there.
+            capabilities=(
+                [DESKTOP_WATCH_CAPABILITY]
+                + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
+                + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
+            ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
             # the window before a viewer attaches is exactly when a detached
@@ -457,6 +467,7 @@ class RuntimeServer:
         # an orphan warning and proving teardown returned before its work ended.
         self._push_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._attention_task: asyncio.Task[None] | None = None
         # Shutdown is represented by one owner-loop task so synchronous close,
         # awaited close, and the thread runner can converge without cancelling
         # loop-owned objects from whichever thread happened to request teardown.
@@ -727,6 +738,8 @@ class RuntimeServer:
                 logger.debug("event relay subscribe failed", exc_info=True)
         heartbeat = asyncio.ensure_future(self._heartbeat_loop())
         self._heartbeat_task = heartbeat
+        if hasattr(self._handle, "refresh_attention"):
+            self._attention_task = asyncio.create_task(self._attention_loop())
         if self._thread is not None:
             # Thread mode owns the loop: park here until closed. In-process
             # mode returns so the caller's loop keeps running its own work —
@@ -754,6 +767,8 @@ class RuntimeServer:
         """Cancel and join every object owned by the runtime event loop."""
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
+        if self._attention_task is not None:
+            self._attention_task.cancel()
         if self._push_task is not None:
             self._push_task.cancel()
         for task in list(self._event_sends):
@@ -769,6 +784,9 @@ class RuntimeServer:
         if heartbeat is not None:
             await asyncio.gather(heartbeat, return_exceptions=True)
             self._heartbeat_task = None
+        if self._attention_task is not None:
+            await asyncio.gather(self._attention_task, return_exceptions=True)
+            self._attention_task = None
         if self._server is not None:
             await self._server.wait_closed()
             self._server = None
@@ -789,6 +807,21 @@ class RuntimeServer:
         if self._push_task is task:
             self._push_task = None
         self._push_scheduled = False
+
+    async def _attention_loop(self) -> None:
+        """Reconcile read receipts without making a liveness heartbeat a read."""
+        previous: Any = None
+        while not self._closed.is_set():
+            await asyncio.sleep(1.0)
+            if not self._clients:
+                continue
+            try:
+                state = await cast(Any, self._handle).refresh_attention()
+                if state != previous:
+                    previous = state
+                    self._schedule_push()
+            except Exception:
+                logger.debug("runtime receipt reconciliation deferred", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
         while not self._closed.is_set():
@@ -1513,6 +1546,16 @@ class RuntimeServer:
 
         validate_control_frame(frame)
         h = self._handle
+        if op == "acknowledge_attention":
+            token = frame.get("completion_token")
+            if not isinstance(token, str) or len(token) != 36:
+                raise ValueError("completion_token must identify the rendered completion")
+            acknowledge = getattr(self._handle, "acknowledge_attention", None)
+            if not callable(acknowledge):
+                raise ValueError("completion acknowledgements unavailable; update the owner")
+            await cast(Any, acknowledge)(token)
+            self._schedule_push()
+            return "completion acknowledged"
         if op == "ping":
             return "pong"
         if op == "snapshot":
