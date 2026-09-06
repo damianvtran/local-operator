@@ -282,14 +282,32 @@ had written into the real home. Any cell whose point is a cold cache needs a
 
 ### Read the committed ref, not the working tree
 
-The section above is about not *writing* into a checkout other agents are
-using. This is the same hazard in the other direction, and it is easier to
-fall into because nothing fails: **when you want to know what the repository
-says, read the ref, not the files on disk.**
+"Never `git stash` to get a before-frame" (in the visual-validation section
+below) is about not *writing* into a checkout other agents are using. This is
+the same hazard in the other direction, and it is easier to fall into because
+nothing fails: **when you want to know what the repository says, read a ref,
+not the files on disk.**
 
 ```sh
+git -C ~/local-operator fetch origin main --quiet          # REQUIRED: see below
 git -C ~/local-operator show origin/main:AGENTS.md | grep -n 'thing you are checking'
 grep -n 'thing you are checking' ~/local-operator/AGENTS.md   # answers about SOMEONE'S DRAFT
+```
+
+**Fetch first, and pick the right ref.** `origin/main` is a local tracking
+ref that only moves when something fetches, so reading it without fetching has
+the *same* failure this section exists to prevent — a silent, plausible, stale
+answer. Reproduced: against a tracking ref left where it was a few hours
+earlier, `git show origin/main:pyproject.toml` reported `0.50.2` while `main`
+was `0.50.3`, with no error. It bites hardest on "is this documented?"
+questions, because anything added recently is invisible on an older ref.
+
+And `origin/main` is not always the ref you mean. Asking whether *a PR's* tree
+contains something means reading that PR's head, not `main`:
+
+```sh
+git -C ~/local-operator fetch origin pull/713/head --quiet
+git -C ~/local-operator show FETCH_HEAD:AGENTS.md | grep -n 'thing you are checking'
 ```
 
 Several agents routinely hold uncommitted work in the root checkout at the
@@ -319,10 +337,28 @@ git -C ~/local-operator status --porcelain AGENTS.md   # 'M'/'MM' => on-disk cop
 This applies to any question about repository content — whether a rule is
 written down, whether a helper exists, whether a test covers a case, what a
 config declares. It does not apply to your own uncommitted work, which is the
-one thing the working tree is authoritative about. When you need several files
-or a whole tree at a known revision, take a throwaway worktree
-(`git worktree add --detach /tmp/lo-read origin/main`) rather than reading the
-shared checkout and hoping it is clean.
+one thing the working tree is authoritative about, and it is not only about
+`grep`: a subprocess launched with the wrong cwd resolves the root checkout's
+copy of a module rather than its own worktree's, which surfaces as failures
+that look environmental and are.
+
+When you need several files or a whole tree at a known revision, take a
+throwaway worktree rather than reading the shared checkout and hoping it is
+clean — and **remove it in the same task**, on a unique path, because a
+leftover either blocks the next agent or gets silently reused at a stale
+revision (`git worktree list` presently shows dozens of abandoned ones):
+
+```sh
+read=$(mktemp -d /tmp/lo-read.XXXXXX)
+git -C ~/local-operator fetch origin main --quiet
+git -C ~/local-operator worktree add --detach "$read" origin/main --quiet
+grep -n 'thing you are checking' "$read/AGENTS.md"
+git -C ~/local-operator worktree remove --force "$read"
+```
+
+The `-C ~/local-operator` is load-bearing on every command here: you are
+usually standing somewhere else when you ask these questions, and without it
+`git` fails with `not a git repository`.
 
 ## Releasing the stable `lop` runtime
 
