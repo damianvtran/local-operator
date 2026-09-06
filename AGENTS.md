@@ -303,12 +303,22 @@ was `0.50.3`, with no error. It bites hardest on "is this documented?"
 questions, because anything added recently is invisible on an older ref.
 
 And `origin/main` is not always the ref you mean. Asking whether *a PR's* tree
-contains something means reading that PR's head, not `main`:
+contains something means reading that PR's head, not `main`. Fetch it into a
+**named ref** and delete that ref afterwards:
 
 ```sh
-git -C ~/local-operator fetch origin pull/713/head --quiet
-git -C ~/local-operator show FETCH_HEAD:AGENTS.md | grep -n 'thing you are checking'
+git -C ~/local-operator fetch origin pull/713/head:refs/lo-read/pr713 --force --quiet
+git -C ~/local-operator show refs/lo-read/pr713:AGENTS.md | grep -n 'thing you are checking'
+git -C ~/local-operator update-ref -d refs/lo-read/pr713
 ```
+
+**Not `FETCH_HEAD`.** There is one `FETCH_HEAD` per gitdir, rewritten by every
+fetch, and the `-C ~/local-operator` above means every session on this machine
+shares the root checkout's copy. A peer fetching between your fetch and your
+read silently redirects it: measured at **0 successes in 20 interleaved
+trials**, returning `main`'s tree with no error, where the named-ref form
+succeeded 8/8. That is this section's own failure — a confident wrong answer —
+reappearing inside the command meant to prevent it.
 
 Several agents routinely hold uncommitted work in the root checkout at the
 same time, so a tracked file there is whatever the last writer left mid-task —
