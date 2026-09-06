@@ -52,7 +52,13 @@ class GoalLoop:
         except ValueError:
             if _BOTCHED_COUNT_RE.fullmatch(args):
                 raise ValueError("Enter a whole iteration count or a goal") from None
-            goal, count = args, None
+            # Clipped HERE, where the user's slash argument enters the loop
+            # state, for the same reason `reason` is clipped at its parse: this
+            # is the one place the value arrives, so a later writer cannot
+            # forget. Without it `goal` rode the attach frame bounded only by
+            # the desktop route's `max_length=200_000`, and an oversized frame
+            # is a DROPPED LINE -- a session that simply cannot be attached to.
+            goal, count = args[:LOOP_GOAL_CHARS], None
         if count is not None and not 1 <= count <= MAX_LOOP_ITERATIONS:
             raise ValueError(f"Iterations must be between 1 and {MAX_LOOP_ITERATIONS}")
         if not goal and not standing_goal:
@@ -108,6 +114,20 @@ class GoalLoop:
 #: matches ``JOB_PROMPT_WIRE_CHARS`` so two frontends do not disagree about how
 #: much explanatory text is "a preview".
 LOOP_REASON_CHARS = 1_000
+
+#: Upper bound on the user's typed loop goal, the state's other free-text value.
+#:
+#: It rides the same attach frame as `reason` and was previously bounded only by
+#: the desktop route's `max_length=200_000` -- two orders of magnitude past what
+#: the frame guard asserted against, so the guard's 2,000-char fixture was
+#: testing a limit nothing enforced. Clipped at :meth:`GoalLoop.start`, where the
+#: value enters the state.
+#:
+#: 2,000 rather than LOOP_REASON_CHARS: a goal is the user's own instruction and
+#: the loop prompts with it every iteration, so it earns more room than a judge's
+#: one-sentence explanation. It is also the bound the frame guard already
+#: asserts, which is now a real bound rather than a hopeful one.
+LOOP_GOAL_CHARS = 2_000
 
 _BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")
 
