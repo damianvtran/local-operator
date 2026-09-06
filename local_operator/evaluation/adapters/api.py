@@ -201,12 +201,32 @@ class AdapterCapabilities(ProtocolModel):
     scoring: bool
     paste_text: bool = False
     type_text_mode: Literal["unicode", "ascii"] = "unicode"
+    # An adapter whose keyboard delivery is linear in text length advertises the
+    # longest type it can finish inside its own execution deadline. Negotiated
+    # rather than assumed by core: the deadline and the per-character cost are
+    # both the backend's, and a bound core invented would be wrong for every
+    # backend but one. ``None`` means the backend has no length-dependent
+    # deadline. The None default lets a NEW parent accept an OLD worker that
+    # predates the field — it simply advertises no bound, which is the
+    # behaviour it already had. The reverse is NOT compatible: ``ProtocolModel``
+    # forbids extra keys, and this key is always emitted (even as ``None``), so
+    # an old parent refuses a new worker at hello with ``extra_forbidden``.
+    # That is the compatibility gate for the old-parent direction, not the
+    # selector's ``package_digest``: that digest hashes only the adapter
+    # wheel's RECORD (``discovery.verify_distribution``), is checked on the
+    # worker during hello, and does not pin ``local-operator``. A matching
+    # selector plus new adapter plus new worker-venv core plus old parent
+    # core still reaches hello and dies there. Hello fails closed before
+    # ``prepare``/``reset`` allocate, which is why the schema version was
+    # not bumped; do not treat the digest as a protocol-compat substitute.
+    max_type_chars: int | None = Field(default=None, ge=1)
 
     def action_surface(self) -> "ActionSurface":
         return ActionSurface(
             paste_text=self.paste_text,
             type_text_mode=self.type_text_mode,
             ask_user=self.ask_user,
+            max_type_chars=self.max_type_chars,
         )
 
     @field_validator("routes", mode="before")

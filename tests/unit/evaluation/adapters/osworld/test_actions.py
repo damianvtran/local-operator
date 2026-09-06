@@ -57,7 +57,24 @@ def test_type_uses_repr_for_adversarial_text() -> None:
     compiled = actions.compile_action(TypeAction(observation_id="o", text=text), None)
     # The emitted statement must contain the repr, so re-parsing the argument
     # yields exactly the original string.
-    assert compiled == f"pyautogui.typewrite({text!r}, interval=0.01)"
+    assert compiled == f"pyautogui.typewrite({text!r})"
+
+
+@pytest.mark.parametrize("length", [1, 100, 6092, 7332, 20_000])
+def test_type_never_emits_an_interval_at_any_length(length: int) -> None:
+    """Upstream parity: pyautogui's default interval of 0.0, at every size.
+
+    ``typewrite`` sleeps ``interval`` seconds per character unconditionally, so
+    any interval at all is a hard floor of ``interval x len(text)`` on guest
+    time rather than a pacing hint. Passing 0.01 killed two episodes at 7332 and
+    6912 characters. Parametrised over length because the defect was invisible
+    at the short strings the other compiler tests use.
+    """
+
+    compiled = actions.compile_action(TypeAction(observation_id="o", text="a" * length), None)
+    assert compiled is not None
+    assert "interval" not in compiled
+    assert compiled == f"pyautogui.typewrite({'a' * length!r})"
 
 
 def test_single_key_compiles_to_press() -> None:

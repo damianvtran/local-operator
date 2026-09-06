@@ -69,5 +69,5 @@ def test_adapter_metadata_matches_compiler_admission() -> None:
 
 def test_native_type_control_and_small_transport_are_unchanged() -> None:
     assert actions.compile_action(TypeAction(observation_id="obs", text="a\t\n\r")) == (
-        "pyautogui.typewrite('a\\t\\n\\r', interval=0.01)"
+        "pyautogui.typewrite('a\\t\\n\\r')"
     )
