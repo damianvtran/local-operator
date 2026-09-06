@@ -478,3 +478,53 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
     assert "Settings > Providers" in raised.value.actionable
     assert "Traceback" not in raised.value.actionable
     assert "x.py" not in raised.value.actionable
+
+
+def test_spawn_capture_is_private_and_anonymous(tmp_path, monkeypatch) -> None:
+    """The child's stdio capture must not be world-readable, or name the session.
+
+    It receives the runtime's ENTIRE stdout+stderr -- tracebacks, provider error
+    bodies, config echoes -- and lives in the shared temp directory. Created
+    through `Path.open("wb")` it took the process umask (measured 0o644 here),
+    so any local user could read another user's provider errors; and because the
+    name embedded `session_id`, a directory listing alone disclosed live session
+    ids without opening anything (review round 2, MAJOR-2).
+    """
+    import os
+    import stat
+
+    from local_operator.session.runtime import launch as launch_module
+
+    monkeypatch.setattr(os, "umask", lambda _mask: 0o022)
+    spawned: list[Any] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(*args: Any, **kwargs: Any):
+        # Record the handle the spawn opened, then hand back an inert process:
+        # the file's PERMISSIONS are what is under test, not the child.
+        spawned.append(kwargs["stdout"])
+        return _Popen()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+
+    session_id = "secret-session-id-abc123"
+    process = launch_module._spawn_runtime(session_id, str(tmp_path), defer_materialise=True)
+    capture = getattr(process, "lop_capture_path")
+    try:
+        mode = stat.S_IMODE(capture.stat().st_mode)
+        assert not mode & stat.S_IROTH, f"world-readable: {oct(mode)}"
+        assert not mode & stat.S_IRGRP, f"group-readable: {oct(mode)}"
+        assert mode == 0o600, oct(mode)
+        assert session_id not in capture.name, capture.name
+        # The four-unlink lifecycle still needs a real path on the process.
+        assert capture.exists()
+    finally:
+        capture.unlink(missing_ok=True)
