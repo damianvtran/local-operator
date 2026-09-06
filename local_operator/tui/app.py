@@ -16242,6 +16242,33 @@ class OperatorApp(App[None]):
         notice("starting session…", "info")
         self._run_session_transition(self._reload_session())
 
+    def _footer_persist_hint(self) -> str:
+        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+
+        The footer's half of U12. The notice above the list stops naming
+        `/model default` in the no-hosting and unknown-hosting setup variants
+        because every `/model` route refuses there — but the footer is a second
+        surface printing the same instruction, and a fix that left it advertising
+        the dead end would only move the trap one row down (visible in the U12
+        before/after frames: the notice was honest and the footer was not).
+
+        The predicate is ``_model_missing_for``, the same one `_cmd_model`'s
+        escape is gated on, so across the three SETUP-STATE variants "the
+        footer offers it" and "the command performs it" cannot drift apart.
+
+        That is the full extent of the claim (code review round 1, R2). It is
+        not a general equivalence: `_cmd_model` ALSO refuses `/model default`
+        when :meth:`_session_runs_elsewhere` is true, and this predicate does
+        not consult it, so on a genuinely remote session the footer still
+        advertises a command that answers with the "run it on the terminal
+        whose launches it should govern" refusal. That case is pre-existing and
+        outside #641's scope — recorded here rather than fixed so the next
+        reader does not take the coupling for wider than it is.
+        """
+        if self._setup_state and not self._model_missing_for:
+            return ""
+        return PERSIST_HINT
+
     def _persist_hint_notice(self) -> str:
         """The line a bare ``/model`` prints above the list.
 
@@ -16262,24 +16289,148 @@ class OperatorApp(App[None]):
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
 
+        The measurement above is about the NOTICE's own last row and about
+        command names spanning a fold — nothing stronger (QA round 1, Q1). An
+        earlier revision of this docstring claimed `/settings` "is never the
+        final token at ANY body width from 38 to 90", which is false: it ends a
+        folded, non-final row in 58 combinations across 27 widths for the
+        ordinary variant (162 across all three), measured through
+        `NoticeBlock.body_budget` (QA round 2, Q5 — the earlier 62/39 came from
+        a harness that is not recoverable from what was written). A clause that
+        continues on the next row is not the defect D8 named; a command the
+        reader must re-join two rows to recover is, and that is what is
+        actually pinned.
+
         The nouns are placed so each pronoun sits beside its antecedent (design
-        review D4): "this" is the model on the band, "the boot default" is
-        restated before "set it" so "it" does not have to reach back past
-        "this". "Boot default" is the ONE noun for the thing `/model default`
-        writes — the receipt says `boot default saved to …` and `/model saved`
-        refuses with `no boot default …` — so the user is never left wondering
-        whether a "saved default" and a "boot default" are two settings
-        (design review round 2, D6).
+        review D4). "Boot default" is the ONE noun for the thing `/model
+        default` writes — the receipt says `boot default saved to …` and
+        `/model saved` refuses with `no boot default …` — so the user is never
+        left wondering whether a "saved default" and a "boot default" are two
+        settings (design review round 2, D6).
+
+        CLAUSE ORDER IS A WRAP CONSTRAINT, not a preference (design review
+        round 2, D8). The old order ended on `· or set it in /settings`, and at
+        the three widths the block actually renders at — body budgets 70/69/76
+        cells for 80/100/120 columns — the fold left `/settings` alone on the
+        last row for most model labels: the row length varies with the label,
+        so a single label measuring clean proves nothing.
+
+        TWO defect classes, not one, and a fix for the first can create the
+        second (design review round 4 D1 / UX round 4 U3). D8's harness scored
+        only LONE-TOKEN LAST ROWS, so the arrangement it picked
+        (`… · /settings edits the boot default too · /model saved reverts to
+        it`) scored a clean 0 while quietly moving the damage into the middle
+        of the block: a row ending on a bare `/model` whose next row opens
+        `saved reverts to it` splits the two-word COMMAND NAME across the fold,
+        which costs the reader exactly what D8 cost them — the command cannot
+        be read off one row. That measured 4 splits over the 9 labels the test
+        carries x the three pristine widths (code review round 2, R18 — the
+        earlier "5 over 11 labels" described a wider matrix than the one that
+        ships as evidence), and the frame shipped as D8's own evidence
+        contained one.
+
+        Both classes are scored now, and the lever turned out to be structural
+        rather than lexical: it is WHERE a two-word command name sits in its
+        clause. A name that OPENS a clause (`/model saved reverts to it`) sits
+        one word from the `·` seam, so it breaks across the fold whenever that
+        seam lands near the margin; a name at the clause's END has ordinary
+        words ahead of it to absorb the fold. So `/model saved` moved to the
+        end of its clause and the pristine split count goes 4 -> 0.
+        `/settings` keeps its leading position because four words follow it
+        either way.
+
+        THE BLOCK RENDERS AT TWO WIDTH FAMILIES AND BOTH ARE MEASURED (QA
+        round 2, Q3). Earlier rounds scored only the PRISTINE family — the
+        widths a `NoticeBlock` takes in a transcript with nothing else in it
+        (block widths 76/75/82 at 80/100/120 columns, body budgets 70/69/76).
+        Once the transcript holds any content the block is `cols - 4` instead
+        (76/96/116, budgets 70/90/110), and that is the family the hint is
+        NORMALLY read at, because a user meets it after they have been working.
+        Measured over the 9 labels the test carries x 3 variants x 3 widths in
+        each family:
+
+        =========================  ========  =========
+        class                      pristine  non-empty
+        =========================  ========  =========
+        C1 lone command last row          0          0
+        C2 split command name             0          3
+        C3 lone ordinary word             2          1
+        =========================  ========  =========
+
+        So the clean 0 that earlier rounds claimed holds at the pristine family
+        only. At the non-empty family C2 is not zero, and the honest
+        justification for the arrangement is a comparison rather than a clean
+        sheet: the D8 arrangement scores C2 4 / C3 2 pristine and C2 2 / C3 1
+        non-empty, so this trades a class the reader cannot act on (a command
+        split across the fold, in the family they see least) against one they
+        can (prose wrapping). Sweeping 80-160 columns at the non-empty family
+        the two arrangements are a wash — the split occupies a narrow band — so
+        the pristine improvement is what is actually bought.
+
+        What is NOT claimed: this does not promise every row ends on a
+        multi-word phrase, and the residual is not a rounding error (design
+        review round 2, D4). An ordinary word can still land alone on the last
+        row — 2 label x width combinations at the pristine family and 1 at the
+        non-empty one, on the test's own 9 labels. That is ordinary prose
+        wrapping rather than the defect these findings are about, and the
+        reader can still read every command off a single row, which is the
+        property being bought — but it is a real cost paid on a real surface,
+        not a hypothetical one. A 2,240-combination search over clause wordings
+        and orders found no arrangement that is clean on all three classes
+        across all three variants, so this is the measured optimum and not a
+        claim of perfection. `test_the_bare_model_notice_does_not_orphan_a_route_token`
+        pins the two that matter, at BOTH families.
 
         The `/model saved` clause is DROPPED in the setup state (UX review
         round 2, U11): that state is by definition the one with no usable boot
         default, and `_cmd_model_saved` refuses there, so naming the route
         would advertise a dead end the app already knows about.
+
+        THE SETUP STATE HAS TWO SHAPES and they get different sentences (UX
+        review round 3, U12). In the no-model variant (`_model_missing_for`
+        set) the `/model` routes genuinely work: `_cmd_model` has an escape
+        that writes config and boots, so the persist hint is live advice. In
+        the no-hosting and unknown-hosting variants there is no model escape at
+        all — `_cmd_model`, `_cmd_model_saved` and the bare `/model default`
+        all fall through to `session is still starting…`, and #625 kept
+        Enter-on-a-row from writing config there for exactly that reason. So
+        naming `/model default` there advertises three dead ends beside the one
+        working route. Those variants get the `/settings` clause ALONE, which
+        is the route that actually resolves, and the splash's `/login` remains
+        the primary next step it always was. Pinned by
+        `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
         session = self._session
         label = session.model_label if session is not None else ""
-        back = "" if self._setup_state else " · /model saved switches back to the boot default"
-        routes = f"{PERSIST_HINT}{back} · or set it in /settings"
+        # Named once: it is the one clause every variant below shares, and the
+        # wrap analysis above measured this exact string.
+        settings_clause = "/settings edits the boot default too"
+        # `/model saved` sits at its clause's END, which is what removes the
+        # split: as the clause's FIRST word it sat one word from the `·` seam
+        # and broke across the fold at 4 of the 27 rendered label x width
+        # combinations the test pins (R18). `/settings` is left leading its own
+        # clause because it is followed by four words, so the fold has slack
+        # after it either way.
+        #
+        # The carrier NAMES ITS DESTINATION (design review round 2, D5). It
+        # read `come back with /model saved`, which put the only mention of
+        # what the user comes back TO at character 95 of 111 — in the following
+        # clause, attached to `/settings` — so a strictly left-to-right reader
+        # met the pronoun before its antecedent, which is what D6/D10 were
+        # filed to prevent. `boot default` now sits at character 59, beside the
+        # command it describes. It also says what the command DOES rather than
+        # naming an occasion to use it (UX review round 2, U6), and it measures
+        # better on both width families, not worse: pristine C3 3 -> 2 and
+        # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
+        saved_clause = "switch to the boot default with /model saved"
+        if self._setup_state and not self._model_missing_for:
+            # No hosting / unknown hosting: every `/model` route refuses here,
+            # so the notice must not name one. `/settings` is the live escape.
+            routes = settings_clause
+        elif self._setup_state:
+            routes = f"{PERSIST_HINT} · {settings_clause}"
+        else:
+            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
         return f"model: {label} — {routes}"
@@ -17155,7 +17306,7 @@ class OperatorApp(App[None]):
         notice ends the empty state — which collapses the boot composition and
         makes the centred prompt unreachable.
 
-        The notice is skipped when the ledger's LAST row already says it. The
+        The notice is skipped when the ledger's last ROW ALREADY SAYS IT. The
         message is meant to fire once per visible opening, and the editor now
         keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
         round 2, U8, where each Esc-then-edit cycle stacked another copy). This
@@ -17163,11 +17314,27 @@ class OperatorApp(App[None]):
         opens that produces nothing between them can print the hint twice,
         whatever the editor's resync does in future. Compared on the text, so
         a hint that changed (a switch landed between two opens) still prints.
+
+        THE SCAN SKIPS THE PINNED WORKING LINE (code review round 2, R12). A
+        turn in flight pins its working line to the bottom of the transcript
+        (``TranscriptView.pin_tail``) and every later append is inserted BEFORE
+        it, so mid-turn the hint never lands last and a guard reading only
+        ``blocks()[-1]`` could not match it — the deduplication silently
+        stopped applying in exactly the state where a user re-opening the list
+        while the agent works would stack copies. Walking back over the pinned
+        tail costs one comparison and makes the guard mean what its name says
+        in both states. Only the tail is skipped, not an arbitrary run: two
+        notices with a real block between them are two separate openings and
+        must both print.
         """
         message.stop()
         hint = self._persist_hint_notice()
-        blocks = self._transcript_view().blocks()
-        last = blocks[-1] if blocks else None
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        pinned = transcript.pinned_tail()
+        # The last block that is not the pinned working line — which is where a
+        # mid-turn append actually lands.
+        last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
             self._system_notice(hint)
         self._populate_model_picker()
@@ -17223,7 +17390,9 @@ class OperatorApp(App[None]):
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
             status=_status_line(
-                note, "checking providers…" if self._providers else "", PERSIST_HINT
+                note,
+                "checking providers…" if self._providers else "",
+                self._footer_persist_hint(),
             ),
         )
         if self._providers is not None:
@@ -17255,7 +17424,9 @@ class OperatorApp(App[None]):
                 rows,
                 current=self._current_selector(),
                 status=_status_line(
-                    note, f"{STALE_LIST_LABEL} all providers — {error}", PERSIST_HINT
+                    note,
+                    f"{STALE_LIST_LABEL} all providers — {error}",
+                    self._footer_persist_hint(),
                 ),
             )
             return
@@ -17263,7 +17434,7 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
+            status=_status_line(note, _catalogue_status(statuses), self._footer_persist_hint()),
         )
 
     def _publish_model_catalogue(self, session: Any) -> None:
