@@ -17,7 +17,7 @@ Two invariants run through the whole file and are each pinned by name:
 from __future__ import annotations
 
 import time
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 from textual import messages
@@ -55,6 +55,21 @@ def _running_app() -> OperatorApp:
     session = FakeSession()
     session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path", status="running"))
     return OperatorApp(_async_factory(session))
+
+
+class _SpinnerTimers(NamedTuple):
+    """The three animated surfaces' timer objects, captured at one instant.
+
+    Named rather than a bare tuple because these are only ever compared PER
+    SURFACE: a tuple `!=` passes when any single element differs, which is the
+    hole review round 1 (R1) and QA round 1 (Q1) both found by mutation. Fields
+    make the pairing explicit at the assertion site, so reordering the capture
+    cannot silently compare the dock against the band.
+    """
+
+    view: Any
+    panel: Any
+    band: Any
 
 
 def _running_app_with_running_grandchild() -> OperatorApp:
@@ -323,7 +338,9 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
         assert view._spinner_rate == SPINNER_INTERVAL_S
         assert panel._spinner_rate == SPINNER_INTERVAL_S
         assert band._spinner_rate == SPINNER_INTERVAL_S
-        before = (view._spinner_timer, panel._spinner_timer, band._spinner_timer)
+        blurred_from = _SpinnerTimers(
+            view._spinner_timer, panel._spinner_timer, band._spinner_timer
+        )
 
         app._set_animation_focused(False)
         await pilot.pause()
@@ -337,12 +354,24 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
         assert view._spinner_timer is not None
         assert panel._spinner_timer is not None
         assert band._spinner_timer is not None
-        # The structural half of the claim: a re-rate is a REPLACED timer, so
-        # an identical object here means the surface was silently skipped even
-        # though the number above happened to read correctly.
-        assert (view._spinner_timer, panel._spinner_timer, band._spinner_timer) != before
+        # The structural half of the claim, asserted PER SURFACE. A re-rate is
+        # a REPLACED timer, so an identical object here means that surface was
+        # silently skipped even though the number above happened to read
+        # correctly — a `_spinner_rate` reporting the new cadence while the
+        # timer still fires at the old one is exactly the lying-field shape
+        # this test exists to remove, and one assertion per surface is what
+        # makes it detectable. Stated three times rather than as one tuple
+        # compare: `!=` on a tuple passes when ANY element differs, so two
+        # surfaces could keep their timers and it would still go green
+        # (review round 1, R1 / QA round 1, Q1 — both mutation-proved it by
+        # having the panel record the wanted rate without replacing its timer).
+        assert view._spinner_timer is not blurred_from.view, "the child page was not re-rated"
+        assert panel._spinner_timer is not blurred_from.panel, "the dock was not re-rated"
+        assert band._spinner_timer is not blurred_from.band, "the band was not re-rated"
 
-        blurred = (view._spinner_timer, panel._spinner_timer, band._spinner_timer)
+        focused_from = _SpinnerTimers(
+            view._spinner_timer, panel._spinner_timer, band._spinner_timer
+        )
 
         app._set_animation_focused(True)
         await pilot.pause()
@@ -350,7 +379,9 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
         assert view._spinner_rate == SPINNER_INTERVAL_S
         assert panel._spinner_rate == SPINNER_INTERVAL_S
         assert band._spinner_rate == SPINNER_INTERVAL_S
-        assert (view._spinner_timer, panel._spinner_timer, band._spinner_timer) != blurred
+        assert view._spinner_timer is not focused_from.view, "the child page was not restored"
+        assert panel._spinner_timer is not focused_from.panel, "the dock was not restored"
+        assert band._spinner_timer is not focused_from.band, "the band was not restored"
 
 
 @pytest.mark.asyncio

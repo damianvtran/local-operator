@@ -2563,8 +2563,18 @@ async def test_a_deliberately_slow_double_click_is_still_a_double_click(
         await pilot.pause()
         editor = await _composer(app, pilot, "summarise the ingest path please")
         app._clipboard = "SOMETHING THE USER PUT THERE"
-        # Patched on the module `Message` resolves through, so every event this
-        # test constructs is stamped from this clock and nothing else is.
+        # `textual.message._time` IS the `textual._time` module object, not a
+        # per-module alias, so this freezes the clock GLOBALLY for the duration
+        # — `textual.timer` reads the same `_time.get_time()` inside
+        # `_run_timer`, and therefore sees it frozen and then jumped forward by
+        # the gaps below. That is safe HERE, and the reason is specific rather
+        # than lucky: `textual.timer` binds `sleep` directly
+        # (`from textual._time import sleep`), so actual waits stay real, and
+        # this test asserts on click-chain arithmetic rather than on anything
+        # firing at a cadence. Copying this fixture into a test that DOES
+        # depend on timer firing would need a different approach; patching
+        # `message_module` alone is not available, given the module identity
+        # above (review round 1, R2).
         now = {"t": textual_time.get_time()}
         monkeypatch.setattr(message_module._time, "get_time", lambda: now["t"])
 
