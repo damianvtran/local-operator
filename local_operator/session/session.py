@@ -245,6 +245,15 @@ _CONTINUATION_PROMPT = (
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
 
+#: How many turns may be dropped as born-pre-aborted before the session says so
+#: on the front end. The first drop is ordinary and silent — one arrival racing
+#: an abort the user just pressed is normal and needs no commentary. A RUN of
+#: them means work keeps arriving into a stopped session, which the user can
+#: only act on if they are told; the notice fires once per run (see
+#: ``_pre_aborted_drops``) rather than once per drop, because N identical rows
+#: at sub-second cadence is the noise this replaced.
+_PRE_ABORT_DROP_NOTICE_AT = 3
+
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
 #: ask hook). Named here rather than inline in
@@ -1989,6 +1998,17 @@ class Session:
         # usage objects that lifetime cost and analytics still need.
         self._held_context_tokens: int | None = None
         self._abort_requested = False  # sticky across the continuation gap
+        # Turns dropped back-to-back because they were born pre-aborted. Reset
+        # by any turn that actually runs, so the honest "I am dropping these"
+        # notice is emitted ONCE per run of drops instead of once per drop —
+        # the live session painted N identical ``interrupted`` rows at
+        # sub-second cadence and none of them said why.
+        self._pre_aborted_drops = 0
+        # Monotonic count of aborts. It is what lets an arriving unit of work
+        # tell "an abort happened before I got here" (stale — my own intent is
+        # newer, so I run) from "an abort happened while I was queued" (that
+        # Esc was aimed at me too, so I am held). See ``_prompt_messages``.
+        self._abort_epoch = 0
         # Boundary-respecting cancel (see request_graceful_cancel). Sticky like
         # ``_abort_requested`` and cleared on the same edges, but honoured at
         # the loop's post-tool boundary instead of by firing the abort signal,
@@ -5011,6 +5031,11 @@ class Session:
         the caller asks the session what it cancelled.
         """
         self._abort_requested = True
+        # Bumped on EVERY abort, before the signal fires. Work already queued
+        # on ``_turn_lock`` samples this on arrival and compares here, so one
+        # press stops the running turn AND the backlog behind it instead of
+        # stopping one turn per press (see ``_prompt_messages``).
+        self._abort_epoch += 1
         self.cancel_fork()
         if self._signal is not None:
             self._signal.abort(reason)
@@ -5696,7 +5721,60 @@ class Session:
         handling so it can REJECT reentrants instead of queueing)."""
         if self._disposed:
             raise RuntimeError("session is disposed")
+        # Sampled BEFORE the lock wait, so it dates this work's ARRIVAL rather
+        # than the moment it reached the front of the queue. An abort landing
+        # during the wait therefore bumps the epoch past this sample, which is
+        # exactly how the honoured-vs-stale test below can tell the two apart.
+        arrived_at_epoch = self._abort_epoch
         async with self._turn_lock:
+            # A newly ARRIVING unit of work is a fresh intent, exactly like a
+            # typed prompt, so it clears the sticky abort the same way
+            # ``prompt()`` does — see that method for the flag's contract.
+            #
+            # WHY THIS IS NOT "just clear it unconditionally": the flag is
+            # sticky on purpose, so a Ctrl+C landing in the gap between a turn
+            # and its post-compaction continuation is still honoured (read at
+            # ``_run_turn`` and ``_drain_continuation``). That case is
+            # untouched here because a continuation never comes through this
+            # method — ``_drain_continuation`` calls ``_run_turn`` directly,
+            # inside the same lock hold this clear can only run after. Every
+            # caller of ``_prompt_messages`` is arriving work (peer message,
+            # wake delivery, resume catch-up, background job result), never a
+            # continuation of the aborted turn.
+            #
+            # AFTER acquiring the lock, not before spawning: while this
+            # coroutine waits for the lock the PREVIOUS turn still owns it, and
+            # an abort landing in that window belongs to that turn and its
+            # continuations. Clearing early would eat it. Once the lock is
+            # ours, that turn and its continuation drain are both finished, so
+            # anything still set applied to work that is over. Identical
+            # ordering to ``prompt()``.
+            #
+            # Without this, ONE abort made every later wake/peer/catch-up turn
+            # pre-aborted forever: each arrival opened a turn that died before
+            # doing anything, and a session with subagents reporting in span at
+            # sub-second cadence spending a provider call per iteration.
+            #
+            # "FRESH" IS RELATIVE TO THE ABORT, WHICH IS WHY THIS IS NOT
+            # UNCONDITIONAL. Arrivals queue on ``_turn_lock`` behind a running
+            # turn, so at the moment the user presses Esc there may be N of
+            # them waiting. Those arrived BEFORE the stop and are part of what
+            # the user is stopping; clearing the flag for each of them in turn
+            # would run all N and force one press per queued item — the
+            # observed "Esc does nothing" (Defect 2a), and a worse loop than
+            # the one Defect 1 describes because each item runs a full turn.
+            #
+            # The epoch is the test. Unchanged since this work arrived means
+            # any pending abort predates it and does not apply: run, clearing
+            # the flag. Bumped means an abort landed while this sat in the
+            # queue, aimed at the backlog it was in: leave the flag set and let
+            # ``_run_turn`` hold the message instead of running it.
+            if self._abort_epoch == arrived_at_epoch:
+                self._abort_requested = False
+                # ...and the boundary cancel, for the reason ``prompt()``
+                # gives: the request applied to the turn the caller was
+                # stopping, not to the work that has just arrived.
+                self._graceful_cancel_requested = False
             # Same shell-receipt boundary as prompt(): a wake turn must not
             # build from context that omits a command already visible in TUI.
             await self._flush_shell_records()
@@ -5801,6 +5879,32 @@ class Session:
         producer_command_id: str | None = None,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``."""
+        if self._abort_requested:
+            # BORN PRE-ABORTED: do not open a turn at all. Running one spends a
+            # real provider request — the loop builds and issues the call
+            # before ``_drain_stream`` cancels its pump — and returns an
+            # ``aborted`` end with no output, which is a paid no-op. In the
+            # live incident that was the entire cost: a stopped session
+            # answering arrivals with instant empty turns, billed per
+            # iteration.
+            #
+            # DROPPED, not run, and the distinction matters: the arriving
+            # message is still persisted and still reaches the model on the
+            # next turn (the record-only path ``receive_peer_message`` uses for
+            # a busy session), so nothing is lost — only the model call the
+            # user already said to stop is skipped. No ``AgentStartEvent`` is
+            # emitted either, so no front end paints a turn that is not
+            # running.
+            #
+            # The flag deliberately stays set: it is cleared by an arriving
+            # unit of work (``_prompt_messages``) or a typed prompt, and a drop
+            # is neither. Clearing here would let the next arrival run the very
+            # work the abort was meant to stop.
+            await self._drop_pre_aborted_turn(initial, admitted=admitted, admitted_id=admitted_id)
+            return
+        # A turn is really running, so any run of drops has ended; the next one
+        # earns a fresh notice.
+        self._pre_aborted_drops = 0
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
             # construction; the first turn (with a loop) re-arms via pump().
@@ -5812,9 +5916,9 @@ class Session:
         signal = AbortSignal()
         self._signal = signal
         if self._abort_requested:
-            # A Ctrl+C landed in the gap between turns (signal was None);
-            # honour it on the fresh signal instead of running the
-            # continuation the user tried to stop.
+            # An abort that landed between the drop check above and here — a
+            # Ctrl+C in the microseconds this turn took to start. Honour it on
+            # the fresh signal rather than running work the user just stopped.
             signal.abort("interrupted")
         try:
             for message in initial:
@@ -6045,6 +6149,67 @@ class Session:
             await self._persist_progress(self._context.messages)
             self._signal = None
             self._is_streaming = False
+
+    async def _drop_pre_aborted_turn(
+        self,
+        initial: list[AgentMessage],
+        *,
+        admitted: asyncio.Future[None] | None = None,
+        admitted_id: str | None = None,
+    ) -> None:
+        """Retire a turn that would have been born aborted, without running it.
+
+        The arriving messages are still made DURABLE and still reach the model
+        on the session's next real turn — this drops the model call, never the
+        message. That is the same guarantee the record-only delivery path gives
+        a busy session (see ``receive_peer_message``), which is why the message
+        is appended to the transcript here and handed to
+        ``_append_or_park_journal`` for the live context rather than being
+        appended straight onto ``_context.messages``: the caller holds
+        ``_turn_lock``, so a bare append is the tool-batch splice hazard that
+        method documents.
+
+        No ``AgentStartEvent``/``AgentEndEvent`` pair is emitted. A dropped
+        turn never started, and emitting the pair is precisely what painted a
+        row of identical ``interrupted`` entries for turns that did no work.
+        """
+        self._pre_aborted_drops += 1
+        for message in initial:
+            await self._transcript.append_message(message)
+            if isinstance(message, CustomMessage):
+                self._append_or_park_journal(message)
+            else:
+                # A plain Message has no journal park (that path is typed for
+                # CustomMessage). Park it the same way the steering queue does
+                # so the next turn reads it: the queue is drained at the loop's
+                # injection boundary, which is turn-safe by construction.
+                self._steering_queue.put_nowait(message)
+            if admitted is not None and message.id == admitted_id and not admitted.done():
+                # The producer's durability contract is about the APPEND, not
+                # about a turn running: the row is on disk under Transcript's
+                # fsync boundary, so the producer may discard its retained
+                # command exactly as it would on the normal path. Leaving this
+                # future unresolved would hang the producer forever.
+                admitted.set_result(None)
+        if self._pre_aborted_drops == _PRE_ABORT_DROP_NOTICE_AT:
+            # ONE notice per run of drops. It names the remedy, because the
+            # state is otherwise invisible: the session looks idle, work keeps
+            # arriving, and nothing runs until a prompt clears the abort.
+            await self._emit(
+                NoticeEvent(
+                    text=(
+                        "Work is arriving into a stopped session and is being held, "
+                        "not run. Send a message to resume; the held items are read "
+                        "on that turn."
+                    ),
+                    kind="warning",
+                )
+            )
+        logger.info(
+            "dropped a pre-aborted turn (%d in this run); %d message(s) held for the next turn",
+            self._pre_aborted_drops,
+            len(initial),
+        )
 
     async def _drain_continuation(self) -> None:
         """Run queued auto-continuation prompts (post-compaction resume) as

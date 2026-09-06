@@ -1303,3 +1303,94 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+def _oversized_event_frame() -> dict[str, Any]:
+    """An ``event`` frame the size the operator's real transcript produced.
+
+    A single 1,039,374-byte transcript row serialized to a 1,129,319-byte
+    ``event`` frame — past the 1 MiB line limit both sides enforce.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    return {
+        "op": "event",
+        "data": {
+            "type": "message_update",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x" * (_MAX_LINE_BYTES + 80_000)}],
+            },
+            "delta": "x",
+        },
+    }
+
+
+def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
+    """``event`` is guarded the way ``frontend_sync`` already was.
+
+    An oversized line makes the client's ``readline`` raise
+    ``LimitOverrunError``, and the overrun does NOT consume the buffer, so every
+    later read re-raises: the pump dies and the viewer paints "owner sent a
+    frame too large to read". Degrading one delta is safe — the viewer recovers
+    through ``frontend_sync`` plus durable history — while killing the socket
+    is not.
+    """
+    from local_operator.session.remote import deserialize_event
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = _oversized_event_frame()
+    assert len(json.dumps(frame).encode()) + 1 > _MAX_LINE_BYTES
+
+    sendable = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+
+    # It now fits, so the client can read it...
+    assert len(json.dumps(sendable).encode()) + 1 <= _MAX_LINE_BYTES
+    assert sendable["op"] == "event"
+    # ...and it is still a VALID event: the client deserializes every relayed
+    # payload, and a bare marker would raise there and be silently swallowed.
+    event = deserialize_event(sendable["data"])
+    assert event.type == "notice"
+
+
+def test_oversized_frontend_update_keeps_its_sequence():
+    """Canonical deltas are not replacement-safe, so the placeholder is not one.
+
+    The client closes the connection on an ``epoch``/``sequence`` gap by design.
+    A placeholder that dropped those fields would trip that check and kill the
+    connection this guard exists to save, so only the oversized BODY is shed.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "epoch-1",
+            "sequence": 42,
+            "snapshot": {"jobs": "y" * (_MAX_LINE_BYTES + 10_000)},
+        },
+    }
+
+    sendable = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+
+    assert len(json.dumps(sendable).encode()) + 1 <= _MAX_LINE_BYTES
+    assert sendable["data"]["epoch"] == "epoch-1"
+    assert sendable["data"]["sequence"] == 42
+    assert sendable["data"]["degraded"] is True
+
+
+def test_ordinary_relay_frames_pass_through_untouched():
+    """The guard is on the hot path, so the common case must not rewrite."""
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = {"op": "event", "data": {"type": "notice", "text": "hello", "kind": "note"}}
+    assert relay_frame_or_degraded(frame, _MAX_LINE_BYTES) is frame
