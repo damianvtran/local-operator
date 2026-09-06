@@ -187,6 +187,45 @@ MODEL_CATALOGUE_FLOOR_ROWS = 50
 #: ``tools.builtin.BASH_SHELL_PATH``, and for the same reason: the consumer
 #: must stay cheap to import.
 _MODEL_CATALOGUE_LINE_LIMIT = 1 << 20
+#: Fields :meth:`FrontendStateStore.read_field` may serve without the
+#: whole-state deep copy — see that method for the measurement that motivates
+#: it.
+#:
+#: The membership test is the SAFETY ARGUMENT, not a convenience list. Two
+#: properties are required of every name here, and both were checked against
+#: the reducer rather than assumed:
+#:
+#: 1. IMMUTABLE OR REPLACED WHOLESALE. A `str`/`bool`/`None` cannot be mutated
+#:    by a caller at all; `FrontendModelSpec` and `FrontendUsage` are Pydantic
+#:    shells the reducer swaps out via `mutate()` rather than editing in place,
+#:    so handing out the instance cannot corrupt the store.
+#: 2. NOT A MUTABLE COLLECTION. `jobs`, `usage_components`, `child_costs`,
+#:    `attention` and `context_breakdown` are deliberately EXCLUDED even though
+#:    single-field readers exist for some of them: a `dict`/`list` handed out
+#:    unguarded can be mutated by its caller, which is exactly the corruption
+#:    `state`'s deep copy exists to prevent. Those reads keep paying for it.
+_SHAREABLE_STATE_FIELDS = frozenset(
+    {
+        "model_label",
+        "effective_model_label",
+        "selected_model",
+        "effective_model",
+        "last_usage",
+        "streaming",
+        "session_id",
+        "epoch",
+        "sequence",
+        "history_generation",
+        "conversation_name",
+        "goal",
+        "active_agent",
+        "active_team",
+        "context_tokens",
+        "context_window",
+        "context_is_estimate",
+        "cumulative_parent_cost",
+    }
+)
 
 #: Wire bounds for the launch-row reconciliation identities (see
 #: :func:`_wire_launch_prompts`).
@@ -2217,6 +2256,32 @@ class FrontendStateStore:
         return snapshot.model_copy(
             update={"jobs": _FrozenSequence(_public_job(job) for job in self._state.jobs)}
         )
+
+    def read_field(self, name: str) -> Any:
+        """One field of the state, WITHOUT cloning the whole state.
+
+        The general sibling of :attr:`pending_gate`, and it exists for the same
+        measured reason: `state` deep-copies every job, usage component and
+        trajectory row so no caller can mutate the store's instance, and the
+        per-frame accessors that read a SINGLE field were paying that clone
+        each time. Profiling one cold sidebar navigation measured 37 `state`
+        reads and ~25,000 `deepcopy` calls, ~30 ms of a 135 ms frame, almost
+        all of it from single-field reads like `model_label` and
+        `effective_model`.
+
+        RESTRICTED TO FIELDS THAT ARE SAFE TO SHARE, and the restriction is
+        enforced rather than documented: the reducer REPLACES these values
+        instead of mutating them in place, so a caller cannot reach the store's
+        instance through them. `jobs`, `usage_components` and the other mutable
+        collections are deliberately absent — reading those still goes through
+        `state` and still pays for its protection.
+        """
+        if name not in _SHAREABLE_STATE_FIELDS:
+            raise KeyError(
+                f"{name!r} is not a copy-free state field; read it through `state` "
+                "so the caller cannot mutate the store's own instance"
+            )
+        return getattr(self._state, name)
 
     @property
     def has_subscribers(self) -> bool:

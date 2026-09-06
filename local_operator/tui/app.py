@@ -3306,11 +3306,19 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _sidebar_gate_identity(source: SessionInteraction) -> tuple[Any, ...] | None:
-        state = getattr(source.session, "frontend_state", None)
-        gate = getattr(state, "pending_gate", None)
+        # Per-frame, so it reads the two fields it needs without the
+        # whole-state clone `frontend_state` pays; reduced facades that lack
+        # the narrow accessors still fall back to it.
+        session = source.session
+        gate = getattr(session, "pending_gate", None)
+        if gate is None and not hasattr(session, "pending_gate"):
+            gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
         if gate is None:
             return None
-        return (getattr(state, "epoch", ""), gate.kind, gate.request_id, gate.question_index)
+        epoch = getattr(session, "epoch", None)
+        if epoch is None:
+            epoch = getattr(getattr(session, "frontend_state", None), "epoch", "")
+        return (epoch, gate.kind, gate.request_id, gate.question_index)
 
     def _watch_source_frontend(self, source: SessionInteraction) -> None:
         from local_operator.session.frontend_state import FrontendSubscription

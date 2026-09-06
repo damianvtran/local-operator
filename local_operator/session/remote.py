@@ -1439,6 +1439,60 @@ class RemoteSession:
             raise RuntimeError("this session uses full-history replay")
         return await self._fetch_history_page(before, window.owner_epoch, window.through_id, anchor)
 
+    def pending_display_tool_ids(self) -> set[str]:
+        """Unanswered calls in the pending gate's current serialized user turn.
+
+        A gate can precede tool_execution_start, so no invented start event is
+        needed. The latest call group after the latest user boundary is the
+        only eligible group; old interrupted turns must remain interrupted.
+        """
+        if self.pending_gate is None:
+            return set()
+        answered: set[str] = set()
+        for message in reversed(self.display_history_window()):
+            role = getattr(message, "role", "")
+            if role == "user":
+                break
+            if role == "tool":
+                answered.add(str(getattr(message, "tool_call_id", "")))
+            calls = getattr(message, "tool_calls", None)
+            if role == "assistant" and calls:
+                return {call.id for call in calls} - answered
+        return set()
+
+    @property
+    def display_history_revision(self) -> int:
+        return self._display_revision
+
+    @property
+    def display_history_current(self) -> bool:
+        return not self._display_invalidated
+
+    def _invalidate_display_history(self) -> None:
+        if not self._display_window_supported:
+            return
+        self._display_invalidated = True
+        self._display_revision += 1
+        task = self._display_refresh_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_display_history())
+            self._display_refresh_task = task
+
+            def finished(done: asyncio.Task[None]) -> None:
+                if not done.cancelled() and done.exception() is not None:
+                    # Keep the invalidation fence closed. Selection awaits this
+                    # task and reports the failure instead of painting stale rows.
+                    logger.warning("canonical display refresh failed: %s", done.exception())
+
+            task.add_done_callback(finished)
+
+    async def ensure_display_current(self) -> None:
+        task = self._display_refresh_task
+        if task is not None:
+            await asyncio.shield(task)
+        if self._display_invalidated:
+            await self._refresh_display_history()
+
     async def _refresh_display_history(self) -> None:
         """Reattach only this viewer; never restart, stop, or prompt the owner."""
         async with self._display_refresh_lock:
@@ -2015,7 +2069,7 @@ class RemoteSession:
         if self._disposed or not self._ready_for_events:
             return
         if pending is None:
-            pending = _pending_request(self.frontend_state.pending_gate)
+            pending = _pending_request(self.pending_gate)
         if pending is None or self._gate_task is not None:
             return
         if self._gate_identity(pending) == self._gate_answered_key:
@@ -2729,32 +2783,66 @@ class RemoteSession:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.state
 
+    @property
+    def pending_gate(self) -> Any:
+        """The pending gate without the full-state clone ``frontend_state`` pays.
+
+        For per-frame readiness checks only; see the store's own property.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.pending_gate
+
+    @property
+    def epoch(self) -> str:
+        """The owner epoch without the full-state clone.
+
+        Paired with :attr:`pending_gate` because gate IDENTITY is epoch plus
+        gate, and reading the epoch through ``frontend_state`` would put the
+        clone back on the same per-frame path.
+        """
+        return self._read_state_field("epoch")
+
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.subscribe(handler)
 
+    def _read_state_field(self, name: str) -> Any:
+        """One canonical field without the whole-state clone.
+
+        These accessors are called per FRAME by the band and panels, and each
+        `frontend_state` read deep-copies every job and usage row (measured:
+        ~30 ms of a 135 ms cold sidebar frame). The store enforces which fields
+        are safe to share; anything else still goes through `frontend_state`.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.read_field(name)
+
     @property
     def model_label(self) -> str:
-        return self.frontend_state.model_label
+        return self._read_state_field("model_label")
 
     @property
     def model(self) -> ModelSpec:
-        model = self.frontend_state.selected_model
+        model = self._read_state_field("selected_model")
         if model is None:
             raise RuntimeError("owner has no selected model spec")
         return model
 
     @property
     def effective_model(self) -> ModelSpec:
-        model = self.frontend_state.effective_model or self.frontend_state.selected_model
+        model = self._read_state_field("effective_model") or self._read_state_field(
+            "selected_model"
+        )
         if model is None:
             raise RuntimeError("owner has no effective model spec")
         return model
 
     @property
     def effective_model_label(self) -> str:
-        return self.frontend_state.effective_model_label
+        return self._read_state_field("effective_model_label")
 
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         old = self.model
@@ -3256,7 +3344,7 @@ class RemoteSession:
         return self.frontend_state.active_team
 
     def restored_usage(self) -> Usage | None:
-        return self.frontend_state.last_usage
+        return self._read_state_field("last_usage")
 
     def running_subagents(self) -> int:
         return sum(

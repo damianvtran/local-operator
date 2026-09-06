@@ -5500,6 +5500,24 @@ class Session:
         """Current canonical state for any full terminal frontend."""
         return self._frontend_state_store.state
 
+    @property
+    def pending_gate(self):  # type: ignore[no-untyped-def]
+        """The pending gate without the full-state clone ``frontend_state`` pays.
+
+        For per-frame readiness checks only; see the store's own property.
+        """
+        return self._frontend_state_store.pending_gate
+
+    @property
+    def epoch(self):  # type: ignore[no-untyped-def]
+        """The owner epoch without the full-state clone.
+
+        Paired with :attr:`pending_gate`: gate identity is epoch plus gate, so
+        reading the epoch through ``frontend_state`` would restore the clone on
+        the same per-frame path.
+        """
+        return self._frontend_state_store.read_field("epoch")
+
     def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
         """Atomically refresh, snapshot and subscribe on the session loop.
 
