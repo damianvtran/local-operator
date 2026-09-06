@@ -211,10 +211,14 @@ class AdapterCapabilities(ProtocolModel):
     # behaviour it already had. The reverse is NOT compatible: ``ProtocolModel``
     # forbids extra keys, and this key is always emitted (even as ``None``), so
     # an old parent refuses a new worker at hello with ``extra_forbidden``.
-    # That mixed pair is already refused earlier by the selector's
-    # ``package_digest`` pin (``discovery.py``), which is why the schema
-    # version was not bumped for this field; rely on the digest, not on this
-    # default, for the old-parent direction.
+    # That is the compatibility gate for the old-parent direction, not the
+    # selector's ``package_digest``: that digest hashes only the adapter
+    # wheel's RECORD (``discovery.verify_distribution``), is checked on the
+    # worker during hello, and does not pin ``local-operator``. A matching
+    # selector plus new adapter plus new worker-venv core plus old parent
+    # core still reaches hello and dies there. Hello fails closed before
+    # ``prepare``/``reset`` allocate, which is why the schema version was
+    # not bumped; do not treat the digest as a protocol-compat substitute.
     max_type_chars: int | None = Field(default=None, ge=1)
 
     def action_surface(self) -> "ActionSurface":
