@@ -137,9 +137,11 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
       through and only the oversized BODY is shed. The viewer sees a
       well-sequenced delta whose payload says it was degraded.
 
-    Cheap on the hot path: relay frames are ordinary-sized, so the common case
-    pays one ``len(json.dumps(...))`` — the same measurement the send would
-    perform anyway.
+    Cost on the hot path: one ``json.dumps`` per frame, measured at ~48µs on a
+    20 KB frame (about 41% of the send's own serialization). That is an
+    ADDITIONAL serialization, not a reused one — the send does its own — and it
+    is accepted deliberately: the alternative is a frame the viewer cannot read
+    at all, which costs the connection.
     """
     encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
     if encoded <= cap_bytes:
