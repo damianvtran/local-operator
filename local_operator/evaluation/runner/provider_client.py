@@ -584,6 +584,54 @@ def parse_decision(
     )
 
 
+#: Stop reasons that end a stream having DELIVERED content (or having been cut
+#: off mid-content). Everything else -- ``refusal``, ``error``, ``aborted``, and
+#: any marker a future wire client normalizes to -- ended the turn without the
+#: provider ever committing to an answer. Named as an allow-list rather than a
+#: deny-list of the abnormal ones so a newly introduced abnormal marker is
+#: classified as abnormal by default: mis-reading an outage as a normal stop is
+#: the failure this constant exists to prevent, and mis-reading a normal stop as
+#: an outage would be caught immediately by the parse tests.
+_NORMAL_CONTENT_STOPS = frozenset({"stop", "length", "toolUse"})
+
+
+class ProviderStreamAbortedError(RuntimeError):
+    """The stream ended abnormally without producing any usable content.
+
+    Deliberately NOT a :class:`DecisionRejected`. That type means the provider
+    answered, was billed, and the MODEL's reply failed strict parsing -- which
+    the runner corrects by re-prompting, because a model that emitted bad JSON
+    can emit good JSON when told what was wrong. None of that holds here: a
+    refusal (or a mid-stream provider error) produced no reply at all, so there
+    is nothing for the model to correct and a correction prompt asks it to fix
+    text it never wrote.
+
+    Raising a plain exception puts this on the protocol's provider path
+    (``EpisodeModelClient``: "raising anything else is the contract for an
+    unrecoverable provider failure"), so the runner seals the episode unscored
+    as ``category="provider"`` / ``reason="infrastructure_failure"`` instead of
+    ``model_failure``. That attribution is the point: the agent under test never
+    got the chance to act, so charging it a model failure would fold a provider
+    outage into the agent's number.
+
+    Observed, and the reason this exists: three consecutive ``refusal`` ends
+    (one billing zero tokens both ways) had their ``error`` dropped by
+    ``_stream``, so empty text reached ``parse_decision`` and the episode's
+    evidence recorded "decision is not valid JSON: Unterminated string" against
+    a model that had emitted no bytes. The diagnostic named the wrong cause, so
+    the failure was not diagnosable from the bundle at all.
+
+    The message quotes the provider's own words UNBOUNDED and UNSCANNED on
+    purpose. This client holds no ``RedactionSet``; the episode renders the
+    exception through ``_diagnostic(error, self._redactions)``, which scans the
+    whole string BEFORE applying its 500-character bound. Cutting the prose here
+    first would sever a canary and let the surviving prefix pass that scan --
+    the truncate-then-scan inversion documented on ``_diagnostic``. Retention is
+    therefore unchanged: the same bounded, scanned artifact every other fatal
+    error already produces, and nothing new held anywhere else.
+    """
+
+
 class ContextUnrecoverableError(ValueError):
     """The context cannot be made to fit the window, so the request must not
     be sent.
@@ -862,9 +910,15 @@ class ProviderModelClient:
             tool_choice="none",
             prompt_cache_key=self._prompt_cache_key,
         )
-        text, usage, cost_micros, stop_reason, provider_request_id, context_tokens = (
-            await self._stream(request)
-        )
+        (
+            text,
+            usage,
+            cost_micros,
+            stop_reason,
+            provider_request_id,
+            context_tokens,
+            stream_error,
+        ) = await self._stream(request)
         self._last_request_ms = _now_ms()
         if context_tokens is not None:
             # A figure reported FOR the request just sent is measured against
@@ -878,6 +932,22 @@ class ProviderModelClient:
         if extra_usage is not None:
             usage = _add_usage(usage, extra_usage)
             cost_micros += extra_cost
+        # Checked BEFORE parsing, because parsing an empty string produces a
+        # confident and completely wrong diagnosis. ``parse_decision`` reports
+        # "decision is not valid JSON", the runner turns that into a correction
+        # prompt asking the model to fix its JSON, and the model -- which said
+        # nothing -- is re-prompted until the retry bound is spent. The episode
+        # then seals as a MODEL failure for a provider's refusal.
+        #
+        # Both halves of the condition are required. ``error`` alone misses a
+        # wire client that ends abnormally without composing prose; an abnormal
+        # ``stop_reason`` alone would swallow the recoverable case where the
+        # provider refused only AFTER streaming a parseable batch -- that text
+        # is real model output and stays on the correctable rejection path.
+        if (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip():
+            raise ProviderStreamAbortedError(
+                stream_error or f"provider ended the stream as '{stop_reason}' with no content"
+            )
         try:
             return parse_decision(
                 text.strip(),
@@ -985,7 +1055,9 @@ class ProviderModelClient:
 
         async def summarize(prompt: str) -> str:
             nonlocal summary_usage, summary_cost
-            text, usage, cost, _stop, _rid, _ctx = await self._stream(self._summary_request(prompt))
+            text, usage, cost, _stop, _rid, _ctx, _err = await self._stream(
+                self._summary_request(prompt)
+            )
             summary_usage = usage
             summary_cost = cost
             return text
@@ -1180,13 +1252,16 @@ class ProviderModelClient:
             replayable=True,
         )
 
-    async def _stream(self, request: Any) -> tuple[str, ModelUsage, int, str, str, int | None]:
+    async def _stream(
+        self, request: Any
+    ) -> tuple[str, ModelUsage, int, str, str, int | None, str | None]:
         text = ""
         usage = ModelUsage()
         cost_micros = 0
         stop_reason = "stop"
         provider_request_id = "unknown"
         context_tokens: int | None = None
+        stream_error: str | None = None
         async for event in self._stream_fn(request, None):
             if event.type == "text_delta":
                 text += event.delta
@@ -1202,7 +1277,21 @@ class ProviderModelClient:
                 # bundle's model_response back to the provider's records, so it
                 # is worth carrying when the wire client reports one.
                 provider_request_id = _provider_request_id(event.provider_payload)
-        return text, usage, cost_micros, stop_reason, provider_request_id, context_tokens
+                # The wire clients are the ONLY layer where the provider's
+                # actual terminal marker (``content_filter``, ``refusal``,
+                # ``SAFETY``…) is still visible; downstream sees only the
+                # normalized stop. Dropping this field is what left a refused
+                # episode's evidence blaming the model's JSON.
+                stream_error = event.error
+        return (
+            text,
+            usage,
+            cost_micros,
+            stop_reason,
+            provider_request_id,
+            context_tokens,
+            stream_error,
+        )
 
 
 def _frames_line(observation: Observation) -> str:
