@@ -1988,6 +1988,20 @@ class Session:
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
         self._held_context_tokens: int | None = None
+        #: Fired once per logical turn, AFTER the turn's terminal event has
+        #: been emitted AND ``is_streaming`` has been cleared, as the last
+        #: statement under ``_turn_lock``. The owned-session handle uses it to
+        #: republish the discovery record's ``busy`` bit; the per-event path
+        #: cannot, because the final ``AgentEndEvent`` is delivered while the
+        #: turn still counts as busy — on the normal path it is the HELD end,
+        #: flushed from the pipeline's ``finally`` with ``_turn_lock`` still
+        #: held; on the abort/error path it is emitted inline while
+        #: ``_is_streaming`` is still True. Either way the last event-driven
+        #: publish carried ``busy=True`` for every turn that did not run through
+        #: the handle's prompt queue — peer wakes, scheduled wakes, background
+        #: result deliveries, resume catch-ups (design-runtime-autorefresh §1.2).
+        #: Sync, non-raising by contract (the pipeline guards it anyway).
+        self.on_turn_settled: Callable[[], None] | None = None
         self._abort_requested = False  # sticky across the continuation gap
         # Boundary-respecting cancel (see request_graceful_cancel). Sticky like
         # ``_abort_requested`` and cleared on the same edges, but honoured at
@@ -5774,6 +5788,20 @@ class Session:
             # aborted turn still hands the notice to the next one instead of
             # stranding it until the session is disposed.
             self._flush_context_journal()
+            # LAST, by design: ``_run_turn``'s own ``finally`` has already
+            # cleared ``_is_streaming`` on the way out of the await above, and
+            # ``_flush_held_end`` has delivered the end event, so a reader
+            # inside the hook sees the turn as genuinely over. The lock is
+            # still held here, which is fine — ``is_busy()`` also reads the
+            # lock, and the next ``_notify`` (or the hook's own republish on
+            # the following turn) settles that; what this guarantees is that
+            # the STREAMING contribution is observed after it changed.
+            settled = self.on_turn_settled
+            if settled is not None:
+                try:
+                    settled()
+                except Exception:  # noqa: BLE001 — a publish failure is not a turn failure
+                    logger.debug("on_turn_settled hook failed", exc_info=True)
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""

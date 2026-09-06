@@ -22,6 +22,14 @@ costs nothing and a wake fires in a fresh process later. It stays resident
 while any of three things holds — see :func:`_should_exit` for each term and
 the reasoning behind it.
 
+**Self-refresh (design-runtime-autorefresh §3.2).** Independently of the
+quiet exit, an idle runtime whose install on disk has moved under it
+(``lop-update`` ran) ANNOUNCES ``retiring`` to its viewers and exits, so the
+next engage runs the new build. An attached viewer does not hold this — it
+re-engages a successor itself — which is what keeps a five-hour-stale
+runtime from staying resident because someone was looking at it. See
+:func:`_should_refresh` and :func:`_refresh_for`.
+
 This was ``mobile/child.py``. Only the phone spawns one today, but nothing in
 it is phone-specific: it is the generic "a session running with no interface
 owner" process, which is what later work needs for wakes and background
@@ -37,10 +45,14 @@ import asyncio
 import inspect
 import logging
 import os
+import random
 import signal
 import sys
 import time
-from typing import Any, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
+
+if TYPE_CHECKING:
+    from local_operator.update import BuildStamp
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +77,29 @@ DEFAULT_GRACE_S = 3.0
 #: layer, and a knob would let the two drift apart.
 WARM_WINDOW_S = 90.0
 
+#: How often an idle runtime re-reads the install on disk. Cheap (one
+#: dist-info lookup + one 60-byte file), but there is no reason to do it on
+#: every 250 ms reaper tick: a runtime that is already idle can afford to
+#: notice an update within a few seconds, and a busy one never checks.
+BUILD_CHECK_S = 5.0
+
+#: A freshly written install is not a stable one: ``lop-update`` runs
+#: ``uv tool install --force`` (which rewrites site-packages over several
+#: seconds) and THEN writes ``.lop-source``. Retiring against a half-written
+#: tree would spawn a successor that imports a mix of two builds. Require
+#: the marker's mtime to be at least this old before acting on it.
+#: Env-overridable ONLY so the e2e stage can flip a fake marker and observe
+#: the retirement within its budget; production never sets the variable.
+BUILD_SETTLE_S = 10.0
+
+#: After the refresh predicate first holds, sleep a uniform random slice of
+#: this before re-checking and retiring. This host runs ~16 resident
+#: runtimes; ``lop-update`` would otherwise have all of them notice on the
+#: same tick and their viewers spawn sixteen successors within a second.
+#: Spread over 20 s the eager re-engages average ≤1 spawn/s. Same env
+#: override rule as the settle: test-only.
+BUILD_STAGGER_S = 20.0
+
 
 def _grace_seconds() -> float:
     raw = os.environ.get("LOP_SESSION_GRACE_S", "")
@@ -73,6 +108,103 @@ def _grace_seconds() -> float:
     except ValueError:
         return DEFAULT_GRACE_S
     return value if value > 0 else DEFAULT_GRACE_S
+
+
+def _positive_seconds(raw: str, default: float) -> float:
+    """``raw`` as a positive float, else ``default``.
+
+    Same shape as ``_grace_seconds``: the refresh timings are constants in
+    production and only the e2e stage shortens them (``LOP_BUILD_SETTLE_S``,
+    ``LOP_BUILD_STAGGER_S``), so a malformed or non-positive value falls back
+    to the constant rather than disabling the protection it names. ``0`` is
+    deliberately NOT accepted for the settle: a zero settle is the torn-tree
+    race this constant exists to prevent, and a test that wants "fast" can
+    say ``0.1``. The two readers below spell their variable names out as
+    literals so the ambient-environment audit (``test_ambient_env_isolation``)
+    can see them.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _build_settle_seconds() -> float:
+    return _positive_seconds(os.environ.get("LOP_BUILD_SETTLE_S", ""), BUILD_SETTLE_S)
+
+
+def _build_stagger_seconds() -> float:
+    return _positive_seconds(os.environ.get("LOP_BUILD_STAGGER_S", ""), BUILD_STAGGER_S)
+
+
+def _build_prefix() -> str | None:
+    """Where to read the install stamp from: ``sys.prefix`` in production.
+
+    ``LOP_BUILD_PREFIX`` exists ONLY so the e2e stage can point a real
+    ``process.py`` at a temp directory carrying a fake ``.lop-source`` and
+    flip it under the runtime. Nothing outside ``tests/e2e`` sets it, and a
+    production runtime that inherited it by accident would merely compare
+    against a marker that never changes — it can never retire early.
+    """
+    return os.environ.get("LOP_BUILD_PREFIX") or None
+
+
+def _build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
+    """The build now on disk, if it differs from ``boot`` AND has settled.
+
+    ``None`` means "nothing to do": same stamp, an unreadable stamp, a boot
+    stamp that was never captured (a reduced test server), or a marker still
+    inside the settle window (see ``BUILD_SETTLE_S``). Editable checkouts have
+    no ``.lop-source`` and a constant version, so they never trip this — by
+    design, matching ``design-build-skew.md`` §6.5: a developer's worktree
+    runtime must not retire because they touched a file.
+    """
+    if boot is None:
+        return None
+    from local_operator import update as update_mod
+
+    prefix = _build_prefix()
+    try:
+        on_disk = update_mod.installed_build(prefix)
+    except Exception:  # noqa: BLE001 — an unreadable stamp is "no change"
+        logger.debug("build stamp unreadable; no refresh", exc_info=True)
+        return None
+    if on_disk == boot:
+        return None
+    age = update_mod.build_marker_age_s(prefix)
+    if age is None or age < _build_settle_seconds():
+        # Younger than the settle, or unknowable: the install may still be
+        # mid-write. Try again next check; the marker only gets older.
+        return None
+    return on_disk
+
+
+def _should_refresh(handle: object, boot: "BuildStamp | None") -> "BuildStamp | None":
+    """Retire so the next engage spawns from the build now on disk?
+
+    Returns the NEW stamp when yes, ``None`` when no. Not a fourth term of
+    :func:`_should_exit`: that predicate answers "may I exit *quietly*", and a
+    refresh must ANNOUNCE (the ``retiring`` frame) so a viewer re-engages
+    rather than reading the exit as owner death. Only when the runtime is
+    doing NOTHING it would lose — ``OwnedSessionHandle.may_refresh`` is the
+    one predicate for that, shared with the viewer-driven ``refresh_if_idle``
+    op so both sides agree what idle means. An attached viewer does NOT hold
+    (the operator's rule; the viewer re-engages on its own), and neither does
+    pristineness — a pristine stale runtime is the cheapest refresh there is.
+    A handle without the probe (an older host, a reduced test handle) never
+    refreshes: unknown state is not an invitation to exit.
+    """
+    may_refresh = getattr(handle, "may_refresh", None)
+    if not callable(may_refresh):
+        return None
+    try:
+        if may_refresh():
+            return None
+    except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+        logger.debug("refresh predicate failed; keeping runtime", exc_info=True)
+        return None
+    return _build_changed(boot)
 
 
 def _wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
@@ -180,13 +312,39 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
     in-process, with no supervisor involvement.
     """
     grace_s = _grace_seconds()
+    boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
+    next_build_check = time.monotonic() + BUILD_CHECK_S
+
+    async def refresh_check() -> bool:
+        """The refresh branch on its own slower cadence. True once the
+        runtime has retired (the caller returns). Runs on BOTH loop levels
+        below: outside the drain — where an attached viewer, which holds the
+        quiet exit, must not hold this — and inside it, because a grace of
+        minutes (``LOP_SESSION_GRACE_S``) would otherwise starve the check
+        for an unwatched runtime that is exactly the one nobody else will
+        ever refresh."""
+        nonlocal next_build_check
+        if time.monotonic() < next_build_check:
+            return False
+        next_build_check = time.monotonic() + BUILD_CHECK_S
+        newer = _should_refresh(handle, boot)
+        if newer is None:
+            return False
+        return await _refresh_for(newer, handle, runtime, stop)
+
     while not stop.is_set():
         await asyncio.sleep(REAP_CHECK_S)
+        if stop.is_set():
+            continue
+        if await refresh_check():
+            return
         if stop.is_set() or not _should_exit(handle, runtime):
             continue
         deadline = time.monotonic() + grace_s
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
+            if await refresh_check():
+                return
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
         else:
@@ -199,6 +357,65 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             await _clean_exit(handle, runtime)
             stop.set()  # amain's wait() returns; exit code stays 0
             return
+
+
+async def _refresh_for(
+    newer: "BuildStamp", handle: object, runtime: object, stop: asyncio.Event
+) -> bool:
+    """Announce and retire so the next engage runs ``newer``. True if exited.
+
+    Three checks of the predicate, and each is load-bearing:
+
+    1. Before the stagger (the caller's) — the cheap gate.
+    2. After the stagger — work may have arrived while sixteen siblings
+       spread their exits over ``BUILD_STAGGER_S``; a runtime that picked up
+       a turn meanwhile keeps it and tries again next check.
+    3. After the announce — ``announce_retiring`` is an await (it drains each
+       viewer's writer), and a ``peer_message`` or ``prompt`` can open a turn
+       in that gap. Same shape as ``RuntimeServer._retire_if_pristine``'s
+       re-check after its ``stopping`` broadcast. A turn that starts between
+       THIS re-check and ``_clean_exit`` is aborted by the dispose exactly as
+       a ``stop`` op racing a turn is; the message is persisted and the
+       sender's next engage runs the new build.
+
+    ``retiring`` is announced AFTER the stagger, immediately before exit, so
+    a viewer never waits on a runtime that is merely "about to" leave.
+    """
+    boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
+    delay = random.uniform(0, _build_stagger_seconds())  # noqa: S311 — jitter, not security
+    logger.info(
+        "session runtime: build on disk is %s but this process loaded %s; idle, retiring in "
+        "%.1fs so the next engage runs the new build",
+        newer.label(),
+        boot.label() if boot is not None else "<unknown>",
+        delay,
+    )
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=delay)
+        return False  # a stop landed during the stagger; its path owns the exit
+    except asyncio.TimeoutError:
+        pass
+    if _should_refresh(handle, boot) is None:
+        logger.info("session runtime: work arrived during the refresh stagger; keeping")
+        return False
+    announce = getattr(runtime, "announce_retiring", None)
+    if callable(announce):
+        try:
+            await cast(Callable[..., Awaitable[None]], announce)("stale-build", to=newer.label())
+        except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
+            logger.debug("retiring announcement failed", exc_info=True)
+    if stop.is_set():
+        return False
+    if _should_refresh(handle, boot) is None:
+        # Refusing AFTER announcing is safe for the same reason it is for
+        # ``stopping``: ``retiring`` only latches the disconnect REASON in an
+        # attach client, and does nothing unless the socket then closes.
+        logger.info("session runtime: work arrived while retiring was announced; keeping")
+        return False
+    logger.info("session runtime: retiring for %s", newer.label())
+    await _clean_exit(handle, runtime)
+    stop.set()
+    return True
 
 
 async def _drain_inbox_into(handle: object) -> int:

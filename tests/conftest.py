@@ -48,6 +48,11 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The e2e stage's fake install prefix for the runtime self-refresh: a
+    # runtime that inherited it would compare its boot stamp against a
+    # directory the test owns rather than its real install, and could
+    # retire (or refuse to) on a stranger's marker.
+    "LOP_BUILD_PREFIX",
     # A runtime child spawned by the mobile daemon carries its session id,
     # provider, model and cwd here. A test suite run from inside such a
     # session (agents do this) inherited LOP_MOBILE_CHILD_RESUME and created

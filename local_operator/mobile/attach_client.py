@@ -60,6 +60,14 @@ ACK_TIMEOUT_S = 15.0
 #: Consumers compare against this exact string to decide whether to recover.
 STOPPED_REASON = "owner stopped the session"
 
+#: Disconnect reason for a PLANNED refresh: the owner retired itself because
+#: ``lop-update`` put a newer build on disk, and the next engage should spawn
+#: from it. Distinct from :data:`STOPPED_REASON` on purpose — a stop parks the
+#: viewer in the stopped state (``/resume`` reopens it); a refresh means "a
+#: fresh runtime is owed, engage one now". Nothing was interrupted: the owner
+#: retires only when idle (``OwnedSessionHandle.may_refresh``).
+RETIRING_REASON = "owner retired for a newer build"
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -379,6 +387,13 @@ class AttachClient:
                     # viewer that mistakes it for owner death takes over a
                     # session the user just ended (U2-4).
                     reason = STOPPED_REASON
+                elif op == "retiring":
+                    # A planned refresh (design-runtime-autorefresh §3.2). Same
+                    # carrier as ``stopping`` — the disconnect reason — and for
+                    # the same reason: the EOF is moments away and every host
+                    # already reads that string. The host goes cold at once
+                    # and re-engages rather than chasing a record for 8 s.
+                    reason = RETIRING_REASON
                 elif op in ("ack", "error", "result"):
                     future = self._pending.pop(frame.get("req"), None)
                     if future is not None and not future.done():
@@ -594,6 +609,19 @@ class AttachClient:
         the ordinary residency drain.
         """
         return await self._request("retire_if_pristine")
+
+    async def request_refresh(self) -> str:
+        """Ask a STALE owner to retire now if it is idle, so the next engage
+        runs the build on disk.
+
+        The viewer-side belt for the runtime's own reaper-driven refresh: a
+        resume in the seconds after ``lop-update`` binds before the runtime
+        has noticed the change, and without this the viewer would either wait
+        for it or warn. As with ``retire_if_pristine`` the answer is the
+        runtime's ("retiring", or "kept: …"); an owner too old to know the op
+        answers the unknown-op error, which the caller reads as kept.
+        """
+        return await self._request("refresh_if_idle")
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         """Fetch one page of a child job's retained events from the owner.
