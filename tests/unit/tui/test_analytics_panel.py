@@ -661,3 +661,118 @@ def test_toggle_hint_shown_only_with_series():
             assert "t cost/tokens" not in hint3
 
     asyncio.run(run())
+
+
+def _nested_aggregate() -> UsageAggregate:
+    """A root with two subagents and a grandchild, plus an unrelated session."""
+
+    def scope(micro, calls=1):
+        return UsageAggregate(
+            calls=calls,
+            ok_calls=calls,
+            context_tokens=micro,
+            cost_micro=micro,
+            cost_known_calls=calls,
+        )
+
+    agg = scope(15_000_000, calls=5)
+    agg.by_session = {
+        "rootsession": scope(1_000_000),
+        "kid1session": scope(2_000_000),
+        "kid2session": scope(3_000_000),
+        "grandkidses": scope(4_000_000),
+        "solosession": scope(5_000_000),
+    }
+    setattr(agg, "session_names", {"rootsession": "Review and merge open PRs"})
+    setattr(
+        agg,
+        "session_parents",
+        {"kid1session": "rootsession", "kid2session": "rootsession", "grandkidses": "kid1session"},
+    )
+    return agg
+
+
+def _session_rows(text: list[str]) -> list[str]:
+    start = next(i for i, line in enumerate(text) if "By session" in line)
+    rows = []
+    for line in text[start].split("\n")[1:]:
+        if line.strip():
+            rows.append(line)
+    return rows
+
+
+def test_session_table_shows_roots_with_tree_totals_and_indents_children():
+    lines = [line.plain for line in build_report(_nested_aggregate(), 120)]
+    rows = _session_rows(lines)
+    # Two top-level rows only; the three children moved under their root.
+    top = [r for r in rows if not r.startswith("    ")]
+    assert len(top) == 2
+    root = next(r for r in rows if "Review and merge open PRs" in r)
+    assert not root.startswith("    ")
+    assert "$10.00" in root  # own $1 + kid1 $2 + kid2 $3 + grandkid $4
+    # Children are present, indented, and reachable — not deleted.
+    assert any(r.startswith("    ") and "kid1session" in r for r in rows)
+    assert any(r.startswith("      ") and "grandkidses" in r for r in rows)
+    # And the section says the roots include their subagents.
+    assert "totals include subagents" in "\n".join(lines)
+
+
+def test_session_column_still_sums_to_the_headline_total():
+    """THE invariant (design §7 risk 1): a rolled-up column that still lists
+    children inflates the operator's real table by $8,077. Only ROOT rows may
+    carry a tree total, and they must add to the total printed above them."""
+    aggregate = _nested_aggregate()
+    lines = [line.plain for line in build_report(aggregate, 120)]
+    rows = _session_rows(lines)
+    top = [r for r in rows if not r.startswith("    ")]
+    total = 0.0
+    for row in top:
+        money = next(part for part in row.split() if part.startswith("$"))
+        total += float(money.strip("+").lstrip("$"))
+    assert abs(total - aggregate.cost_usd) < 0.01
+
+
+def test_a_flat_ledger_renders_exactly_as_before():
+    """No parent edges (an old ledger, or a machine that never ran subagents)
+    means every session is a root and the table is byte-identical to today's."""
+    aggregate = _nested_aggregate()
+    setattr(aggregate, "session_parents", {})
+    rows = _session_rows([line.plain for line in build_report(aggregate, 120)])
+    assert len(rows) == 5
+    assert not any(r.startswith("    ") for r in rows)
+    assert "totals include subagents" not in rows[0]
+
+
+def test_nesting_does_not_cost_the_cache_column_on_a_narrow_frame():
+    """Risk 4: indentation must not push the table past _WIDE_TABLE_MIN and
+    shed the cache column that a wide frame keeps."""
+    aggregate = _nested_aggregate()
+    wide = _session_rows([line.plain for line in build_report(aggregate, 120)])
+    narrow = _session_rows([line.plain for line in build_report(aggregate, 80)])
+    assert all("cache" in r for r in wide)
+    assert all("cache" in r for r in narrow)
+    # Below the threshold cache sheds for every row equally, root and child.
+    tight = _session_rows([line.plain for line in build_report(aggregate, 60)])
+    assert not any("cache" in r for r in tight)
+    assert all("$" in r for r in tight)  # the cost column survives, as designed
+
+
+def test_legend_is_drawn_for_a_plus_that_only_the_rollup_produces():
+    """A parent priced in full whose CHILD is unpriced draws a ``+`` on the root
+    row that no individual session shows. The footnote must follow it."""
+    agg = UsageAggregate(
+        calls=3, ok_calls=3, context_tokens=3, cost_micro=1_000_000, cost_known_calls=2
+    )
+    agg.by_session = {
+        "rootsession": UsageAggregate(
+            calls=2, ok_calls=2, context_tokens=2, cost_micro=1_000_000, cost_known_calls=2
+        ),
+        "kid1session": UsageAggregate(
+            calls=1, ok_calls=1, context_tokens=1, cost_micro=0, cost_known_calls=0
+        ),
+    }
+    setattr(agg, "session_names", {})
+    setattr(agg, "session_parents", {"kid1session": "rootsession"})
+    text = "\n".join(line.plain for line in build_report(agg, 120))
+    assert "$1.00+" in text
+    assert "lower bound" in text
