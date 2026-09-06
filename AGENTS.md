@@ -301,6 +301,21 @@ releasing. The sections below say why, then how.
 fix branch. A PR never touches it, and the reviewer round treats a version
 change inside a feature PR as a finding.
 
+**CI enforces this**, in the `version-bump-guard` job. A pull request whose
+diff changes the `version =` line fails unless its title starts with
+`chore(release):`. Dependency and metadata edits to `pyproject.toml` are
+unaffected — the guard reads the version line, not the file.
+
+The job exists because the prose above was not enough. It was already written,
+and it already told reviewers to treat a bump as a finding, when #701 and #706
+each landed one inside a feature PR and both review rounds passed anyway. The
+result was that `main` advertised `0.50.2` while the newest tag, GitHub Release
+and PyPI artifact were all still `0.50.0`: `0.50.1` and `0.50.2` were consumed
+without ever being built or published, and the v0.50.3 window had to skip both
+numbers rather than reuse a version `main` had already claimed. A rule that
+depends on every reviewer remembering to look is a rule that fails on the day
+someone does not.
+
 This replaces the earlier practice of each PR bumping its own patch, which
 failed in a measurable way on 2026-09-05: with ten sessions each holding a
 reserved patch number, `0.47.1` → `0.48.0` took close to five hours of agents

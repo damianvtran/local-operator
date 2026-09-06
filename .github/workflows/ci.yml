@@ -81,6 +81,73 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A feature PR must never carry a version bump. Releases are cut as ONE
+  # deliberate `chore(release):` PR per window by that window's owner, so a
+  # bump riding a feature diff silently consumes a version number that is
+  # never tagged, never built and never published.
+  #
+  # This is not hypothetical and it is why the check is machine-checked rather
+  # than left to review. Two feature PRs (#701, #706) each smuggled a bump, so
+  # `main` advertised 0.50.2 while the newest tag, GitHub Release and PyPI
+  # artifact were all still 0.50.0: 0.50.1 and 0.50.2 were burned, and anyone
+  # reading pyproject.toml got a version PyPI had never heard of. The v0.50.3
+  # window had to skip both numbers, because two artifacts believing they are
+  # the same version is unrecoverable once published.
+  #
+  # AGENTS.md already stated the rule AND told reviewers to treat a version
+  # change in a feature PR as a finding. Both review rounds passed anyway. The
+  # defect was that the rule existed only in prose, so it depended on each
+  # reviewer remembering to look; this job is that rule with teeth.
+  #
+  # PR-only: a `push` run on `main` has no PR title to read, and by then the
+  # commit is already in. The release PR is exempted by its conventional-commit
+  # title, which is the same string the release procedure already requires.
+  version-bump-guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The three-dot diff below needs both branches, which the default
+          # single-commit fetch does not provide.
+          fetch-depth: 0
+
+      - name: Reject a version bump outside a release PR
+        env:
+          # Read through the environment rather than interpolated into the
+          # script: a PR title is attacker-controlled text, and inlining it
+          # directly would let a crafted title inject shell.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Three-dot: compare against the MERGE BASE, so a branch that is
+          # merely behind a release does not look like it reverted the version.
+          changed=$(git diff "$BASE_SHA"...HEAD -- pyproject.toml \
+            | grep -E '^[+-]version[[:space:]]*=' || true)
+          if [ -z "$changed" ]; then
+            echo "No version change in pyproject.toml."
+            exit 0
+          fi
+          case "$PR_TITLE" in
+            'chore(release):'*)
+              echo "Release PR, version change allowed:"
+              echo "$changed"
+              ;;
+            *)
+              echo "::error file=pyproject.toml::A feature PR must not change the project version."
+              echo "This PR changes the version line in pyproject.toml:"
+              echo "$changed"
+              echo
+              echo "Versions are bumped only by a dedicated release PR whose title"
+              echo "starts with 'chore(release):', cut by the release window owner."
+              echo "Drop the bump from this branch; pyproject.toml stays at the last"
+              echo "released version on every feature branch."
+              exit 1
+              ;;
+          esac
+
   lint:
     runs-on: ubuntu-latest
     # Generous against the ~30 s this takes; it exists so a wedged install step
