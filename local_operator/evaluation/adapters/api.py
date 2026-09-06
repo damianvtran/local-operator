@@ -206,9 +206,15 @@ class AdapterCapabilities(ProtocolModel):
     # rather than assumed by core: the deadline and the per-character cost are
     # both the backend's, and a bound core invented would be wrong for every
     # backend but one. ``None`` means the backend has no length-dependent
-    # deadline. Optional with a None default so a 1.6 peer that predates the
-    # field still validates — it simply advertises no bound, which is the
-    # behaviour it already had.
+    # deadline. The None default lets a NEW parent accept an OLD worker that
+    # predates the field — it simply advertises no bound, which is the
+    # behaviour it already had. The reverse is NOT compatible: ``ProtocolModel``
+    # forbids extra keys, and this key is always emitted (even as ``None``), so
+    # an old parent refuses a new worker at hello with ``extra_forbidden``.
+    # That mixed pair is already refused earlier by the selector's
+    # ``package_digest`` pin (``discovery.py``), which is why the schema
+    # version was not bumped for this field; rely on the digest, not on this
+    # default, for the old-parent direction.
     max_type_chars: int | None = Field(default=None, ge=1)
 
     def action_surface(self) -> "ActionSurface":
