@@ -715,6 +715,61 @@ def test_perform_upgrade_does_not_refresh() -> None:
     run.assert_not_called()
 
 
+def test_installed_version_prefers_whichever_source_is_newer() -> None:
+    """Neither the checkout file nor the install metadata is authoritative alone.
+
+    Both are stale in opposite directions, so `installed_version` takes the
+    higher of the two:
+
+    * metadata never moves with the tree, which reported 0.46.23 for a checkout
+      at 0.49.0 -- the bug the checkout lookup was added for (QA Q3 / UX U13);
+    * a `pyproject.toml` naming this project but declaring an older version (a
+      fixture, a scratch tree, a hand-edited `version = "0.1.0"`) overrode
+      correct metadata and produced a spurious "update available" (review round
+      2, MINOR-2).
+    """
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value="0.49.0"),
+        patch.object(update_mod, "version", return_value="0.46.23"),
+    ):
+        assert update_mod.installed_version() == "0.49.0"
+
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value="0.1.0"),
+        patch.object(update_mod, "version", return_value="0.49.2"),
+    ):
+        assert update_mod.installed_version() == "0.49.2"
+
+
+def test_installed_version_falls_back_when_a_side_is_missing_or_unparseable() -> None:
+    """An unorderable side cannot win; the other one is the only defensible answer."""
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value="0.28.0rc1"),
+        patch.object(update_mod, "version", return_value="0.49.2"),
+    ):
+        assert update_mod.installed_version() == "0.49.2"
+
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value="0.49.2"),
+        patch.object(update_mod, "version", return_value="not-a-version"),
+    ):
+        assert update_mod.installed_version() == "0.49.2"
+
+    # No adjacent project file: a packaged install reports its metadata exactly
+    # as it always did.
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value=""),
+        patch.object(update_mod, "version", return_value="0.49.2"),
+    ):
+        assert update_mod.installed_version() == "0.49.2"
+
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value="0.49.2"),
+        patch.object(update_mod, "version", side_effect=update_mod.PackageNotFoundError),
+    ):
+        assert update_mod.installed_version() == "0.49.2"
+
+
 # ---------------------------------------------------------------------------
 # Build stamps: the comparable token a viewer and a runtime skew against
 # ---------------------------------------------------------------------------

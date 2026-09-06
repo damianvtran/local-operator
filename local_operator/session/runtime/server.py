@@ -58,6 +58,8 @@ from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
+    DESKTOP_WATCH_CAPABILITY,
+    DESKTOP_WATCH_LEASE_S,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
     ClientLocality,
@@ -191,6 +193,13 @@ class _ClientConn:
     #: auth frame; see ``ClientLocality``. Only ops that act on the USER's
     #: surroundings (an OAuth browser tab) read it.
     locality: ClientLocality = "local"
+    #: Which host is on the other end. ``"desktop"`` is declared in the attach
+    #: frame; the remaining fields are that host's presentation state, which
+    #: only it reports and only it is scored on.
+    surface: str = "terminal"
+    desktop_visible: bool = False
+    desktop_can_notify: bool = False
+    desktop_seen: float = 0.0
     #: Which action-carrying slash receipts this client renders itself (see
     #: ``SLASH_ACTION_RECEIPTS``). ``None`` means the auth frame omitted the
     #: field, i.e. a client built before it existed — the runtime then
@@ -353,6 +362,7 @@ class RuntimeServer:
         #: has no viewer, so this starts True rather than False — the old
         #: default had every new runtime claiming a terminal it had never had.
         self._detached = True
+        self._desktop_delivery = False
         self._handle = handle
         # Back-reference so the handle can publish record state it alone knows
         # about — today the parked-gate ``pending`` bit, which originates deep
@@ -410,8 +420,16 @@ class RuntimeServer:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
+            # Three independent capabilities, each gated by its own condition.
+            # The desktop watch surface is unconditional (this server always
+            # serves it), while the frontend and completion-ack capabilities
+            # are advertised only when the handle actually implements them --
+            # advertising one the handle cannot honour is worse than omitting
+            # it, because the client then negotiates a surface that is not
+            # there.
             capabilities=(
-                ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
+                [DESKTOP_WATCH_CAPABILITY]
+                + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
             ),
             # A runtime is born with no terminal watching it. Stamped at
@@ -811,6 +829,10 @@ class RuntimeServer:
             if self._closed.is_set():
                 return
             try:
+                # A dead renderer can leave its main-process socket alive.
+                # Expiring the lease must reroute a parked gate even when no
+                # TCP disconnect arrives to trigger the ordinary detach path.
+                self._republish_detached()
                 seed = self._handle.session_projection_seed
                 if self._publisher is not None:
                     self._publisher.heartbeat(
@@ -910,6 +932,9 @@ class RuntimeServer:
             writer=writer,
             kind=kind,
             locality=locality,
+            surface=(
+                "desktop" if kind == "attach" and frame.get("surface") == "desktop" else "terminal"
+            ),
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
@@ -1088,10 +1113,12 @@ class RuntimeServer:
         nothing a reader can see, and republishing for it would put a staged
         write on every connection churn.
         """
-        detached = self.attach_clients() == 0
-        if detached == self._detached:
+        detached = not bool(self._visible_attach_surfaces())
+        delivery = bool(self.notification_surfaces())
+        if detached == self._detached and delivery == self._desktop_delivery:
             return
         self._detached = detached
+        self._desktop_delivery = delivery
         self._republish()
         if detached and self._pending:
             # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
@@ -1135,18 +1162,55 @@ class RuntimeServer:
             publisher.heartbeat(
                 pending=self._pending,
                 busy=self._busy,
-                detached=self.attach_clients() == 0,
+                detached=not bool(self._visible_attach_surfaces()),
             )
         except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
             logger.debug("could not republish the session record", exc_info=True)
 
     def attach_clients(self) -> int:
-        """How many attach (follower terminal) connections are live.
+        """Live terminal viewers or leased desktop delivery surfaces.
 
-        Term 3 of the runtime's residency predicate (``process._should_exit``):
-        an interactive viewer holds the runtime warm; ``daemon`` clients never
-        do. Also the attach-cap count."""
-        return sum(1 for c in self._clients.values() if c.kind == "attach")
+        The reaper must not keep an idle runtime forever because a crashed
+        renderer left its HTTP proxy connection behind. Connection-cap eviction
+        still counts raw sockets separately, so expired leases cannot bypass it.
+        """
+        return sum(
+            1
+            for c in self._clients.values()
+            if c.kind == "attach"
+            and (
+                c.surface != "desktop"
+                or (self._desktop_lease_live(c) and (c.desktop_visible or c.desktop_can_notify))
+            )
+        )
+
+    def _desktop_lease_live(self, conn: _ClientConn) -> bool:
+        return (
+            conn.surface == "desktop"
+            and time.monotonic() - conn.desktop_seen < DESKTOP_WATCH_LEASE_S
+        )
+
+    def _visible_attach_surfaces(self) -> set[str]:
+        return {
+            "desktop" if conn.surface == "desktop" else "attach"
+            for conn in self._clients.values()
+            if conn.kind == "attach"
+            and (
+                conn.surface != "desktop"
+                or (self._desktop_lease_live(conn) and conn.desktop_visible)
+            )
+        }
+
+    def notification_surfaces(self) -> frozenset[str]:
+        """Delivery reachability is independent of a person viewing a session."""
+        return (
+            frozenset({"desktop"})
+            if any(
+                conn.kind == "attach" and self._desktop_lease_live(conn) and conn.desktop_can_notify
+                for conn in self._clients.values()
+            )
+            else frozenset()
+        )
 
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
@@ -1186,7 +1250,7 @@ class RuntimeServer:
         surfaces come and go constantly, and a stale answer here means a
         notification delivered to a surface that has gone away.
         """
-        watching = {c.kind for c in self._clients.values() if c.kind == "attach"}
+        watching = self._visible_attach_surfaces()
         if self.watch_supported and self.phone_watchers > 0:
             # Reported as ``viewer`` rather than ``daemon`` so a reader cannot
             # confuse "a relay is connected" (true of every session on a
@@ -1220,6 +1284,21 @@ class RuntimeServer:
                 else:
                     conn.watched_jobs.discard(job_id)
                 detail = f"watching {len(conn.watched_jobs)} job(s)"
+            elif op == "desktop_watch":
+                if (
+                    conn.kind != "attach"
+                    or conn.surface != "desktop"
+                    or id(conn.writer) not in self._clients
+                ):
+                    raise ValueError("desktop visibility requires a live desktop attach connection")
+                visible, can_notify = frame.get("visible"), frame.get("can_notify")
+                if type(visible) is not bool or type(can_notify) is not bool:
+                    raise ValueError("desktop visibility fields must be booleans")
+                conn.desktop_visible = visible
+                conn.desktop_can_notify = can_notify
+                conn.desktop_seen = time.monotonic()
+                self._republish_detached()
+                detail = "desktop lease renewed"
             elif op in ("watch", "unwatch"):
                 # The reaper's phone-watcher signal (§2.8). watch_supported
                 # latches on the FIRST op seen so a mixed-version child never

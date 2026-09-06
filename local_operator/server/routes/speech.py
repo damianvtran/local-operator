@@ -11,10 +11,12 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.model.configure import configure_model
+from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
     get_credential_manager,
+    get_provider_auth_store,
     get_radient_client,
 )
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
@@ -89,6 +91,7 @@ async def create_agent_speech(
     radient_client: RadientClient = Depends(get_radient_client),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
     config_manager: ConfigManager = Depends(get_config_manager),
     env_config: EnvConfig = Depends(get_env_config),
 ) -> Response:
@@ -116,7 +119,13 @@ async def create_agent_speech(
             else:
                 logger.warning("OpenRouter hosting selected but OPENROUTER_API_KEY not found.")
         elif hosting == "radient":
-            api_key = credential_manager.get_credential("RADIENT_API_KEY")
+            from local_operator.providers.radient_credentials import (
+                resolve_radient_credential,
+            )
+
+            api_key = await resolve_radient_credential(
+                credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+            )
             if api_key:
                 model_info_client = RadientClient(api_key, env_config.radient_api_base_url)
             else:

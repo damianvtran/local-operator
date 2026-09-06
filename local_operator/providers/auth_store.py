@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import zlib
 from collections.abc import Iterable
@@ -239,6 +240,48 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     return None
 
 
+class _SerializedConnection:
+    """A sqlite connection whose statements are serialized by a mutex.
+
+    The store's connection is opened with ``check_same_thread=False`` so a
+    caller on a worker thread gets a correct answer instead of a
+    ``ProgrammingError`` (see :meth:`AuthStore._connect`). sqlite connection
+    objects are not internally synchronised, though, so the flag alone would
+    swap a loud failure for silently interleaved statements -- an INSERT's
+    ``lastrowid`` read after another thread's INSERT, for one.
+
+    Wrapping instead of editing every call site keeps the ~27 existing
+    ``self._conn.execute(...)`` uses exactly as they read, and means a
+    statement added later is serialized by construction rather than by the
+    author remembering a lock. ``execute`` returns the cursor, so
+    ``.fetchall()``, ``.fetchone()`` and ``.lastrowid`` keep working; the lock
+    covers producing the cursor, which is where the shared state is touched.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        # Reentrant: `executescript` runs during construction while the schema
+        # is applied, and a future caller holding the lock across a helper that
+        # also executes must not deadlock against itself.
+        self._lock = threading.RLock()
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.execute(*args, **kwargs)
+
+    def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.executescript(*args, **kwargs)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
@@ -305,14 +348,30 @@ class AuthStore:
 
     # -- connection ----------------------------------------------------------
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> _SerializedConnection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         # Create the file 0600 BEFORE sqlite opens it: the plain
         # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
         if not self._db_path.exists():
             fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
             os.close(fd)
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+        # `check_same_thread=False` + an explicit mutex, rather than sqlite's
+        # default thread affinity. The store is built once on whatever thread
+        # first asks for it (for the desktop routes, the event loop) and is then
+        # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
+        # hop, a thread-pool executor, a background scheduler -- raised
+        # `ProgrammingError`. That is how a credential-free machine came to
+        # report every model as connected (D18): the raise was swallowed by a
+        # broad catch and reported as "the store is unreadable", which the model
+        # catalogue deliberately degrades to "show everything".
+        #
+        # Removing the one bad hop fixed that route; this fixes the CLASS, so
+        # the next caller to touch the store from another thread gets correct
+        # serialized access instead of a plausible-looking wrong answer. The
+        # lock is required because sqlite connection objects are not internally
+        # synchronised: `check_same_thread=False` alone would trade a loud error
+        # for silent interleaving.
+        conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -328,7 +387,7 @@ class AuthStore:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
-        return conn
+        return _SerializedConnection(conn)
 
     def close(self) -> None:
         self._conn.close()

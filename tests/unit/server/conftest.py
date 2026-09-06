@@ -189,6 +189,10 @@ def test_app_client(temp_dir):
     # Override app state with test-specific values
     # Store original values to restore later
     original_state = {}
+    original_desktop_auth = getattr(app.state, "desktop_auth", None)
+    # These clients bypass lifespan. A shared provider store must follow this
+    # fixture's config root rather than survive into the next test's managers.
+    app.state.desktop_auth = None
     if hasattr(app.state, "credential_manager"):
         original_state["credential_manager"] = app.state.credential_manager
     if hasattr(app.state, "config_manager"):
@@ -246,6 +250,10 @@ def test_app_client(temp_dir):
     yield client
 
     # Restore original state
+    created_auth = getattr(app.state, "desktop_auth", None)
+    if created_auth is not None:
+        created_auth.store.close()
+    app.state.desktop_auth = original_desktop_auth
     for key, value in original_state.items():
         setattr(app.state, key, value)
 

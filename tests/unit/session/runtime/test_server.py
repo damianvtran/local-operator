@@ -1161,6 +1161,67 @@ class TestLiveStateReachesTheRecord:
 
 
 @pytest.mark.asyncio
+async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.notification_surfaces() == frozenset()
+        await desktop.desktop_watch(visible=True, can_notify=True)
+        assert runtime.watching_surfaces() == frozenset({"desktop"})
+        assert runtime.notification_surfaces() == frozenset({"desktop"})
+        assert runtime.attach_clients() == 1
+        await desktop.desktop_watch(visible=False, can_notify=True)
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.notification_surfaces() == frozenset({"desktop"})
+        # Advance ONLY the lease timestamp, never the process-wide clock used
+        # by asyncio. A crashed renderer need not close its proxy's socket.
+        conn = next(c for c in runtime._clients.values() if c.surface == "desktop")
+        conn.desktop_seen -= DESKTOP_WATCH_LEASE_S + 1
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.notification_surfaces() == frozenset()
+        assert runtime.attach_clients() == 0
+        await terminal.connect(record, "s1")
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+        with pytest.raises(RuntimeError, match="desktop visibility"):
+            await terminal.desktop_watch(visible=True, can_notify=True)
+        await desktop.desktop_watch(visible=True, can_notify=False)
+        assert runtime.watching_surfaces() == frozenset({"attach", "desktop"})
+        assert runtime.notification_surfaces() == frozenset()
+    finally:
+        await desktop.detach()
+        await terminal.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_attach_refuses_old_runtime_before_becoming_a_false_terminal() -> None:
+    from dataclasses import replace
+
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        with pytest.raises(ConnectionError, match="runtime update"):
+            await desktop.connect(replace(record, capabilities=[]), "s1")
+        assert runtime.attach_clients() == 0
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_watching_surfaces_is_derived_from_real_connections() -> None:
     """A relay's presence is not a person. Derived from REAL dials.
 

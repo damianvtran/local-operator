@@ -53,6 +53,12 @@ from typing import Any, Literal
 # bump — the value is unchanged and no frame shape moved with it.
 PROTOCOL_VERSION = 5
 
+# Additive attach metadata: a desktop proxy is not itself a person watching.
+# Clients must negotiate this before connecting or an old owner would count
+# their background socket as a terminal and suppress its fallback notification.
+DESKTOP_WATCH_CAPABILITY = "desktop-watch-v1"
+DESKTOP_WATCH_LEASE_S = 45.0
+
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
 #: the owner's conversation; ``attach`` is a follower terminal that may

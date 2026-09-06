@@ -938,6 +938,42 @@ async def test_a_pending_announcement_routes_to_whoever_is_watching(
 
 
 @pytest.mark.asyncio
+async def test_background_desktop_owns_notification_without_becoming_interactive(
+    monkeypatch,
+) -> None:
+    import local_operator.tui.notify as notify_mod
+
+    deliveries = []
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    monkeypatch.setattr(
+        notify_mod, "detached_notify", lambda *args, **kwargs: deliveries.append(args)
+    )
+    handle, _session = make_handle()
+
+    class DesktopRegistrant:
+        active = True
+        record = type("R", (), {"session_id": "desktop00001"})()
+
+        def watching_surfaces(self):
+            return frozenset()
+
+        def notification_surfaces(self):
+            return frozenset({"desktop"}) if self.active else frozenset()
+
+        def set_record_pending(self, _kind):
+            return None
+
+    registrant = DesktopRegistrant()
+    handle._registrant = registrant
+    handle._announce_pending("approval", "bash", "build the project")
+    assert not deliveries
+    assert not handle._watching_surfaces()
+    registrant.active = False
+    handle._announce_pending("approval", "bash", "build the project")
+    assert len(deliveries) == 1
+
+
+@pytest.mark.asyncio
 async def test_an_old_registrant_without_surface_kinds_keeps_the_previous_behaviour() -> None:
     """A runtime published by an older release cannot answer by kind.
 

@@ -40,6 +40,8 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Tests launched from a detached operator inherit these runtime-only flags.

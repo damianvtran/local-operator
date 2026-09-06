@@ -48,6 +48,7 @@ from local_operator.mobile.types import (
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import scan
+from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -144,7 +145,9 @@ class AttachClient:
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
+        surface: str = "terminal",
     ) -> None:
+        self._surface = surface
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
         if locality not in ("local", "remote"):
@@ -193,6 +196,8 @@ class AttachClient:
         graceful refusal copy — a user re-running the command is the only
         retry mechanism, by design.
         """
+        if self._surface == "desktop" and DESKTOP_WATCH_CAPABILITY not in record.capabilities:
+            raise ConnectionError("This session needs a runtime update before desktop attachment.")
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
@@ -205,11 +210,17 @@ class AttachClient:
             raise ConnectionError(f"owner socket unreachable: {exc}") from exc
         self._reader = reader
         self._writer = writer
+        # The owner needs both facts and they answer different questions:
+        # ``locality`` (upstream) says where the client physically is, while
+        # ``surface`` says which interface it presents — a desktop watcher
+        # negotiates notification/visibility leases that a plain attach does not.
         auth: dict[str, Any] = {
             "key": record.control_key,
             "client": "attach",
             "locality": self._locality,
         }
+        if self._surface == "desktop":
+            auth["surface"] = "desktop"
         if self._events:
             # v4 capability flag. A v3 owner ignores unknown auth fields and
             # simply never sends event frames — the caller gates on
@@ -541,6 +552,10 @@ class AttachClient:
             text=text,
             images=list(images or []),
         )
+
+    async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
+        """Renew this attach connection's desktop lease, not the phone counter."""
+        return await self._request("desktop_watch", visible=visible, can_notify=can_notify)
 
     async def abort(self) -> str:
         return await self._request("abort")

@@ -139,10 +139,96 @@ def installed_version() -> str:
 
     Empty is the source-checkout case: there is nothing to compare to PyPI
     and :func:`install_kind` will refuse rather than guess.
+
+    Install metadata is written ONCE and never refreshed when the version in
+    ``pyproject.toml`` moves, so a checkout at 0.49.0 kept reporting the
+    0.46.23 it had been installed at -- and the app showed that stale number to
+    users in Settings > Updates (QA Q3 / UX U13).
+
+    PRECEDENCE: the HIGHER of the checkout's ``pyproject.toml`` and the install
+    metadata, when both are readable and parseable.
+
+    Not "the checkout always wins". Both sources are stale in opposite
+    directions and neither is authoritative on its own:
+
+    * metadata is written once at install time and never moves with the tree,
+      so a checkout at 0.49.0 reported the 0.46.23 it was installed at (QA Q3 /
+      UX U13) -- the bug this function exists to fix;
+    * a ``pyproject.toml`` is merely a file that happens to sit next to the
+      package, and one naming this project but declaring an older version (a
+      fixture, a scratch tree, a hand-edited ``version = "0.1.0"``) overrode
+      correct metadata and produced a spurious "update available" (review round
+      2, MINOR-2).
+
+    Taking the maximum resolves both: the forward-moving tree wins over stale
+    metadata, and stale-looking file loses to metadata that knows better. It
+    also fails in the SAFE direction. The residual case is a deliberate checkout
+    of an OLDER tag alongside newer install metadata: this reports the newer
+    number and the user sees no update banner while running older code. That is
+    a missed banner rather than a false one, and this module already takes that
+    side of the trade -- see :func:`parse_version`, where an unparseable version
+    is treated as "not behind" because "a banner we cannot defend is worse than
+    none".
+
+    A packaged (non-editable) install has no adjacent project file, so it never
+    takes this path and reports its metadata exactly as before; there is no
+    configuration in which a released build starts reading a stray file. Both an
+    editable install and a bare ``PYTHONPATH`` checkout are covered, which
+    matters because a leftover ``*.egg-info`` in the tree shadows the installed
+    distribution entirely and made "is this editable?" the wrong question.
+    """
+    source = _editable_source_version()
+    try:
+        metadata = version("local-operator")
+    except PackageNotFoundError:
+        metadata = ""
+    if not source:
+        return metadata
+    if not metadata:
+        return source
+    # Compare on parsed tuples; an unparseable side cannot be ordered, so the
+    # other one is the only defensible answer.
+    source_parts, metadata_parts = parse_version(source), parse_version(metadata)
+    if source_parts is None:
+        return metadata
+    if metadata_parts is None:
+        return source
+    return source if source_parts >= metadata_parts else metadata
+
+
+def _editable_source_version() -> str:
+    """The version in the checkout's ``pyproject.toml``, when code runs FROM it.
+
+    Two stale-metadata layouts produce the same wrong answer, and both are
+    normal for a working tree:
+
+    * an editable install, whose ``dist-info`` is written once at install time;
+    * a leftover ``*.egg-info`` in the checkout, which shadows the installed
+      distribution entirely and is a gitignored build artifact nothing
+      refreshes.
+
+    Rather than distinguish them, this asks the question that actually matters:
+    is the imported package sitting next to a ``pyproject.toml``? If so the
+    running code IS that checkout, and the checkout's version is the truth
+    while any metadata is a copy of some earlier state.
+
+    Deliberately cheap and total: any doubt (no adjacent project file, an
+    unreadable or unexpected one) returns ``""`` so the caller falls back to
+    metadata rather than inventing a number.
     """
     try:
-        return version("local-operator")
-    except PackageNotFoundError:
+        import tomllib
+
+        # local_operator/update.py -> local_operator/ -> the checkout root.
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        if not pyproject.is_file():
+            return ""
+        with pyproject.open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        if project.get("name") != "local-operator":
+            return ""
+        return str(project["version"])
+    except Exception:  # noqa: BLE001 — a version readout must never raise
         return ""
 
 
