@@ -70,7 +70,7 @@ SIDEBAR_MAIN_MIN_WIDTH = 60
 #: The band animates ONE glyph; this list repaints every visible row per tick,
 #: so the same nominal rate costs ~38x more terminal output for the same
 #: information. At 0.15s the eight-frame cycle still reads as clearly alive
-#: (4.8s) while writing ~1.9x less, and it does not visibly disagree with the
+#: (1.2s) while writing ~1.9x less, and it does not visibly disagree with the
 #: band because the rate a throttled surface ACHIEVES is well under its
 #: nominal one either way. Local rather than a change to the shared constant:
 #: the other surfaces read that one and are not paying this cost.
@@ -161,10 +161,11 @@ class SessionSidebar(Widget, can_focus=True):
 
     @property
     def page_size(self) -> int:
-        # Minus the "Sessions" title, the footer, and whatever section headers
-        # the current window draws — a header occupies a line that cannot hold
-        # a session, so the count of ENTRIES that fit shrinks by exactly that.
-        return max(1, self.size.height - 2 - self._header_lines())
+        # Minus the footer, the title if one is drawn, and whatever section
+        # chrome the window carries: each occupies a line that cannot hold a
+        # session, so the count of ENTRIES that fit shrinks by exactly that.
+        chrome = self._header_lines()
+        return max(1, self.size.height - 1 - (0 if chrome else 1) - chrome)
 
     def _header_lines(self) -> int:
         """Lines the section headers will consume in the current window.
@@ -177,13 +178,24 @@ class SessionSidebar(Widget, can_focus=True):
         if not self.entries:
             return 0
         tiers = {0 if entry.rank[0] <= 2 else 1 for entry in self.entries}
-        # One line per header present, plus a blank line before the SECOND
-        # header only — whitespace is this chrome's only separator.
-        return len(tiers) + (1 if len(tiers) > 1 else 0)
+        # Per section: its heading and the blank beneath it, plus a blank
+        # above every heading after the first. The outer "Sessions" title is
+        # not counted — it is not drawn at all once any header is (`render`).
+        return len(tiers) * 2 + (len(tiers) - 1)
 
     @property
     def visible_entries(self) -> tuple[CatalogEntry, ...]:
         return self.entries[self._offset : self._offset + self.page_size]
+
+    @staticmethod
+    def _draws_section_headers(rows: tuple[tuple[str, CatalogEntry | None], ...]) -> bool:
+        """Whether these display rows carry section headings.
+
+        The single rule both `render` and `_entry_at` consult, so the painted
+        title line and the hit-test can never disagree about whether it is
+        there.
+        """
+        return any(kind.startswith("header:") for kind, _entry in rows)
 
     def _display_rows(self) -> tuple[tuple[str, CatalogEntry | None], ...]:
         """The lines to paint: ``("header", None)`` or ``("entry", entry)``.
@@ -206,9 +218,20 @@ class SessionSidebar(Widget, can_focus=True):
         for entry in self.visible_entries:
             current = "active" if entry.rank[0] <= 2 else "previous"
             if current != section:
+                # A blank ABOVE every heading but the first, and one BELOW
+                # every heading. The ask was "an active sessions header and
+                # then padding, previous sessions": the heading owns the space
+                # beneath it, so the gap reads as "this group starts here"
+                # rather than "the last one ended". The leading blank is still
+                # needed or the second heading collides with the row above it
+                # — with padding only underneath, `Previous Sessions` sat
+                # flush against the last active row and the two groups ran
+                # together. The first heading takes no leading blank: nothing
+                # sits above it to separate from.
                 if section is not None:
                     rows.append(("blank", None))
                 rows.append((f"header:{current}", None))
+                rows.append(("blank", None))
                 section = current
             rows.append(("entry", entry))
         return tuple(rows)
@@ -327,13 +350,15 @@ class SessionSidebar(Widget, can_focus=True):
         self.post_message(self.Dismissed())
 
     def _entry_at(self, y: int) -> CatalogEntry | None:
-        index = y - 1
         # Against the DISPLAY rows, not the entries: a header and its blank
         # line occupy lines that hold no session, so indexing entries directly
         # would attribute a click to whatever sits that many rows further
         # down. `None` on a header is already what hover and click want — both
         # no-op on it.
         rows = self._display_rows()
+        # Same rule `render` uses to decide whether a title line is drawn, so
+        # the hit-test cannot drift a row away from the paint.
+        index = y - (0 if self._draws_section_headers(rows) else 1)
         if not 0 <= index < len(rows):
             return None
         kind, entry = rows[index]
@@ -517,11 +542,29 @@ class SessionSidebar(Widget, can_focus=True):
     def render(self) -> Text:
         width = max(1, self.size.width)
         result = Text(no_wrap=True, overflow="crop")
-        result.append(
-            truncate_cells("Sessions", width).ljust(width), style=theme_mod.semantic_color("muted")
-        )
-        for kind, entry in self._display_rows():
-            result.append("\n")
+        rows = self._display_rows()
+        # The outer title only when nothing else heads the list. Once the
+        # section headings are present it paints identically to them — same
+        # `muted`, same weight, same indent, on the adjacent line — so the
+        # frame opened with the word "Sessions" twice and no rendered cue
+        # which was the panel and which the group. The relay this mirrors has
+        # its two headings under the PRODUCT BRAND, not under a third
+        # "Sessions" label. The quiet states still need it: with no sections
+        # there is nothing to head, and loading/empty/error would open on bare
+        # body copy — which an empty list gets for free, since it emits no
+        # headers.
+        first = True
+        if not self._draws_section_headers(rows):
+            result.append(
+                truncate_cells("Sessions", width).ljust(width),
+                style=theme_mod.semantic_color("muted"),
+            )
+            first = False
+        for kind, entry in rows:
+            if first:
+                first = False
+            else:
+                result.append("\n")
             if kind == "blank":
                 # Whitespace is the separator; the chrome stays borderless.
                 result.append(" " * width)

@@ -670,11 +670,20 @@ async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
 
 
 def _mixed_entries() -> list[CatalogEntry]:
-    """Two ACTIVE rows (rank tier <=2) and two PREVIOUS (tier 3)."""
+    """Two ACTIVE rows (rank tier <=2) and two PREVIOUS (tier 3).
+
+    Deliberately reaches Active WITHOUT ``live_state="busy"``: a busy row
+    animates, and a test that compares frames from two app instances then
+    compares two spinner PHASES. That made the `auto_links` frame-equality
+    guard flaky under ``-n0`` (fail/fail/pass, the diff a single glyph) while
+    passing under xdist — a broken instrument in front of the one test that
+    closes the `auto_links=False` risk. `pending` and `unseen` are tiers 0 and
+    1, so the section split is still exercised with a still frame.
+    """
     now = 1_700_000_000.0
     return [
-        CatalogEntry(SessionRow("act1", now - 60, "Live one", live_state="busy")),
-        CatalogEntry(SessionRow("act2", now - 120, "Live two", live_state="busy")),
+        CatalogEntry(SessionRow("act1", now - 60, "Needs you", pending="approval")),
+        CatalogEntry(SessionRow("act2", now - 120, "Has news"), True, "completed"),
         CatalogEntry(SessionRow("old1", now - 9000, "Old one")),
         CatalogEntry(SessionRow("old2", now - 99000, "Old two")),
     ]
@@ -787,15 +796,21 @@ async def test_the_spinner_does_not_tick_while_blurred_or_closed():
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             sidebar = app._session_sidebar
-            # Closed: no ticks regardless of busy rows.
-            sidebar.set_entries(_mixed_entries())
+            # Closed: no ticks regardless of busy rows. A BUSY fixture is
+            # required here — `_mixed_entries` is deliberately still, because
+            # the frame-equality guard cannot compare two spinner phases.
+            busy = [
+                CatalogEntry(SessionRow("b1", 1_700_000_000.0, "Working", live_state="busy")),
+                CatalogEntry(SessionRow("o1", 1_699_000_000.0, "Old one")),
+            ]
+            sidebar.set_entries(busy)
             await pilot.pause()
             assert sidebar._timer is not None
             assert sidebar._timer._active.is_set() is False
 
             await pilot.press("ctrl+b")
             await pilot.pause()
-            sidebar.set_entries(_mixed_entries())
+            sidebar.set_entries(busy)
             await pilot.pause()
             # Open with a busy row: running, at the list's own slower cadence.
             assert sidebar._timer is not None
@@ -831,7 +846,9 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         sidebar.focus()
         await pilot.pause()
         # The frame really does carry both headers.
-        assert sidebar._header_lines() == 3  # two headers plus one blank
+        # Two headings, each owning the blank beneath it, plus the blank that
+        # separates the second heading from the group above.
+        assert sidebar._header_lines() == 5
         sidebar.cursor_id = "act1"
 
         walked: list[str] = []
@@ -920,3 +937,60 @@ async def test_rows_are_independent_so_a_row_scoped_repaint_is_sound():
         differing = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
         # Hovering one row changes that row's line and nothing else.
         assert len(differing) <= 1, differing
+
+
+@pytest.mark.asyncio
+async def test_the_outer_title_yields_to_section_headers_but_survives_quiet_states():
+    """One title, not two — and never a frame that opens on bare body copy.
+
+    The panel title and the group headings painted identically (same `muted`,
+    same weight, same indent, adjacent lines), so the list opened by saying
+    "Sessions" twice with no rendered cue which was which — 2 of 13 usable
+    lines at 80x24. The headings now do the title's job when they are there.
+
+    But the quiet states have nothing to head: without the title, loading,
+    empty and error would open straight into body copy. Conditioning on "any
+    header row exists" gets that for free, since an empty list emits none.
+    """
+    from textual.geometry import Region
+
+    async def first_lines(setup) -> list[str]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            sidebar = app._session_sidebar
+            setup(sidebar)
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            return [
+                "".join(segment.text for segment in line).strip()
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+
+    populated = await first_lines(lambda sidebar: sidebar.set_entries(_mixed_entries()))
+    assert populated[0] == "Active Sessions"
+    assert "Sessions" not in populated[:1] or populated[0] != "Sessions"
+    # The word appears only inside the two headings, never on its own line.
+    assert not any(line == "Sessions" for line in populated)
+
+    # Each heading owns the padding BENEATH it, and the second is separated
+    # from the group above: "header, gap, rows" reads as a group starting.
+    assert populated[1] == ""
+    previous = populated.index("Previous Sessions")
+    assert populated[previous - 1] == "", "the second heading collides with the group above"
+    assert populated[previous + 1] == "", "the heading does not own its padding"
+
+    for setup in (
+        lambda sidebar: sidebar.set_entries([]),
+        lambda sidebar: sidebar.show_error("Could not load conversations"),
+        lambda sidebar: None,  # loading: never received a catalog
+    ):
+        quiet = await first_lines(setup)
+        assert quiet[0] == "Sessions", quiet[:2]
