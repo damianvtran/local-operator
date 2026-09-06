@@ -40,8 +40,9 @@ On sites that you approve, the extension may:
 - observe navigation completion and redirects so it can report where the tab
   actually landed.
 
-The extension asks before the agent uses a new website. You can allow the
-site once, always allow it, or deny it. A site's normal subresources may load
+The extension asks before the agent uses a new website. You can allow all
+pages on that domain, only that exact site, or just that once, or deny it. A
+site's normal subresources may load
 from other domains; the approval controls where the delegated tab navigates,
 not every subresource requested by the page.
 

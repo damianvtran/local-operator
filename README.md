@@ -612,7 +612,8 @@ then load `extension/dist` unpacked at `chrome://extensions` with Developer mode
 on — the extension is not yet on the Chrome Web Store), click its toolbar icon,
 and enter the pairing code. Once paired, `browser` tool calls drive a dedicated
 tab in your real browser. The first time the agent wants a new site, the
-extension asks you to Allow once / Always allow / Deny; you stay in control of
+extension asks you to pick a scope (all pages on this domain, only this site,
+just this once) or Deny; you stay in control of
 which sites it can reach, and can revoke the whole browser any time from the
 extension's Settings or with `lop browser pair --reset`.
 

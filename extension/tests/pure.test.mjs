@@ -54,7 +54,385 @@ test("origin policy preserves exact grants and scopes loopback all-port grants",
   } finally { await module.close(); }
 });
 
-test("settings list and revoke exact and all-port grants independently", async () => {
+test("registrable domain follows the bundled Public Suffix List and refuses unbounded keys", async () => {
+  const module = await load("src/origin-policy.ts");
+  try {
+    const { registrableDomain, broadGrantFor } = module.loaded;
+    const domain = (href) => registrableDomain(new URL(href));
+    // Ordinary ICANN suffixes.
+    assert.equal(domain("https://qa-app.qa.gominerva.com"), "gominerva.com");
+    assert.equal(domain("https://app.gominerva.com"), "gominerva.com");
+    assert.equal(domain("https://gominerva.com"), "gominerva.com");
+    assert.equal(domain("https://GoMinerva.COM:8443/x"), "gominerva.com");
+    // Multi-label public suffix.
+    assert.equal(domain("https://foo.bar.co.uk"), "bar.co.uk");
+    assert.equal(domain("https://bar.co.uk"), "bar.co.uk");
+    assert.equal(domain("https://co.uk"), null);
+    // Wildcard rule `*.ck` and its exception `!www.ck`.
+    assert.equal(domain("https://foo.bar.ck"), "foo.bar.ck");
+    assert.equal(domain("https://bar.ck"), null);
+    assert.equal(domain("https://www.ck"), "www.ck");
+    assert.equal(domain("https://a.www.ck"), "www.ck");
+    // PRIVATE section: a tenant on shared hosting is its own domain.
+    assert.equal(domain("https://me.github.io"), "me.github.io");
+    assert.equal(domain("https://github.io"), null);
+    // IDN rule matched through punycode.
+    assert.equal(domain("https://\u0441\u0430\u0439\u0442.\u0440\u0444"), "xn--80aswg.xn--p1ai");
+    // No domain option at all for these: a grant would be unbounded or
+    // meaningless.
+    for (const href of [
+      "http://10.0.0.5",
+      "http://[2001:db8::1]:8080",
+      "http://intranet",
+      "https://example.com.",
+      "https://com",
+    ]) assert.equal(domain(href), null, href);
+    // Loopback gets a host grant instead; an IP literal gets nothing.
+    assert.deepEqual(broadGrantFor(new URL("http://localhost:5173")), { scope: "host", key: "localhost" });
+    assert.deepEqual(broadGrantFor(new URL("http://[::1]:8000")), { scope: "host", key: "[::1]" });
+    assert.deepEqual(broadGrantFor(new URL("https://qa-app.qa.gominerva.com")), { scope: "domain", key: "gominerva.com" });
+    assert.equal(broadGrantFor(new URL("http://10.0.0.5")), null);
+  } finally { await module.close(); }
+  const psl = await load("src/psl.gen.ts");
+  try {
+    assert.ok(psl.loaded.PSL_RULE_COUNT > 9000, `bundled list looks truncated: ${psl.loaded.PSL_RULE_COUNT}`);
+    assert.equal(psl.loaded.PSL_RULES.split("\n").length, psl.loaded.PSL_RULE_COUNT);
+    assert.match(psl.loaded.PSL_GENERATED_AT, /^\d{4}-\d{2}-\d{2}$/);
+  } finally { await psl.close(); }
+});
+
+test("site grants admit by domain or loopback host, in lookup order, and fail closed", async () => {
+  const module = await load("src/origin-policy.ts");
+  try {
+    const { matchingGrantScope, storedOriginAllowed } = module.loaded;
+    const siteGrants = {
+      version: 1,
+      grants: {
+        "gominerva.com": { scope: "domain", createdAt: 1 },
+        localhost: { scope: "host", createdAt: 1 },
+      },
+    };
+    const NONE = Symbol("no site grants");
+    const scope = (href, origins = {}, hostGrants, grants = siteGrants) =>
+      matchingGrantScope(origins, hostGrants, new URL(href), grants === NONE ? undefined : grants);
+    // Exact origin wins first.
+    assert.equal(scope("https://gominerva.com", { "https://gominerva.com": "allow" }), "origin");
+    // Domain grant: every subdomain, both schemes, any port.
+    assert.equal(scope("https://qa-app.qa.gominerva.com"), "domain");
+    assert.equal(scope("https://gominerva.com"), "domain");
+    assert.equal(scope("http://gominerva.com"), "domain");
+    assert.equal(scope("https://gominerva.com:8443"), "domain");
+    assert.equal(scope("https://gominerva.co"), null);
+    assert.equal(scope("https://notgominerva.com"), null);
+    assert.equal(scope("https://gominerva.com.evil.example"), null);
+    // Host grant: any port, both schemes, literal hostname only.
+    assert.equal(scope("http://localhost:9999"), "host");
+    assert.equal(scope("https://localhost:9999"), "host");
+    assert.equal(scope("http://127.0.0.1:9999"), null);
+    assert.equal(scope("http://api.localhost:9999"), null);
+    // Legacy v1 loopback grant is still honoured, still same-scheme only,
+    // and ranks after the site grants.
+    const legacy = { version: 1, grants: { '["http:","localhost"]': { scope: "all_ports", createdAt: 1 } } };
+    assert.equal(scope("http://localhost:1", {}, legacy, NONE), "loopback_all_ports");
+    assert.equal(scope("https://localhost:1", {}, legacy, NONE), null);
+    assert.equal(scope("http://localhost:1", {}, legacy), "host");
+    // Fail closed: unknown version, malformed entry, wrong scope for key.
+    assert.equal(scope("https://gominerva.com", {}, undefined, { version: 2, grants: siteGrants.grants }), null);
+    assert.equal(scope("https://gominerva.com", {}, undefined, { version: 1, grants: { "gominerva.com": { scope: "domain" } } }), null);
+    assert.equal(scope("https://gominerva.com", {}, undefined, { version: 1, grants: { "gominerva.com": { scope: "host", createdAt: 1 } } }), null);
+    assert.equal(scope("https://gominerva.com", {}, undefined, { version: 1, grants: [] }), null);
+    assert.equal(storedOriginAllowed({}, new URL("https://x.gominerva.com"), undefined, siteGrants), true);
+    // A "deny" verdict is typed but never written; it is simply not an allow.
+    assert.equal(scope("https://gominerva.com", { "https://gominerva.com": "deny" }, undefined, NONE), null);
+  } finally { await module.close(); }
+});
+
+test("policyCovers reconciles by domain and loopback host regardless of scheme", async () => {
+  const module = await load("src/access-queue.ts");
+  try {
+    const { policyCovers } = module.loaded;
+    assert.equal(policyCovers("https://qa-app.qa.gominerva.com", "http://app.gominerva.com:8080", "domain"), true);
+    assert.equal(policyCovers("https://gominerva.com", "https://gominerva.co", "domain"), false);
+    assert.equal(policyCovers("http://10.0.0.5", "http://10.0.0.5", "domain"), false, "no domain, no coverage");
+    assert.equal(policyCovers("http://localhost:3000", "https://localhost:5173", "host"), true);
+    assert.equal(policyCovers("http://localhost:3000", "http://127.0.0.1:5173", "host"), false);
+    assert.equal(policyCovers("http://example.com", "http://example.com:81", "host"), false);
+    assert.equal(policyCovers("http://localhost:3000", "https://localhost:5173", "loopback_all_ports"), false, "legacy stays same-scheme");
+    assert.equal(policyCovers("https://a.example", "https://a.example"), true);
+  } finally { await module.close(); }
+});
+
+test("normalizedSiteGrants preserves keys the current PSL cannot re-derive", async () => {
+  const module = await load("src/access-grants.ts");
+  try {
+    const { normalizedSiteGrants } = module.loaded;
+    // A key written under an OLDER bundled PSL, before the name became a
+    // public suffix. Re-deriving it here refused the whole mutation, which
+    // bricked every future grant AND the Remove button for this very row
+    // while the read path kept honouring the rest: access stayed granted and
+    // the off-switch vanished (A2). Carrying the key is safe because lookups
+    // derive their key from the URL, so a stale key can only fail to match.
+    for (const key of ["blogspot.com", "co.uk", "www.gominerva.com"]) {
+      const stale = { version: 1, grants: { [key]: { scope: "domain", createdAt: 1 } } };
+      assert.deepEqual(normalizedSiteGrants(stale), stale, key);
+    }
+    // A scope/key mismatch is likewise preserved, not interpreted: it is the
+    // read path that decides what a record admits, and it checks both.
+    const mismatched = { version: 1, grants: { "example.com": { scope: "host", createdAt: 1 } } };
+    assert.deepEqual(normalizedSiteGrants(mismatched), mismatched);
+    // Likewise a key that is not a bare hostname at all: unreachable by any
+    // lookup, so preserving it costs nothing and keeps Remove working.
+    const urlish = { version: 1, grants: { "https://gominerva.com": { scope: "domain", createdAt: 1 } } };
+    assert.deepEqual(normalizedSiteGrants(urlish), urlish);
+  } finally { await module.close(); }
+});
+
+test("normalizedSiteGrants refuses any record this build cannot preserve", async () => {
+  const module = await load("src/access-grants.ts");
+  try {
+    const { normalizedSiteGrants } = module.loaded;
+    const good = { version: 1, grants: { "gominerva.com": { scope: "domain", createdAt: 1 }, "[::1]": { scope: "host", createdAt: 2 } } };
+    assert.deepEqual(normalizedSiteGrants(good), good);
+    for (const bad of [
+      { version: 2, grants: {} },
+      { version: 1, grants: { "gominerva.com": { scope: "domain", createdAt: "1" } } },
+      { version: 1, grants: { "gominerva.com": { scope: "all_ports", createdAt: 1 } } },
+    ]) assert.equal(normalizedSiteGrants(bad), null, JSON.stringify(bad));
+  } finally { await module.close(); }
+});
+
+test("the ack latch: all eight prompt/ack transitions", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { originPromptView } = module.loaded;
+    const A = "https://qa-app.qa.gominerva.com";
+    const B = "https://other.example";
+    const decided = { origin: A, decision: "once", entryId: "gen-1" };
+    // The full matrix. Requiring the two ids to be EQUAL passes the sibling
+    // case but fails the ordinary end of every real decision: the queue write
+    // fires render() at once while /health's pending_origin only clears after
+    // a websocket round-trip, so the popup sees a truthy origin with no entry.
+    // An ABSENT pending generation means "nothing distinguishes this from my
+    // own echo", not "mismatch" (A6).
+    const cases = [
+      ["U1 same-generation echo",        [A, decided, "gen-1"], "ack"],
+      ["A6 live same-origin sibling",    [A, decided, "gen-2"], "prompt"],
+      ["/health-only echo (no ids)",     [A, { ...decided, entryId: "" }, ""], "ack"],
+      ["real entry then /health echo",   [A, decided, ""], "ack"],
+      ["TTL sweep while ack is up",      [A, decided, undefined], "ack"],
+      ["different origin",               [B, decided, "gen-9"], "prompt"],
+      ["echo cleared",                   [undefined, decided, ""], "none"],
+      ["no decision made",               [A, null, "gen-1"], "prompt"],
+    ];
+    for (const [label, args, want] of cases) {
+      assert.equal(originPromptView(...args), want, label);
+    }
+    // Deny takes the same transitions: the copy is confidently wrong if a live
+    // re-ask is swallowed as "Site denied.".
+    assert.equal(originPromptView(A, { ...decided, decision: "deny" }, "gen-2"), "prompt");
+    assert.equal(originPromptView(A, { ...decided, decision: "deny" }, ""), "ack");
+  } finally { await module.close(); }
+});
+
+test("a re-ask never preselects a scope wider than the one just chosen", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { preselectedScope, scopeOptions, isRepeatAsk } = module.loaded;
+    const A = "https://qa-app.qa.gominerva.com";
+    const entry = { origin: A, broad: { scope: "domain", key: "gominerva.com" } };
+    const built = scopeOptions(entry);
+    assert.equal(built.defaultValue, "domain", "the broad default is what makes this dangerous");
+    // The card is byte-identical to the request just answered and the ack is
+    // gone within a frame or two, so a user who reads it as "my click did not
+    // register" clicks again. That second click must not hand over more than
+    // the first one did (U9).
+    for (const decision of ["once", "site", "domain"]) {
+      assert.equal(
+        preselectedScope(built, A, { origin: A, decision, entryId: "gen-1" }),
+        decision,
+        `a repeat ask after ${decision} must preselect ${decision}`,
+      );
+    }
+    // Not a repeat ask: the fail-closed default stands.
+    assert.equal(preselectedScope(built, A, null), "domain");
+    assert.equal(preselectedScope(built, A, { origin: "https://b.example", decision: "once", entryId: "g" }), "domain");
+    assert.equal(preselectedScope(built, undefined, { origin: A, decision: "once", entryId: "g" }), "domain");
+    // Deny carries no scope to repeat.
+    assert.equal(preselectedScope(built, A, { origin: A, decision: "deny", entryId: "g" }), "domain");
+    // A decision this entry cannot offer (a domain choice on an IP literal,
+    // after a worker restart drops `broad`) falls back rather than inventing
+    // an option that is not in the list.
+    const narrow = scopeOptions({ origin: "http://10.0.0.5:8080" });
+    assert.deepEqual(narrow.options.map((o) => o.value), ["site", "once"]);
+    assert.equal(preselectedScope(narrow, "http://10.0.0.5:8080", { origin: "http://10.0.0.5:8080", decision: "domain", entryId: "g" }), "site");
+    // The card must also SAY it is asking again; the preselect protects a user
+    // who reads nothing, the banner explains it to one who does.
+    assert.equal(isRepeatAsk(A, { origin: A, decision: "once", entryId: "gen-1" }), true);
+    assert.equal(isRepeatAsk(A, null), false);
+    assert.equal(isRepeatAsk(A, { origin: "https://b.example", decision: "once", entryId: "g" }), false);
+    assert.equal(isRepeatAsk(undefined, { origin: A, decision: "once", entryId: "g" }), false);
+  } finally { await module.close(); }
+});
+
+test("the scope latch key cannot collide across origins on the health-only path", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { scopeLatchKey } = module.loaded;
+    // With a real queue entry the id IS the identity.
+    assert.equal(scopeLatchKey("gen-1", "https://alpha.example"), "gen-1");
+    assert.notEqual(scopeLatchKey("gen-1", "https://a"), scopeLatchKey("gen-2", "https://a"));
+    // On the /health-only fallback the entry id is "" for EVERY origin. Keyed
+    // on that alone, two successive fallback renders reuse one option list and
+    // the trough names the previous site while Allow grants the current one
+    // (A7) - which defeats the one thing the trough exists for.
+    const alpha = scopeLatchKey("", "https://alpha.example");
+    const beta = scopeLatchKey("", "https://beta.example");
+    assert.notEqual(alpha, beta, "two fallback origins must not share a latch key");
+    assert.ok(alpha, "a fallback key must not be empty");
+    assert.equal(scopeLatchKey("", "https://alpha.example"), alpha, "same origin is stable");
+    // Nothing pending at all has no identity to cache against.
+    assert.equal(scopeLatchKey("", undefined), "");
+  } finally { await module.close(); }
+});
+
+test("popup scope options come from the entry and default to the broad grant when present", async () => {
+  const module = await load("src/popup/origin-flow.ts");
+  try {
+    const { scopeOptions } = module.loaded;
+    const domain = scopeOptions({ origin: "https://qa-app.qa.gominerva.com", broad: { scope: "domain", key: "gominerva.com" } });
+    assert.deepEqual(domain.options.map((option) => option.value), ["domain", "site", "once"]);
+    assert.equal(domain.defaultValue, "domain");
+    assert.deepEqual(domain.options.map((option) => option.label), ["All pages on this domain", "Only this site", "Just this once"]);
+    assert.deepEqual(domain.options.map((option) => option.detail), [
+      "gominerva.com and every subdomain, any port",
+      "https://qa-app.qa.gominerva.com",
+      "one navigation to https://qa-app.qa.gominerva.com, within 10 minutes",
+    ]);
+    const host = scopeOptions({ origin: "http://localhost:5173", broad: { scope: "host", key: "localhost" } });
+    assert.equal(host.options[0].label, "Any port on this host");
+    assert.equal(host.options[0].detail, "localhost, any port");
+    assert.equal(host.defaultValue, "domain");
+    // No broad field (IP literal, a 0.1.7 entry, or a /health-only render):
+    // no domain option, and the narrow grant is the default.
+    for (const entry of [{ origin: "http://10.0.0.5" }, undefined]) {
+      const narrow = scopeOptions(entry);
+      assert.deepEqual(narrow.options.map((option) => option.value), ["site", "once"]);
+      assert.equal(narrow.defaultValue, "site");
+    }
+    for (const option of [...domain.options, ...host.options]) {
+      assert.doesNotMatch(option.label, /\u2014/);
+      assert.doesNotMatch(option.detail, /\u2014/);
+    }
+  } finally { await module.close(); }
+});
+
+test("allow-all switch writes only after an acknowledged Enable and reverts on cancel", async () => {
+  const module = await load("src/options/allow-all-flow.ts");
+  try {
+    const { nextAllowAllView, allowAllView } = module.loaded;
+    const off = allowAllView(false);
+    assert.deepEqual(off, { switchOn: false, dialogOpen: false, acked: false, banner: false });
+    // Checking opens the dialog, shows the switch on, writes nothing.
+    const opened = nextAllowAllView(false, { type: "toggle", checked: true }, off);
+    assert.deepEqual(opened, { switchOn: true, dialogOpen: true, acked: false, banner: false });
+    // Enable is inert until acked.
+    assert.deepEqual(nextAllowAllView(false, { type: "enable" }, opened), opened);
+    const acked = nextAllowAllView(false, { type: "ack", checked: true }, opened);
+    assert.equal(acked.acked, true);
+    assert.equal(acked.write, undefined);
+    // Cancel (or Escape) reverts with no write.
+    assert.deepEqual(nextAllowAllView(false, { type: "cancel" }, acked), off);
+    // Ack then Enable is the only way to write true.
+    const enabled = nextAllowAllView(false, { type: "enable" }, acked);
+    assert.deepEqual(enabled, { switchOn: true, dialogOpen: false, acked: false, banner: true, write: true });
+    // Unchecking, or the banner's Turn off, writes false with no dialog.
+    const on = allowAllView(true);
+    assert.deepEqual(nextAllowAllView(true, { type: "toggle", checked: false }, on), { ...off, write: false });
+    assert.deepEqual(nextAllowAllView(true, { type: "turn_off" }, on), { ...off, write: false });
+    // Re-checking an already-on switch is a no-op.
+    assert.deepEqual(nextAllowAllView(true, { type: "toggle", checked: true }, on), on);
+  } finally { await module.close(); }
+});
+
+// A1/U1/A6/A7 all live in popup.ts's render() control flow, which round 2
+// showed has now produced a MAJOR three rounds running precisely because no
+// test imports it for behaviour. These scan the SOURCE for the invariants the
+// pure helpers cannot express on their own: that render() feeds the generation
+// and the collision-proof key into the helpers rather than calling them with
+// the origin alone, and that the options page repaints the card when it writes.
+test("render() keys the ack latch on the generation and the scope cache on a non-empty key", async () => {
+  const popup = await readFile(new URL("../src/popup/popup.ts", import.meta.url), "utf8");
+  // A6/U7: originPromptView must receive the pending entry id. Called with two
+  // arguments it compares origins alone and strands a live same-origin request
+  // behind a stale "Site allowed.".
+  const call = popup.match(/originPromptView\(([^)]*)\)/);
+  assert.ok(call, "render() must call originPromptView");
+  assert.equal(call[1].split(",").length, 3, `originPromptView needs the generation, got: ${call[1]}`);
+  assert.match(call[1], /pendingEntryId/);
+  // The decision recorded for that comparison must carry the id it answered,
+  // or every comparison degrades to the origin-only behaviour above.
+  // Field-wise, not a literal object match: this assertion broke when a
+  // `decidedAt` bound was added (A11), which is exactly the kind of harmless
+  // change a source scan should not fail on. What must hold is that the
+  // recorded decision carries the generation it answered.
+  const latch = popup.match(/decidedOrigin = \{([^}]*)\}/);
+  assert.ok(latch, "decide() must record the decision it made");
+  assert.match(latch[1], /origin/);
+  assert.match(latch[1], /decision/);
+  assert.match(latch[1], /entryId: promptId/);
+  // A7: the scope cache key must not be the raw entry id, which is "" for
+  // every origin on the /health-only path.
+  assert.match(popup, /scopeLatchKey\(nextPromptId, pendingOriginValue\)/);
+  assert.match(popup, /renderScopeSelect\([\s\S]{0,200}?scopeKey,/);
+  assert.doesNotMatch(popup, /renderScopeSelect\([\s\S]{0,200}?shownPromptId,/,
+    "the raw prompt id collides across origins on the fallback path");
+  // D10: the live-region write is guarded so identical re-renders do not
+  // re-announce an unchanged scope.
+  assert.match(popup, /if \(detail\.textContent !== next\) detail\.textContent = next;/);
+});
+
+test("the options page repaints the Allowed sites card whenever it writes the bypass", async () => {
+  const options = await readFile(new URL("../src/options/options.ts", import.meta.url), "utf8");
+  // U8/Q3: paintAllowAll owns the switch/banner/dialog; the card is render()'s.
+  // Writing without re-rendering left the superseded strip absent at the exact
+  // moment of the accidental enable it exists for, and stale after turning off.
+  const write = options.match(/if \(view\.write !== undefined\) \{([\s\S]*?)\n  \}/);
+  assert.ok(write, "applyAllowAll must have a write branch");
+  assert.match(write[1], /await render\(\)/, "a write must repaint the card");
+  assert.match(write[1], /chrome\.storage\.local\.set\(\{ allowAllSites: view\.write \}\)/);
+});
+
+// The all-sites bypass must stay reachable ONLY from the options page: no
+// wire method and no worker message may set it, or a daemon-side caller (an
+// agent) could grant itself every site. This pins that property so a future
+// "convenience" RPC fails a test rather than a review.
+test("no wire method or worker message can set the all-sites bypass", async () => {
+  const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const table = worker.match(/const HANDLERS[\s\S]*?=\s*\{([\s\S]*?)\n\};/);
+  assert.ok(table, "worker.ts must declare the HANDLERS table");
+  const handlerNames = table[1]
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .flatMap((line) => [...line.matchAll(/^\s{2}([A-Za-z_][A-Za-z0-9_]*)\s*[,:]/g)].map((m) => m[1]));
+  assert.ok(handlerNames.length > 10, `parsed too few handlers: ${handlerNames}`);
+  assert.deepEqual(handlerNames.filter((name) => /allow|site|grant/i.test(name)), []);
+  const events = [...worker.matchAll(/message\?\.event === "([a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(events.includes("site_grant_revoke"), "revoke path is a worker message");
+  assert.deepEqual(events.filter((name) => /allow_all|allowAll/i.test(name)), []);
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(generated, /allow_all|allowAllSites/);
+  // The only writer is the options page, as a plain storage write.
+  const writers = [];
+  for (const file of ["../src/worker.ts", "../src/origins.ts", "../src/approval-store.ts", "../src/access-grants.ts", "../src/commands/access.ts", "../src/popup/popup.ts"]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    if (/set\(\{[^}]*allowAllSites/.test(source)) writers.push(file);
+  }
+  assert.deepEqual(writers, []);
+  const options = await readFile(new URL("../src/options/options.ts", import.meta.url), "utf8");
+  assert.match(options, /chrome\.storage\.local\.set\(\{ allowAllSites: view\.write \}\)/);
+});
+
+test("settings list labels and revokes every grant scope independently", async () => {
   const module = await load("src/options/grant-list.ts");
   try {
     const key = JSON.stringify(["http:", "localhost"]);
@@ -63,27 +441,51 @@ test("settings list and revoke exact and all-port grants independently", async (
       version: 1,
       grants: { [key]: { scope: "all_ports", createdAt: 1 } },
     };
-    const rows = module.loaded.grantRows(origins, hostGrants);
+    const siteGrants = {
+      version: 1,
+      grants: {
+        "gominerva.com": { scope: "domain", createdAt: 1 },
+        "127.0.0.1": { scope: "host", createdAt: 1 },
+      },
+    };
+    const rows = module.loaded.grantRows(origins, hostGrants, siteGrants);
     assert.deepEqual(rows.map((row) => row.label), [
-      "http://localhost · all ports",
-      "http://localhost:5173 · this port",
+      "127.0.0.1 · any port",
+      "gominerva.com · all subdomains, any port",
+      "http://localhost · all ports (http only)",
+      "http://localhost:5173 · this site",
     ]);
-    assert.equal(hostGrants.grants[key].scope, "all_ports", "broader grant remains");
-    assert.equal(rows[0].key, key, "host revoke targets the canonical authority");
+    assert.deepEqual(rows.map((row) => row.scope), ["host", "domain", "legacy_host", "origin"]);
+    assert.equal(hostGrants.grants[key].scope, "all_ports", "legacy grant remains");
+    assert.equal(rows[2].key, key, "legacy revoke targets the canonical authority");
     const accessibleNames = rows.map(module.loaded.removeGrantAccessibleName);
     assert.deepEqual(accessibleNames, [
-      "Remove all-ports grant for http://localhost",
-      "Remove this-port grant for http://localhost:5173",
+      "Remove any-port grant for 127.0.0.1",
+      "Remove domain grant for gominerva.com",
+      "Remove legacy all-ports grant for http://localhost",
+      "Remove this-site grant for http://localhost:5173",
     ]);
     assert.equal(new Set(accessibleNames).size, rows.length, "each Remove control is distinguishable");
+    // Each scope lives in its own storage record and so has its own revoke.
+    assert.deepEqual(rows.map(module.loaded.revokeMessageFor), [
+      { event: "site_grant_revoke", key: "127.0.0.1" },
+      { event: "site_grant_revoke", key: "gominerva.com" },
+      { event: "host_grant_revoke", canonicalKey: key },
+      { event: "origin_grant_revoke", origin: "http://localhost:5173" },
+    ]);
     const compactRows = module.loaded.grantRows({}, hostGrants);
-    assert.deepEqual(compactRows.map((row) => row.label), ["http://localhost · all ports"]);
+    assert.deepEqual(compactRows.map((row) => row.label), ["http://localhost · all ports (http only)"]);
     assert.equal(origins["http://localhost:5173"], "allow", "exact grant remains");
 
     assert.deepEqual(
-      module.loaded.grantRows(origins, { hostGrants: { version: 2, grants: null } }),
-      [{ key: "http://localhost:5173", label: "http://localhost:5173 · this port", scope: "origin" }],
-      "malformed host state must not hide exact grants",
+      module.loaded.grantRows(origins, { hostGrants: { version: 2, grants: null } }, { version: 2, grants: {} }),
+      [{ key: "http://localhost:5173", label: "http://localhost:5173 · this site", scope: "origin" }],
+      "malformed or unknown-version broad state must not hide exact grants",
+    );
+    assert.deepEqual(
+      module.loaded.grantRows({}, undefined, { version: 1, grants: { "x.com": { scope: "wildcard", createdAt: 1 } } }),
+      [],
+      "an unknown site-grant scope renders no row",
     );
   } finally { await module.close(); }
 });
@@ -252,11 +654,22 @@ test("origin decision acks render per decision, deny staying neutral", async () 
     assert.match(once.sub, /next visit/);
     assert.match(once.sub, /10 minutes/);
     assert.deepEqual([once.tone, once.check], ["success", true]);
-    // "always" is a standing grant: the ack must say it persists and where to
-    // revoke it.
-    const always = ackForDecision("always");
-    assert.equal(always.tone, "success");
-    assert.match(always.sub, /Always-allowed sites can be taken back any time in Settings\./);
+    // "site" and "domain" are standing grants: the ack must say exactly what
+    // persists and where to revoke it.
+    const site = ackForDecision("site");
+    assert.equal(site.title, "Site allowed.");
+    assert.equal(site.tone, "success");
+    assert.match(site.sub, /This exact site \(address and port\) stays allowed; take it back any time in Settings\./);
+    const domain = ackForDecision("domain", "domain");
+    assert.equal(domain.title, "Domain allowed.");
+    assert.match(domain.sub, /Every page on this domain and its subdomains, on any port, stays allowed/);
+    // Both broad scopes share the wire value "domain", but the loopback grant
+    // is a HOST grant and must not be titled as a domain (D1).
+    const host = ackForDecision("domain", "host");
+    assert.equal(host.title, "Host allowed.");
+    assert.match(host.sub, /Every port on this host stays allowed/);
+    assert.notEqual(host.title, domain.title);
+    for (const ack of [site, domain, host]) assert.doesNotMatch(ack.sub, /\u2014/, "no em dashes in user copy");
     // Deny is a completed choice, not a failure: neutral, no check.
     const deny = ackForDecision("deny");
     assert.deepEqual([deny.title, deny.tone, deny.check], ["Site denied.", "neutral", false]);
@@ -310,7 +723,7 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
       "allowed",
     );
     assert.equal(
-      accessState({ ...record, decision: "always" }, undefined, false, false, "https://a.example", "req-A", now),
+      accessState({ ...record, decision: "site" }, undefined, false, false, "https://a.example", "req-A", now),
       "allowed",
     );
     assert.equal(
@@ -381,7 +794,7 @@ test("origin render holds the ack through the decision round-trip race", async (
   const module = await load("src/popup/origin-flow.ts");
   try {
     const { originPromptView } = module.loaded;
-    const decided = { origin: "https://example.com", decision: "always" };
+    const decided = { origin: "https://example.com", decision: "site" };
     // The race: the prompt is still echoed after the click — hold the ack, do
     // not resurrect the buttons.
     assert.equal(originPromptView("https://example.com", decided), "ack");

@@ -20,6 +20,10 @@
   --hairline-strong: #d5cfc2;
   --success: #1e7b4e;
   --danger: #b23a31;
+  /* Modal scrim. Named per ramp rather than derived from --ink, which is
+   * near-white on the dark ramp and so painted a WHITE veil that lightened
+   * the page and reversed the modal's depth (D3). */
+  --scrim: rgba(0, 0, 0, 0.45);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -34,6 +38,7 @@
     --hairline-strong: #3b3527;
     --success: #57c785;
     --danger: #ef8078;
+    --scrim: rgba(0, 0, 0, 0.62);
   }
 }
 
@@ -210,6 +215,34 @@ input:focus-visible {
   font-size: 14px;
   color: var(--ink-dim);
 }
+/* The list's superseded state carries the same danger vocabulary as the
+ * banner, because it describes the same condition from the card the user is
+ * actually reading (U2). */
+.notice {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.linkish {
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--danger);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.linkish:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
 
 /* Allowed-sites rows: hairline-separated, the origin in monospace so a long
  * host wraps at sensible points while the Remove action stays put (D8). */
@@ -238,6 +271,172 @@ li span {
 }
 li .btn {
   flex: none;
+}
+
+/* The all-sites switch: a checkbox styled as a track, keyboard-operable as a
+ * native checkbox (the input stays in the tree, visually clipped). The track
+ * takes --ink when on, never --danger: the switch is a control, and the
+ * danger colour is reserved for the banner and Enable that describe the
+ * consequence. */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+.switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--sunken);
+  transition: background 120ms ease;
+}
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink-dim);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.switch input:checked + .switch-track {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.switch input:checked + .switch-track::after {
+  background: var(--surface);
+  transform: translateX(16px);
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* Persistent danger banner: a card-shaped band above the masthead in the
+ * danger tint, with the Turn off action on the same row so leaving the state
+ * is one click. */
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 20px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+.banner p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.banner .btn {
+  flex: none;
+}
+
+/* The confirmation dialog reuses .card; the backdrop is --scrim (a ramp-stable
+ * dark, see the token) so the page behind stays legible but clearly inert.
+ * Native <dialog> centres itself; the width cap matches main so it reads as
+ * one of the page's own cards. */
+dialog.card {
+  width: min(100% - 48px, 30rem);
+  padding: 24px 28px;
+  color: var(--ink);
+}
+dialog::backdrop {
+  background: var(--scrim);
+}
+dialog h2 {
+  font-family: ui-serif, "Iowan Old Style", Georgia, "Palatino Linotype",
+    "URW Palladio L", serif;
+  font-size: 1.4rem;
+  line-height: 1.15;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--ink);
+}
+.warnings {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  list-style: disc;
+}
+.warnings li {
+  display: list-item;
+  padding: 3px 0;
+  border: none;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.disclaimer {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+.disclaimer a {
+  color: var(--ink);
+}
+.ack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.ack input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--ink);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.dialog-actions .btn.danger {
+  margin-top: 0;
+}
+/* A disabled control keeps a legible border and label instead of fading the
+ * danger red to a ~2.3:1 pink that scans as decoration rather than as a
+ * control waiting on the acknowledgement (D4). Neutral, not washed-out
+ * danger: the state is "not yet available", not "a faint dangerous action". */
+.btn:disabled {
+  /* --hairline, not --hairline-strong: the latter is .btn's own default, so a
+   * disabled button's border was pixel-identical to an enabled neighbour's and
+   * "which of these two is inert" rested entirely on label lightness (D9). The
+   * lighter border separates them without reintroducing the opacity fade that
+   * made the disabled danger action illegible (D4). */
+  border-color: var(--hairline);
+  color: var(--ink-dim);
+  cursor: not-allowed;
+}
+.btn.danger:disabled:hover {
+  background: var(--surface);
 }
 
 .hidden {

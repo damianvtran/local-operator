@@ -69,3 +69,13 @@ jobs:
         run: pnpm build
       - name: Verify generated protocol
         run: python -m local_operator.browser_bridge.gen_ts --check
+      # Non-blocking on purpose. A stale list over-grants (a suffix registered
+      # after PSL_GENERATED_AT is treated as a registrable domain) and also
+      # strands stored keys, so drift must be VISIBLE — but the check fetches
+      # publicsuffix.org, and an upstream blip or a legitimate new suffix must
+      # not fail an unrelated PR. The release path enforces it: the submission
+      # checklist requires a refresh before upload.
+      - name: Check bundled Public Suffix List freshness (advisory)
+        working-directory: extension
+        continue-on-error: true
+        run: node scripts/gen-psl.mjs --check

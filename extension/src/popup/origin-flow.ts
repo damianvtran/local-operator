@@ -10,14 +10,29 @@
  * from the CLICK alone, and a stale prompt echo must hold the ack rather than
  * resurrect the buttons. */
 
-export type OriginDecision = "once" | "always" | "all_ports" | "deny";
+import type { AccessQueueEntry, OriginDecision } from "../access-queue";
+import type { BroadGrant } from "../origin-policy";
 
-/** The decision this popup already made, keyed by ORIGIN — finding A6's rule:
- * a redirect chain resolves each hop independently, so a DIFFERENT pending
- * origin is a new prompt even while this one's ack is still settling. */
+export type { OriginDecision } from "../access-queue";
+
+/** The decision this popup already made. Keyed by origin AND by the
+ * generation (entry id) it was made against.
+ *
+ * Origin alone is not enough: two live entries can share an origin (dedupe is
+ * origin+requester), and `once`/`deny` resolve only the selected entry, so a
+ * sibling survives the click and keeps the origin pending. An origin-only
+ * latch reads that survivor as its own stale echo and strands the popup on
+ * "Site allowed." over a live request the user cannot act on (A6/U7). A
+ * `once` grant is spent on one navigation, so the same origin re-prompting is
+ * the DESIGNED behaviour, not an edge case. */
 export interface DecidedOrigin {
   origin: string;
   decision: OriginDecision;
+  /** When the click happened. Bounds the echo-only ack (A11). */
+  decidedAt?: number;
+  /** The entry id the decision answered. Empty on the /health-only fallback,
+   * which has no generation to compare and falls back to origin equality. */
+  entryId: string;
 }
 
 export interface DecisionAck {
@@ -30,8 +45,10 @@ export interface DecisionAck {
 /** The acknowledgement each decision renders. Deny is a COMPLETED choice, not
  * a failure, so it takes the neutral register and no check — danger is
  * reserved for states the user must recover from (error/incompatible), and a
- * check over "denied" would read as the wrong verdict. */
-export function ackForDecision(decision: OriginDecision): DecisionAck {
+ * check over "denied" would read as the wrong verdict. `broadScope` names
+ * which broad grant a `domain` decision wrote so the ack says exactly what
+ * now stays allowed. */
+export function ackForDecision(decision: OriginDecision, broadScope?: BroadGrant["scope"]): DecisionAck {
   if (decision === "deny") {
     return {
       title: "Site denied.",
@@ -44,8 +61,8 @@ export function ackForDecision(decision: OriginDecision): DecisionAck {
   // in-flight pass: in the async approval flow the navigation happens a turn
   // or two after the click, so the ack names what the grant actually covers
   // and its bound (10 min unconsumed — see ONCE_GRANT_TTL_MS). The button
-  // label stays "Allow once": it is the one-shot consent vocabulary the
-  // store listing already promises, and the ack carries the nuance (n2).
+  // option label stays "Just this once": it is the one-shot consent
+  // vocabulary the store listing promises, and the ack carries the nuance (n2).
   if (decision === "once") {
     return {
       title: "Site allowed.",
@@ -54,31 +71,203 @@ export function ackForDecision(decision: OriginDecision): DecisionAck {
       check: true,
     };
   }
-  const standing =
-    decision === "all_ports"
-      ? " Every port on this loopback host is allowed for this scheme. You can take it back any time in Settings."
-      : decision === "always"
-        ? " Always-allowed sites can be taken back any time in Settings."
-        : "";
+  if (decision === "domain") {
+    // Both broad scopes share the wire value "domain", but a loopback grant is
+    // a HOST grant: titling it "Domain allowed." names a scope the user was
+    // never offered and contradicts its own body copy (D1).
+    if (broadScope === "host") {
+      return {
+        title: "Host allowed.",
+        sub: "The agent is continuing. Every port on this host stays allowed; take it back any time in Settings.",
+        tone: "success",
+        check: true,
+      };
+    }
+    return {
+      title: "Domain allowed.",
+      sub: "The agent is continuing. Every page on this domain and its subdomains, on any port, stays allowed; take it back any time in Settings.",
+      tone: "success",
+      check: true,
+    };
+  }
   return {
     title: "Site allowed.",
-    sub: `The agent is continuing.${standing}`,
+    sub: "The agent is continuing. This exact site (address and port) stays allowed; take it back any time in Settings.",
     tone: "success",
     check: true,
   };
 }
 
-/** Which origin view a render shows. A pending origin equal to the one just
- * decided is the stale echo of the race above — hold the ack. A different
- * pending origin is a genuinely new prompt (A6). No pending origin means the
- * round-trip landed and the caller should clear its latch so a future prompt
- * for the SAME origin (e.g. a retry after deny) is not swallowed. */
+export interface ScopeOption {
+  value: Exclude<OriginDecision, "deny">;
+  label: string;
+  /** What the option grants, rendered as data in the trough under the select. */
+  detail: string;
+}
+
+export interface ScopeOptions {
+  options: ScopeOption[];
+  defaultValue: ScopeOption["value"];
+}
+
+/** The Allow dropdown's options for a prompt, derived from the ENTRY alone.
+ * The broad (domain/host) option appears only when the worker stamped
+ * `broad` on the entry, and is then the default: it is the grant most
+ * approvals actually want (the whole product, not one subdomain and port).
+ * An entry without it (an IP literal, a bare public suffix, an entry from
+ * 0.1.7, or a /health-only render with no entry) falls back to "Only this
+ * site" as the default, which is the fail-closed choice. */
+export function scopeOptions(entry: Pick<AccessQueueEntry, "origin" | "broad"> | undefined): ScopeOptions {
+  const options: ScopeOption[] = [];
+  const broad = entry?.broad;
+  if (broad) {
+    options.push(
+      broad.scope === "host"
+        ? { value: "domain", label: "Any port on this host", detail: `${broad.key}, any port` }
+        : {
+            value: "domain",
+            label: "All pages on this domain",
+            detail: `${broad.key} and every subdomain, any port`,
+          },
+    );
+  }
+  const origin = entry?.origin;
+  options.push(
+    { value: "site", label: "Only this site", detail: origin ?? "this exact site" },
+    {
+      value: "once",
+      label: "Just this once",
+      // Every other detail line names the subject as data; a bare quantity
+      // would make this the one option whose trough stops saying what is
+      // being granted (U6).
+      detail: origin
+        ? `one navigation to ${origin}, within 10 minutes`
+        : "one navigation within 10 minutes",
+    },
+  );
+  return { options, defaultValue: broad ? "domain" : "site" };
+}
+
+/** Which origin view a render shows.
+ *
+ * The ack is held only while the pending entry IS the generation that was
+ * decided. A different pending origin, or the SAME origin under a different
+ * generation, is a genuinely new prompt and must be shown: holding it strands
+ * a live request behind a confident "Site allowed." (A6/U7). No pending
+ * origin means the round-trip landed and the caller should clear its latch so
+ * a future prompt for the same origin is not swallowed.
+ *
+ * The /health-only fallback carries no entry id. There is no generation to
+ * compare there, so both sides being empty falls back to origin equality,
+ * which is exactly the U1 behaviour that path had before. */
+/** How long an EMPTY pending generation still reads as the decision's own
+ * echo. The echo clears on one websocket round-trip; this is a wide margin
+ * over that, because acking a live request briefly is a smaller harm than
+ * resurrecting a prompt over a click that worked (U1). */
+export const ECHO_ACK_WINDOW_MS = 10_000;
+
 export function originPromptView(
   pendingOrigin: string | undefined,
   decided: DecidedOrigin | null,
+  pendingEntryId = "",
+  now = Date.now(),
 ): "prompt" | "ack" | "none" {
   if (!pendingOrigin) return "none";
-  return decided && decided.origin === pendingOrigin ? "ack" : "prompt";
+  if (!decided || decided.origin !== pendingOrigin) return "prompt";
+  // An ABSENT pending generation means "nothing here distinguishes this from
+  // my own echo", never "mismatch". Requiring equality broke the ordinary end
+  // of every real decision: the queue write fires render() immediately, while
+  // /health's pending_origin only clears after a websocket round-trip, so the
+  // popup sees a truthy origin with no entry and resurrected the prompt over a
+  // click that had already taken effect. That render has no entry, so the
+  // select falls back to `site` — re-presenting a deliberate "once" as a
+  // standing grant, which is worse than the U1 it reopened. The TTL sweep
+  // lands in the same state. Only a DIFFERENT, present generation is a live
+  // request that must be shown (A6).
+  const pending = pendingEntryId ?? "";
+  if (pending === (decided.entryId ?? "")) return "ack";
+  // An ABSENT pending generation is normally this decision's own echo, but it
+  // carries no evidence of WHICH request it belongs to. Against a legacy
+  // daemon that reports pending_origin without populating the queue, a second
+  // live request for the same origin looks identical to the first one's echo,
+  // and an unbounded ack would hold "Site allowed." over it until its TTL
+  // (A11). The echo is a single websocket round-trip, so anything still
+  // empty long after the click is a new request: prompt instead. Fails
+  // closed either way, since the ack grants nothing.
+  if (pending !== "") return "prompt";
+  const decidedAt = decided.decidedAt;
+  return decidedAt === undefined || now - decidedAt < ECHO_ACK_WINDOW_MS ? "ack" : "prompt";
+}
+
+/** The scope to preselect when a prompt is rendered.
+ *
+ * A new generation for an origin the user JUST decided is byte-identical to
+ * the request they answered — same heading, host, body and position — and the
+ * acknowledgement that would confirm the first click lives 0-81ms in the
+ * ordinary two-session case, under the ~100ms floor at which a change reads as
+ * feedback. So the card looks untouched, the user clicks again, and the reset
+ * select hands over `domain` when they chose `once` twice. Carrying their
+ * previous choice makes the reflexive second click grant what they granted a
+ * second ago instead of the widest option (U9).
+ *
+ * Only ever NARROWS relative to the default: an unrelated prompt, or a decision
+ * whose scope this entry cannot offer (a `domain` choice on an IP literal),
+ * falls through to the fail-closed default. `deny` carries nothing — there is
+ * no scope to repeat. */
+export function preselectedScope(
+  options: ScopeOptions,
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): ScopeOption["value"] {
+  if (!decided || !pendingOrigin || decided.origin !== pendingOrigin) return options.defaultValue;
+  if (decided.decision === "deny") return options.defaultValue;
+  const repeat = options.options.find((option) => option.value === decided.decision);
+  return repeat ? repeat.value : options.defaultValue;
+}
+
+/** Is this prompt a REPEAT ask for an origin the user just decided?
+ *
+ * The card is otherwise byte-identical to the request they answered, and the
+ * acknowledgement is gone within a frame or two, so without a positive signal
+ * the only available reading is "my click did not register" (U9). The banner
+ * this drives is the signal; it is not a substitute for narrowing the
+ * preselected scope, because a user who reads nothing still must not
+ * over-grant. */
+export function isRepeatAsk(
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): boolean {
+  return !!decided && !!pendingOrigin && decided.origin === pendingOrigin;
+}
+
+/** The repeat-ask line, or "" when this is not a repeat ask.
+ *
+ * Branches on the decision because a denial used nothing: the agent did not
+ * visit the site, and "your last answer has already been used" reads to a user
+ * who just refused as though the visit went through (U11). Deny is also the
+ * one decision that carries no scope forward, so this line is the only
+ * confirmation on the card that the refusal registered. */
+export function repeatAskNotice(
+  pendingOrigin: string | undefined,
+  decided: DecidedOrigin | null,
+): string {
+  if (!isRepeatAsk(pendingOrigin, decided)) return "";
+  return decided?.decision === "deny"
+    ? "You denied this site a moment ago. It is asking again."
+    : "This site is asking again. Your last answer has already been used.";
+}
+
+/** The identity the scope select's option list is cached against.
+ *
+ * The entry id alone collides on the /health-only fallback, where it is the
+ * empty string for EVERY origin: two successive fallback renders for
+ * different sites then reuse one option list, so the trough names the
+ * previous origin while Allow grants the current one (A7). That defeats the
+ * trough's whole purpose, which is letting the user verify the authority as
+ * data before committing. Falling back to the origin keeps the key
+ * non-empty and unique per site. */
+export function scopeLatchKey(entryId: string, pendingOrigin: string | undefined): string {
+  return entryId || (pendingOrigin ? `origin:${pendingOrigin}` : "");
 }
 
 export interface OriginNotice {
