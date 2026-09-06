@@ -198,7 +198,17 @@ _LEGACY_CONTROL_PATHS = frozenset(
 #: agent inventory and names, working-directory paths (the filesystem layout of
 #: the user's machine), conversation content, system prompts, execution
 #: variables, exported agent ZIPs, and job history.
-_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs")
+#:
+#: ``/v1/schedules`` is here because a schedule is not a record, it is DELAYED
+#: EXECUTION. Both writes on the surface -- the agent-scoped ``POST`` and
+#: ``PATCH /v1/schedules/{id}`` -- hand their ``prompt`` to
+#: ``SchedulerService.add_or_update_job``, which registers ``_trigger_agent_task``
+#: on APScheduler. Whatever text reaches them is later run BY THE USER'S OWN
+#: AGENT, with that agent's tools and credentials and nobody watching. An
+#: unauthenticated cross-origin caller reaching either one is arbitrary code
+#: execution on a delay, not a defaced field, so this family cannot sit at a
+#: weaker posture than the agent inventory it schedules work against.
+_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules")
 
 #: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
 #: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using
@@ -212,20 +222,25 @@ _LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs")
 #: -- because every new route had to be REMEMBERED into the gate. A route is now
 #: gated the moment it exists, and an omission fails a test instead of shipping
 #: a bypass.
-_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {
-    # The agent-scoped half of the schedules surface; the other half lives under
-    # `/v1/schedules/{id}`, outside these prefixes and ungated. Gating only this
-    # half would split one feature across two auth postures -- breaking the
-    # renderer's schedule screens while the same rows stayed readable through
-    # the ungated half, a boundary that looks tighter without being tighter.
-    # Moving the whole schedules surface behind the contract is its own change.
-    "GET /v1/agents/{agent_id}/schedules": (
-        "paired with ungated /v1/schedules/{schedule_id}; gate the surface as one change"
-    ),
-    "POST /v1/agents/{agent_id}/schedules": (
-        "paired with ungated /v1/schedules/{schedule_id}; gate the surface as one change"
-    ),
-}
+#:
+#: Currently EMPTY, and the emptiness is load-bearing: no legacy route today has
+#: a justification for staying open.
+#:
+#: It previously held the two agent-scoped schedules routes, excused as "paired
+#: with the ungated /v1/schedules/{schedule_id}; gate the surface as one
+#: change". That reasoning does not survive contact with the routing table.
+#: `routes/schedules.py` has exactly ONE `@router.post`, and it is the
+#: agent-scoped one -- so `POST` was never half of a symmetric pair, it was the
+#: only create on the entire surface, and the symmetry argument was excusing
+#: the write it should have been protecting. Review round 3 duly reproduced an
+#: unauthenticated cross-origin POST persisting an active, auto-executing
+#: schedule. The "one change" the note deferred to is the change that removed
+#: this list: the whole family is gated by prefix above.
+#:
+#: Before adding a key here, check the route against the router rather than
+#: against the shape of the URL: a path that LOOKS like the counterpart of
+#: something ungated may be the only way in.
+_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {}
 
 
 def _iter_routes(routes: Iterable[Any]) -> Iterator[tuple[str, frozenset[str]]]:

@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -17,6 +18,7 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
 from local_operator.providers import registry
+from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import desktop_validation_error, managed_desktop_boundary
 from local_operator.server.routes import (
     agents,
@@ -25,6 +27,7 @@ from local_operator.server.routes import (
     config,
     credentials,
     jobs,
+    schedules,
     settings,
 )
 
@@ -49,12 +52,21 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # whether or not the boundary works.
     app.include_router(agents.router)
     app.include_router(jobs.router)
+    # Mounted for the same reason as agents/jobs: without it every schedules
+    # path 404s and the gate assertions below pass whether or not the boundary
+    # exists. A schedule is delayed EXECUTION, so this router's gating is the
+    # one that matters most.
+    app.include_router(schedules.router)
     app.middleware("http")(managed_desktop_boundary)
     app.exception_handler(RequestValidationError)(desktop_validation_error)
     app.state.config_manager = ConfigManager(tmp_path)
     app.state.credential_manager = CredentialManager(tmp_path)
     app.state.agent_registry = AgentRegistry(tmp_path)
     app.state.job_manager = JobManager()
+    # Never started: these tests assert on the HTTP boundary, and a running
+    # APScheduler would fire `_trigger_agent_task` for real. The routes only
+    # need `add_or_update_job`/`remove_job` to be callable.
+    app.state.scheduler_service = MagicMock(spec=SchedulerService)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -522,3 +534,112 @@ async def test_oauth_failure_is_redacted_and_browser_opener_is_per_flow(desktop,
     done = await wait_for_state(client, operation_id, "failed")
     assert observed
     assert "raw-provider-access-token" not in str(done)
+
+
+async def test_round_three_schedules_are_gated_and_no_row_is_created(desktop, monkeypatch):
+    """The schedules surface: refused, and nothing persisted as a side effect.
+
+    Round 3 reproduced an unauthenticated cross-origin ``POST`` to
+    ``/v1/agents/{id}/schedules`` returning 201, with an authenticated ``GET
+    /v1/schedules`` reading the attacker's prompt back with ``is_active`` true.
+    That is worse than the round-2 agent rename: ``create_schedule_for_agent``
+    calls ``add_or_update_job``, so the stored text is later executed by the
+    user's own agent with its tools and credentials. The whole family is now
+    gated, including the ``PATCH`` that reaches the same execution by rewriting
+    an existing job's prompt without creating anything.
+
+    The status code alone is NOT the assertion. A route that returns 403 after
+    writing the row is still exploited, so this reads the surface back through
+    the AUTHENTICATED client and asserts the absence of the attacker's text.
+    """
+    client, _ = desktop
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+    agent_id = (await client.post("/v1/agents", json={"name": "r3-victim"})).json()["result"]["id"]
+    seeded = (
+        await client.post(
+            f"/v1/agents/{agent_id}/schedules",
+            json={"prompt": "LEGIT-SEED", "interval": 1, "unit": "days", "is_active": True},
+        )
+    ).json()["result"]["id"]
+
+    payload = {
+        "prompt": "EXFIL-BY-UNAUTH-CALLER",
+        "interval": 1,
+        "unit": "days",
+        "is_active": True,
+    }
+    for headers in ({"Authorization": ""}, {"Origin": "https://evil.example"}):
+        # The blocker: the only create on the whole schedules surface.
+        assert (
+            await client.post(f"/v1/agents/{agent_id}/schedules", json=payload, headers=headers)
+        ).status_code in (401, 403), headers
+        # The major: rewriting an executing job's prompt reaches the same
+        # autonomous execution without creating anything.
+        assert (
+            await client.patch(
+                f"/v1/schedules/{seeded}",
+                json={"prompt": "EXFIL-BY-UNAUTH-PATCH"},
+                headers=headers,
+            )
+        ).status_code in (401, 403), headers
+        for path in (
+            f"/v1/agents/{agent_id}/schedules",
+            "/v1/schedules",
+            f"/v1/schedules/{seeded}",
+        ):
+            assert (await client.get(path, headers=headers)).status_code in (401, 403), path
+            # Starlette answers HEAD from the GET route.
+            assert (await client.head(path, headers=headers)).status_code in (401, 403), path
+        assert (await client.delete(f"/v1/schedules/{seeded}", headers=headers)).status_code in (
+            401,
+            403,
+        ), headers
+
+    # The side effect, read back through the authenticated client: no row was
+    # created, and the seeded row still carries its original prompt.
+    rows = (await client.get("/v1/schedules", params={"per_page": 100})).json()["result"][
+        "schedules"
+    ]
+    prompts = [row["prompt"] for row in rows]
+    assert not [p for p in prompts if "EXFIL-BY-UNAUTH" in p], prompts
+    assert prompts == ["LEGIT-SEED"], prompts
+    # The DELETE was refused too, so the legitimate schedule is still there.
+    assert (await client.get(f"/v1/schedules/{seeded}")).status_code == 200
+
+
+async def test_unmanaged_mode_keeps_the_schedules_surface_open(desktop, monkeypatch):
+    """Gating the schedules family must be invisible without a desktop token.
+
+    Same contract as ``test_unmanaged_mode_keeps_every_legacy_route_open``: the
+    CLI and every script client run against a standalone server, and a PATH
+    becoming gated must not change what that server accepts.
+    """
+    client, _ = desktop
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN")
+    bare = {"Authorization": ""}
+    agent_id = (await client.post("/v1/agents", json={"name": "cli-victim"}, headers=bare)).json()[
+        "result"
+    ]["id"]
+    created = await client.post(
+        f"/v1/agents/{agent_id}/schedules",
+        json={"prompt": "cli-scheduled", "interval": 1, "unit": "days", "is_active": True},
+        headers=bare,
+    )
+    assert created.status_code not in (401, 403), created.status_code
+    schedule_id = created.json()["result"]["id"]
+    for path, method in (
+        ("/v1/schedules", "get"),
+        (f"/v1/agents/{agent_id}/schedules", "get"),
+        (f"/v1/schedules/{schedule_id}", "get"),
+    ):
+        response = await getattr(client, method)(path, headers=bare)
+        assert response.status_code not in (401, 403), f"{method} {path} -> {response.status_code}"
+    assert (
+        await client.patch(
+            f"/v1/schedules/{schedule_id}", json={"prompt": "cli-edited"}, headers=bare
+        )
+    ).status_code not in (401, 403)
+    assert (await client.delete(f"/v1/schedules/{schedule_id}", headers=bare)).status_code not in (
+        401,
+        403,
+    )
