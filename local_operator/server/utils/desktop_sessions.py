@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -23,6 +25,7 @@ from typing import Any
 from anyio import CancelScope
 
 from local_operator.resume import is_user_session, recent_session_rows, session_preview
+from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
@@ -30,6 +33,8 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.remote import RemoteSession
 from local_operator.session.transcript import read_transcript_page
+
+logger = logging.getLogger(__name__)
 
 SESSION_ID = re.compile(r"^[a-f0-9]{12}$")
 REPLAY_COUNT = 256
@@ -71,6 +76,9 @@ class DesktopSessionBridge:
         self.watch_lock = asyncio.Lock()
         self.unsubscribers: list[Any] = []
         self.watch_task: asyncio.Task[None] | None = None
+        self.attention_task: asyncio.Task[None] | None = None
+        self.attention: dict[str, Any] = {}
+        self.attention_poll_key: tuple[tuple[int, int], bool] | None = None
 
     async def acquire(self) -> RemoteSession:
         async with self.lock:
@@ -97,6 +105,8 @@ class DesktopSessionBridge:
                         remote.subscribe_frontend(self._frontend).unsubscribe,
                     ]
                 await self.remote.attach_existing()
+                if self.attention_task is None:
+                    self.attention_task = asyncio.create_task(self._poll_attention())
                 return self.remote
             except BaseException:
                 self.users -= 1
@@ -123,6 +133,18 @@ class DesktopSessionBridge:
         remote, self.remote = self.remote, None
         if remote is not None:
             await remote.dispose()
+        # LAST, and suppressing the task's OWN failure rather than only
+        # CancelledError: awaiting a task that already died re-raises its
+        # exception, and with this block ahead of `dispose()` a store error
+        # aborted teardown midway -- leaking the owner session and its
+        # subscriptions while `users` had already reached 0, so a later
+        # `acquire()` reused a half-torn bridge. A read receipt must never
+        # strand a session owner.
+        if self.attention_task is not None:
+            self.attention_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self.attention_task
+            self.attention_task = None
 
     async def close(self) -> None:
         for sub in self.subscribers.values():
@@ -172,6 +194,10 @@ class DesktopSessionBridge:
         # Trajectories are intentionally opt-in on the runtime and absent here;
         # large roster/usage fields still pass through the shared wire budget.
         payload = update.model_dump(mode="json")
+        # Receipt revisions outlive an owner epoch. Only the independent durable
+        # projection below may update them; a delayed owner delta must not undo
+        # a read made through another process while this stream stays mounted.
+        payload["changes"].pop("attention", None)
         payload["job_trajectory_appends"] = {}
         payload["job_trajectory_replacements"] = []
         if {"jobs", "usage_components"} & update.changes.keys():
@@ -181,9 +207,85 @@ class DesktopSessionBridge:
                     payload["changes"][key] = bounded[key]
         self.publish("frontend.update", payload)
 
+    async def refresh_attention(self) -> dict[str, Any]:
+        state = await asyncio.to_thread(
+            AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
+        )
+        remote = self.remote
+        state["supported"] = bool(
+            remote is not None
+            and (remote.is_cold or getattr(remote, "supports_completion_ack", False))
+        )
+        if state != self.attention:
+            previous = self.attention
+            self.attention = state
+            # The initial snapshot owns the baseline; later changes have their
+            # own receipt clock rather than borrowing a runtime owner sequence.
+            if previous:
+                self.publish("attention", state)
+        return state
+
+    async def _poll_attention(self) -> None:
+        # Read-only polling is shared by every subscriber of this bridge and
+        # independent of watch leases. It also works while no owner is running.
+        #
+        # The body is guarded because this store has other writers: a `database
+        # is locked` that outlives its 2 s timeout is routine contention, and
+        # letting it end the loop stopped cross-process read sync for the life
+        # of the bridge -- the phone and the TUI would clear an unread
+        # completion while the desktop kept showing it, silently and forever.
+        # A transient store error must cost one poll, not the feature. Matches
+        # the suppression `_expire_watches` already uses for the same reason.
+        store = AttentionStore(self.root / "attention.db")
+        failing = 0
+        while True:
+            try:
+                # `revision()` exists for exactly this loop and is far cheaper
+                # than the full per-conversation read; the steady state is a
+                # store nothing has written since the last tick.
+                #
+                # The owner's own state is part of the key because `supported`
+                # is derived from it, not from the store: an owner starting or
+                # going cold changes that answer while the store is untouched,
+                # so gating on the revision alone would pin `supported` to
+                # whatever happened to be true when the bridge attached.
+                remote = self.remote
+                key = (
+                    await asyncio.to_thread(store.revision),
+                    remote is not None
+                    and (remote.is_cold or getattr(remote, "supports_completion_ack", False)),
+                )
+                if key != self.attention_poll_key:
+                    await self.refresh_attention()
+                    self.attention_poll_key = key
+                if failing:
+                    logger.info(
+                        "attention poll recovered for %s after %d failure(s)",
+                        self.session_id,
+                        failing,
+                    )
+                    failing = 0
+            except Exception as error:
+                # Log the TRANSITION, not the tick. A transient error costs one
+                # line, but a persistent one (corrupt schema, permissions, full
+                # disk) would otherwise write ~3,600 identical warnings an hour
+                # per bridge, across up to BRIDGE_COUNT bridges, burying
+                # whatever else the operator needs to read. Recovery is logged
+                # too, so the pair brackets the outage rather than leaving a
+                # single warning of unknown duration.
+                failing += 1
+                if failing == 1:
+                    logger.warning(
+                        "attention poll failed for %s (further failures quiet "
+                        "until it recovers): %s",
+                        self.session_id,
+                        error,
+                    )
+            await asyncio.sleep(1)
+
     def state(self) -> dict[str, Any]:
         assert self.remote is not None
-        state = self.remote.frontend_state
+        state = self.remote.frontend_state.model_copy(update={"attention": self.attention})
         return sync_wire_payload(
             FrontendSync(
                 epoch=state.epoch,
@@ -194,6 +296,14 @@ class DesktopSessionBridge:
         )
 
     async def snapshot(self) -> dict[str, Any]:
+        # Decorative, so a busy or damaged receipt sidecar cannot stop a
+        # conversation from OPENING. Before this field existed the snapshot
+        # never touched `attention.db`; letting it raise here turned routine
+        # write contention into a failure of the primary read path. The last
+        # known state is kept rather than blanked -- it is what the previous
+        # successful poll actually saw.
+        with contextlib.suppress(sqlite3.Error, OSError):
+            await self.refresh_attention()
         state = self.state()
         seq, epoch = self.sequence, self.epoch
         cursor = state["snapshot"].get("history_cursor")
@@ -345,6 +455,26 @@ class DesktopSessions:
         self.bridges: dict[str, DesktopSessionBridge] = {}
         self.lock = asyncio.Lock()
 
+    async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
+        """A read receipt never admits work, binds a viewer, or starts an owner.
+
+        Validate the same durable user-session namespace as the bridge, but do
+        not enter its acquire path: a completed cold conversation is readable
+        even when its owner and the mobile daemon are both stopped.
+        """
+
+        def acknowledge() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return AttentionStore(self.root / "attention.db").acknowledge(
+                f"session/{session_id}", token
+            )
+
+        return await asyncio.to_thread(acknowledge)
+
     async def create(self, cwd: str) -> str:
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
@@ -377,8 +507,23 @@ class DesktopSessions:
             # runs once per row the caller will actually see rather than once
             # per session on disk. Measured 0.10 ms per row on a 38-session
             # store; the whole call already runs on a worker thread.
+            # One read connection per list, never one per row or an owner bind.
+            #
+            # Guarded for the same reason as `snapshot()`: unread badges are a
+            # decoration on the session list, and losing every session row
+            # because the receipt sidecar is busy is strictly worse than
+            # showing the sessions without badges. Omitting the key degrades to
+            # "not ackable" on the client, which is correct rather than a false
+            # read state.
+            attention: dict[str, dict[str, Any]] = {}
+            with contextlib.suppress(sqlite3.Error, OSError):
+                attention = AttentionStore(self.root / "attention.db").state_many(
+                    f"session/{row['id']}" for row in visible
+                )
             for row in visible:
                 row["preview"] = session_preview(self.root / "sessions" / row["id"])
+                if f"session/{row['id']}" in attention:
+                    row["attention"] = attention[f"session/{row['id']}"]
             return visible
 
         return await asyncio.to_thread(rows)
