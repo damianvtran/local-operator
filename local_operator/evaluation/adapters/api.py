@@ -201,12 +201,22 @@ class AdapterCapabilities(ProtocolModel):
     scoring: bool
     paste_text: bool = False
     type_text_mode: Literal["unicode", "ascii"] = "unicode"
+    # An adapter whose keyboard delivery is linear in text length advertises the
+    # longest type it can finish inside its own execution deadline. Negotiated
+    # rather than assumed by core: the deadline and the per-character cost are
+    # both the backend's, and a bound core invented would be wrong for every
+    # backend but one. ``None`` means the backend has no length-dependent
+    # deadline. Optional with a None default so a 1.6 peer that predates the
+    # field still validates — it simply advertises no bound, which is the
+    # behaviour it already had.
+    max_type_chars: int | None = Field(default=None, ge=1)
 
     def action_surface(self) -> "ActionSurface":
         return ActionSurface(
             paste_text=self.paste_text,
             type_text_mode=self.type_text_mode,
             ask_user=self.ask_user,
+            max_type_chars=self.max_type_chars,
         )
 
     @field_validator("routes", mode="before")

@@ -20,6 +20,12 @@ not be silently repaired.
 
 from __future__ import annotations
 
+from lop_osworld_v2_adapter.providers.base import (
+    GUEST_COMMAND_TIMEOUT_S,
+    GUEST_TYPE_DEADLINE_FRACTION,
+    GUEST_TYPE_MS_PER_CHAR,
+)
+
 from local_operator.computer_input import paste_text_source
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.protocol import (
@@ -37,10 +43,32 @@ from local_operator.evaluation.protocol import (
     WaitAction,
 )
 
+#: Longest ``type`` this adapter admits, DERIVED so it cannot drift from the
+#: deadline that enforces it. Typing is a per-character loop against a constant
+#: socket timeout, and until these two were related the protocol's 100000-char
+#: ``MAX_TEXT_LENGTH`` was admissible while needing roughly seven minutes — the
+#: batch would be dispatched, blow the deadline, and die with its outcome
+#: unknown, which is fatal to the episode rather than correctable.
+#:
+#: Computed rather than written down: changing the timeout, the per-character
+#: budget, or the fraction moves this bound with them, and a second hardcoded
+#: number here would reintroduce exactly the drift that caused the incident.
+#: Floored to stay conservative, and it is a CEILING on admission, not a
+#: prediction — a payload just under it is expected to finish well inside the
+#: deadline because the per-character budget is ~2x the measured cost.
+MAX_TYPE_CHARS = int(
+    GUEST_COMMAND_TIMEOUT_S * GUEST_TYPE_DEADLINE_FRACTION * 1000.0 / GUEST_TYPE_MS_PER_CHAR
+)
+
 # Admission is independent of neutral data parsing and runs for the ENTIRE
 # batch before a provider sees any statement, so a click cannot precede a
 # silently lossy Unicode TypeAction. The adapter metadata uses this same surface.
-ACTION_SURFACE = ActionSurface(paste_text=True, type_text_mode="ascii", ask_user=True)
+ACTION_SURFACE = ActionSurface(
+    paste_text=True,
+    type_text_mode="ascii",
+    ask_user=True,
+    max_type_chars=MAX_TYPE_CHARS,
+)
 
 # Our named keys (protocol._NAMED_KEYS) -> pyautogui key names. pyautogui
 # uses lowercase single words; the two that differ structurally are META
