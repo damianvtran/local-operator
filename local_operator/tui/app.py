@@ -171,7 +171,13 @@ from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
 from local_operator.tui.session_navigation import SessionNavigation
-from local_operator.tui.session_presentation import HistoryPageNotice, PreparedReplay, SessionPresentation
+from local_operator.tui.session_presentation import (
+    DraftRecoveryNotice,
+    HistoryPageNotice,
+    PreparedReplay,
+    SessionPresentation,
+)
+from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
 from local_operator.tui.terminal_title import (
     TerminalTitle,
@@ -179,7 +185,12 @@ from local_operator.tui.terminal_title import (
     terminal_title_enabled,
 )
 from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
-from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
+from local_operator.tui.widgets.aside_panel import (
+    ASIDE_PROMPT,
+    AsidePanel,
+    AsideSnapshot,
+    AsideTurn,
+)
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.command_picker import CommandPicker
@@ -2189,7 +2200,7 @@ class OperatorApp(App[None]):
         # costs a delayed name instead of a permanently nameless session: the
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
-        self._name_requested: bool = False
+        self._name_requested = False
         #: A receipt that must survive a session transition, as
         #: ``(fork_id, text)``. `fork.mode=switch` reboots onto the fork, which
         #: wipes the ledger about half a second after the notice is written, so
@@ -2216,17 +2227,17 @@ class OperatorApp(App[None]):
         # through the session's history instead of naming the session. Held
         # here and not on the session because it is a DISPLAY stand-in, not a
         # stored title — see :meth:`_show_provisional_name`.
-        self._provisional_name: str = ""
+        self._provisional_name = ""
         # Ownership token for the latch above. Reload can supersede an
         # in-flight naming worker synchronously, then let the replacement
         # session schedule its own attempt before cancellation has unwound;
         # only the current generation may clear the new latch or store a title.
-        self._name_generation: int = 0
+        self._name_generation = 0
         # Monotonic stamp of the last moment a title was DECIDED — either
         # stored, or checked against a new message and left alone. The re-title
         # throttle's SECONDARY time floor measures its gap from here; see
         # :meth:`_maybe_retitle_conversation` for why the gap exists.
-        self._retitle_checked_at: float = 0.0
+        self._retitle_checked_at = 0.0
         # The growth-gated re-title schedule's two counters, mirroring omp's
         # `lastTitledTurnCount`/`refreshCount`. `_last_titled_turn_count` is the
         # transcript turn-count at the moment the title in force was set (0 until
@@ -2240,14 +2251,14 @@ class OperatorApp(App[None]):
         # holder (`ConversationName`) is shared with the session and persisted,
         # while these are display-schedule bookkeeping for the live host — the
         # same split `_provisional_name` already makes.
-        self._last_titled_turn_count: int = 0
-        self._theme_refresh_count: int = 0
+        self._last_titled_turn_count = 0
+        self._theme_refresh_count = 0
         # Opener text of a naming attempt that returned nothing. A quota
         # fallback pins AFTER the isolated naming call has already 429'd on
         # the dead primary, so the next substantive message is too late —
         # the phone stays "untitled" for the whole first turn. The route
         # edge re-fires this opener once a serving model exists.
-        self._pending_name_text: str = ""
+        self._pending_name_text = ""
         # A turn holds this for its whole provider round trip, and `_dispose`
         # waits on it so a session is never torn down under a live request.
         # Naming does NOT take it: the title call is `isolated` (see
@@ -2341,7 +2352,7 @@ class OperatorApp(App[None]):
         #: ``_request_login_key``). Distinct from ``_key_prompt``, which is
         #: cleared the moment the prompt is answered.
         self._last_login_prompt: Any = None
-        self._approve_all: bool = False
+        self._approve_all = False
         #: The phone-facing bridge: registrant (discovery record + control
         #: socket) and the handle adapting this app to it. None until the
         #: first session is adopted; torn down in ``on_unmount``.
@@ -2486,21 +2497,21 @@ class OperatorApp(App[None]):
         # stash whatever the user had half typed for the main chat, and Esc has
         # to hand it back. `None` means the aside is closed; `""` is a real
         # value (the draft was empty) and must not collapse into it.
-        self._aside_draft: str | None = None
+        self._aside_draft = None
         #: and its attachments. The aside CLEARS the composer to borrow it, and
         #: `clear_content` drops attachments by design — so without stashing
         #: these the draft came back with its `[Image #N]` markers resolving to
         #: nothing, and Enter sent the words alone. Worse, an image pasted
         #: INSIDE the aside took number 1, so the restored marker resolved to
         #: the aside's image instead (review round 17).
-        self._aside_draft_images: dict[int, Marked] = {}
+        self._aside_draft_images = {}
         #: Whether bang-mode was ON when the aside borrowed the composer. The
         #: aside disables the gesture for the life of the card, but the command
         #: the user had half typed is stashed and returned verbatim — returning
         #: it into a composer that silently left bang-mode would arm Enter with
         #: a shell command aimed at the model. Restored in `_close_aside` with
         #: the draft it belongs to.
-        self._aside_draft_shell_mode: bool = False
+        self._aside_draft_shell_mode = False
         # The reasoning-effort level the USER picked, or None while the model's
         # own default stands. Held on the app rather than only on the session
         # spec because the session is replaceable — `/new`, `/reload` and
@@ -2525,6 +2536,13 @@ class OperatorApp(App[None]):
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
         self._sidebar_prefetch: Any = None
+        self._sidebar_prior_workers: set[Any] = set()
+        self._sidebar_last_prefetch = ""
+        self._sidebar_settings_applied = False
+        self._sidebar_ready_frame: tuple[SessionInteraction, int, asyncio.Future[None]] | None = (
+            None
+        )
+        self._sidebar_frame_pending = False
         self._sidebar_focus_restore: Widget | None = None
         self._sidebar_presentations: dict[str, SessionPresentation] = {}
         self._sidebar_sources: dict[str, SessionInteraction] = {}
@@ -2691,10 +2709,136 @@ class OperatorApp(App[None]):
     def _spend_is_floor(self, value: bool) -> None:
         self._interaction.accounting.is_floor = value
 
+    @property
+    def _completion_deferred(self) -> bool:
+        return self._interaction.turn.completion_deferred
+
+    @_completion_deferred.setter
+    def _completion_deferred(self, value: bool) -> None:
+        self._interaction.turn.completion_deferred = value
+
+    @property
+    def _settled_child_ids(self) -> set[str]:
+        return self._interaction.turn.settled_child_ids
+
+    @_settled_child_ids.setter
+    def _settled_child_ids(self, value: set[str]) -> None:
+        self._interaction.turn.settled_child_ids = value
+
+    @property
+    def _waiting_kind(self) -> str | None:
+        return self._interaction.turn.waiting_kind
+
+    @_waiting_kind.setter
+    def _waiting_kind(self, value: str | None) -> None:
+        self._interaction.turn.waiting_kind = value
+
+    @property
+    def _approvals_denied_epoch(self) -> int | None:
+        return self._interaction.turn.approvals_denied_epoch
+
+    @_approvals_denied_epoch.setter
+    def _approvals_denied_epoch(self, value: int | None) -> None:
+        self._interaction.turn.approvals_denied_epoch = value
+
+    @property
+    def _name_requested(self) -> bool:
+        return self._interaction.naming.requested
+
+    @_name_requested.setter
+    def _name_requested(self, value: bool) -> None:
+        self._interaction.naming.requested = value
+
+    @property
+    def _provisional_name(self) -> str:
+        return self._interaction.naming.provisional
+
+    @_provisional_name.setter
+    def _provisional_name(self, value: str) -> None:
+        self._interaction.naming.provisional = value
+
+    @property
+    def _name_generation(self) -> int:
+        return self._interaction.naming.generation
+
+    @_name_generation.setter
+    def _name_generation(self, value: int) -> None:
+        self._interaction.naming.generation = value
+
+    @property
+    def _retitle_checked_at(self) -> float:
+        return self._interaction.naming.checked_at
+
+    @_retitle_checked_at.setter
+    def _retitle_checked_at(self, value: float) -> None:
+        self._interaction.naming.checked_at = value
+
+    @property
+    def _last_titled_turn_count(self) -> int:
+        return self._interaction.naming.last_titled_turn_count
+
+    @_last_titled_turn_count.setter
+    def _last_titled_turn_count(self, value: int) -> None:
+        self._interaction.naming.last_titled_turn_count = value
+
+    @property
+    def _theme_refresh_count(self) -> int:
+        return self._interaction.naming.refresh_count
+
+    @_theme_refresh_count.setter
+    def _theme_refresh_count(self, value: int) -> None:
+        self._interaction.naming.refresh_count = value
+
+    @property
+    def _pending_name_text(self) -> str:
+        return self._interaction.naming.pending_text
+
+    @_pending_name_text.setter
+    def _pending_name_text(self, value: str) -> None:
+        self._interaction.naming.pending_text = value
+
+    @property
+    def _aside_draft(self) -> str | None:
+        return self._interaction.draft.aside_main_text
+
+    @_aside_draft.setter
+    def _aside_draft(self, value: str | None) -> None:
+        self._interaction.draft.aside_main_text = value
+
+    @property
+    def _aside_draft_images(self) -> dict[int, Marked]:
+        return self._interaction.draft.aside_main_images
+
+    @_aside_draft_images.setter
+    def _aside_draft_images(self, value: dict[int, Marked]) -> None:
+        self._interaction.draft.aside_main_images = value
+
+    @property
+    def _aside_draft_shell_mode(self) -> bool:
+        return self._interaction.draft.aside_main_shell_mode
+
+    @_aside_draft_shell_mode.setter
+    def _aside_draft_shell_mode(self, value: bool) -> None:
+        self._interaction.draft.aside_main_shell_mode = value
+
+    @property
+    def _approve_all(self) -> bool:
+        return bool(self._interaction.draft.approve_all)
+
+    @_approve_all.setter
+    def _approve_all(self, value: bool) -> None:
+        self._interaction.draft.approve_all = value
+
     async def _on_message(self, message: TextualMessage) -> None:
         if isinstance(message, SessionEvent) and message.origin is not None:
             source = self._event_sources.get(message.origin)
             if source is not None:
+                if (
+                    isinstance(message, TurnAbandoned)
+                    and message.operation is not None
+                    and message.operation != source.turn.operation
+                ):
+                    return
                 source.presentation_revision += 1
                 if not self._is_current(source):
                     self._reduce_hidden_session_event(source, message)
@@ -2719,9 +2863,13 @@ class OperatorApp(App[None]):
         # Hiding a view is not cancelling its work. In particular, accepted
         # input held during compaction still owes delivery to its source.
         if isinstance(message, TurnStarted):
-            source.turn.epoch += 1
+            if not message.projection:
+                source.turn.epoch += 1
             source.turn.open = True
             source.turn.notified = False
+            source.turn.completion_deferred = False
+            source.turn.settled_child_ids.clear()
+            source.turn.waiting_kind = None
         elif isinstance(message, TurnEnded):
             source.turn.open = False
             source.turn.notified = True
@@ -2741,9 +2889,17 @@ class OperatorApp(App[None]):
         typed, source.compaction.held_typed = source.compaction.held_typed, ""
         images, source.compaction.held_images = source.compaction.held_images, {}
         accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
+        message_id, source.compaction.accepted_message_id = (
+            source.compaction.accepted_message_id,
+            "",
+        )
         if held or images:
             self._start_turn_for(
-                source, held, resolve_markers(typed or held, images), accepted=accepted
+                source,
+                held,
+                resolve_markers(typed or held, images),
+                accepted=accepted,
+                message_id=message_id,
             )
 
     def _is_current(self, source: SessionInteraction) -> bool:
@@ -2758,6 +2914,25 @@ class OperatorApp(App[None]):
             source.notices.append((text, kind))
             del source.notices[:-64]
 
+    def _capture_editor_draft(self) -> SessionDraft:
+        editor = self._editor()
+        # Only the editor payload: copying the source's whole view state would
+        # recursively capture its own recovery queue and overwrite newer state.
+        return SessionDraft(
+            text=editor.text,
+            attachments=editor.attachments(),
+            selection=editor.selection,
+            shell_mode=editor.shell_mode,
+        )
+
+    def _load_editor_draft(self, draft: SessionDraft) -> None:
+        editor = self._editor()
+        editor.load_text(draft.text)
+        editor.adopt_attachments(draft.attachments)
+        editor.set_shell_mode(draft.shell_mode)
+        if draft.selection is not None:
+            editor.selection = draft.selection
+
     def _restore_unsent_for(
         self,
         source: SessionInteraction,
@@ -2767,16 +2942,74 @@ class OperatorApp(App[None]):
         accepted: SessionDraft | None = None,
     ) -> None:
         restored = accepted or SessionDraft(text=text)
+        if accepted is None and images:
+            from local_operator.tui.widgets.editor import Attachment, _marker_indices
+
+            index = max(_marker_indices(text), default=0)
+            for image in images:
+                index += 1
+                marker = f"[Image #{index}]"
+                restored.attachments[index] = Attachment(image, marker)
+                restored.text += "\n" + marker
         if self._is_current(source):
             editor = self._editor()
-            if not editor.text.strip():
-                editor.forget_prompt(text)
-                editor.load_text(restored.text)
-                editor.adopt_attachments(restored.attachments)
-        else:
-            source.unsent.append((text, list(images or [])))
-            if not source.draft.text.strip():
-                source.draft = restored
+            editor.forget_prompt(text)
+            if not self._aside_is_open() and not editor.text and not editor.attachments():
+                self._load_editor_draft(restored)
+                return
+        elif not source.aside_open and not source.draft.text and not source.draft.attachments:
+            source.draft.text = restored.text
+            source.draft.attachments = dict(restored.attachments)
+            source.draft.selection = restored.selection
+            source.draft.shell_mode = restored.shell_mode
+            return
+        if not any(draft is restored for draft in source.unsent):
+            source.unsent.append(restored)
+        self._sync_draft_recoveries(source)
+
+    def _sync_draft_recoveries(self, source: SessionInteraction) -> None:
+        if not self._is_current(source):
+            return
+        view = self._transcript_view()
+        notices = [block for block in view.blocks() if isinstance(block, DraftRecoveryNotice)]
+        for notice in notices:
+            if notice.source_token != source.token or not any(
+                draft is notice.draft for draft in source.unsent
+            ):
+                view.remove_block(notice)
+        for draft in source.unsent:
+            if not any(
+                notice.source_token == source.token and notice.draft is draft for notice in notices
+            ):
+                self._append_block(DraftRecoveryNotice(source.token, draft))
+
+    def on_draft_recovery_notice_requested(self, message: DraftRecoveryNotice.Requested) -> None:
+        message.stop()
+        source = self._interaction
+        notice = message.notice
+        if (
+            self._session_transition_pending
+            or notice.source_token != source.token
+            or notice not in self._transcript_view().blocks()
+        ):
+            return
+        index = next(
+            (index for index, draft in enumerate(source.unsent) if draft is notice.draft), None
+        )
+        if index is None:
+            return
+        if self._aside_is_open():
+            panel = self._aside_panel()
+            if panel is not None:
+                panel.set_notice("Close the aside to restore this main prompt")
+            return
+        restored = source.unsent.pop(index)
+        current = self._capture_editor_draft()
+        if current.text or current.attachments:
+            source.unsent.append(current)
+        self._load_editor_draft(restored)
+        self._sync_draft_recoveries(source)
+        self._editor().focus()
 
     def _register_user_echo_for(
         self, source: SessionInteraction, text: str, *, message_id: str = ""
@@ -2791,7 +3024,12 @@ class OperatorApp(App[None]):
         ]
 
     def _post_turn_abandoned_for(
-        self, source: SessionInteraction, *, aborted: bool, error: str | None
+        self,
+        source: SessionInteraction,
+        *,
+        aborted: bool,
+        error: str | None,
+        operation: int | None = None,
     ) -> None:
         message = TurnAbandoned(
             source.turn.epoch,
@@ -2800,7 +3038,18 @@ class OperatorApp(App[None]):
             outcome_known=not bool(getattr(source.session, "is_remote", False)),
         )
         message.origin = source.controller
+        message.operation = operation
         self.post_message(message)
+
+    @staticmethod
+    def _sidebar_source_stamp(source: SessionInteraction) -> tuple[Any, ...]:
+        state = getattr(source.session, "frontend_state", None)
+        return (
+            getattr(state, "epoch", ""),
+            getattr(state, "generation", 0),
+            getattr(state, "history_cursor", None),
+            getattr(state, "streaming", False),
+        )
 
     def _capture_sidebar_presentation(self) -> SessionPresentation:
         replay = PreparedReplay(
@@ -2818,6 +3067,10 @@ class OperatorApp(App[None]):
         return SessionPresentation(
             replay=replay,
             revision=self._interaction.presentation_revision,
+            source_stamp=self._sidebar_source_stamp(self._interaction),
+            source_token=self._interaction.token,
+            history_size=len(self._session.history()) if self._session is not None else 0,
+            needs_live_projection=False,
             streaming_block=self._streaming_block,
             tool_cards=self._tool_cards,
             composing_cards=self._composing_cards,
@@ -2856,7 +3109,7 @@ class OperatorApp(App[None]):
         self._deferred_steer_notices = presentation.deferred_steer_notices
         self._held_steer_blocks = presentation.held_steer_blocks
         self._welcome = presentation.welcome
-        self._welcome_visible = presentation.welcome_visible
+        self._welcome_visible = None
         # Gesture tasks belong to the abandoned viewport, not its history.
         self._resume_paging = False
         self._resume_check_pending = False
@@ -2869,61 +3122,121 @@ class OperatorApp(App[None]):
         self._exit_hint = None
         self._superseded_steer_controllers.clear()
 
-    async def _prepare_sidebar_session(
-        self, session_id: str
-    ) -> tuple[SessionInteraction, SessionPresentation]:
+    async def _lease_sidebar_source(
+        self, session_id: str, *, speculative: bool
+    ) -> SessionInteraction:
         from local_operator.mobile.attach_client import find_owner_record
         from local_operator.paths import config_dir
         from local_operator.session.remote import RemoteSession
 
-        if self._session is not None and self._session.session_id == session_id:
-            return self._interaction, self._capture_sidebar_presentation()
         source = self._sidebar_sources.get(session_id)
-        if source is None:
-            directory = config_dir()
-            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
-            if record is not None and record.protocol < 4:
-                raise RuntimeError("Update the older Local Operator session before opening it here")
+        if source is not None and not source.retired:
+            source.preparations += 1
+            return source
+        directory = config_dir()
+        record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
 
-            async def takeover() -> Any:
-                if self._resume_factory is None:
-                    raise RuntimeError("This launcher cannot reopen an inactive conversation")
-                return await self._resume_factory(session_id)
+        async def no_takeover() -> Any:
+            # Match the CLI viewer policy: discovery/preparation must never
+            # turn this TUI into an owner or recursively create a cold facade.
+            raise RuntimeError("a sidebar viewer never takes over a session")
 
-            if record is not None and owner is not None:
-                remote = await RemoteSession.connect(
-                    record, session_id, config_dir=directory, takeover_factory=takeover
-                )
-            else:
-                remote = await takeover()
-                if not isinstance(remote, RemoteSession):
-                    raise RuntimeError("Sidebar navigation requires an owner-backed session")
-                await remote._ensure_bound()
+        if record is not None and owner is not None:
+            remote = await RemoteSession.connect(
+                record, session_id, config_dir=directory, takeover_factory=no_takeover
+            )
+        else:
+            if speculative:
+                raise RuntimeError("The prepared owner is no longer active")
+            if self._resume_factory is None:
+                raise RuntimeError("This launcher cannot reopen an inactive conversation")
+            remote = await self._resume_factory(session_id)
+        if not isinstance(remote, RemoteSession):
+            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+        try:
+            if remote.session_id != session_id:
+                raise RuntimeError("The launcher returned a different conversation")
             source = SessionInteraction(remote)
             source.draft = await self._sidebar_drafts.get(session_id)
+            if source.draft.approve_all is None:
+                source.draft.approve_all = self._approvals_default_auto
+            source.preparations = 1
+            remote.suspend_viewer_gates()
             self._interactions[id(remote)] = source
             self._sidebar_sources[session_id] = source
             source.controller = EventController(remote, self)
             self._event_sources[source.controller] = source
             source.controller.subscribe()
-        session = source.session
-        if not isinstance(session, RemoteSession):
-            raise RuntimeError("Sidebar navigation requires an owner-backed session")
-        if session.is_cold:
-            await session._ensure_bound()
-        if session.is_cold:
-            raise RuntimeError("The conversation has not finished connecting")
-        cached = self._sidebar_presentations.get(session_id)
-        if cached is not None and cached.revision == source.presentation_revision:
-            if not source.draft.following_tail and source.draft.scroll_anchor_id:
-                cached.replay.view.restore_navigation_anchor(source.draft.scroll_anchor_id, source.draft.scroll_anchor_part, source.draft.scroll_offset)
-            return source, cached
-        replay = PreparedReplay()
-        source.preparations += 1
-        revision = source.presentation_revision
+            self._watch_source_frontend(source)
+            return source
+        except BaseException:
+            if remote is not self._session:
+                await remote.dispose()
+            raise
+
+    async def _drain_sidebar_prior_transitions(self) -> None:
+        from textual.worker import WorkerCancelled, WorkerFailed
+
+        for worker in tuple(self._sidebar_prior_workers):
+            try:
+                # A cancellation-resistant old reload must finish touching its
+                # own view before the replacement can publish another one.
+                await asyncio.shield(worker.wait())
+            except WorkerCancelled:
+                pass
+            except WorkerFailed:
+                logger.debug("prior session transition failed while draining", exc_info=True)
+            self._sidebar_prior_workers.discard(worker)
+
+    async def _prepare_sidebar_session(
+        self, session_id: str, *, speculative: bool = False
+    ) -> tuple[SessionInteraction, SessionPresentation]:
+        from local_operator.session.remote import RemoteSession
+        from local_operator.tui.session_catalog import session_directory_name
+
+        if self._session is not None and self._session.session_id == session_id:
+            return self._interaction, self._capture_sidebar_presentation()
+        if not speculative:
+            await self._drain_sidebar_prior_transitions()
+        source = await self._lease_sidebar_source(session_id, speculative=speculative)
+        replay: PreparedReplay | None = None
+        succeeded = False
         try:
+            session = source.session
+            if not isinstance(session, RemoteSession):
+                raise RuntimeError("Sidebar navigation requires an owner-backed session")
+            if session.is_cold:
+                if speculative:
+                    raise RuntimeError("The prepared owner is no longer ready")
+                await asyncio.wait_for(session._ensure_bound(), 15)
+            if session.is_cold:
+                raise RuntimeError("The conversation has not finished connecting")
+            gate = session.frontend_state.pending_gate
+            if gate is not None and gate.kind not in {"ask", "approval"}:
+                raise RuntimeError("This viewer does not support the conversation's pending input")
+            cached = self._sidebar_presentations.get(session_id)
+            if (
+                cached is not None
+                and cached.source_token == source.token
+                and cached.revision == source.presentation_revision
+                and cached.source_stamp == self._sidebar_source_stamp(source)
+            ):
+                if not source.draft.following_tail and source.draft.scroll_anchor_id:
+                    cached.replay.view.restore_navigation_anchor(
+                        source.draft.scroll_anchor_id,
+                        source.draft.scroll_anchor_part,
+                        source.draft.scroll_offset,
+                    )
+                succeeded = True
+                return source, cached
+            replay = PreparedReplay()
+            welcome: WelcomeView | None = None
+            revision = source.presentation_revision
+            history = list(session.history())
+            source_stamp = self._sidebar_source_stamp(source)
             replay.prepare(
-                list(session.history()), bound=max(12, self.size.height // 2),
+                history,
+                bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
             )
             replay.view.styles.layer = "session-cache"
@@ -2932,6 +3245,18 @@ class OperatorApp(App[None]):
             conversation = self.query_one("#session-conversation")
             conversation.styles.layers = "default session-cache"
             await conversation.mount(replay.view)
+            if not replay.blocks:
+                welcome = WelcomeView(
+                    lambda: session_welcome_info(
+                        session,
+                        self._providers,
+                        notice=self._splash_notice,
+                        setup=self._setup_state,
+                        update_available=self._update_available,
+                    )
+                )
+                welcome.set_navigation_visible(False)
+                await replay.view.mount(welcome)
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
@@ -2942,27 +3267,187 @@ class OperatorApp(App[None]):
             self.call_after_refresh(laid_out.set)
             await laid_out.wait()
             if not source.draft.following_tail and source.draft.scroll_anchor_id:
-                replay.view.restore_navigation_anchor(source.draft.scroll_anchor_id, source.draft.scroll_anchor_part, source.draft.scroll_offset)
+                replay.view.restore_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
+            succeeded = True
             return source, SessionPresentation(
-                replay, revision=revision, working_fallback=DEFAULT_ACTIVITY
+                replay,
+                revision=revision,
+                source_stamp=source_stamp,
+                source_token=source.token,
+                history_size=len(history),
+                working_fallback=DEFAULT_ACTIVITY,
+                welcome=welcome,
+                welcome_visible=welcome is not None,
             )
         except BaseException:
-            if replay.view.is_mounted:
+            if replay is not None and replay.view.parent is not None:
                 await replay.view.remove()
-            if (
-                source.preparations == 1
-                and not source.must_retain
-                and source is not self._interaction
-                and session_id not in self._sidebar_presentations
-            ):
-                source.controller.dispose()
-                self._event_sources.pop(source.controller, None)
-                self._sidebar_sources.pop(session_id, None)
-                self._interactions.pop(id(session), None)
-                await session.dispose()
             raise
         finally:
             source.preparations -= 1
+            if not succeeded:
+                await self._release_sidebar_source(source)
+
+    @staticmethod
+    def _sidebar_gate_identity(source: SessionInteraction) -> tuple[Any, ...] | None:
+        state = getattr(source.session, "frontend_state", None)
+        gate = getattr(state, "pending_gate", None)
+        if gate is None:
+            return None
+        return (getattr(state, "epoch", ""), gate.kind, gate.request_id, gate.question_index)
+
+    def _watch_source_frontend(self, source: SessionInteraction) -> None:
+        from local_operator.session.frontend_state import FrontendSubscription
+
+        subscribe = getattr(source.session, "subscribe_frontend", None)
+        if source.unsubscribe_frontend is None and callable(subscribe):
+            subscription = subscribe(
+                lambda _update: self.call_later(self._source_frontend_changed, source)
+            )
+            source.unsubscribe_frontend = cast(FrontendSubscription, subscription).unsubscribe
+
+    def _source_frontend_changed(self, source: SessionInteraction) -> None:
+        if source.retired:
+            return
+        if source.gate_draft is not None and source.gate_draft[0] != self._sidebar_gate_identity(
+            source
+        ):
+            source.gate_draft = None
+        if self._sidebar_source_releasable(source) and self.is_running:
+            self.run_worker(self._release_sidebar_source(source))
+
+    def _restore_gate_draft(self, source: SessionInteraction, card: AskPickerScreen) -> None:
+        saved = source.gate_draft
+        if saved is not None and saved[0] == self._sidebar_gate_identity(source):
+            card.restore_state(saved[1])
+
+    def _suspend_sidebar_gates(self, source: SessionInteraction) -> None:
+        from local_operator.session.remote import RemoteSession
+
+        session = source.session
+        if not isinstance(session, RemoteSession):
+            return
+        view_generation = source.gate_view_generation
+        source.gate_view_generation += 1
+        keep_answer = False
+        if self._is_current(source):
+            card = self._ask_screen or self._approval
+            key = self._sidebar_gate_identity(source)
+            owns_card = card is not None and card.source_binding == (
+                source.token,
+                key,
+                view_generation,
+            )
+            if card is not None:
+                if owns_card and key is not None and not card.settled:
+                    snapshot = card.snapshot_state()
+                    snapshot.focused = source.draft.focus_id == "@gate"
+                    source.gate_draft = (key, snapshot)
+                card.disabled = True
+            keep_answer = owns_card and bool(
+                (self._approval is not None and self._approval.answered)
+                or (
+                    self._ask_pending is not None
+                    and self._ask_pending.done()
+                    and not self._ask_pending.cancelled()
+                )
+            )
+        denied = source.turn.approvals_denied_epoch
+        auto = bool(source.draft.approve_all) and not (
+            denied is not None and source.turn.epoch <= denied
+        )
+        task = session.suspend_viewer_gates(auto_approve=auto, keep_answer=keep_answer)
+        if task is not None:
+            task.add_done_callback(
+                lambda _task: self.call_later(self._source_frontend_changed, source)
+            )
+
+    def _sidebar_gate_surface_ready(self, source: SessionInteraction) -> bool:
+        if not self._is_current(source) or getattr(source.session, "is_cold", False):
+            return False
+        view = self._transcript_view()
+        editor = self._editor()
+        if not view.is_on_screen or not editor.is_mounted or editor.disabled:
+            return False
+        blocks = view.blocks()
+        if source.draft.following_tail:
+            last = next((block for block in reversed(blocks) if block.display), None)
+            if not view.is_near_bottom() or (
+                last is not None and last.region.bottom > view.content_region.bottom
+            ):
+                return False
+        elif source.draft.scroll_anchor_id:
+            anchor = next(
+                (
+                    block
+                    for block in blocks
+                    if block.navigation_anchor_id == source.draft.scroll_anchor_id
+                    and block.navigation_anchor_part == source.draft.scroll_anchor_part
+                ),
+                None,
+            )
+            if anchor is not None:
+                offset = min(source.draft.scroll_offset, max(0, anchor.region.height - 1))
+                if (
+                    anchor.region.y + offset != view.content_region.y
+                    and 0 < view.scroll_y < view.max_scroll_y
+                ):
+                    return False
+        state = getattr(source.session, "frontend_state", None)
+        gate = getattr(state, "pending_gate", None)
+        if gate is None:
+            return self._ask_screen is None and self._approval is None
+        if gate.kind == "approval" and bool(source.draft.approve_all):
+            return True
+        card = self._ask_screen if gate.kind == "ask" else self._approval
+        return bool(
+            card is not None
+            and card.source_binding
+            == (source.token, self._sidebar_gate_identity(source), source.gate_view_generation)
+            and card.is_mounted
+            and card.is_on_screen
+            and not card.disabled
+            and not card.settled
+        )
+
+    def _await_sidebar_frame(
+        self, source: SessionInteraction, generation: int
+    ) -> asyncio.Future[None]:
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._sidebar_ready_frame = (source, generation, future)
+
+        def expired() -> None:
+            if not future.done():
+                future.set_exception(
+                    RuntimeError(
+                        "The conversation connected but its input surface did not become ready"
+                    )
+                )
+
+        timer = self.set_timer(15, expired)
+        future.add_done_callback(lambda _future: timer.stop())
+        self.refresh()
+        return future
+
+    def post_display_hook(self) -> None:
+        super().post_display_hook()
+        pending = getattr(self, "_sidebar_ready_frame", None)
+        if pending is None:
+            return
+        source, generation, future = pending
+        if future.done():
+            self._sidebar_ready_frame = None
+        elif generation == self._sidebar_navigation.generation and self._sidebar_gate_surface_ready(
+            source
+        ):
+            # This is the real display path, not a timer or a cosmetic selection
+            # update. Only now are the target frame and its input surface ready.
+            self._sidebar_ready_frame = None
+            future.set_result(None)
 
     def _sidebar_navigation_pending(self, session_id: str) -> None:
         from local_operator.session.remote import RemoteSession
@@ -2970,16 +3455,75 @@ class OperatorApp(App[None]):
         current = self._session
         if isinstance(current, RemoteSession):
             if session_id:
-                current.suspend_viewer_gates()
+                self._suspend_sidebar_gates(self._interaction)
             else:
                 current.resume_viewer_gates()
         self._session_transition_pending = bool(session_id)
+        self._sidebar_frame_pending = True
+        if not session_id:
+            source = self._interaction
+            generation = self._sidebar_navigation.generation
+
+            def painted() -> None:
+                if (
+                    self._interaction is source
+                    and self._sidebar_navigation.generation == generation
+                ):
+                    self._sidebar_frame_pending = False
+
+            self.call_after_refresh(painted)
         self._session_sidebar.requested_id = session_id
         self._session_sidebar.refresh()
 
     def _sidebar_navigation_failed(self, session_id: str, error: Exception) -> None:
         self._session_sidebar.show_error(str(error))
         self._system_notice(f"Could not open conversation: {error}", "warning")
+
+    def _sidebar_source_releasable(self, source: SessionInteraction) -> bool:
+        from local_operator.session.remote import RemoteSession
+
+        return (
+            isinstance(source.session, RemoteSession)
+            and source is not self._interaction
+            and not source.retired
+            and not source.must_retain
+            and not source.preparations
+            and not getattr(source.session, "has_pending_gate_reply", False)
+            and source.session is not None
+            and source.session is not self._fork_source_session
+            and source.session.session_id not in self._sidebar_presentations
+        )
+
+    async def _release_sidebar_source(self, source: SessionInteraction) -> None:
+        if not self._sidebar_source_releasable(source) or source.session is None:
+            return
+        session = source.session
+        try:
+            await self._sidebar_drafts.put(
+                session.session_id,
+                replace(source.draft, attachments=dict(source.draft.attachments)),
+            )
+        except OSError:
+            self._system_notice(
+                "Could not save the draft to disk; it is still kept in memory", "warning"
+            )
+            return
+        # Saving overflow yields. A rapid return may have acquired this same
+        # source; neither its event controller nor its socket may close then.
+        if not self._sidebar_source_releasable(source):
+            return
+        source.retired = True
+        if source.unsubscribe_frontend is not None:
+            source.unsubscribe_frontend()
+            source.unsubscribe_frontend = None
+        if source.controller is not None:
+            source.controller.dispose()
+            self._event_sources.pop(source.controller, None)
+        if self._sidebar_sources.get(session.session_id) is source:
+            self._sidebar_sources.pop(session.session_id, None)
+        if self._interactions.get(id(session)) is source:
+            self._interactions.pop(id(session), None)
+        await session.dispose()
 
     async def _release_sidebar_preparation(
         self, prepared: tuple[SessionInteraction, SessionPresentation]
@@ -2992,45 +3536,53 @@ class OperatorApp(App[None]):
             return
         if presentation.replay.view.is_mounted:
             await presentation.replay.view.remove()
-        # Detaching this speculative viewer never stops its runtime. A source
-        # with accepted input or executing work retains its facade separately.
-        if (
-            source is not self._interaction
-            and not source.must_retain
-            and not source.preparations
-            and source.session is not None
-        ):
-            if source.controller is not None:
-                source.controller.dispose()
-                self._event_sources.pop(source.controller, None)
-            try:
-                await self._sidebar_drafts.put(
-                    source.session.session_id,
-                    replace(source.draft, attachments=dict(source.draft.attachments)),
-                )
-            except OSError:
-                self._system_notice(
-                    "Could not save the draft to disk; it is still kept in memory", "warning"
-                )
-                return
-            # Saving overflow yields to disk. A rapid return may have acquired
-            # this same facade meanwhile, so recheck ownership before closing.
-            if (
-                source is self._interaction
-                or source.preparations
-                or source.session.session_id in self._sidebar_presentations
-            ):
-                return
-            self._sidebar_sources.pop(source.session.session_id, None)
-            self._interactions.pop(id(source.session), None)
-            await source.session.dispose()
+        await self._release_sidebar_source(source)
+
+    def _park_sidebar_aside(self, source: SessionInteraction) -> None:
+        panel = self._aside_panel()
+        if panel is None or not panel.is_open:
+            return
+        source.draft.aside = panel.snapshot()
+        source.aside_generation = source.draft.aside.generation
+        source.aside_open = True
+        # Closing the projection must not cancel the source-bound provider
+        # request. Its data reducer keeps the detached exchange up to date.
+        panel.close()
+        panel._on_height = None
+        self._transcript_view().styles.clear_rule("padding")
+        self.screen.remove_class(ASIDE_LAYOUT_CLASS)
+
+    def _restore_sidebar_aside(self, source: SessionInteraction) -> None:
+        editor = self._editor()
+        snapshot = source.draft.aside
+        panel = self._aside_panel()
+        if isinstance(snapshot, AsideSnapshot) and panel is not None:
+            source.aside_open = True
+            source.aside_generation = snapshot.generation
+            editor.set_allows_shell(False)
+            editor.placeholder = ASIDE_PLACEHOLDER
+            editor.set_commands([])
+            editor.set_records_history(False)
+            self.screen.add_class(ASIDE_LAYOUT_CLASS)
+            panel._on_height = self._reserve_ground_for_aside
+            panel.restore(snapshot)
+            self._sync_aside_fork_hint()
+        else:
+            source.aside_open = False
+            editor.set_allows_shell(True)
+            editor.set_shell_mode(source.draft.shell_mode)
+            editor.placeholder = (
+                SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
+            )
+            editor.set_commands(SLASH_COMMANDS)
+            editor.set_records_history(True)
 
     def _commit_sidebar_session(
         self,
         session_id: str,
         prepared: tuple[SessionInteraction, SessionPresentation],
         generation: int,
-    ) -> None:
+    ) -> asyncio.Future[None] | None:
         from local_operator.session.remote import RemoteSession
 
         source, incoming = prepared
@@ -3045,6 +3597,9 @@ class OperatorApp(App[None]):
         previous = outgoing.session
         if previous is not None and not isinstance(previous, RemoteSession):
             raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+        self._close_subagent_view()
+        self._close_org_chart_view()
+        self._close_settings_view()
         editor = self._editor()
         outgoing.draft.text = editor.text
         outgoing.draft.attachments = editor.attachments()
@@ -3054,18 +3609,36 @@ class OperatorApp(App[None]):
         outgoing.draft.following_tail = old_view.is_following_tail
         if not outgoing.draft.following_tail:
             top = old_view.content_region.y
-            anchor = next((block for block in old_view.blocks() if block.navigation_anchor_id and block.display and block.region.bottom > top), None)
+            anchor = next(
+                (
+                    block
+                    for block in old_view.blocks()
+                    if block.navigation_anchor_id and block.display and block.region.bottom > top
+                ),
+                None,
+            )
             if anchor is not None:
                 outgoing.draft.scroll_anchor_id = anchor.navigation_anchor_id
                 outgoing.draft.scroll_anchor_part = anchor.navigation_anchor_part
                 outgoing.draft.scroll_offset = top - anchor.region.y
+        outgoing_presentation = None
         if previous is not None:
             self._sidebar_sources[previous.session_id] = outgoing
-            self._sidebar_presentations[previous.session_id] = self._capture_sidebar_presentation()
+            outgoing_presentation = self._capture_sidebar_presentation()
+            if outgoing_presentation.retainable():
+                self._sidebar_presentations[previous.session_id] = outgoing_presentation
+                outgoing_presentation = None
+        self._park_sidebar_aside(outgoing)
         if isinstance(previous, RemoteSession):
-            previous.suspend_viewer_gates()
-        self._deny_queued_approvals()
-        self._settle_ask_picker()
+            self._suspend_sidebar_gates(outgoing)
+        # Detach the old projection without fabricating a deny/empty answer or
+        # poisoning the source's turn-scoped denial latch for its next visit.
+        for card in (self._ask_screen, self._approval):
+            if card is not None:
+                card.display = False
+                self._unmount_prompt(card)
+        self._ask_screen = None
+        self._ask_pending = None
         self._settle_key_prompt()
         self._approval = None
         old_view = self._transcript_view()
@@ -3085,22 +3658,54 @@ class OperatorApp(App[None]):
         incoming.replay.view.set_on_tail_requested(self._jump_newer_resume_tail)
         self._swapping_session = True
         try:
+            factory = self._resume_factory
+            if factory is not None:
+                self._session_factory = lambda: factory(session_id)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            history = list(session.history())
+            if len(history) > incoming.history_size:
+                self._project_settled_rows(history[incoming.history_size :])
+            elif len(history) < incoming.history_size:
+                # A compaction/recovery changed the snapshot while its widgets
+                # were preparing. Reconcile the viewport without invoking the
+                # ordinary /clear hook, which would settle this source's gates.
+                incoming.replay.view.set_on_clear(None)
+                incoming.replay.view.clear_blocks()
+                incoming.replay.view.set_on_clear(self._on_transcript_cleared)
+                self._resume_pending_head = []
+                self._resume_pending_tail = []
+                self._resume_results = {}
+                self._resume_mounted_ids.clear()
+                self._resume_head_notice = None
+                self._resume_tail_notice = None
+                self._project_settled_rows(history, bound=max(12, self.size.height // 2))
+            if incoming.needs_live_projection and self._controller is not None:
+                self._controller.restore_live_projection(
+                    session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
+                )
             editor.load_text(source.draft.text)
             editor.adopt_attachments(source.draft.attachments)
             editor.set_shell_mode(source.draft.shell_mode)
             if source.draft.selection is not None:
                 editor.selection = source.draft.selection
+            self._restore_sidebar_aside(source)
+            self._sync_draft_recoveries(source)
+            for text, kind in source.notices:
+                self._system_notice(text, kind)
+            source.notices.clear()
+            self._submit_boot_prompt(session)
             session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
-            self._set_welcome_visible(False)
             if source.draft.focus_id == "@transcript":
                 incoming.replay.view.focus()
             else:
                 editor.focus()
         finally:
             self._swapping_session = False
+        self._set_welcome_visible(not bool(incoming.replay.view.blocks()))
+        if outgoing_presentation is not None:
+            self.run_worker(self._release_sidebar_preparation((outgoing, outgoing_presentation)))
         if displaced is not None and displaced is not incoming:
             self.run_worker(self._release_sidebar_preparation((source, displaced)))
         # Active + one retained presentation. Executing contexts stay alive
@@ -3111,6 +3716,11 @@ class OperatorApp(App[None]):
             self.run_worker(
                 self._release_sidebar_preparation((self._sidebar_sources[evicted_id], evicted))
             )
+        if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+            # A drawer cannot count as a correct visible conversation while it
+            # covers the response. Pinned wide sidebars stay open.
+            self._set_sidebar_open(False)
+        return self._await_sidebar_frame(source, generation)
 
     def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
         message.stop()
@@ -3119,21 +3729,33 @@ class OperatorApp(App[None]):
                 self._sidebar_navigation.cancel()
             self._editor().focus()
             return
-        if self._session_transition_pending and not self._sidebar_navigation.requested_id:
-            self.workers.cancel_group(self, "session")
+        self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
         self._sidebar_navigation.select(message.session_id)
 
     def _apply_sidebar_settings(self) -> None:
-        self._sidebar_settings = SidebarSettings.from_values(self._config_values())
-        self._set_sidebar_open(self._sidebar_settings.visible)
+        settings = SidebarSettings.from_values(self._config_values())
+        apply_visibility = (
+            not self._sidebar_settings_applied or settings.visible != self._sidebar_settings.visible
+        )
+        self._sidebar_settings = settings
+        self._sidebar_settings_applied = True
+        if apply_visibility:
+            self._set_sidebar_open(settings.visible)
+        else:
+            self._sync_sidebar_layout(self.size)
 
     def action_toggle_sidebar(self) -> None:
+        if not self._session_sidebar.display:
+            self._close_subagent_view()
+            self._close_org_chart_view()
+            self._close_settings_view()
         self._set_sidebar_open(not self._session_sidebar.display)
 
     def _set_sidebar_open(self, opened: bool) -> None:
         sidebar = self._session_sidebar
         if opened and not sidebar.display:
             self._sidebar_focus_restore = self.focused
+            self._sidebar_last_prefetch = ""
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
         if self._sidebar_timer is not None:
@@ -3223,18 +3845,20 @@ class OperatorApp(App[None]):
         candidate = next(
             (entry for entry in entries if entry.id != current and entry.row.live_state), None
         )
-        if candidate is None:
+        if candidate is None or candidate.id == self._sidebar_last_prefetch:
             return
+        self._sidebar_last_prefetch = candidate.id
 
         async def prepare() -> None:
             prepared = None
             try:
-                prepared = await self._prepare_sidebar_session(candidate.id)
+                prepared = await self._prepare_sidebar_session(candidate.id, speculative=True)
                 if (
                     self._session_sidebar.display
                     and not self._sidebar_navigation.requested_id
                     and not self._sidebar_presentations
                     and candidate.id != str(getattr(self._session, "session_id", ""))
+                    and prepared[1].retainable()
                 ):
                     self._sidebar_presentations[candidate.id] = prepared[1]
                     prepared = None
@@ -3245,9 +3869,11 @@ class OperatorApp(App[None]):
                 # An explicit selection reports the same failure normally.
                 logger.debug("sidebar prewarm failed", exc_info=True)
             finally:
-                if prepared is not None:
-                    await self._release_sidebar_preparation(prepared)
-                self._sidebar_prefetch = None
+                try:
+                    if prepared is not None:
+                        await self._release_sidebar_preparation(prepared)
+                finally:
+                    self._sidebar_prefetch = None
 
         self._sidebar_prefetch = self.run_worker(prepare(), group="sidebar-prefetch")
 
@@ -3527,10 +4153,20 @@ class OperatorApp(App[None]):
         """
         self._invalidate_pending_frontend_state()
         source = self._interactions.get(id(session))
-        if source is None:
+        if source is None or source.retired:
             source = SessionInteraction(session)
             self._interactions[id(session)] = source
+        if source.draft.approve_all is None:
+            source.draft.approve_all = (
+                self._approve_all
+                if self._interaction.session is None
+                else self._approvals_default_auto
+            )
         self._interaction = source
+        self._watch_source_frontend(source)
+        self._set_approve_all(self._approve_all)
+        if getattr(session, "session_id", ""):
+            self._sidebar_sources[session.session_id] = source
         self._session = session
         # The latch belongs to the BINDING, not to the app: a swapped-in
         # session is cold again and owes its own engage. Its declaration has
@@ -3583,7 +4219,7 @@ class OperatorApp(App[None]):
         if bool(getattr(session, "is_remote", False)):
             set_takeover = getattr(session, "set_takeover_callback", None)
             if callable(set_takeover):
-                set_takeover(self._adopt_takeover_session)
+                set_takeover(partial(self._adopt_takeover_session, source=source))
             # The opposite outcome to takeover, and equally in need of a
             # screen: the owner ENDED this session, so this viewer stays a
             # viewer of something cold and must say so rather than leaving
@@ -3643,9 +4279,11 @@ class OperatorApp(App[None]):
         # Every session enters the same widget path through Textual's pump.
         # Remote socket callbacks require the marshal; using it locally too
         # removes a second gate state machine without changing arbitration.
-        session.set_approval_handler(self._request_tool_approval_on_app_loop)
+        session.set_approval_handler(
+            partial(self._request_tool_approval_on_app_loop, source=source)
+        )
         # Installing this hook is what makes the ask tool exist for a UI host.
-        session.set_ask_handler(self._request_user_choice_on_app_loop)
+        session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -3963,7 +4601,30 @@ class OperatorApp(App[None]):
         origin = "" if self._issued_own_stop else " from another terminal"
         self._system_notice(f"this session was stopped{origin}{way_back}", "warning")
 
-    async def _adopt_takeover_session(self, session: Any) -> None:
+    def _rebind_takeover_source(self, source: SessionInteraction, session: Any) -> None:
+        previous = source.session
+        if source.unsubscribe_frontend is not None:
+            source.unsubscribe_frontend()
+            source.unsubscribe_frontend = None
+        if previous is not None:
+            self._interactions.pop(id(previous), None)
+        source.session = session
+        source.gate_draft = None
+        source.gate_view_generation += 1
+        self._interactions[id(session)] = source
+        self._sidebar_sources[session.session_id] = source
+        session.set_approval_handler(
+            partial(self._request_tool_approval_on_app_loop, source=source)
+        )
+        session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        source.controller = EventController(session, self)
+        self._event_sources[source.controller] = source
+        source.controller.subscribe()
+        self._watch_source_frontend(source)
+
+    async def _adopt_takeover_session(
+        self, session: Any, *, source: SessionInteraction | None = None
+    ) -> None:
         """Become the owner after the remote facade wins the transcript lease.
 
         Unlike /new or /resume, this is NOT a conversation change: every block
@@ -3973,47 +4634,38 @@ class OperatorApp(App[None]):
         unpersisted killed-owner tail honestly; repainting durable history here
         would duplicate everything and cause visible reflow.
         """
-        remote = self._session
-        if self._controller is not None:
-            # A takeover KEEPS the conversation, so it also keeps the receipt's
-            # right to settle (review round 1, F3). The steer-delivery guard
-            # drops events from a superseded controller because a `/reload`
-            # cleared the rows they would have settled — but here the rows are
-            # deliberately still on screen and their messages are still the
-            # same session's, so a drain already in flight across the swap is
-            # about a row this app is still holding. Recording the outgoing
-            # controller as still-honoured is what keeps that receipt landing
-            # instead of leaving the row stuck on `queued` after the message
-            # actually went.
-            self._superseded_steer_controllers.add(self._controller)
-            self._controller.dispose()
-            self._controller = None
+        source = source or self._interaction
+        remote = source.session
+        if source.controller is not None:
+            self._superseded_steer_controllers.add(source.controller)
+            source.controller.dispose()
+            self._event_sources.pop(source.controller, None)
+            if self._is_current(source):
+                self._controller = None
         if remote is not None:
             try:
                 await remote.dispose()
             except Exception:
                 pass
+        if not self._is_current(source):
+            self._rebind_takeover_source(source, session)
+            return
         unsubscribe_frontend = getattr(self, "_unsubscribe_frontend", None)
         if callable(unsubscribe_frontend):
             unsubscribe_frontend()
         self._unsubscribe_frontend = None
         self._invalidate_pending_frontend_state()
+        self._rebind_takeover_source(source, session)
         self._session = session
+        self._controller = source.controller
         self._mobile_adopted(session)
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
         if callable(subscribe_frontend):
             from local_operator.session.frontend_state import FrontendSubscription
 
-            subscription = cast(
-                FrontendSubscription,
-                subscribe_frontend(self._on_frontend_update),
-            )
+            subscription = cast(FrontendSubscription, subscribe_frontend(self._on_frontend_update))
             self._unsubscribe_frontend = subscription.unsubscribe
             self._apply_frontend_state(subscription.sync.snapshot)
-        session.set_approval_handler(self.request_tool_approval)
-        session.set_ask_handler(self.request_user_choice)
-        self._controller = EventController(session, self)
-        self._controller.subscribe()
         assert self._status is not None
         self._status.update(
             model_label=_effective_label(session),
@@ -4073,7 +4725,12 @@ class OperatorApp(App[None]):
                 )
 
     async def _request_tool_approval_on_app_loop(
-        self, tool_name: str, description: str, *, job_id: str | None = None
+        self,
+        tool_name: str,
+        description: str,
+        *,
+        job_id: str | None = None,
+        source: SessionInteraction | None = None,
     ) -> bool:
         """Enter the real approval surface from a pre-Textual socket task.
 
@@ -4082,17 +4739,27 @@ class OperatorApp(App[None]):
         future mirrors completion/cancellation back to RemoteSession without
         letting a late card settle a cancelled owner request.
         """
+        source = source or self._interaction
+        if not self._is_current(source):
+            raise asyncio.CancelledError
         return bool(
             await self._run_gate_on_app_loop(
-                lambda: self.request_tool_approval(tool_name, description, job_id=job_id)
+                lambda: self.request_tool_approval(
+                    tool_name, description, job_id=job_id, source=source
+                )
             )
         )
 
     async def _request_user_choice_on_app_loop(
-        self, questions: list[AskQuestion]
+        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
     ) -> dict[str, list[str]] | None:
         """Enter the real ask picker through Textual's message-pump context."""
-        result = await self._run_gate_on_app_loop(lambda: self.request_user_choice(questions))
+        source = source or self._interaction
+        if not self._is_current(source):
+            raise asyncio.CancelledError
+        result = await self._run_gate_on_app_loop(
+            lambda: self.request_user_choice(questions, source=source)
+        )
         return cast(dict[str, list[str]] | None, result)
 
     async def _run_gate_on_app_loop(self, build: Callable[[], Awaitable[Any]]) -> Any:
@@ -4253,6 +4920,7 @@ class OperatorApp(App[None]):
         # otherwise be lost with it — a coroutine's locals die with the
         # `CancelledError`, but the completed future's result does not. See
         # `_park_unadopted_session`.
+        navigation_generation = self._sidebar_navigation.generation
         built = asyncio.ensure_future(self._construct_session())
         try:
             session = await built
@@ -4261,6 +4929,10 @@ class OperatorApp(App[None]):
             raise
         except Exception as error:  # TUI-012: construction error path
             self._on_boot_failed(error)
+            return
+        if navigation_generation != self._sidebar_navigation.generation:
+            if session is not self._session:
+                await session.dispose()
             return
         self._adopt_session(session)
         self._report_degraded_attach(session)
@@ -4597,7 +5269,10 @@ class OperatorApp(App[None]):
             # The middle gap stays reachable without moving it after that tail.
             return
         start = _resume_tail_start(self._resume_pending_tail, max(12, self.size.height // 2))
-        page, self._resume_pending_tail = self._resume_pending_tail[start:], self._resume_pending_tail[:start]
+        page, self._resume_pending_tail = (
+            self._resume_pending_tail[start:],
+            self._resume_pending_tail[:start],
+        )
         blocks = self._collect_resume_page_blocks(page)
         if not self._resume_pending_tail and notice is not None:
             view.remove_block(notice)
@@ -4613,13 +5288,30 @@ class OperatorApp(App[None]):
         generation = self._sidebar_navigation.generation
         self._resume_tail_paging = True
         top = view.content_region.y
-        anchor = next((block for block in view.blocks() if block.navigation_anchor_id and block.region.bottom > top), None)
+        anchor = next(
+            (
+                block
+                for block in view.blocks()
+                if block.navigation_anchor_id and block.region.bottom > top
+            ),
+            None,
+        )
         if anchor is not None:
-            view.restore_navigation_anchor(anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y)
+            view.restore_navigation_anchor(
+                anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y
+            )
         count = min(len(self._resume_pending_tail), max(12, self.size.height // 2))
-        page, self._resume_pending_tail = self._resume_pending_tail[:count], self._resume_pending_tail[count:]
-        page = [message for message in page if str(getattr(message, "id", "")) not in self._resume_mounted_ids]
+        page, self._resume_pending_tail = (
+            self._resume_pending_tail[:count],
+            self._resume_pending_tail[count:],
+        )
+        page = [
+            message
+            for message in page
+            if str(getattr(message, "id", "")) not in self._resume_mounted_ids
+        ]
         blocks = self._collect_resume_page_blocks(page)
+
         def settled() -> None:
             if self._transcript is view and self._sidebar_navigation.generation == generation:
                 self._resume_tail_paging = False
@@ -5146,6 +5838,7 @@ class OperatorApp(App[None]):
         """
         # Explicit reload replaces this workflow source. Sidebar navigation
         # never calls this path and therefore never retires its loops.
+        navigation_generation = self._sidebar_navigation.generation
         self._interaction.retired = True
         previous_id = self._conversation_id()
         previous_len = self._history_length()
@@ -5408,6 +6101,10 @@ class OperatorApp(App[None]):
                         "warning",
                     )
             else:
+                if navigation_generation != self._sidebar_navigation.generation:
+                    if session is not self._session:
+                        await session.dispose()
+                    return
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
                 # Reload retired the outgoing turn before adopting a fresh
@@ -9565,12 +10262,19 @@ class OperatorApp(App[None]):
         and something lost it, and only the pair covers "the composer went dark
         because the usage panel lit up".
         """
-        if not self._swapping_session and event.widget is not self._session_sidebar:
+        if (
+            not self._swapping_session
+            and bool(self.screen_stack)
+            and self.focused is event.widget
+            and event.widget is not self._session_sidebar
+        ):
             view = self._transcript
             if view is not None and (event.widget is view or view in event.widget.ancestors):
                 self._interaction.draft.focus_id = "@transcript"
             elif isinstance(event.widget, Editor):
                 self._interaction.draft.focus_id = "@editor"
+            elif isinstance(event.widget, AskPickerScreen):
+                self._interaction.draft.focus_id = "@gate"
         self._sync_composer_focus()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
@@ -10555,7 +11259,12 @@ class OperatorApp(App[None]):
 
     # -- tool approvals -------------------------------------------------------
     async def request_tool_approval(
-        self, tool_name: str, description: str, *, job_id: str | None = None
+        self,
+        tool_name: str,
+        description: str,
+        *,
+        job_id: str | None = None,
+        source: SessionInteraction | None = None,
     ) -> bool:
         """The session's approval gate while this app owns the terminal.
 
@@ -10594,19 +11303,26 @@ class OperatorApp(App[None]):
         """
         # Captured BEFORE the first await: this asker belongs to the turn that was
         # running when the engine called it, and no later turn's start can move it.
-        epoch = self._turn_epoch
-        if job_id is None and self._approvals_are_denied(epoch):
+        source = source or self._interaction
+        if not self._is_current(source):
+            raise asyncio.CancelledError
+        epoch = source.turn.epoch
+        view_generation = source.gate_view_generation
+        gate_key = self._sidebar_gate_identity(source)
+        if job_id is None and self._source_approvals_are_denied(source, epoch):
             return False
-        if self._approve_all:
+        if bool(source.draft.approve_all):
             return True
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
+            if not self._is_current(source):
+                raise asyncio.CancelledError
             # Same exemption as the check above, and it has to be: a job's ask
             # that merely QUEUED behind a foreground prompt would otherwise be
             # denied on waking by a latch that has nothing to do with it.
-            if job_id is None and self._approvals_are_denied(epoch):
+            if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            if self._approve_all:
+            if bool(source.draft.approve_all):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -10626,7 +11342,15 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        prompt = ApprovalPrompt(tool_name, description, on_answer=self._latch_approval_answer)
+        prompt = ApprovalPrompt(
+            tool_name,
+            description,
+            on_answer=partial(
+                self._latch_source_approval_answer, source, gate_key, view_generation
+            ),
+        )
+        prompt.source_binding = (source.token, gate_key, view_generation)
+        self._restore_gate_draft(source, prompt)
         self._approval = prompt
         # The QUESTION goes in the dock, where it cannot scroll away from the
         # turn it is blocking and where it reliably owns its own answer keys.
@@ -10652,7 +11376,8 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._unmount_prompt(prompt)
-            self._notify_mobile_approval_settled(prompt)
+            if self._is_current(source):
+                self._notify_mobile_approval_settled(prompt)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
             # settled fact rather than a question it would then have to revise.
@@ -10663,7 +11388,7 @@ class OperatorApp(App[None]):
             # `#transcript`), and a receipt is a nice-to-have on that path while
             # the future underneath it is not: raising here would propagate out
             # of the approval gate and fail the tool call itself.
-            if prompt.answered:
+            if self._is_current(source) and prompt.answered:
                 try:
                     self._append_block(
                         ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
@@ -10696,7 +11421,7 @@ class OperatorApp(App[None]):
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
-        self, questions: list[AskQuestion]
+        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
     ) -> dict[str, list[str]] | None:
         """The ``ask`` tool's surface while this app owns the terminal.
 
@@ -10714,6 +11439,10 @@ class OperatorApp(App[None]):
         coroutine is the tool call, and moving it into a worker would put the
         answer on the far side of a second hop with nothing gained.
         """
+        source = source or self._interaction
+        if not self._is_current(source):
+            raise asyncio.CancelledError
+        view_generation = source.gate_view_generation
         while self._ask_pending is not None:
             # Unreachable through the advertised tool — `ask` is `exclusive`, so
             # the loop never runs two at once — and cheap to be right about:
@@ -10721,6 +11450,8 @@ class OperatorApp(App[None]):
             # while its tool call went on waiting. Shielded because a cancel of
             # THIS call must not cancel the future the other one is parked on.
             await asyncio.shield(self._ask_pending)
+            if not self._is_current(source):
+                raise asyncio.CancelledError
         future: asyncio.Future[dict[str, list[str]] | None] = (
             asyncio.get_running_loop().create_future()
         )
@@ -10729,7 +11460,8 @@ class OperatorApp(App[None]):
             # Guarded: a cancelled tool call (steering, abort, teardown) resolves
             # the future on the way out, and the dismissal that follows would
             # otherwise raise InvalidStateError out of Textual's callback.
-            if not future.done():
+            if not future.done() and view_generation == source.gate_view_generation:
+                source.gate_draft = None
                 future.set_result(result)
 
         # The subagent page hides the transcript and the aside floats over it,
@@ -10742,6 +11474,8 @@ class OperatorApp(App[None]):
         self._close_settings_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
+        card.source_binding = (source.token, self._sidebar_gate_identity(source), view_generation)
+        self._restore_gate_draft(source, card)
         self._ask_screen = card
         self._ask_pending = future
         self._mount_prompt(card)
@@ -10780,8 +11514,9 @@ class OperatorApp(App[None]):
             # terminal answer, Escape, a cancelled tool call, or teardown all
             # pass through this finally. Card-scoped so it cannot clear a card
             # a later ask already mounted.
-            self._notify_mobile_ask_settled(card)
-            self._refresh_working_activity()
+            if self._is_current(source):
+                self._notify_mobile_ask_settled(card)
+                self._refresh_working_activity()
 
     def _notify_mobile_ask_pending(self, card: AskPickerScreen) -> None:
         """Tell the mobile bridge an ask picker went up, if one is attached.
@@ -11123,6 +11858,22 @@ class OperatorApp(App[None]):
                 block.resolve(None)
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("key prompt was already settled", exc_info=True)
+
+    @staticmethod
+    def _source_approvals_are_denied(source: SessionInteraction, epoch: int) -> bool:
+        armed = source.turn.approvals_denied_epoch
+        return armed is not None and epoch <= armed
+
+    def _latch_source_approval_answer(
+        self, source: SessionInteraction, key: tuple[Any, ...] | None, generation: int, answer: str
+    ) -> None:
+        if (
+            self._is_current(source)
+            and source.gate_view_generation == generation
+            and (key is None or key == self._sidebar_gate_identity(source))
+        ):
+            source.gate_draft = None
+            self._latch_approval_answer(answer)
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -12067,7 +12818,12 @@ class OperatorApp(App[None]):
     def _completion_anchor_visible(self, anchor: str) -> bool:
         from local_operator.tui.widgets.transcript import TranscriptBlock
 
-        if len(self.screen_stack) != 1 or not self.app_focus:
+        if (
+            len(self.screen_stack) != 1
+            or not self.app_focus
+            or self._session_transition_pending
+            or self._sidebar_frame_pending
+        ):
             return False
         transcript = self._transcript_view()
         if not transcript.display or not transcript.is_near_bottom():
@@ -12432,6 +13188,16 @@ class OperatorApp(App[None]):
             self.exit()
 
     async def on_unmount(self) -> None:
+        from textual.worker import WorkerCancelled, WorkerFailed
+
+        if self._sidebar_prefetch is not None:
+            self._sidebar_prefetch.cancel()
+            try:
+                await self._sidebar_prefetch.wait()
+            except WorkerCancelled:
+                pass
+            except WorkerFailed:
+                logger.debug("sidebar prewarm failed during shutdown", exc_info=True)
         await self._sidebar_navigation.close()
         await self._sidebar_drafts.close()
         if self._sidebar_timer is not None:
@@ -12439,6 +13205,10 @@ class OperatorApp(App[None]):
         from local_operator.session.remote import RemoteSession
 
         for source in tuple(self._interactions.values()):
+            source.gate_draft = None
+            if source.unsubscribe_frontend is not None:
+                source.unsubscribe_frontend()
+                source.unsubscribe_frontend = None
             if source.session is not self._session and isinstance(source.session, RemoteSession):
                 if source.controller is not None:
                     source.controller.dispose()
@@ -12664,9 +13434,11 @@ class OperatorApp(App[None]):
                 await run_shell()
             finally:
                 source.active_workers -= 1
+                self.call_later(self._source_frontend_changed, source)
                 _clear_shell_state()
                 if source.shell.worker is worker:
                     source.shell.worker = None
+                    self.call_later(self._source_frontend_changed, source)
 
         worker = self.run_worker(run_and_clear(), thread=False, group=source.worker_group("shell"))
         source.shell.worker = worker
@@ -12902,8 +13674,10 @@ class OperatorApp(App[None]):
         # what used to make it arrive minutes late.
         self._maybe_name_conversation(named)
 
-    def _start_turn(self, text: str, images: list[ImageContent] | None = None) -> None:
-        self._start_turn_for(
+    def _start_turn(
+        self, text: str, images: list[ImageContent] | None = None
+    ) -> _PendingUserEcho | None:
+        return self._start_turn_for(
             self._interaction, text, images, accepted=self._interaction.turn.submitted_draft
         )
 
@@ -12940,6 +13714,8 @@ class OperatorApp(App[None]):
         # back to text. Both in-tree sessions accept it -- `RemoteSession`
         # included, which is what an attached follower TUI drives and which
         # swallowed cross-surface prompts until it did (round 1, F1).
+        source.turn.operation += 1
+        turn_operation = source.turn.operation
         echo = self._register_user_echo_for(
             source, text, message_id=self._echo_message_id(session.prompt)
         )
@@ -13032,7 +13808,10 @@ class OperatorApp(App[None]):
                 # the entry.
                 self._discard_user_echo_for(source, echo)
             finally:
+                if source.turn.submitted_draft is accepted:
+                    source.turn.submitted_draft = None
                 source.active_workers -= 1
+                self.call_later(self._source_frontend_changed, source)
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong
                 # together. The status band and the working line used to be
                 # retired by DIFFERENT mechanisms: the band by this `finally`
@@ -13124,7 +13903,9 @@ class OperatorApp(App[None]):
                 # and the fallback is a no-op on every normal turn. Calling
                 # `_finalize_turn` directly instead would run AHEAD of the
                 # queued real end and double-notify every single turn.
-                self._post_turn_abandoned_for(source, aborted=aborted, error=error_text)
+                self._post_turn_abandoned_for(
+                    source, aborted=aborted, error=error_text, operation=turn_operation
+                )
 
         self.run_worker(run_prompt(), thread=False, group=source.worker_group("turns"))
 
@@ -13210,7 +13991,7 @@ class OperatorApp(App[None]):
         """
         self._name_generation += 1
         self._name_requested = False
-        self.workers.cancel_group(self, "naming")
+        self.workers.cancel_group(self, self._interaction.worker_group("naming"))
 
     def _maybe_name_conversation(self, text: str) -> None:
         """Name this conversation, or re-name it when the subject has moved.
@@ -13262,9 +14043,9 @@ class OperatorApp(App[None]):
         # stored 1.8 seconds after the answer was already on screen.
         self._show_provisional_name(text)
         self.run_worker(
-            self._name_conversation_worker(session, text, generation),
+            self._name_conversation_worker(session, text, generation, source=self._interaction),
             thread=False,
-            group="naming",
+            group=self._interaction.worker_group("naming"),
         )
 
     def _show_provisional_name(self, text: str) -> None:
@@ -13391,10 +14172,16 @@ class OperatorApp(App[None]):
         turns = list(session.history()) if hasattr(session, "history") else []
         self.run_worker(
             self._retitle_conversation_worker(
-                session, session.conversation_name, text, generation, turns, turn_count
+                session,
+                session.conversation_name,
+                text,
+                generation,
+                turns,
+                turn_count,
+                source=self._interaction,
             ),
             thread=False,
-            group="naming",
+            group=self._interaction.worker_group("naming"),
         )
 
     async def _retitle_conversation_worker(
@@ -13405,6 +14192,7 @@ class OperatorApp(App[None]):
         generation: int,
         turns: list[AgentMessage],
         turn_count: int,
+        source: SessionInteraction | None = None,
     ) -> None:
         """One isolated re-title call; ``None`` from it means "leave it alone".
 
@@ -13427,33 +14215,45 @@ class OperatorApp(App[None]):
         charge is applied at the store when a title lands, and here when the
         model answered "no change" — both spend one refresh.
         """
+        source = source or self._interactions.get(id(session), self._interaction)
+        source.active_workers += 1
         try:
-            title = await naming.generate_retitle(current, text, session.complete_once, turns=turns)
-        except asyncio.CancelledError:
-            return
-        # A generation/session mismatch means this attempt was superseded (a
-        # reload) or belongs to a session no longer on screen: it must touch
-        # neither the title nor the shared growth budget.
-        if generation != self._name_generation or session is not self._session:
-            return
-        if not title:
-            # Unchanged subject, or the call failed: leave the title alone, but
-            # STILL spend a refresh on a genuine "no change" answer so the
-            # growth schedule advances. A failed call is indistinguishable here
-            # from "no change" (both are None), and charging it is the safe
-            # direction — it slows re-titling, never speeds it — while leaving
-            # the never-titled baseline untouched.
-            self._charge_theme_refresh(session, turn_count)
-            return
-        # Re-read rather than trusting `current`: a rename or a reload may have
-        # landed during the call, and both outrank a check made against a title
-        # that is no longer in force.
-        if session.conversation_name != current:
-            return
-        self._store_title(session, title, turn_count=turn_count)
+            try:
+                title = await naming.generate_retitle(
+                    current, text, session.complete_once, turns=turns
+                )
+            except asyncio.CancelledError:
+                return
+            # A generation/session mismatch means this attempt was superseded (a
+            # reload) or belongs to a session no longer on screen: it must touch
+            # neither the title nor the shared growth budget.
+            if generation != source.naming.generation or source.retired:
+                return
+            if not title:
+                # Unchanged subject, or the call failed: leave the title alone, but
+                # STILL spend a refresh on a genuine "no change" answer so the
+                # growth schedule advances. A failed call is indistinguishable here
+                # from "no change" (both are None), and charging it is the safe
+                # direction — it slows re-titling, never speeds it — while leaving
+                # the never-titled baseline untouched.
+                self._charge_theme_refresh_for(source, session, turn_count)
+                return
+            # Re-read rather than trusting `current`: a rename or a reload may have
+            # landed during the call, and both outrank a check made against a title
+            # that is no longer in force.
+            if session.conversation_name != current:
+                return
+            self._store_title_for(source, session, title, turn_count=turn_count)
+        finally:
+            source.active_workers -= 1
+            self.call_later(self._source_frontend_changed, source)
 
     async def _name_conversation_worker(
-        self, session: SessionProtocol, text: str, generation: int
+        self,
+        session: SessionProtocol,
+        text: str,
+        generation: int,
+        source: SessionInteraction | None = None,
     ) -> None:
         """Ask the model for a title NOW, alongside the turn it decorates.
 
@@ -13485,35 +14285,46 @@ class OperatorApp(App[None]):
         the conversation better than the second message would. Reload and user
         rename are re-checked immediately before the store.
         """
+        source = source or self._interactions.get(id(session), self._interaction)
+        source.active_workers += 1
         try:
-            title = await naming.generate_title(text, session.complete_once)
-        except asyncio.CancelledError:
-            if (
-                generation == self._name_generation
-                and session is self._session
-                and not session.conversation_name
-            ):
-                self._name_requested = False
-            return
+            try:
+                title = await naming.generate_title(text, session.complete_once)
+            except asyncio.CancelledError:
+                if (
+                    generation == source.naming.generation
+                    and not source.retired
+                    and not session.conversation_name
+                ):
+                    source.naming.requested = False
+                return
 
-        if generation != self._name_generation or session is not self._session:
-            return
-        if not title:
-            # Provider failure, cancellation, or "no topic": a later
-            # substantive message may retry while the conversation is unnamed.
-            # The opener's excerpt stays on the band and the tab meanwhile —
-            # that is the point of it being a stand-in and not a placeholder.
-            if not session.conversation_name:
-                self._name_requested = False
-                # Remember the opener so a fallback that pins AFTER this
-                # isolated 429 can re-fire naming on the serving model
-                # without waiting for the next user message.
-                self._pending_name_text = text
-            return
-        self._pending_name_text = ""
-        self._store_title(session, title)
+            if generation != source.naming.generation or source.retired:
+                return
+            if not title:
+                # Provider failure, cancellation, or "no topic": a later
+                # substantive message may retry while the conversation is unnamed.
+                # The opener's excerpt stays on the band and the tab meanwhile —
+                # that is the point of it being a stand-in and not a placeholder.
+                if not session.conversation_name:
+                    source.naming.requested = False
+                    # Remember the opener so a fallback that pins AFTER this
+                    # isolated 429 can re-fire naming on the serving model
+                    # without waiting for the next user message.
+                    source.naming.pending_text = text
+                return
+            source.naming.pending_text = ""
+            self._store_title_for(source, session, title)
+        finally:
+            source.active_workers -= 1
+            self.call_later(self._source_frontend_changed, source)
 
     def _charge_theme_refresh(self, session: SessionProtocol, turn_count: int) -> None:
+        self._charge_theme_refresh_for(self._interaction, session, turn_count)
+
+    def _charge_theme_refresh_for(
+        self, source: SessionInteraction, session: SessionProtocol, turn_count: int
+    ) -> None:
         """Spend one growth-budget refresh without changing the title.
 
         The "no change" (and, indistinguishably, the failed-call) branch of a
@@ -13528,12 +14339,22 @@ class OperatorApp(App[None]):
         stays geometric regardless of how much history the concurrent turn wrote
         while the call was in flight.
         """
-        self._last_titled_turn_count = turn_count
-        self._theme_refresh_count += 1
-        self._retitle_checked_at = self._clock()
+        source.naming.last_titled_turn_count = turn_count
+        source.naming.refresh_count += 1
+        source.naming.checked_at = self._clock()
 
     def _store_title(
         self, session: SessionProtocol, title: str, *, turn_count: int | None = None
+    ) -> str:
+        return self._store_title_for(self._interaction, session, title, turn_count=turn_count)
+
+    def _store_title_for(
+        self,
+        source: SessionInteraction,
+        session: SessionProtocol,
+        title: str,
+        *,
+        turn_count: int | None = None,
     ) -> str:
         """Store a generated title and put it on both surfaces.
 
@@ -13562,25 +14383,25 @@ class OperatorApp(App[None]):
             # at SUBMIT, before the opener is in history, so a raw count of 0
             # would make the next refresh eligible at four turns instead of the
             # documented "titled at 1, refresh at >=6" schedule.
-            self._last_titled_turn_count = max(1, self._theme_turn_count(session))
-            self._theme_refresh_count = 0
+            source.naming.last_titled_turn_count = max(1, self._theme_turn_count(session))
+            source.naming.refresh_count = 0
         else:
             # A re-title landed: advance the baseline to the dispatch count and
             # spend one refresh, exactly as `_charge_theme_refresh` does for the
             # no-change branch — a rename and a "same subject" answer cost the
             # same one call against the budget.
-            self._last_titled_turn_count = turn_count
-            self._theme_refresh_count += 1
+            source.naming.last_titled_turn_count = turn_count
+            source.naming.refresh_count += 1
         # A title just took effect, so the re-title window restarts from here
         # rather than from whenever the last CHECK was dispatched. Without
         # this, a title landing at the tail of an open window would be eligible
         # for replacement by the very next message.
-        self._retitle_checked_at = self._clock()
+        source.naming.checked_at = self._clock()
         # Superseded: an answer beats a quote of the question. Cleared rather
         # than left set so nothing downstream still believes the band is
         # showing a stand-in.
-        self._provisional_name = ""
-        if self._status is not None:
+        source.naming.provisional = ""
+        if self._is_current(source) and self._status is not None:
             # The band's setter also pushes the terminal title (see
             # `StatusLine._sync_terminal_title`), so both surfaces follow from
             # this one call and neither can lag the other by a frame.
@@ -13596,7 +14417,8 @@ class OperatorApp(App[None]):
         # The title lands on a detached worker AFTER the last turn event, so
         # the mobile fold never re-reads it on its own. Push now so the
         # phone's header and list update the same moment the band does.
-        self._notify_mobile_title(stored)
+        if self._is_current(source):
+            self._notify_mobile_title(stored)
         return stored
 
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
@@ -19265,6 +20087,8 @@ class OperatorApp(App[None]):
                 # prompt. Register it so the event is consumed silently instead
                 # of painting the loudest mark in the transcript for words the
                 # user never typed.
+                source.turn.operation += 1
+                turn_operation = source.turn.operation
                 echo = self._register_user_echo_for(
                     source, LOOP_PROMPT, message_id=self._echo_message_id(session.prompt)
                 )
@@ -19300,11 +20124,15 @@ class OperatorApp(App[None]):
                     # verbatim under `/loop`: spinner climbing, band idle,
                     # nothing announced. A healthy iteration's real `TurnEnded`
                     # is already queued ahead of this, so it is a no-op there.
-                    self._post_turn_abandoned_for(source, aborted=False, error=loop_error)
+                    self._post_turn_abandoned_for(
+                        source, aborted=False, error=loop_error, operation=turn_operation
+                    )
                 completed = index + 1
         finally:
             source.active_workers -= 1
+            self.call_later(self._source_frontend_changed, source)
             source.loop.running = False
+            self.call_later(self._source_frontend_changed, source)
         if source.loop.cancelled:
             notice(f"loop cancelled after {completed} iteration(s)")
         elif source.retired:
@@ -19411,6 +20239,8 @@ class OperatorApp(App[None]):
                 # string byte-for-byte, so a second `.format` here could drift
                 # and leave the user MessageStartEvent unconsumed.
                 prompt = LOOP_GOAL_PROMPT.format(goal=goal)
+                source.turn.operation += 1
+                turn_operation = source.turn.operation
                 echo = self._register_user_echo_for(
                     source, prompt, message_id=self._echo_message_id(session.prompt)
                 )
@@ -19434,7 +20264,9 @@ class OperatorApp(App[None]):
                     # takes its ERROR branch — a held loop that dies outright
                     # must not go silent, which is the one notification the
                     # suppression deliberately does not cover.
-                    self._post_turn_abandoned_for(source, aborted=False, error=str(error))
+                    self._post_turn_abandoned_for(
+                        source, aborted=False, error=str(error), operation=turn_operation
+                    )
                     break
                 # NOTE: the status is deliberately NOT reset to idle here — it
                 # stays in a working state across the judge call below so the
@@ -19494,6 +20326,7 @@ class OperatorApp(App[None]):
             # release path is unaffected: it calls `_notify` directly, and its
             # own `await _judge_goal` already drained the final `TurnEnded`.
             source.loop.running = False
+            self.call_later(self._source_frontend_changed, source)
             source.loop.goal = ""
             self.call_later(self._release_loop_completion_suppression, source, operation)
         # Terminal outcome (mirrors the numeric worker's tail). Only the release
@@ -20616,6 +21449,7 @@ class OperatorApp(App[None]):
         self.screen.add_class(ASIDE_LAYOUT_CLASS)
         panel._on_height = self._reserve_ground_for_aside
         panel.open()
+        self._interaction.aside_open = True
         self._sync_aside_fork_hint()
         return panel
 
@@ -20661,7 +21495,10 @@ class OperatorApp(App[None]):
         # Retire the request as well as the surface: workers and messages are
         # separate queues, so cancelling alone cannot stop a delta already
         # posted. ``close`` bumps the card's generation, which drops it.
-        self.workers.cancel_group(self, "aside")
+        self.workers.cancel_group(self, self._interaction.worker_group("aside"))
+        self._interaction.aside_open = False
+        self._interaction.aside_generation += 1
+        self._interaction.draft.aside = None
         panel.close()
         panel._on_height = None
         # Give the transcript its own last rows back, and land the reader at
@@ -20719,15 +21556,36 @@ class OperatorApp(App[None]):
             panel.fail_answer(generation, "the session is still starting…")
             return
         generation = panel.ask(question)
+        source = self._interaction
+        source.aside_open = True
+        source.aside_generation = generation
         self._sync_aside_fork_hint()
         self.run_worker(
-            self._aside_worker(session, question, generation),
+            self._aside_worker(
+                session,
+                question,
+                generation,
+                source=source,
+                turn=panel.turns[-1],
+                prior_turns=panel.turns[:-1],
+                in_flight=self._streaming_block.text() if self._streaming_block is not None else "",
+            ),
             thread=False,
-            group="aside",
+            group=source.worker_group("aside"),
             exclusive=True,
         )
 
-    async def _aside_worker(self, session: SessionProtocol, question: str, generation: int) -> None:
+    async def _aside_worker(
+        self,
+        session: SessionProtocol,
+        question: str,
+        generation: int,
+        *,
+        source: SessionInteraction | None = None,
+        turn: AsideTurn | None = None,
+        prior_turns: list[AsideTurn] | None = None,
+        in_flight: str = "",
+    ) -> None:
         """One off-the-record request, streamed into the card.
 
         The turns handed to ``complete_aside`` are this aside's whole history
@@ -20749,45 +21607,78 @@ class OperatorApp(App[None]):
         free, and a status line that an F8 popup could move without moving
         would be a number the user cannot act on.
         """
+        source = source or self._interactions.get(id(session), self._interaction)
         panel = self._aside_panel()
         if panel is None:
             return
+        if turn is None:
+            if not panel.turns:
+                return
+            turn = panel.turns[-1]
+            prior_turns = panel.turns[:-1]
+            source.aside_open = panel.is_open
+            source.aside_generation = generation
+            streaming = self._streaming_block
+            in_flight = streaming.text() if streaming is not None else ""
+        target = turn
+
+        def accepts() -> bool:
+            return (
+                source.aside_open
+                and not source.retired
+                and source.aside_generation == generation
+                and target.state == "running"
+            )
+
+        def delta(text: str) -> None:
+            if not accepts():
+                return
+            if self._is_current(source) and panel.accepts(generation):
+                panel.append_answer(generation, text)
+            else:
+                target.append_delta(text)
+
         turns: list[AgentMessage] = []
-        streaming = self._streaming_block
-        # ``AssistantBlock.text`` is a METHOD, not a property — reading it
-        # without the call handed the model a bound function and blew up the
-        # one path this branch exists for.
-        in_flight = streaming.text() if streaming is not None else ""
         if in_flight.strip():
             history = session.history()
             tail = history[-1] if history else None
             if getattr(tail, "text", None) != in_flight:
                 turns.append(Message.assistant(in_flight))
-        for turn in panel.turns[:-1]:
-            if not turn.forkable:
-                continue
-            turns.append(Message.user(turn.question))
-            turns.append(Message.assistant(turn.answer))
+        for previous in prior_turns or []:
+            if previous.forkable:
+                turns.extend((Message.user(previous.question), Message.assistant(previous.answer)))
         turns.append(Message.user(ASIDE_PROMPT.format(question=question)))
+        source.active_workers += 1
         try:
-            answer = await session.complete_aside(
-                turns,
-                on_delta=lambda delta: panel.append_answer(generation, delta),
-                on_usage=self._charge_aside,
-            )
-        except Exception as error:  # noqa: BLE001 — any provider failure is the card's news
-            # ``CancelledError`` is a ``BaseException``, so a worker cancelled
-            # by `_close_aside` never lands here — no re-raise clause needed.
-            panel.fail_answer(generation, str(error))
-            # The question goes back in the composer so the footer's `enter ask
-            # again` is a real retry, editable first. It is the only gesture
-            # anyone wants under a failed answer.
-            if panel.accepts(generation):
-                self._editor().load_text(question)
-            self._sync_aside_fork_hint()
-            return
-        panel.settle_answer(generation, answer)
-        self._sync_aside_fork_hint()
+            try:
+                answer = await session.complete_aside(
+                    turns,
+                    on_delta=delta,
+                    on_usage=lambda usage: self._charge_aside_for(source, usage),
+                )
+            except Exception as error:
+                if not accepts():
+                    return
+                if self._is_current(source) and panel.accepts(generation):
+                    panel.fail_answer(generation, str(error))
+                    if not self._editor().text.strip():
+                        self._editor().load_text(question)
+                    self._sync_aside_fork_hint()
+                else:
+                    target.fail(str(error))
+                    if not source.draft.text.strip():
+                        source.draft.text = question
+                return
+            if not accepts():
+                return
+            if self._is_current(source) and panel.accepts(generation):
+                panel.settle_answer(generation, answer)
+                self._sync_aside_fork_hint()
+            else:
+                target.settle(answer)
+        finally:
+            source.active_workers -= 1
+            self.call_later(self._source_frontend_changed, source)
 
     def _charge_aside(self, usage: Any) -> None:
         self._charge_aside_for(self._interaction, usage)

@@ -84,7 +84,8 @@ async def test_failed_source_prompt_restores_only_its_own_input():
         first.release.set()
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert source.unsent == [("source A message", [])]
+        assert source.draft.text == "source A message"
+        assert source.unsent == []
         assert app._editor().text == "source B draft"
         assert not second.prompts
         assert source.active_workers == 0

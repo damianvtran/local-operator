@@ -848,6 +848,9 @@ class ToolCard(ExpandableActionBlock):
     #: toggle expansion without knowing this subclass's CSS selector.
     EXPANDED_CLASS = "tool-expanded"
 
+    def retained_payloads(self) -> tuple[Any, ...]:
+        return self._args, self._output, self._live, self._diff
+
     def __init__(
         self,
         tool_call_id: str,

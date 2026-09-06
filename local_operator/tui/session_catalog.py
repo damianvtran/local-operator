@@ -77,7 +77,22 @@ def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
     return tuple(sorted(entries, key=lambda entry: entry.rank))
 
 
-def decorate_rows(directory: Path, rows: list[SessionRow]) -> list[SessionRow]:
+def session_directory_name(session_id: str) -> bool:
+    """Discovery metadata cannot redirect a catalog read outside sessions/."""
+    return (
+        isinstance(session_id, str)
+        and bool(session_id)
+        and session_id not in {".", ".."}
+        and not any(
+            character in "/\\\\" or ord(character) < 32 or ord(character) == 127
+            for character in session_id
+        )
+    )
+
+
+def decorate_rows(
+    directory: Path, rows: list[SessionRow], *, include_live: bool = False
+) -> list[SessionRow]:
     """Fill in each row's runtime state, and float the ones needing a person.
 
     Two reads for the whole list: the discovery records say which sessions
@@ -108,6 +123,23 @@ def decorate_rows(directory: Path, rows: list[SessionRow]) -> list[SessionRow]:
         if session_id:
             live[session_id] = (record, state)
 
+    if include_live:
+        from local_operator.resume import is_user_session
+
+        known = {row.id for row in rows}
+        rows = list(rows)
+        for session_id, (record, _state) in live.items():
+            if not session_directory_name(session_id):
+                continue
+            session_dir = directory / "sessions" / session_id
+            if session_id not in known and session_dir.is_dir() and is_user_session(session_dir):
+                rows.append(
+                    SessionRow(
+                        session_id,
+                        float(getattr(record, "started_at", 0.0) or 0.0),
+                        str(getattr(record, "conversation_name", "") or "Untitled conversation"),
+                    )
+                )
     updated: list[SessionRow] = []
     for row in rows:
         record_state = live.get(row.id)
@@ -135,3 +167,25 @@ def decorate_rows(directory: Path, rows: list[SessionRow]) -> list[SessionRow]:
             )
         )
     return sort_needs_you_first(updated)
+
+
+def load_catalog(directory: Path) -> list[CatalogEntry]:
+    """One off-loop summary snapshot; never acknowledge or read full histories."""
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    rows = decorate_rows(directory, recent_session_rows(directory, limit=None), include_live=True)
+    identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
+    attention = AttentionStore(directory / "attention.db").state_many(identities.values())
+    return list(
+        rank_entries(
+            [
+                CatalogEntry(
+                    row,
+                    bool(attention[identities[row.id]]["unseen"]),
+                    str(attention[identities[row.id]]["kind"] or ""),
+                )
+                for row in rows
+            ]
+        )
+    )

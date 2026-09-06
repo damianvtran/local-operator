@@ -140,6 +140,8 @@ class TurnAbandoned(SessionEvent):
     real outcome from the end arriving behind it (review R4).
     """
 
+    operation: int | None = None
+
     def __init__(
         self,
         epoch: int,
@@ -510,6 +512,37 @@ class EventController:
         self._unsubscribe: Callable[[], Any] | None = None
 
     # -- lifecycle ----------------------------------------------------------
+    def restore_live_projection(
+        self, state: Any, rendered_ids: set[str], settled_tools: set[str]
+    ) -> None:
+        """Rebuild a newly visible viewport from the owner's canonical seed.
+
+        A hidden context reduced events without retaining widgets. Replaying
+        the seed paints its in-flight state, but is not a new source turn or a
+        completion acknowledgement.
+        """
+        from local_operator.harness.types import AgentStartEvent
+        from local_operator.session.remote import deserialize_event
+
+        if not getattr(state, "streaming", False):
+            return
+        self._restoring_projection = True
+        try:
+            self._on_event(AgentStartEvent(generation=state.generation))
+            for data in state.live_events:
+                event = deserialize_event(data)
+                identity = str(getattr(getattr(event, "message", None), "id", "") or "")
+                if identity and identity in rendered_ids:
+                    continue
+                if getattr(event, "tool_call_id", None) in settled_tools:
+                    continue
+                self._on_event(event)
+            # A prepared attachment's first frame must include the current
+            # partial answer, not wait another coalescer interval for a token.
+            self._flush_assistant()
+        finally:
+            self._restoring_projection = False
+
     def subscribe(self) -> None:
         """Register with the session; the returned callable unsubscribes."""
         self._unsubscribe = self._session.subscribe(self._on_event)

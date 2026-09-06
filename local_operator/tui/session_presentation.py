@@ -7,14 +7,17 @@ acknowledgement, or reference to the currently selected app session.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from pydantic import BaseModel
 from textual import events
 from textual.binding import Binding
 from textual.message import Message
 
 from local_operator.harness.types import ImageContent
+from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -33,6 +36,7 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
 
     def __init__(self) -> None:
         super().__init__("More recent messages below", "note")
+        self.add_class("interactive-notice")
 
     def action_more(self) -> None:
         self.post_message(self.Requested(self))
@@ -40,6 +44,28 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
     def on_click(self, event: events.Click) -> None:
         event.stop()
         self.action_more()
+
+
+class DraftRecoveryNotice(NoticeBlock, can_focus=True):
+    BINDINGS = [Binding("enter", "restore", "Restore unsent prompt", show=False)]
+
+    class Requested(Message):
+        def __init__(self, notice: DraftRecoveryNotice) -> None:
+            super().__init__()
+            self.notice = notice
+
+    def __init__(self, source_token: str, draft: SessionDraft) -> None:
+        super().__init__("Restore unsent prompt", "warning")
+        self.source_token = source_token
+        self.draft = draft
+        self.add_class("interactive-notice")
+
+    def action_restore(self) -> None:
+        self.post_message(self.Requested(self))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_restore()
 
 
 @dataclass
@@ -127,7 +153,22 @@ class PreparedReplay(ReplayState):
 
     def prepare(self, history: list[Any], *, bound: int = 12, anchor_id: str = "") -> None:
         self._block_sink = self.blocks
-        anchor = next((index for index, message in enumerate(history) if str(getattr(message, "id", "")) == anchor_id), None) if anchor_id else None
+        anchor = (
+            next(
+                (
+                    index
+                    for index, message in enumerate(history)
+                    if str(getattr(message, "id", "")) == anchor_id
+                    or any(
+                        f"tool:{getattr(call, 'id', '')}" == anchor_id
+                        for call in getattr(message, "tool_calls", ())
+                    )
+                ),
+                None,
+            )
+            if anchor_id
+            else None
+        )
         end = min(len(history), anchor + bound) if anchor is not None else None
         project_settled_rows(self, history, bound=bound, end=end)
         if self._resume_pending_head:
@@ -145,6 +186,10 @@ class PreparedReplay(ReplayState):
 class SessionPresentation:
     replay: PreparedReplay
     revision: int = 0
+    source_stamp: tuple[Any, ...] = ()
+    source_token: str = ""
+    history_size: int = 0
+    needs_live_projection: bool = True
     streaming_block: Any = None
     tool_cards: dict[str, Any] = field(default_factory=dict)
     composing_cards: dict[str, Any] = field(default_factory=dict)
@@ -157,6 +202,68 @@ class SessionPresentation:
     held_steer_blocks: list[Any] = field(default_factory=list)
     welcome: Any = None
     welcome_visible: bool | None = False
+
+    def retainable(self) -> bool:
+        """Bound explicit payloads, not a widget's private object graph.
+
+        One cached view can otherwise retain arbitrarily much history. Unknown
+        renderers (including decoded images) are rebuilt instead of guessing.
+        """
+        if len(self.replay.view.blocks()) > 128:
+            return False
+        state = self.replay
+        stack: list[Any] = [
+            self.replay.view.blocks(),
+            state._resume_pending_head,
+            state._resume_pending_tail,
+            state._resume_results,
+            self.tool_cards,
+            self.composing_cards,
+            self.streaming_block,
+            self.working_block,
+            self.shell_card,
+            self.queued_steer_notices,
+            self.deferred_steer_notices,
+            self.held_steer_blocks,
+        ]
+        seen: set[int] = set()
+        remaining = 1024 * 1024
+        nodes = 0
+        while stack:
+            value = stack.pop()
+            nodes += 1
+            if nodes > 4096:
+                return False
+            if isinstance(value, str):
+                remaining -= len(value) * 4
+            elif isinstance(value, bytes):
+                remaining -= len(value)
+            elif value is None or isinstance(value, (bool, int, float)):
+                pass
+            elif id(value) in seen:
+                continue
+            else:
+                seen.add(id(value))
+                if isinstance(value, TranscriptBlock):
+                    payload = value.retained_payloads()
+                    if payload is None:
+                        return False
+                    stack.append(payload)
+                elif isinstance(value, BaseModel):
+                    stack.extend(getattr(value, key) for key in type(value).model_fields)
+                elif isinstance(value, Mapping):
+                    if len(value) + len(stack) > 4096:
+                        return False
+                    stack.extend(value.values())
+                elif isinstance(value, (list, tuple, set)):
+                    if len(value) + len(stack) > 4096:
+                        return False
+                    stack.extend(value)
+                else:
+                    return False
+            if remaining < 0:
+                return False
+        return True
 
 
 def project_settled_rows(

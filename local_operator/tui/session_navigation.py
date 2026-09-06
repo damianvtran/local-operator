@@ -21,7 +21,7 @@ class SessionNavigation(Generic[Prepared]):
         self,
         *,
         prepare: Callable[[str], Awaitable[Prepared]],
-        commit: Callable[[str, Prepared, int], None],
+        commit: Callable[[str, Prepared, int], Awaitable[None] | None],
         release: Callable[[Prepared], Awaitable[None]],
         pending: Callable[[str], None],
         failed: Callable[[str, Exception], None],
@@ -78,9 +78,14 @@ class SessionNavigation(Generic[Prepared]):
             # There is deliberately no await between the final identity check
             # and commit. The app swaps every source-bound presentation field
             # together, then enables input on that exact authoritative facade.
-            self._commit(session_id, prepared, generation)
-            self.committed_id = session_id
+            ready = self._commit(session_id, prepared, generation)
             transferred = True
+            if ready is not None:
+                # Ownership already moved atomically. The requested boundary
+                # stays raised until its actual frame and input gates exist.
+                await ready
+            if not self._closed and generation == self.generation:
+                self.committed_id = session_id
         except asyncio.CancelledError:
             raise
         except Exception as error:

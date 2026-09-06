@@ -447,8 +447,12 @@ with its title and age:
   (`$research the payments rewrite`); `$` alone opens the picker.
 - **Type while the agent works**: your message is delivered at the next
   step as steering, no need to wait.
-- `esc`: stop the agent without ending the session.
-- `ctrl+b`: open an aside (side question) without losing what you were typing;
+- `esc` — stop the agent without ending the session.
+- `ctrl+b` or `/sidebar` — show or hide active and recent conversations in the
+  same TUI. `cmd+b` is also accepted when the terminal forwards the Super
+  modifier. `/settings` → **Session sidebar** and **Sidebar position** control
+  visibility and left/right placement; the defaults are hidden and left.
+- `f8` — open an aside (side question) without losing what you were typing;
   `ctrl+f` promotes the aside into the conversation.
 - `shift+tab`: cycle reasoning effort.
 - `ctrl+l`: clear the transcript (history is untouched).

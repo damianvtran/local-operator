@@ -267,6 +267,10 @@ class TranscriptBlock(Static):
     # anchor a viewport, but only a rendered terminal completion may be read.
     navigation_anchor_id: str = ""
     navigation_anchor_part: int = 0
+    _navigation_visible: bool = True
+
+    def set_navigation_visible(self, visible: bool) -> None:
+        self._navigation_visible = visible
     #: True for a block that always opens a gap above itself regardless of
     #: what preceded it — the turn boundary, not a content difference.
     SPACING_LEAD: ClassVar[bool] = False
@@ -520,6 +524,11 @@ class TranscriptBlock(Static):
         return self._multirow_cache
 
     # -- text selection (TUI-021) -------------------------------------------
+    def retained_payloads(self) -> tuple[Any, ...] | None:
+        """Data a hidden view retains; unknown block kinds are not cacheable."""
+        text = getattr(self, "text", None)
+        return (text(),) if callable(text) else None
+
     def copy_gutter(self, index: int) -> int:
         """Leading CHARACTERS of rendered row ``index`` that are the block's
         own gutter — structure the block paints, never text the model or the
@@ -2976,15 +2985,26 @@ class TranscriptView(ScrollableContainer):
     def restore_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> bool:
         """Restore the same message, not a stale screen-row offset after resize."""
         anchor = next(
-            (block for block in self._blocks if block.navigation_anchor_id == anchor_id and block.navigation_anchor_part == part),
+            (
+                block
+                for block in self._blocks
+                if block.navigation_anchor_id == anchor_id and block.navigation_anchor_part == part
+            ),
             None,
         )
         if anchor is None:
-            anchor = next((block for block in self._blocks if block.navigation_anchor_id == anchor_id), None)
+            anchor = next(
+                (block for block in self._blocks if block.navigation_anchor_id == anchor_id), None
+            )
         if anchor is None:
             return False
         self._tail_anchor.release()
-        y = self.scroll_y + anchor.region.y - self.content_region.y + min(offset, max(0, anchor.region.height - 1))
+        y = (
+            self.scroll_y
+            + anchor.region.y
+            - self.content_region.y
+            + min(offset, max(0, anchor.region.height - 1))
+        )
         with self._tail_anchor.programmatic_scroll():
             self.scroll_to(y=max(0, y), animate=False, immediate=True)
         return True

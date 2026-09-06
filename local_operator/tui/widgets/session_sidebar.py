@@ -158,8 +158,12 @@ class SessionSidebar(Widget, can_focus=True):
         event.stop()
 
     def on_click(self, event: events.Click) -> None:
-        entry = self._entry_at(event.y)
-        target = self._pressed_id or (entry.id if entry else "")
+        entry = (
+            self._entry_at(event.y)
+            if self.region.contains(event.screen_x, event.screen_y)
+            else None
+        )
+        target = (self._pressed_id or (entry.id if entry else "")) if entry is not None else ""
         self._pressed_id = None
         if target:
             self.cursor_id = target
@@ -235,7 +239,11 @@ class SessionSidebar(Widget, can_focus=True):
             line.append(age, style=theme_mod.semantic_color("dim"))
             result.append_text(line)
         if not self.entries:
-            text = "Loading conversations…" if self.loading else "No conversations yet"
+            text = (
+                "Could not load conversations"
+                if self.error
+                else "Loading conversations…" if self.loading else "No conversations yet"
+            )
             result.append("\n" + truncate_cells(text, width), style=theme_mod.semantic_color("dim"))
         while result.plain.count("\n") < self.size.height - 2:
             result.append("\n")

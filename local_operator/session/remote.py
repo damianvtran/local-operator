@@ -326,6 +326,9 @@ class RemoteSession:
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
+        self._background_approval = False
+        self._keep_gate_reply = False
+        self._gate_answered_key: tuple[str, str, int] | None = None
         # Snapshot creation is not retryable: navigation must retire the UI,
         # not close the response channel after the owner has begun a copy.
         self._snapshot_clients: dict[AttachClient, int] = {}
@@ -1480,6 +1483,7 @@ class RemoteSession:
         self._ready_for_events = True
         self._owner_ready.set()
         self._drain_buffered_events()
+        self._maybe_start_gate()
 
     def _replay_durable_suffix(self, history: list[Any]) -> None:
         """Emit ONE typed history delta for durable rows nothing ever painted.
@@ -1631,6 +1635,13 @@ class RemoteSession:
     def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
         if state.session_id != self._session_id:
             raise ConnectionError("frontend state belongs to another session")
+        if self._frontend_store is None or self._frontend_store.state.epoch != state.epoch:
+            if self._gate_task is not None:
+                self._gate_task.cancel()
+                self._gate_task = None
+            self._gate_key = None
+            self._gate_answered_key = None
+            self._keep_gate_reply = False
         if self._frontend_store is None:
             self._frontend_store = FrontendStateStore(state)
         elif publish:
@@ -1750,29 +1761,61 @@ class RemoteSession:
             self._gate_task.cancel()
             self._gate_task = None
         self._gate_key = key
+        self._keep_gate_reply = False
         if pending is not None:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
-        if self._gates_detached:
+        if self._disposed or not self._ready_for_events:
             return
         if pending is None:
             pending = _pending_request(self.frontend_state.pending_gate)
         if pending is None or self._gate_task is not None:
             return
-        if pending.kind == "approval" and self._approval_handler is not None:
+        if self._gate_identity(pending) == self._gate_answered_key:
+            return
+        background = (
+            self._gates_detached and self._background_approval and pending.kind == "approval"
+        )
+        if self._gates_detached and not background:
+            return
+        if pending.kind == "approval" and (self._approval_handler is not None or background):
             self._gate_task = asyncio.create_task(self._run_approval(pending))
         elif pending.kind == "ask" and self._ask_handler is not None:
             self._gate_task = asyncio.create_task(self._run_ask(pending))
+
+    def _gate_reply_is_current(self, pending: PendingRequest, client: Any) -> bool:
+        # Cancelling a bridge requests cooperation; even a handler that swallows
+        # cancellation must not answer after another view/gate replaced it.
+        return (
+            (
+                not self._gates_detached
+                or self._keep_gate_reply
+                or (self._background_approval and pending.kind == "approval")
+            )
+            and not self._disposed
+            and self._gate_task is asyncio.current_task()
+            and self._client is client
+            and self._gate_key == self._gate_identity(pending)
+        )
 
     async def _run_approval(self, pending: PendingRequest) -> None:
         try:
             handler = self._approval_handler
             client = self._client
-            if handler is None or client is None:
+            if client is None:
+                return
+            if self._gates_detached and self._background_approval:
+                approved = True
+            elif handler is not None:
+                approved = await call_approval_gate(handler, pending.title, pending.detail)
+            else:
                 return
             approved = await call_approval_gate(handler, pending.title, pending.detail)
+            if not self._gate_reply_is_current(pending, client):
+                return
             await client.approval_answer(pending.request_id, approved)
+            self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
@@ -1828,6 +1871,7 @@ class RemoteSession:
                     values[0],
                     question_index=pending.question_index,
                 )
+                self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Same three outcomes as the approval gate above, including the
             # stop path's dead-owner post (round-6 NIT-3).
@@ -2573,21 +2617,38 @@ class RemoteSession:
         """
         # A sibling frontend may settle Q1 while detach awaits cancellation.
         # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
+        self._background_approval = False
+        self._keep_gate_reply = False
         task = self.suspend_viewer_gates()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
 
-    def suspend_viewer_gates(self) -> asyncio.Task[Any] | None:
-        """Stop the answer bridge before an atomic presentation swap.
+    @property
+    def has_pending_gate_reply(self) -> bool:
+        return bool(
+            self._keep_gate_reply and self._gate_task is not None and not self._gate_task.done()
+        )
 
-        Cancellation is requested synchronously, before clearing a widget can
-        resolve its waiter as a rejection. The runtime's pending gate is never
-        answered by navigation; only this viewer's bridge is suspended.
+    def suspend_viewer_gates(
+        self, *, auto_approve: bool = False, keep_answer: bool = False
+    ) -> asyncio.Task[Any] | None:
+        """Suspend presentation, never invent an answer during navigation.
+
+        An answer the user already committed must finish reaching its owner.
+        A visited source's explicit allow-all grant can keep approving that
+        source in the background; speculative viewers always pass False.
         """
         self._gates_detached = True
-        task, self._gate_task = self._gate_task, None
+        self._background_approval = auto_approve
+        task = self._gate_task
+        if task is not None and (keep_answer or self._keep_gate_reply):
+            self._keep_gate_reply = True
+            return task
+        self._keep_gate_reply = False
+        self._gate_task = None
         if task is not None:
             task.cancel()
+        self._maybe_start_gate()
         return task
 
     def resume_viewer_gates(self) -> None:
