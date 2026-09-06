@@ -302,10 +302,21 @@ def test_the_bands_name_is_the_string_the_picker_offered() -> None:
     """
     from local_operator.providers.controller import ProviderController
 
-    # `static_catalogue` is the one method that reads no credentials, so the
-    # store is genuinely unused here; cast rather than build a stub whose
-    # only job would be to never be called.
-    entries = ProviderController(auth_store=cast(Any, None)).static_catalogue()
+    # `static_catalogue` DOES read the store: it asks `usable_providers()` which
+    # providers are connected, to annotate each row. Passing `None` used to
+    # "work" only because that read raised `AttributeError` into a catch-all
+    # that reported it as an unreadable store -- the same swallow that let a
+    # cross-thread `ProgrammingError` masquerade as a designed degradation and
+    # label every model connected (D18). With the catch narrowed to real store
+    # failures, the None surfaces, so this supplies an empty store instead.
+    #
+    # An empty one is right for what is under test: the assertion is about the
+    # LABEL each row carries, which no credential affects.
+    class _NoCredentials:
+        def list_credentials(self, provider=None, include_disabled=False):
+            return []
+
+    entries = ProviderController(auth_store=cast(Any, _NoCredentials())).static_catalogue()
     checked = 0
     for entry in entries:
         if entry.provider != "anthropic":
