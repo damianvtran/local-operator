@@ -226,9 +226,34 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
                 await _pump(pilot, lambda: fork.model_label == "test/other")
                 await _pump(pilot, lambda: status._model_label == "test/other")
                 assert status.context_tokens == 42_000
-                journal = (config / "sessions" / fork_id / "transcript.jsonl").read_text()
                 # The owner journals a genuine switch (``Session.set_model``):
                 # the durable proof it landed on the runtime, not just the band.
+                #
+                # Waited for on the JOURNAL's own content, not on the in-memory
+                # label. ``set_model`` writes this through
+                # ``_spawn_background(journal_model_switch(...))``
+                # (``session.py``), which is fire-and-forget: the label is
+                # published SYNCHRONOUSLY, so both pumps above can return while
+                # the file write is still queued behind them. Reading the file
+                # at that moment is a read-after-write with nothing
+                # synchronising it — it passes whenever the write happens to be
+                # scheduled first, which on an idle box it reliably is, and
+                # fails as ``the switch never reached the owner`` when a loaded
+                # runner schedules it late. Pumping on the durable fact the
+                # assertion is ABOUT closes that gap without a sleep: like every
+                # other wait here it is bounded by loop turns rather than by the
+                # clock, so it survives contention that a wall-clock budget
+                # would not.
+                journal_path = config / "sessions" / fork_id / "transcript.jsonl"
+
+                def _switch_journalled() -> bool:
+                    # The file need not exist yet on the first turn.
+                    if not journal_path.exists():
+                        return False
+                    return '"new_label":"test/other"' in journal_path.read_text().replace(" ", "")
+
+                await _pump(pilot, _switch_journalled)
+                journal = journal_path.read_text()
                 assert '"new_label":"test/other"' in journal.replace(
                     " ", ""
                 ), "the switch never reached the owner"
