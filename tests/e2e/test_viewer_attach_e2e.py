@@ -663,3 +663,147 @@ async def test_the_record_carries_the_source_ref_when_lop_update_recorded_one(
     finally:
         server.close()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """Test 23: a server-side drop mid-turn must not paint ``interrupted``.
+
+    The runtime keeps working; the viewer re-binds to the same pid; the
+    ledger never gains an aborted artefact; the turn then completes and
+    paints the assistant row once.
+    """
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from tests.e2e.harness import (
+        drain,
+        tool_call_turn,
+        transcript_text,
+        wait_for_adoption,
+    )
+
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def execute_hang(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        started.set()
+        await released.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="hang",
+            content=[TextContent(text="hung done")],
+        )
+
+    hang = AgentTool(
+        name="hang",
+        parameters={"type": "object", "properties": {}},
+        execute=execute_hang,
+        interruptible=True,
+    )
+    directory = headless_tui_env / "sessions" / "dropmidturn01"
+    directory.mkdir(parents=True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="Hanging now.",
+                tool_name="hang",
+                tool_call_id="e2e-hang-1",
+                arguments={},
+            ),
+            text_turn("The hang finished normally."),
+        ]
+    )
+    session = build_session(directory, stream, tools=[hang], cwd=workspace)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    import os
+
+    (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    viewer = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+        pid_before = viewer.runtime_pid
+
+        async def factory() -> RemoteSession:
+            assert viewer is not None
+            return viewer
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            owner_turn = asyncio.create_task(session.prompt("please hang"))
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if started.is_set() and list(app.query(ToolCard)):
+                    break
+                await asyncio.sleep(0.05)
+            assert started.is_set(), "the hang tool never started on the runtime"
+            painted = transcript_text(app)
+            assert "interrupted" not in painted.lower()
+
+            conns = [
+                conn
+                for conn in list(server._clients.values())
+                if conn.wants_events and conn.wants_frontend
+            ]
+            assert conns, "no full-TUI client to drop"
+            server._drop_client(conns[0], reason="test")
+
+            rebound = False
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if (
+                    viewer.runtime_pid == pid_before
+                    and viewer.runtime_pid is not None
+                    and not viewer._recovering
+                    and viewer._client is not None
+                    and viewer._client.connected
+                ):
+                    rebound = True
+                    break
+                await asyncio.sleep(0.05)
+            painted = transcript_text(app)
+            assert rebound, (
+                f"viewer never re-bound to pid {pid_before}; "
+                f"now pid={viewer.runtime_pid} recovering={viewer._recovering} "
+                f"streaming={viewer.is_streaming}"
+            )
+            assert "interrupted" not in painted.lower(), painted
+            assert "\u2298" not in painted, painted
+
+            released.set()
+            await asyncio.wait_for(owner_turn, timeout=15)
+            for _ in range(200):
+                await drain(pilot, cycles=2)
+                painted = transcript_text(app)
+                if "The hang finished normally." in painted:
+                    break
+                await asyncio.sleep(0.05)
+            painted = transcript_text(app)
+            assert "interrupted" not in painted.lower(), painted
+            assert painted.count("The hang finished normally.") == 1, painted
+            assert session.is_streaming is False
+    finally:
+        released.set()
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await handle.dispose()

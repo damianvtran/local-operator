@@ -363,6 +363,17 @@ class RemoteSession:
         self._disposed = False
         self._recovering = False
         self._recovery_task: asyncio.Task[None] | None = None
+        #: Generation of the turn that was live when the socket dropped, or
+        #: ``None`` when nothing was streaming. Recovery uses this to decide
+        #: whether to synthesise an ``AgentEndEvent``: a rebind to the same
+        #: live generation must not, or the ledger paints a false
+        #: "interrupted" on a turn the runtime is still running.
+        self._suspect_generation: int | None = None
+        #: Set by ``_settle_suspect_turn`` when recovery rebound to the same
+        #: live generation. ``_finish_sync`` then seeds only ``AgentStartEvent``
+        #: — replaying ``live_events`` would duplicate tool cards the ledger
+        #: already holds (test 16: "seeded start only").
+        self._same_live_turn = False
         self._takeover_callback: Callable[[Any], Any] | None = None
         # Input submitted while the owner rotates waits here instead of failing
         # out of the composer's turn worker. On reattach it goes over the fresh
@@ -2316,10 +2327,21 @@ class RemoteSession:
             return
         self._recovering = True
         self._owner_ready.clear()
-        self._end_turn_locally()
+        # Do NOT end the turn here. A dropped socket says nothing about the
+        # turn: the runtime is usually still running it (a send timeout under
+        # a stalled TUI loop is the common cause). Recovery decides — see
+        # ``_settle_suspect_turn``.
+        self._suspect_generation = self._generation if self._streaming else None
         self._recovery_task = asyncio.create_task(self._recover_owner())
 
-    def _end_turn_locally(self, *, direct: bool = False) -> None:
+    def _end_turn_locally(
+        self,
+        *,
+        direct: bool = False,
+        aborted: bool = True,
+        error: str | None = None,
+        force: bool = False,
+    ) -> None:
         """End an in-flight turn the owner can no longer end itself.
 
         All three terminal outcomes need it and none can get it from the
@@ -2355,9 +2377,9 @@ class RemoteSession:
         wants. It applies to the buffered path for the same reason: neither
         delivery has standing to speak for the successor's numbering.
         """
-        if not self._streaming:
+        if not self._streaming and not force:
             return
-        end = AgentEndEvent(aborted=True, generation=0, error=None)
+        end = AgentEndEvent(aborted=aborted, generation=0, error=error)
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -2379,6 +2401,53 @@ class RemoteSession:
                 self._emit_or_buffer(end)
         finally:
             self._streaming = False
+            self._suspect_generation = None
+
+    def _settle_suspect_turn(self) -> None:
+        """Decide what a mid-turn disconnect meant, now that recovery rebound.
+
+        A dropped socket is not an abort: the runtime is usually still running
+        the turn. Called after ``_install_frontend`` has overwritten
+        ``_streaming`` / ``_generation`` from the snapshot.
+
+        * same generation still streaming — nothing to synthesise, and
+          ``_finish_sync`` skips the live-event seed so in-flight tool cards
+          are not duplicated. Deviation from the design's "seed
+          AgentStartEvent": that handler clears ``_started_tools``, so a
+          later real tool_end would miss the card and paint ⊘ interrupted.
+        * generation moved, or streaming False — the turn ended while we were
+          away. ``live_events`` is emptied at ``agent_end``, so synthesise
+          from ``last_turn_outcome`` (additive; ``""`` from an old runtime
+          keeps today's aborted synthesis).
+        """
+        suspect = self._suspect_generation
+        self._suspect_generation = None
+        if suspect is None:
+            return
+        snapshot_streaming = self._streaming
+        snapshot_generation = self._generation
+        if snapshot_streaming and snapshot_generation == suspect:
+            self._same_live_turn = True
+            return
+        outcome = ""
+        store = self._frontend_store
+        if store is not None:
+            outcome = str(getattr(store.state, "last_turn_outcome", "") or "")
+        # ``force`` because ``_apply_frontend_facades`` already cleared
+        # ``_streaming`` when the snapshot says the turn ended, and the
+        # usual early-return would swallow the synthesised end.
+        self._end_turn_locally(
+            direct=True,
+            aborted=outcome in ("aborted", ""),
+            error="turn failed" if outcome == "error" else None,
+            force=True,
+        )
+        # A successor turn may already be live (generation moved). The
+        # synthesised end is for the *suspect* turn; do not clear the
+        # successor's streaming bit — ``_end_turn_locally`` always does.
+        if snapshot_streaming:
+            self._streaming = True
+            self._generation = snapshot_generation
 
     async def _session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
@@ -2444,10 +2513,12 @@ class RemoteSession:
         facade the turn was over while the app — which holds its working line,
         band and title open until an ``AgentEndEvent`` reaches it — was never
         told anything, so a viewer that went cold mid-turn held a spinner
-        forever with no toast and no notice. On the common path this is a
-        no-op: ``_on_disconnected`` already ended the turn before
-        ``_recover_owner`` started. The case it exists for is a SUCCESSOR
-        dying mid-reattach — ``_on_disconnected`` returns early while
+        forever with no toast and no notice. On the common path this is the
+        settlement of a *suspect* turn: ``_on_disconnected`` no longer
+        synthesises an abort (a dropped socket is usually a stalled viewer,
+        not a dead runtime), so go-cold is the verdict that the runtime is
+        actually gone. The other case it exists for is a SUCCESSOR dying
+        mid-reattach — ``_on_disconnected`` returns early while
         ``_recovering``, and ``_apply_frontend_facades`` has just re-marked
         the turn live from the successor's snapshot — which leaves
         ``_streaming`` True with nothing else on the way to clear it.
@@ -2483,11 +2554,20 @@ class RemoteSession:
             # die, goes cold rather than taking over. The `lop --resume` TUI
             # is exactly this case (design-runtime-autorefresh §1.1).
             self._can_go_cold = True
+            # ``_suspect_generation`` is deliberately LEFT SET here. A refresh
+            # is not a death, so an in-flight turn (which should not exist —
+            # the warning above) must not be aborted: the successor's snapshot
+            # is the honest repair, and ``_settle_suspect_turn`` decides on
+            # rebind exactly as it does after a transient drop.
         else:
             try:
                 self._end_turn_locally(direct=True)
             except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
                 logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
+            # Belt for the case ``_end_turn_locally`` early-returns on
+            # ``not _streaming``: a suspect recorded at the drop must not
+            # outlive the verdict that the runtime is gone.
+            self._suspect_generation = None
         self._owner_ready.set()
         callback = self._refresh_callback if refresh else self._went_cold_callback
         if callback is None:
@@ -2567,6 +2647,10 @@ class RemoteSession:
         if self._stopped_announced:
             return
         self._stopped_announced = True
+        # A stop found during recovery (the on-disk marker, not the
+        # ``stopping`` frame) never went through ``_on_disconnected``'s
+        # deliberate-stop branch, so the suspect turn is still open.
+        self._end_turn_locally(direct=True)
         callback = self._stopped_callback
         if callback is None:
             return
@@ -2678,6 +2762,14 @@ class RemoteSession:
                                 frontend.live_cursor,
                                 drop_history_duplicates=False,
                             )
+                        # After the snapshot is installed AND the bind held:
+                        # ``_apply_frontend_facades`` overwrote ``_streaming``
+                        # / ``_generation`` from the snapshot, so the
+                        # comparison is against the runtime's current turn.
+                        # Must run AFTER the transcript bind — a raise above
+                        # would otherwise consume ``_suspect_generation`` and
+                        # the next retry would have nothing to settle.
+                        self._settle_suspect_turn()
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
@@ -2701,6 +2793,10 @@ class RemoteSession:
                     else:
                         callback = self._takeover_callback
                         if callback is not None:
+                            # Takeover means the owner is gone: the turn did
+                            # abort. Synthesise before the app disposes this
+                            # facade, or the working line never learns.
+                            self._end_turn_locally(direct=True)
                             result = callback(local)
                             if inspect.isawaitable(result):
                                 await result
@@ -3422,8 +3518,11 @@ class RemoteSession:
         return True
 
     def abort(self, reason: str = "interrupted") -> None:
-        if self._client is not None:
-            asyncio.create_task(self._client.abort())
+        client = self._client
+        if client is None or not client.connected:
+            return  # nothing to abort on; the local end is what the app shows
+        task = asyncio.create_task(client.abort())
+        task.add_done_callback(_log_abort_failure)
 
     async def request_stop(self) -> str:
         """Stop the session this follower is watching — deliberately.
@@ -3609,6 +3708,22 @@ class RemoteSession:
             # A pending snapshot owns the final close, including failure and
             # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
+
+
+def _log_abort_failure(task: asyncio.Task[Any]) -> None:
+    """A mid-recovery abort raises ``ConnectionError("not attached")``.
+
+    ``asyncio.create_task`` without a done-callback left that as "Task
+    exception was never retrieved" in the operator log (12 rows in one
+    morning). DEBUG, not ERROR: the local turn end is already what the
+    app shows, and a detached client has nothing to abort on.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    logger.debug("remote abort failed", exc_info=exc)
 
 
 async def _await_handler(result: Any) -> None:

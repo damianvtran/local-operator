@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -1437,6 +1437,14 @@ class FrontendSessionState(BaseModel):
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
     streaming: bool = False
     generation: int = 0
+    #: How the last logical turn ended, for a viewer that dropped mid-turn and
+    #: rebinds after it settled. ``live_events`` is emptied at ``agent_end``, so
+    #: the real end is not in the snapshot; without this a rebind cannot tell
+    #: aborted from completed and would synthesise ``aborted=True`` (today's
+    #: false "interrupted"). ``""`` is the wire default and the old-runtime
+    #: value — treat as aborted. Additive; extra="allow" keeps older readers
+    #: tolerant. One value per user prompt, not per compaction continuation.
+    last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
     activity_started_at: float | None = None
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
@@ -2733,6 +2741,7 @@ class FrontendStateStore:
             cost_knowledge=knowledge,
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
+            last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
             activity_started_at=(
                 current.activity_started_at
                 if bool(getattr(session, "is_streaming", False))
@@ -2874,7 +2883,18 @@ class FrontendStateStore:
             duration = state.active_duration_s
             if state.activity_started_at is not None:
                 duration += max(0.0, now - state.activity_started_at)
-            changes.update(streaming=False, activity_started_at=None, active_duration_s=duration)
+            if event.error:
+                outcome: Literal["completed", "aborted", "error", ""] = "error"
+            elif event.aborted:
+                outcome = "aborted"
+            else:
+                outcome = "completed"
+            changes.update(
+                streaming=False,
+                activity_started_at=None,
+                active_duration_s=duration,
+                last_turn_outcome=outcome,
+            )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
             usages = [
@@ -3301,6 +3321,21 @@ def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:
             return None
         descendant += cost
     return (direct or 0.0) + descendant
+
+
+def _last_turn_outcome_from(session: Any, current: str) -> str:
+    """Prefer the session's published outcome; keep the store's if it has none.
+
+    ``observe_event`` writes ``last_turn_outcome`` onto the store from the
+    emitted ``AgentEndEvent``. ``refresh_from_session`` then copies the
+    session's fields over the store — and a reduced test double (or a
+    runtime that has not yet grown the attribute) would wipe a just-written
+    value back to ``""``, which a rebinding viewer treats as aborted.
+    """
+    if not hasattr(session, "_last_turn_outcome"):
+        return current if current in ("completed", "aborted", "error") else ""
+    raw = str(getattr(session, "_last_turn_outcome", "") or "")
+    return raw if raw in ("completed", "aborted", "error") else ""
 
 
 def _label(spec: Any) -> str:
