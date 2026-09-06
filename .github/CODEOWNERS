@@ -14,7 +14,13 @@
 # collaborator with write access is silently ignored by GitHub -- the line
 # looks correct and matches nobody, which is the same failure this file
 # exists to fix. Verify a new entry against
-# `gh api repos/damianvtran/local-operator/collaborators`.
+# `gh api repos/damianvtran/local-operator/collaborators`; both entries below
+# were confirmed that way (`damianvtran` admin, `bbqben` write) and against
+# GitHub's own CODEOWNERS validator, which reports no errors for this file.
+#
+# `sebkow` and `jcobhams` also hold write access but are deliberately NOT
+# owners: ownership here means "can approve on behalf of the project", which
+# is a narrower thing than commit access.
 
 # Default owners for everything in the repository.
 * @damianvtran @bbqben

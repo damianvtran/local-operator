@@ -318,38 +318,6 @@ fresh and CI is green** — no release queue, no waiting for a predecessor, no
 handing the "next number" to whoever is behind you. A merged PR that has not
 been released yet is the normal state of `main`, not a problem to fix.
 
-### Who may merge: agent review is sufficient for a code owner
-
-`main` requires an approving review from a code owner (`.github/CODEOWNERS`).
-When the agent is **acting for a code owner** — that is, running on a code
-owner's machine and under their account, which is the normal case here — the
-standing agent review gate **is** the approval. A clean, fresh, independent
-agent review round plus green CI is sufficient to merge; do not wait for a
-second human to click approve, and do not treat the ruleset as an additional
-gate the agent must escalate past.
-
-This is a statement about *authority*, not about rigour. Every requirement in
-this file still holds in full: an **independent** reviewer subagent (never the
-agent that wrote the code), rounds repeated until no blocker or major remains,
-review freshness against the current head, QA evidence from the real running
-surface, and design/UX rounds for anything user-visible. Merging is authorized
-by the review being genuinely clean, never by the merger being entitled to it.
-
-Two things this does not license:
-
-- **Never approve your own work to satisfy the rule.** The author and the
-  reviewer must be different agents. GitHub cannot tell them apart, because
-  every agent here pushes as the same account — so this separation is a
-  discipline the agents keep, not one the forge enforces.
-- **`--admin` stays a last resort, and stays disclosed.** With `CODEOWNERS`
-  present the rule is satisfiable, so a bypass should be rare. If one is ever
-  genuinely necessary, say plainly on the PR and in the release notes that the
-  merge bypassed rather than cleared review. A tag that implies a review it
-  never had is the failure mode this whole section exists to prevent.
-
-An agent that is **not** acting for a code owner is unchanged: it prepares the
-PR, records the review rounds, and hands it to an owner to merge.
-
 ### One release owner per window
 
 Releases are cut by a single **release owner** for a **window**: the set of
@@ -548,6 +516,81 @@ Every agent asked to "update local-operator" or make a change available through
 then either hand it to the window's release owner or become that owner. It
 does not bump the version on its own branch, and it does not release
 one PR alone while other merged work is sitting on `main` unreleased.
+
+## Who may merge: agent review is sufficient for a code owner
+
+`main` requires an approving review from a code owner (`.github/CODEOWNERS`).
+When the agent is **acting for a code owner** — that is, running on a code
+owner's machine and under their account, which is the normal case here — the
+standing agent review gate **is** the approval. A clean, fresh, independent
+agent review round plus green CI is sufficient to merge; the agent does not
+need to find a second human to click approve before landing the work.
+
+**What the forge can and cannot do about that.** GitHub prohibits approving
+your own pull request (`422 Review Can not approve your own pull request`), and
+every agent here pushes as the code owner's account, so an agent-authored PR
+can never be *clicked* approved by the account that opened it. While
+`required_approving_review_count` is 1, the recorded approval must therefore
+come from the other code owner, or the merge is completed with `--admin`. That
+is a limitation of the forge, not a licence to skip review: the agent review
+round is what makes the merge legitimate, and the button is only how GitHub
+records it.
+
+So, concretely, for an agent acting for a code owner with a clean independent
+round and green CI: try the normal merge first; if the ruleset still refuses
+because no second owner has clicked, complete it with `--admin` **and disclose
+that on the PR** in the terms below. Do not sit on finished, reviewed work
+waiting for a click that may never come — and do not pretend the click
+happened.
+
+This is a statement about *authority*, not about rigour. Every requirement in
+this file still holds in full: an **independent** reviewer subagent (never the
+agent that wrote the code), rounds repeated until no blocker or major remains,
+review freshness against the current head, QA evidence from the real running
+surface, and design/UX rounds for anything user-visible. Merging is authorized
+by the review being genuinely clean, never by the merger being entitled to it.
+
+Two things this does not license:
+
+- **Never approve your own work to satisfy the rule.** The author and the
+  reviewer must be different agents. GitHub cannot tell them apart, because
+  every agent here pushes as the same account — so this separation is a
+  discipline the agents keep, not one the forge enforces.
+- **`--admin` stays disclosed, always.** Whenever a merge is completed with
+  `--admin`, say plainly on the PR — and in the release notes if it ships —
+  that the merge bypassed rather than cleared review, and why. A tag that
+  implies a review it never had is the failure mode this whole section exists
+  to prevent. Note that under the current ruleset this disclosure is the
+  *normal* case for an agent-authored PR, not the exception, precisely because
+  of the self-approval limitation above; that is a reason to keep the
+  disclosure honest and routine, never a reason to drop it as boilerplate.
+
+If that trade is unsatisfying — and it should be — the fix is a ruleset change,
+not a wording change: setting `required_approving_review_count` to 0 while
+keeping `require_code_owner_review` for routing would let the agent review gate
+be the real control and end the routine bypass. That is a repository-owner
+decision about a security control, so an agent proposes it and does not make
+it.
+
+An agent that is **not** acting for a code owner is unchanged: it prepares the
+PR, records the review rounds, and hands it to an owner to merge.
+
+**One side effect to manage: GitHub requests code owners automatically at PR
+open.** The standing practice is the opposite — human reviewers are added only
+once the agent rounds are clean, so nobody spends attention on a diff that is
+about to change through remediation. The auto-request fires anyway, at the
+moment the PR opens, before any review round exists.
+
+Do not fight it by removing the request and re-adding it later; that produces a
+second notification and looks like churn. Instead, treat the auto-request as
+routing, not as a summons: open the PR **as a draft** when remediation rounds
+are expected, so the request carries the draft signal with it, and mark it
+ready for review once the rounds are clean. A code owner who is auto-requested
+on a non-draft PR should be able to assume the agent rounds are already done.
+Never tag an owner in a *comment* to ask for review unless their review is
+genuinely required — the auto-request is not a comment tag, and a comment tag
+is what says the PR is waiting on that person.
+
 
 ## Security advisories
 
