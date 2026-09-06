@@ -13457,6 +13457,7 @@ class OperatorApp(App[None]):
             self._subagent_panel,
             self._subagent_view,
             self._status,
+            self._session_sidebar,
         ):
             if surface is None:
                 continue

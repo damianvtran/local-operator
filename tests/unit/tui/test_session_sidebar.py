@@ -23,6 +23,7 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import (
     SIDEBAR_GUTTER,
     SIDEBAR_MAIN_MIN_WIDTH,
+    SIDEBAR_SPINNER_INTERVAL_S,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -173,15 +174,20 @@ async def test_tooltip_survives_in_row_movement_and_the_catalog_poll():
         sidebar.set_entries(_hover_entries(tuple(f"s{i}" for i in range(1, 7))))
         await pilot.pause()
         tooltip = app.screen.get_child_by_type(Tooltip)
+        # By identity, not a literal y: the Active/Previous headers occupy
+        # lines that hold no session, so a hardcoded row number would land on
+        # a header and never change the hovered identity at all.
+        entry_rows = [y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None]
+        last_row, first_row = entry_rows[-1], entry_rows[0]
 
-        await pilot.hover("#session-sidebar", offset=(8, 6))
+        await pilot.hover("#session-sidebar", offset=(8, last_row))
         await asyncio.sleep(float(app.TOOLTIP_DELAY) + 0.2)
         await pilot.pause()
         assert tooltip.display, "description never appeared after the delay"
         shown_for = str(tooltip.render())
 
         for x in (9, 10, 11):
-            await pilot.hover("#session-sidebar", offset=(x, 6))
+            await pilot.hover("#session-sidebar", offset=(x, last_row))
             await pilot.pause()
             assert tooltip.display, f"in-row move to x={x} dropped the description"
         await asyncio.sleep(0.3)
@@ -195,7 +201,7 @@ async def test_tooltip_survives_in_row_movement_and_the_catalog_poll():
 
         # A different row is a fresh arrival: hidden until the delay passes,
         # then THAT row's description — never the previous row's.
-        await pilot.hover("#session-sidebar", offset=(8, 1))
+        await pilot.hover("#session-sidebar", offset=(8, first_row))
         await pilot.pause()
         assert not tooltip.display, "a row change must not pop the old description"
         await asyncio.sleep(float(app.TOOLTIP_DELAY) + 0.2)
@@ -220,10 +226,13 @@ async def test_hover_reresolves_when_a_refresh_reorders_under_the_pointer():
         app._sidebar_timer.pause()
         sidebar = app._session_sidebar
         sidebar.set_entries(_hover_entries(("a", "b", "c")))
-        await pilot.hover("#session-sidebar", offset=(8, 2))
+        first_row = next(
+            y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None
+        )
+        await pilot.hover("#session-sidebar", offset=(8, first_row))
         sidebar.set_entries(_hover_entries(("c", "b", "a")))
         await pilot.pause()
-        under_pointer = sidebar._entry_at(2)
+        under_pointer = sidebar._entry_at(first_row)
         assert under_pointer is not None
         assert sidebar._hover_id == under_pointer.id
         assert under_pointer.row.name in str(sidebar.tooltip or "")
@@ -496,7 +505,9 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         app.action_toggle_sidebar()
         app._session_sidebar.set_entries([CatalogEntry(SessionRow("sess", 1, "Current"))])
         await pilot.pause()
-        await pilot.click("#session-sidebar", offset=(4, 1))
+        sidebar = app._session_sidebar
+        row_y = next(y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None)
+        await pilot.click("#session-sidebar", offset=(4, row_y))
         assert not app._session_sidebar.display
 
 
@@ -568,11 +579,15 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     straight = await grid("alpha", "gamma")
     mirrored = await grid("gamma", "alpha")
     assert straight != mirrored, "requested and cursor render identically"
+
     # And the distinction is the caret, in the same two columns as before, so
     # nothing reflows: the title still starts where it always did.
-    assert straight[1].startswith(" ›   Session alpha"), repr(straight[1])
-    assert straight[3].startswith(" »   Session gamma"), repr(straight[3])
-    assert mirrored[1].startswith(" »   Session alpha"), repr(mirrored[1])
+    def row_line(lines: list[str], title: str) -> str:
+        return next(line for line in lines if title in line)
+
+    assert row_line(straight, "Session alpha").startswith(" ›   ")
+    assert row_line(straight, "Session gamma").startswith(" »   ")
+    assert row_line(mirrored, "Session alpha").startswith(" »   ")
 
 
 @pytest.mark.asyncio
@@ -652,3 +667,256 @@ async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
         # The over-fix guard: local in-flight work was never touched.
         assert "local-work" not in disposed
         assert not keep.retired
+
+
+def _mixed_entries() -> list[CatalogEntry]:
+    """Two ACTIVE rows (rank tier <=2) and two PREVIOUS (tier 3)."""
+    now = 1_700_000_000.0
+    return [
+        CatalogEntry(SessionRow("act1", now - 60, "Live one", live_state="busy")),
+        CatalogEntry(SessionRow("act2", now - 120, "Live two", live_state="busy")),
+        CatalogEntry(SessionRow("old1", now - 9000, "Old one")),
+        CatalogEntry(SessionRow("old2", now - 99000, "Old two")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hover_repaints_the_widget_at_most_once_per_move():
+    """Textual re-renders a widget inline on every pointer move to hunt links.
+
+    `Screen._forward_event` calls `get_style_at` BEFORE dispatch, which forces
+    `_render_content` whenever the widget is dirty — 0.039ms clean against
+    1.975ms dirty. Two callers dirtied it per event: our own hover refresh and
+    Textual's `watch_hover_style`, which fires for every widget under the
+    pointer anywhere in the app and admits in its own comment that it repaints
+    "even when there are no links". With `auto_links = False` only ours
+    remains.
+    """
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_hover_entries(("a", "b", "c")))
+        await pilot.pause()
+
+        renders = 0
+        original = sidebar._render_content
+
+        def counted() -> None:
+            nonlocal renders
+            renders += 1
+            original()
+
+        sidebar._render_content = counted  # type: ignore[method-assign]
+        moves = 6
+        for step in range(moves):
+            event = events.MouseMove(
+                sidebar,
+                x=5,
+                y=1 + (step % 3),
+                delta_x=0,
+                delta_y=0,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=sidebar.region.x + 5,
+                screen_y=sidebar.region.y + 1 + (step % 3),
+                style=None,
+            )
+            app.screen._forward_event(event)
+            await pilot.pause()
+        assert renders <= moves, f"{renders} repaints for {moves} moves"
+
+
+@pytest.mark.asyncio
+async def test_disabling_auto_links_leaves_the_painted_frame_identical():
+    """The one real risk of `auto_links = False`, closed by measurement.
+
+    It would silently kill hover highlighting IF this list ever rendered a
+    link. It renders none — rows are `Text` spans carrying colour and bold
+    only — so the painted output must be identical either way, in text AND in
+    style. If a link is ever added here this test is what fails.
+    """
+    from textual.geometry import Region
+
+    async def frame(auto_links: bool) -> list[tuple[str, str]]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            sidebar = app._session_sidebar
+            sidebar.auto_links = auto_links
+            sidebar.set_entries(_mixed_entries())
+            sidebar.focus()
+            await pilot.pause()
+            painted: list[tuple[str, str]] = []
+            for line in sidebar.render_lines(Region(0, 0, sidebar.size.width, sidebar.size.height)):
+                for segment in line:
+                    painted.append((segment.text, str(segment.style)))
+            return painted
+
+    with_links = await frame(True)
+    without = await frame(False)
+    assert without == with_links
+    # And the premise holds: nothing in the frame carries a link.
+    assert not any("link" in style for _text, style in without)
+
+
+@pytest.mark.asyncio
+async def test_the_spinner_does_not_tick_while_blurred_or_closed():
+    """Every other animated surface rates through `animation_focused`; this
+    list was the only one that did not, so a blurred window kept repainting
+    every visible row for a terminal nobody was looking at."""
+    from local_operator.tui.animation import (
+        BLURRED_SPINNER_INTERVAL_S,
+        reset_animation_focus,
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            sidebar = app._session_sidebar
+            # Closed: no ticks regardless of busy rows.
+            sidebar.set_entries(_mixed_entries())
+            await pilot.pause()
+            assert sidebar._timer is not None
+            assert sidebar._timer._active.is_set() is False
+
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            sidebar.set_entries(_mixed_entries())
+            await pilot.pause()
+            # Open with a busy row: running, at the list's own slower cadence.
+            assert sidebar._timer is not None
+            assert sidebar._timer._active.is_set() is True
+            assert sidebar._spinner_rate == SIDEBAR_SPINNER_INTERVAL_S
+
+            app._set_animation_focused(False)
+            await pilot.pause()
+            assert sidebar._spinner_rate == BLURRED_SPINNER_INTERVAL_S
+    finally:
+        reset_animation_focus()
+
+
+@pytest.mark.asyncio
+async def test_navigation_crosses_a_section_header_without_stalling():
+    """Headers are rendered rows, never entries — the keyboard never sees one.
+
+    `action_move` indexes `entries` and `_switch_session_from` traverses it
+    while the list is CLOSED, so a header in that tuple would let
+    ctrl+shift+down "switch" to a header and desync open-from-closed
+    navigation. Keeping the split presentational is what makes crossing a
+    boundary an ordinary step.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_mixed_entries())
+        sidebar.focus()
+        await pilot.pause()
+        # The frame really does carry both headers.
+        assert sidebar._header_lines() == 3  # two headers plus one blank
+        sidebar.cursor_id = "act1"
+
+        walked: list[str] = []
+        for _ in range(3):
+            await pilot.press("down")
+            await pilot.pause()
+            walked.append(sidebar.cursor_id)
+        # act2 is the last ACTIVE row and old1 the first PREVIOUS one: the
+        # boundary costs no extra press and never parks on a header.
+        assert walked == ["act2", "old1", "old2"], walked
+        assert all(step in {entry.id for entry in sidebar.entries} for step in walked)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_section_draws_no_header():
+    """All-idle shows only "Previous"; a store of live rows only "Active"."""
+    from textual.geometry import Region
+
+    async def headers(entries: list[CatalogEntry]) -> list[str]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            sidebar = app._session_sidebar
+            sidebar.set_entries(entries)
+            await pilot.pause()
+            lines = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            return [
+                line.strip()
+                for line in lines
+                if line.strip() in {"Active Sessions", "Previous Sessions"}
+            ]
+
+    now = 1_700_000_000.0
+    only_previous = [
+        CatalogEntry(SessionRow(f"o{i}", now - 9000 * (i + 1), f"Old {i}")) for i in range(3)
+    ]
+    only_active = [
+        CatalogEntry(SessionRow(f"a{i}", now - 60 * (i + 1), f"Live {i}", live_state="busy"))
+        for i in range(3)
+    ]
+    assert await headers(only_previous) == ["Previous Sessions"]
+    assert await headers(only_active) == ["Active Sessions"]
+    assert await headers(_mixed_entries()) == ["Active Sessions", "Previous Sessions"]
+
+
+@pytest.mark.asyncio
+async def test_rows_are_independent_so_a_row_scoped_repaint_is_sound():
+    """Row-scoped hover refresh assumes one row's paint never affects another.
+
+    If that ever stops holding, repainting the two rows whose ground changed
+    would leave a third stale — so the assumption is asserted, not trusted.
+    """
+    from textual.geometry import Region
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_entries(_mixed_entries())
+        await pilot.pause()
+
+        def painted() -> list[str]:
+            return [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+
+        before = painted()
+        sidebar._set_hover(2)
+        after = painted()
+        differing = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+        # Hovering one row changes that row's line and nothing else.
+        assert len(differing) <= 1, differing

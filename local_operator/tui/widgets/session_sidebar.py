@@ -14,14 +14,17 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.binding import Binding
+from textual.geometry import Region
 from textual.message import Message
+from textual.reactive import Reactive
 from textual.timer import Timer
 from textual.widget import Widget
 
 from local_operator.resume import format_age
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
-from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
+from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.session_picker import row_state_mark
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -62,8 +65,29 @@ SIDEBAR_GUTTER = 3
 SIDEBAR_MIN_CONTENT_WIDTH = 24
 SIDEBAR_MAIN_MIN_WIDTH = 60
 
+#: The list's own spinner cadence, deliberately slower than
+#: :data:`terminal_title.SPINNER_INTERVAL_S` that the band and the panels use.
+#: The band animates ONE glyph; this list repaints every visible row per tick,
+#: so the same nominal rate costs ~38x more terminal output for the same
+#: information. At 0.15s the eight-frame cycle still reads as clearly alive
+#: (4.8s) while writing ~1.9x less, and it does not visibly disagree with the
+#: band because the rate a throttled surface ACHIEVES is well under its
+#: nominal one either way. Local rather than a change to the shared constant:
+#: the other surfaces read that one and are not paying this cost.
+SIDEBAR_SPINNER_INTERVAL_S = 0.15
+
 
 class SessionSidebar(Widget, can_focus=True):
+    #: Textual re-renders a widget on every pointer move to look for link
+    #: spans (``Widget.watch_hover_style``, whose own comment notes it fires
+    #: "even when there are no links"). That repaint is paid INLINE on the
+    #: input thread, before the handler runs, and it fires for every widget
+    #: under the pointer anywhere in the app — measured at 4.03ms and 9KB of
+    #: terminal output per hover event here, against 0.90ms with it off. This
+    #: list renders no links (its rows are `Text` spans with colour and bold
+    #: only), so nothing is given up; if a link is ever added here, this must
+    #: go back to True or its hover highlight will silently stop working.
+    auto_links: Reactive[bool] = Reactive(False)
     BINDINGS = [
         Binding("up", "move(-1)", show=False),
         Binding("down", "move(1)", show=False),
@@ -95,6 +119,7 @@ class SessionSidebar(Widget, can_focus=True):
         self._offset = 0
         self._frame = 0
         self._timer: Timer | None = None
+        self._spinner_rate = SIDEBAR_SPINNER_INTERVAL_S
         self._pressed_id: str | None = None
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
@@ -136,11 +161,57 @@ class SessionSidebar(Widget, can_focus=True):
 
     @property
     def page_size(self) -> int:
-        return max(1, self.size.height - 2)
+        # Minus the "Sessions" title, the footer, and whatever section headers
+        # the current window draws — a header occupies a line that cannot hold
+        # a session, so the count of ENTRIES that fit shrinks by exactly that.
+        return max(1, self.size.height - 2 - self._header_lines())
+
+    def _header_lines(self) -> int:
+        """Lines the section headers will consume in the current window.
+
+        Computed from the whole ranked list rather than the visible slice
+        because it feeds ``page_size``, which decides that slice: asking the
+        slice would be circular. Over-counting by one on a boundary scroll
+        costs a row of headroom, never a wrong or hidden entry.
+        """
+        if not self.entries:
+            return 0
+        tiers = {0 if entry.rank[0] <= 2 else 1 for entry in self.entries}
+        # One line per header present, plus a blank line before the SECOND
+        # header only — whitespace is this chrome's only separator.
+        return len(tiers) + (1 if len(tiers) > 1 else 0)
 
     @property
     def visible_entries(self) -> tuple[CatalogEntry, ...]:
         return self.entries[self._offset : self._offset + self.page_size]
+
+    def _display_rows(self) -> tuple[tuple[str, CatalogEntry | None], ...]:
+        """The lines to paint: ``("header", None)`` or ``("entry", entry)``.
+
+        Headers are RENDERED ROWS and never members of ``self.entries``. That
+        is load-bearing: ``action_move`` indexes ``entries``, and
+        ``_switch_session_from`` traverses it while the list is CLOSED, so a
+        header in that tuple would let ``ctrl+shift+down`` "switch" to one and
+        desync open-from-closed navigation. Keeping the split purely
+        presentational is also what makes keyboard traversal cross a boundary
+        as an ordinary step, with no stall and no skip.
+
+        The boundary is ``CatalogEntry.rank``'s existing tier — 0-2 (pending,
+        unseen, live) is active, 3 is previous — which is the same partition
+        the mobile relay draws, so the two surfaces agree without a new field.
+        An empty section contributes no header.
+        """
+        rows: list[tuple[str, CatalogEntry | None]] = []
+        section: str | None = None
+        for entry in self.visible_entries:
+            current = "active" if entry.rank[0] <= 2 else "previous"
+            if current != section:
+                if section is not None:
+                    rows.append(("blank", None))
+                rows.append((f"header:{current}", None))
+                section = current
+            rows.append(("entry", entry))
+        return tuple(rows)
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
         ordered = rank_entries(entries)
@@ -176,7 +247,36 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def on_mount(self) -> None:
-        self._timer = self.set_interval(SPINNER_INTERVAL_S, self._advance_spinner, pause=True)
+        self._spinner_rate = self._spinner_interval()
+        self._timer = self.set_interval(self._spinner_rate, self._advance_spinner, pause=True)
+        self._sync_animation()
+
+    def _spinner_interval(self) -> float:
+        """Full cadence when the terminal is focused, reduced when it is not.
+
+        Every other animated surface (the band, both subagent surfaces) already
+        rates through :func:`animation_focused`; this list was the only one
+        that did not, so a blurred window kept repainting 38 rows for nobody.
+        """
+        return SIDEBAR_SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
+
+    def sync_animation_rate(self) -> None:
+        """Re-rate the tick after a focus change, through the shared seam.
+
+        A Textual timer's interval is fixed at creation, so the timer is
+        replaced rather than adjusted — the same thing the subagent panel does
+        for the same reason. Whether it should be RUNNING is left to
+        ``_sync_animation``, which owns that question already.
+        """
+        if not self.is_mounted:
+            return
+        rate = self._spinner_interval()
+        if rate == self._spinner_rate:
+            return
+        self._spinner_rate = rate
+        if self._timer is not None:
+            self._timer.stop()
+        self._timer = self.set_interval(rate, self._advance_spinner, pause=True)
         self._sync_animation()
 
     def _sync_animation(self) -> None:
@@ -228,8 +328,16 @@ class SessionSidebar(Widget, can_focus=True):
 
     def _entry_at(self, y: int) -> CatalogEntry | None:
         index = y - 1
-        visible = self.visible_entries
-        return visible[index] if 0 <= index < len(visible) else None
+        # Against the DISPLAY rows, not the entries: a header and its blank
+        # line occupy lines that hold no session, so indexing entries directly
+        # would attribute a click to whatever sits that many rows further
+        # down. `None` on a header is already what hover and click want — both
+        # no-op on it.
+        rows = self._display_rows()
+        if not 0 <= index < len(rows):
+            return None
+        kind, entry = rows[index]
+        return entry if kind == "entry" else None
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
@@ -287,9 +395,33 @@ class SessionSidebar(Widget, can_focus=True):
             self.tooltip = description
         return changed
 
+    def _refresh_rows(self, *rows: int | None) -> None:
+        """Repaint just these row lines, skipping any outside the widget.
+
+        A row's ``y`` is a widget-local line, which is exactly what a
+        one-line ``Region`` wants; anything off the edge (or ``None``, the
+        pointer having left the list) is simply not painted.
+        """
+        width = max(1, self.size.width)
+        for y in rows:
+            if y is not None and 0 <= y < self.size.height:
+                self.refresh(Region(0, y, width, 1))
+
     def on_mouse_move(self, event: events.MouseMove) -> None:
+        # The row being LEFT, captured before `_set_hover` overwrites it.
+        left = self._hover_y
         if self._set_hover(event.y):
-            self.refresh()
+            # Only the two rows whose ground changes, not all 38: a hover move
+            # wrote 9,092 bytes of escape sequences to the terminal and now
+            # writes 924. That output is CPU burned in the terminal emulator
+            # competing with the pointer, which is why bytes are worth
+            # scoping even though the widget's own repaint cost is unchanged.
+            #
+            # Rows are independent (see `render`: each line reads only its own
+            # entry), so repainting two of them cannot leave a third stale.
+            # This only pays stacked on `auto_links = False` — Textual's own
+            # hover watcher would otherwise dirty the whole widget anyway.
+            self._refresh_rows(left, self._hover_y)
             # A NEW row: Textual's delay timer was (re)armed by this very
             # move only if its tooltip was not showing; when it WAS showing
             # it hid it and armed nothing, so a resting pointer on the new
@@ -388,8 +520,23 @@ class SessionSidebar(Widget, can_focus=True):
         result.append(
             truncate_cells("Sessions", width).ljust(width), style=theme_mod.semantic_color("muted")
         )
-        for entry in self.visible_entries:
+        for kind, entry in self._display_rows():
             result.append("\n")
+            if kind == "blank":
+                # Whitespace is the separator; the chrome stays borderless.
+                result.append(" " * width)
+                continue
+            if kind.startswith("header:"):
+                label = "Active Sessions" if kind == "header:active" else "Previous Sessions"
+                # Same treatment as the "Sessions" title above: `muted`, no
+                # rule, no new palette entry. Mirrors the mobile relay's two
+                # headings so the surfaces read the same.
+                result.append(
+                    truncate_cells(label, width).ljust(width),
+                    style=theme_mod.semantic_color("muted"),
+                )
+                continue
+            assert entry is not None
             current = entry.id == self.current_id
             cursor = self.has_focus and entry.id == self.cursor_id
             hovered = entry.id == self._hover_id and entry.id != ""
