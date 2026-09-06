@@ -318,6 +318,38 @@ fresh and CI is green** — no release queue, no waiting for a predecessor, no
 handing the "next number" to whoever is behind you. A merged PR that has not
 been released yet is the normal state of `main`, not a problem to fix.
 
+### Who may merge: agent review is sufficient for a code owner
+
+`main` requires an approving review from a code owner (`.github/CODEOWNERS`).
+When the agent is **acting for a code owner** — that is, running on a code
+owner's machine and under their account, which is the normal case here — the
+standing agent review gate **is** the approval. A clean, fresh, independent
+agent review round plus green CI is sufficient to merge; do not wait for a
+second human to click approve, and do not treat the ruleset as an additional
+gate the agent must escalate past.
+
+This is a statement about *authority*, not about rigour. Every requirement in
+this file still holds in full: an **independent** reviewer subagent (never the
+agent that wrote the code), rounds repeated until no blocker or major remains,
+review freshness against the current head, QA evidence from the real running
+surface, and design/UX rounds for anything user-visible. Merging is authorized
+by the review being genuinely clean, never by the merger being entitled to it.
+
+Two things this does not license:
+
+- **Never approve your own work to satisfy the rule.** The author and the
+  reviewer must be different agents. GitHub cannot tell them apart, because
+  every agent here pushes as the same account — so this separation is a
+  discipline the agents keep, not one the forge enforces.
+- **`--admin` stays a last resort, and stays disclosed.** With `CODEOWNERS`
+  present the rule is satisfiable, so a bypass should be rare. If one is ever
+  genuinely necessary, say plainly on the PR and in the release notes that the
+  merge bypassed rather than cleared review. A tag that implies a review it
+  never had is the failure mode this whole section exists to prevent.
+
+An agent that is **not** acting for a code owner is unchanged: it prepares the
+PR, records the review rounds, and hands it to an owner to merge.
+
 ### One release owner per window
 
 Releases are cut by a single **release owner** for a **window**: the set of

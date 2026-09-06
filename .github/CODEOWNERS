@@ -1,0 +1,20 @@
+# Code owners for local-operator.
+#
+# `main` is governed by a repository ruleset whose `pull_request` rule sets
+# `require_code_owner_review: true`. That rule resolves the owning reviewer
+# through THIS file: without it, the requirement matches nobody, no ordinary
+# approval can ever satisfy it, and every PR is forced through an admin
+# bypass. That is what happened between 2026-09-05 and 2026-09-06 -- PRs #686
+# and #688 through #696 all merged at `reviewDecision: REVIEW_REQUIRED` with
+# zero approvals, because the rule was on and this file was absent. A control
+# that cannot be satisfied is worse than no control: it produces no review
+# while training everyone to override it.
+#
+# Keep this list to people who can actually approve. A handle that is not a
+# collaborator with write access is silently ignored by GitHub -- the line
+# looks correct and matches nobody, which is the same failure this file
+# exists to fix. Verify a new entry against
+# `gh api repos/damianvtran/local-operator/collaborators`.
+
+# Default owners for everything in the repository.
+* @damianvtran @bbqben
