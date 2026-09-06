@@ -286,8 +286,19 @@ async def amain() -> int:
             exc.pid,
         )
         return 0
-    except Exception:
+    except Exception as error:
         logger.exception("session runtime child: session construction failed")
+        # ALSO to stderr, which the spawning parent captures. `main()` points
+        # logging at the daemon's own file, so the traceback above is written
+        # where only a person reading logs later can find it -- the parent saw
+        # nothing at all and could only report a generic timeout after burning
+        # its whole deadline (QA Q1). One line on stderr is what lets an engage
+        # fail fast and name the actual cause.
+        print(
+            f"{type(error).__module__}.{type(error).__qualname__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 2
 
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the

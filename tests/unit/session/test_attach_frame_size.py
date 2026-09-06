@@ -27,6 +27,8 @@ import pytest
 from local_operator.harness.types import ModelSpec, Usage
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
+    _MODEL_CATALOGUE_LINE_LIMIT,
+    MODEL_CATALOGUE_FLOOR_ROWS,
     USAGE_COMPONENT_CAP,
     FrontendSessionState,
     FrontendStateStore,
@@ -40,6 +42,11 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
+from local_operator.session.goal_loop import (
+    LOOP_GOAL_CHARS,
+    LOOP_REASON_CHARS,
+    MAX_LOOP_ITERATIONS,
+)
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
@@ -50,6 +57,30 @@ from tests.unit.session.runtime.test_server import FakeHandle
 #: event carries an unbounded payload, so a small filler would test the row
 #: count rather than the thing that overflows.
 _RESULT_CHARS = 400
+
+
+def _catalogue_row(index: int) -> dict[str, Any]:
+    """One catalogue row exactly as ``refresh_model_catalogue`` builds it.
+
+    Every key that method emits, with values the length real ones have
+    (aggregator selectors are long: ``anthropic/claude-sonnet-4.5``). A row
+    trimmed to the three interesting keys serializes at a quarter of the real
+    weight, which is how this guard previously certified a frame that could not
+    actually be sent.
+    """
+    return {
+        "provider": "openrouter",
+        "model_id": f"anthropic/claude-model-variant-{index}",
+        "label": f"Claude Model Variant {index}",
+        "context_window": 200_000,
+        "default_context_window": 200_000,
+        "max_context_window": 1_000_000,
+        "input_price": 3.0,
+        "output_price": 15.0,
+        "connected": True,
+        "aggregated": True,
+        "routed": False,
+    }
 
 
 def _event(index: int) -> dict[str, Any]:
@@ -308,11 +339,24 @@ _BOUNDED_COLLECTION_FIELDS = {
     "wakes": "the user's own schedules",
     "mcp_servers": "one row per configured server",
     "slash_capabilities": "one row per SLASH_COMMANDS entry",
-    "model_catalogue": "one row per catalogue model; bounded by the provider",
+    # Was described here as "bounded by the provider", which was not a bound at
+    # all: nothing in this process capped it, and a real provider's list is
+    # large enough to overflow the socket line on its own. Now bounded at the
+    # wire by a RESIDUAL budget, with `model_catalogue_truncated` telling the
+    # reader when the list it received is a prefix.
+    "model_catalogue": "clipped at the wire to the frame's remaining bytes; truncation flagged",
     # One startup report from the MCP wiring pass, not an accumulator: it is
     # REPLACED on each wiring round rather than appended to, and its size is a
     # function of how many servers are configured.
     "mcp_startup": "one MCP wiring report; replaced, never appended",
+    # A FIXED set of five scalar keys (status/completed/goal/iterations/reason),
+    # REPLACED on each publish rather than appended to, so it does not grow with
+    # iteration count: a 100-iteration loop and a 1-iteration loop serialize the
+    # same shape, only `completed` differs. BOTH free-text values are clipped
+    # where they enter the state: the judge's `reason` at LOOP_REASON_CHARS in
+    # `_parse_loop_verdict`, and the user's `goal` at LOOP_GOAL_CHARS in
+    # `GoalLoop.start`.
+    "loop": "five scalar keys, replaced per publish; both free-text values clipped at entry",
 }
 
 #: Fields that grow with use and are therefore bounded HERE, by this module.
@@ -555,11 +599,29 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],
         "mcp_startup": {f"server-{index}": {"error": "e" * 200} for index in range(200)},
+        # A loop at the iteration ceiling with its judge reason at the clip.
+        # Filled at the BOUND rather than past it, because that is the largest
+        # value the producer can actually publish: the key set is fixed and
+        # `_parse_loop_verdict` clips the one free-text value, so a bigger
+        # fixture here would assert against a state the runtime cannot reach.
+        "loop": {
+            "status": "running",
+            "completed": MAX_LOOP_ITERATIONS,
+            "iterations": MAX_LOOP_ITERATIONS,
+            "goal": "g" * LOOP_GOAL_CHARS,
+            "reason": "r" * LOOP_REASON_CHARS,
+        },
         "slash_capabilities": [],
-        "model_catalogue": [
-            {"provider": "p", "model_id": f"model-{index}", "context_window": 200_000}
-            for index in range(1_000)
-        ],
+        # PRODUCTION-SHAPED rows, and far more of them than any provider lists.
+        # The old fixture used a 3-key, 63 B row while `refresh_model_catalogue`
+        # builds an 11-key, ~267 B one — understating a real row 4.24x, so the
+        # guard measured a catalogue a quarter of its true weight and passed a
+        # frame the socket could not carry. The count is past the ~1,410 one QA
+        # backend published because this field takes a RESIDUAL wire budget
+        # (`MODEL_CATALOGUE_FLOOR_ROWS`): the assertion below is that the frame
+        # fits HOWEVER long the owner's list is, so the fixture has to be longer
+        # than the budget can hold rather than tuned to sit under it.
+        "model_catalogue": [_catalogue_row(index) for index in range(5_000)],
     }
     missing = _collection_fields() - set(populated)
     assert not missing, (
@@ -1059,4 +1121,185 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
             "the frame could not be read"
         )
     finally:
+        registrant.close()
+
+
+def test_the_loop_goal_is_clipped_where_it_enters_the_state() -> None:
+    """`goal` is bounded by the producer, not merely by the fixture above.
+
+    The frame guard asserted against a 2,000-char goal while nothing enforced
+    2,000: `GoalLoop.start` took the slash argument verbatim, bounded only by
+    the desktop route's `max_length=200_000`. The guard was therefore testing a
+    limit that did not exist, and an oversized attach frame is a DROPPED LINE --
+    a session that cannot be attached to (review round 2, MINOR-1).
+    """
+    import asyncio
+
+    from local_operator.session.goal_loop import GoalLoop
+
+    async def start_a_huge_goal() -> dict[str, object]:
+        async def never_runs(_text: str) -> str:
+            # The loop is cancelled before a turn completes; this exists to
+            # satisfy the judge signature, not to be called.
+            raise AssertionError("the loop should not reach its judge")
+
+        loop = GoalLoop(
+            prompt=lambda _text: asyncio.sleep(0),
+            judge=never_runs,
+            abort=lambda: None,
+            changed=lambda _state: None,
+        )
+        # The largest value the ROUTE accepts, which is what the producer must
+        # defend against -- two orders of magnitude past the guard's fixture.
+        state = loop.start("G" * 200_000, "")
+        await loop.cancel()
+        return state
+
+    state = asyncio.run(start_a_huge_goal())
+    assert len(str(state["goal"])) == LOOP_GOAL_CHARS
+
+
+def _catalogue_frame(rows: int, jobs: int = 0) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(frame, snapshot)`` for a session offering ``rows`` models."""
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        jobs=_jobs(jobs, 50) if jobs else [],
+        model_catalogue=[_catalogue_row(index) for index in range(rows)],
+    )
+    store = FrontendStateStore(state)
+    payload = sync_wire_payload(store.subscribe(lambda _u: None).sync)
+    return {"op": "frontend_sync", "data": payload}, payload["snapshot"]
+
+
+def test_a_real_providers_catalogue_rides_the_wire_whole() -> None:
+    """The bound must not cost the picker models a provider actually lists.
+
+    The reason this file's guard cannot be satisfied with a flat cap. Sizing a
+    constant cap against the 200-child worst case below yields ~241 rows, which
+    would hide two thirds of a real provider's list to make a fixture pass —
+    the same defect as trimming the fixture, one level down. So the budget is
+    residual, and this is the half that keeps it honest: an ordinary session
+    (the deepest roster observed on the reference machine is 19) sends every
+    row, flag clear, at both a real provider's ~600 and the 1,410 one QA
+    backend published.
+    """
+    for rows in (600, 1_410):
+        frame, snapshot = _catalogue_frame(rows, jobs=19)
+        assert len(snapshot["model_catalogue"]) == rows, rows
+        assert snapshot["model_catalogue_truncated"] is False, rows
+        assert _line_bytes(frame) < _MAX_LINE_BYTES, rows
+
+
+def test_a_catalogue_too_large_for_the_frame_is_clipped_and_says_so() -> None:
+    """Clipping is bounded, ordered, and never silent.
+
+    A short list that claims to be complete is the failure the flag exists for:
+    the picker would say "these are your models" while omitting hundreds, and
+    the user would conclude a model they can really switch to does not exist.
+    """
+    frame, snapshot = _catalogue_frame(5_000, jobs=200)
+    kept = snapshot["model_catalogue"]
+    assert _line_bytes(frame) < _MAX_LINE_BYTES
+    assert len(kept) < 5_000
+    assert snapshot["model_catalogue_truncated"] is True
+    # A PREFIX in the owner's order, not an arbitrary slice: that order is the
+    # one the picker renders, so the rows kept are the most relevant ones.
+    assert kept == [_catalogue_row(index) for index in range(len(kept))]
+    # Never emptied. An empty picker claims the session can switch to nothing,
+    # which is the same undetectable lie as a silently short list.
+    assert len(kept) >= MODEL_CATALOGUE_FLOOR_ROWS
+
+
+def test_an_untruncated_catalogue_leaves_the_flag_alone() -> None:
+    """The flag describes the list that SHIPPED, so it stays false when whole."""
+    _frame, snapshot = _catalogue_frame(10)
+    assert snapshot["model_catalogue"] and snapshot["model_catalogue_truncated"] is False
+
+
+def test_an_oversized_frame_does_not_call_a_complete_catalogue_partial() -> None:
+    """An oversized frame is not evidence that the catalogue was clipped.
+
+    When the overflow comes from other fields and the catalogue already sits at
+    or below :data:`MODEL_CATALOGUE_FLOOR_ROWS`, the search keeps every row. The
+    flag is set before the search so each measurement pays for the key that
+    ships, so without withdrawing it the reader would be told models are missing
+    when none are -- the same lie as a silently short list, inverted, sending
+    the user hunting for a model that was never omitted.
+    """
+    # The overflow has to come from a field the wire does NOT budget, or the
+    # branch under test is never entered: the roster is text-budgeted, so even
+    # 800 jobs reach only ~519 KB. Todos are unbounded, which is also how a
+    # real session gets here.
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        todos=[
+            TodoPhaseState(
+                name="p" * 200,
+                items=[TodoItemState(text="t" * 300) for _ in range(6)],
+            )
+            for _ in range(600)
+        ],
+        model_catalogue=[_catalogue_row(index) for index in range(MODEL_CATALOGUE_FLOOR_ROWS)],
+    )
+    store = FrontendStateStore(state)
+    payload = sync_wire_payload(store.subscribe(lambda _update: None).sync)
+    snapshot = payload["snapshot"]
+
+    # The fixture must actually overflow, or this test proves nothing.
+    frame_bytes = len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
+    assert frame_bytes > _MODEL_CATALOGUE_LINE_LIMIT, frame_bytes
+
+    assert len(snapshot["model_catalogue"]) == MODEL_CATALOGUE_FLOOR_ROWS
+    assert snapshot.get("model_catalogue_truncated", False) is False
+
+
+def test_the_catalogue_budget_tracks_the_socket_line_limit() -> None:
+    """The mirrored limit must equal the reader's, or the budget is fiction.
+
+    ``frontend_state`` cannot import ``runtime.server`` (server imports it), so
+    the limit is mirrored. This is the pin that keeps the copy honest.
+    """
+    assert _MODEL_CATALOGUE_LINE_LIMIT == _MAX_LINE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end over a real socket: a huge catalogue attaches, and says it clipped.
+
+    The serialization tests above measure the frame; this one proves the claim
+    that matters — that a viewer can actually CONNECT to an owner whose model
+    catalogue would otherwise overflow the control socket's line. Before the
+    wire bound this frame was silently dropped by the reader, so the connect
+    timed out and degraded to a cold session (the failure mode
+    ``oversized_frame_report`` exists to explain).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    handle._frontend.mutate(
+        jobs=_jobs(200, 500),
+        model_catalogue=[_catalogue_row(index) for index in range(5_000)],
+    )
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        # The attach completing at all is the assertion.
+        catalogue = remote.frontend_state.model_catalogue
+        assert 0 < len(catalogue) < 5_000
+        assert remote.frontend_state.model_catalogue_truncated is True
+        # The rows that survived are usable, in the owner's own order.
+        assert catalogue[0] == _catalogue_row(0)
+        assert remote.owner_model_catalogue()[0]["model_id"] == _catalogue_row(0)["model_id"]
+    finally:
+        if remote is not None:
+            await remote.dispose()
         registrant.close()

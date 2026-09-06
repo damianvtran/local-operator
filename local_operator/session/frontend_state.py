@@ -133,6 +133,51 @@ JOB_ERROR_WIRE_CHARS = 2_000
 JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
 JOB_TEXT_FLOOR_CHARS = 200
 
+#: Smallest catalogue the wire will clip to, however little the frame has left.
+#:
+#: ``model_catalogue`` is the same shape as the job text above — one row per
+#: offerable model, bounded by "whatever the provider lists" rather than by
+#: anything in this process — but it CANNOT take the same fixed budget, and the
+#: arithmetic is worth recording because the obvious fix is the wrong one.
+#:
+#: A production row is 11 keys and ~267 B (see :meth:`refresh_model_catalogue`).
+#: Real providers already list ~600 models and one QA backend published 1,410,
+#: so honouring the real catalogue needs ~392 KB. But the frame guard's
+#: pathological session (a 200-child roster, every collection field maxed) is
+#: already ~981 KB with an EMPTY catalogue, leaving only ~67 KB of the 1 MiB
+#: socket line — about 241 rows. No constant satisfies both: a budget big
+#: enough for a real provider overflows that frame, and one small enough to fit
+#: it hides two thirds of OpenRouter from the picker to satisfy a fixture.
+#:
+#: So the budget is RESIDUAL rather than constant: the catalogue is measured
+#: against what the socket line actually has left once every other field has
+#: been bounded, which is the only quantity that answers both cases. An
+#: ordinary session — the deepest roster ever observed on the reference machine
+#: is 19, and 1,410 models there serialize to ~442 KB against a 1 MiB cap —
+#: has hundreds of kilobytes spare and is never touched. Only the pathological
+#: combination clips, which is the case the socket cannot carry anyway.
+#:
+#: Clipping keeps the FIRST rows in the owner's existing sort order (best/most
+#: relevant first, the order the picker already renders) rather than dropping
+#: from the middle, and sets ``model_catalogue_truncated`` so the reader can
+#: say the list is partial instead of presenting it as the whole set.
+#:
+#: The floor is what stops a frame that is over budget for OTHER reasons from
+#: emptying the picker: an empty catalogue reads as "this session can switch to
+#: nothing", which is a lie the reader cannot detect, exactly the reasoning
+#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` gives for never dropping a job row.
+MODEL_CATALOGUE_FLOOR_ROWS = 50
+
+#: The control socket's line limit, mirrored rather than imported.
+#:
+#: ``runtime.server`` imports THIS module (``FRONTEND_CAPABILITY``), so
+#: importing ``_MAX_LINE_BYTES`` back would close a cycle. The value is pinned
+#: to the reader's by ``test_the_catalogue_budget_tracks_the_socket_line_limit``
+#: — the same "mirror it and pin it" discipline ``settings_io`` uses for
+#: ``tools.builtin.BASH_SHELL_PATH``, and for the same reason: the consumer
+#: must stay cheap to import.
+_MODEL_CATALOGUE_LINE_LIMIT = 1 << 20
+
 #: Wire bounds for the launch-row reconciliation identities (see
 #: :func:`_wire_launch_prompts`).
 #:
@@ -1331,6 +1376,7 @@ class FrontendSessionState(BaseModel):
     wakes: list[WakeState] = Field(default_factory=list)
     mcp_servers: list[McpServerState] = Field(default_factory=list)
     mcp_startup: dict[str, Any] | None = None
+    loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
     # The owner's provider-catalogue rows, so an attached terminal's bare
@@ -1340,6 +1386,17 @@ class FrontendSessionState(BaseModel):
     # (non-aggregator) rows; a follower's current model and its own live
     # refresh stay authoritative for their own rows.
     model_catalogue: list[dict[str, Any]] = Field(default_factory=list)
+    #: True when the frame could not carry every catalogue row and
+    #: ``model_catalogue`` is a prefix of the owner's list rather than all of
+    #: it (see :data:`MODEL_CATALOGUE_FLOOR_ROWS`).
+    #:
+    #: Set at the WIRE boundary, not at accumulation: the owner's state holds
+    #: the whole catalogue and only a frame that cannot fit clips, so this
+    #: describes the copy the reader was actually sent. A reader that shows a
+    #: clipped list as if it were complete is the failure this exists to
+    #: prevent — the picker would say "these are your models" while silently
+    #: omitting hundreds of them.
+    model_catalogue_truncated: bool = False
     history_cursor: str | None = None
     attachment_root: str | None = None
     # Durable receipts are independent of owner epoch and pending action gates.
@@ -1546,7 +1603,81 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             for job in jobs:
                 if isinstance(job, dict):
                     _drop_absent_launch_fields_in_place(job)
+        # LAST, after every other field has been bounded: this budget is what
+        # the socket line has LEFT, so it can only be measured once nothing
+        # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
+        # catalogue takes a residual budget where jobs take a fixed one.
+        _bound_model_catalogue_in_place(payload, snapshot)
     return payload
+
+
+def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Clip ``model_catalogue`` to whatever the frame has left, honestly.
+
+    Measures the frame as it will actually be sent and spends the remainder on
+    catalogue rows, so an ordinary session keeps every model and only a frame
+    that could not be transmitted at all is clipped. See
+    :data:`MODEL_CATALOGUE_FLOOR_ROWS` for the arithmetic and for why this
+    budget is residual rather than a constant like the job-text one.
+
+    The flag is set BEFORE the search so every measurement pays for the key
+    that actually ships, then CLEARED again when the search kept every row --
+    clearing can only shrink the line, so a frame that fit with the flag still
+    fits without it. What the reader sees is therefore true in both
+    directions: ``model_catalogue_truncated`` is set exactly when rows were
+    dropped. A silently short catalogue is the failure mode this closes, and a
+    complete list that claims to be partial is the same lie inverted -- it
+    sends the user hunting for a model that was never omitted.
+    """
+    rows = snapshot.get("model_catalogue")
+    if not isinstance(rows, list) or not rows:
+        return
+    # The whole frame is measured as it will actually be written, rather than
+    # summing per-row estimates against a budget. Estimating was tried and was
+    # quietly wrong by 22 bytes on a full frame: the envelope, the flag's own
+    # key and JSON's separators are all paid for by the LINE, not by the rows,
+    # so any arithmetic that reconstructs the total from its parts is a second
+    # model of the serializer that drifts from the real one. The size of the
+    # thing being sent is the only quantity the socket cares about.
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    # Binary search for the longest prefix that fits. The owner's order is the
+    # picker's order, so a prefix keeps the most relevant rows rather than an
+    # arbitrary slice, and the flag below stops the short list from reading as
+    # a complete one (MODEL_CATALOGUE_FLOOR_ROWS).
+    #
+    # O(log n) serializations of a frame that is already ~1 MB, on the ONLY
+    # path that overflows: an ordinary session returns above without ever
+    # serializing twice.
+    snapshot["model_catalogue_truncated"] = True
+    low, high = MODEL_CATALOGUE_FLOOR_ROWS, len(rows)
+    while low < high:
+        middle = (low + high + 1) // 2
+        snapshot["model_catalogue"] = rows[:middle]
+        if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+            low = middle
+        else:
+            high = middle - 1
+    # The floor wins even when it does not fit: an empty picker claims the
+    # session can switch to nothing, which is a lie the reader cannot detect,
+    # and a frame this large is unsendable for reasons the catalogue cannot fix.
+    snapshot["model_catalogue"] = rows[:low]
+    # An oversized frame does not imply a clipped catalogue. When the overflow
+    # comes from other fields and the catalogue is already at or below the
+    # floor, the search keeps every row -- and the flag set above would then
+    # tell the reader models are missing when none are. Withdraw it.
+    if low >= len(rows):
+        snapshot.pop("model_catalogue_truncated", None)
+
+
+def _frame_line_bytes(payload: dict[str, Any]) -> int:
+    """Bytes the writer will put on the wire for this payload, delimiter included.
+
+    Mirrors the transport exactly — default ``json.dumps`` separators plus the
+    newline the writer appends — because a budget measured any other way is a
+    budget for a line nobody sends.
+    """
+    return len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
 
 
 def _bound_job_text_in_place(job: dict[str, Any], *, share: int) -> None:

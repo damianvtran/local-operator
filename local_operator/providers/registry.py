@@ -127,6 +127,20 @@ class ProviderDefinition:
             object.__setattr__(self, "requires_paste_prompt", True)
 
     @property
+    def login_kind(self) -> str | None:
+        """The flow a host should offer, derived from the callable that owns it.
+
+        A required paste is not necessarily an API-key-only login: QwenCloud
+        collects a key and then runs device authorization. Keeping the marker
+        on the key factory prevents desktop clients from guessing by provider.
+        """
+        if self.login is None:
+            return None
+        if getattr(self.login, "__lo_api_key_login__", False):
+            return "api_key"
+        return "browser" if self.callback_port is not None else "device"
+
+    @property
     def paste_prompt_required(self) -> bool:
         """Whether a host MUST attach ``on_manual_code_input`` to log in.
 
@@ -252,6 +266,7 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
         return key
 
     setattr(login, PASTE_PROMPT_ATTR, True)
+    setattr(login, "__lo_api_key_login__", True)
     return login
 
 

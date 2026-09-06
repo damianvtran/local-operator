@@ -209,10 +209,15 @@ class RemoteSession:
         config_dir: Path,
         session_id: str,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
         self._takeover_factory = takeover_factory
+        self._surface = surface
+        self._desktop_visible = False
+        self._desktop_can_notify = False
+        self._desktop_seen = 0.0
         self._client: AttachClient | None = None
         #: The pid of the runtime this viewer is dialed into, ``None`` while
         #: cold or between owners. Read by the TUI's startup-cleanup notice to
@@ -232,7 +237,12 @@ class RemoteSession:
         #: process must never take it); left False for the legacy attach path,
         #: whose contract is still "recover the conversation into this
         #: process" and whose tests assert exactly that.
-        self._can_go_cold = False
+        #:
+        #: The DESKTOP viewer takes the viewer contract too: its host survives
+        #: the runtime and re-dials, so owner loss must leave it unbound rather
+        #: than dragging the lease into a process the user cannot see. Every
+        #: other surface keeps the legacy attach contract above.
+        self._can_go_cold = surface == "desktop"
         #: The BUILD the runtime on the other end is running, read off its
         #: discovery record at dial. ``""`` on a facade that has never bound,
         #: and on one bound to a runtime older than the field — the TUI treats
@@ -476,6 +486,7 @@ class RemoteSession:
         *,
         config_dir: Path,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> "RemoteSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
@@ -485,6 +496,7 @@ class RemoteSession:
             config_dir=config_dir,
             session_id=session_id,
             takeover_factory=takeover_factory,
+            surface=surface,
         )
         await self._dial(record)
         try:
@@ -508,6 +520,7 @@ class RemoteSession:
         config_dir: Path,
         cwd: str,
         takeover_factory: Callable[[], Any],
+        surface: str = "terminal",
     ) -> "RemoteSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -529,6 +542,7 @@ class RemoteSession:
             config_dir=config_dir,
             session_id=session_id,
             takeover_factory=takeover_factory,
+            surface=surface,
         )
         self._cwd = cwd
         self._can_go_cold = True
@@ -977,6 +991,86 @@ class RemoteSession:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
 
+    async def attach_existing(self) -> bool:
+        """Attach if an owner exists, without turning a history read into work.
+
+        Desktop read/subscription requests use the cold viewer's recovery policy
+        even when an owner is already live: losing that owner must never move
+        execution into the HTTP worker or start a replacement just for a reader.
+        """
+        from local_operator.mobile.attach_client import find_owner_record
+
+        async with self._bind_lock:
+            if self._disposed or not self.is_cold:
+                return not self.is_cold
+            record, _ = await asyncio.to_thread(
+                find_owner_record, self._config_dir, self._session_id
+            )
+            if record is None or self._disposed:
+                return False
+            await self._bind_to(record)
+            return True
+
+    async def admit_prompt(
+        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+    ) -> tuple[str, bool]:
+        """Return the owner's admission receipt, not a fictitious completed turn.
+
+        Retrying the caller's stable ID crosses the existing durable reservation
+        boundary. Unlike submit_response this does not wait for model completion,
+        so an HTTP disconnect cannot cancel work the owner already accepted.
+        """
+        await self._ensure_bound()
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError(self._unavailable_reason())
+        return await client.request_ack_with_duplicate(
+            "steer" if steer else "prompt", text=text, images=images, command_id=command_id
+        )
+
+    async def bind_runtime(self) -> None:
+        """Bind a viewer before an explicitly requested owner control operation."""
+        await self._ensure_bound()
+
+    async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+        """Update the existing attach lease; a proxy socket alone is not a human."""
+        if self._surface != "desktop":
+            raise ValueError("only a desktop viewer can renew a desktop lease")
+        self._desktop_visible = visible
+        self._desktop_can_notify = can_notify
+        self._desktop_seen = time.monotonic()
+        if self._client is not None and self._client.connected:
+            await self._client.desktop_watch(visible=visible, can_notify=can_notify)
+
+    async def answer_gate(
+        self,
+        request_id: str,
+        *,
+        value: str | None = None,
+        approved: bool | None = None,
+        question_index: int | None = None,
+    ) -> str:
+        """Answer the current owner gate without a terminal-local prompt task.
+
+        The owner validates again across the socket. This early identity check
+        prevents a stale desktop popup from accidentally answering a newer gate
+        while a reconnect or a multi-question ask advances in another window.
+        """
+        pending = self.frontend_state.pending_gate
+        client = self._client
+        if (
+            pending is None
+            or pending.request_id != request_id
+            or client is None
+            or not client.connected
+        ):
+            raise ValueError("this question is no longer pending")
+        if pending.kind == "approval" and type(approved) is bool:
+            return await client.approval_answer(request_id, approved)
+        if pending.kind == "ask" and value is not None and question_index == pending.question_index:
+            return await client.ask_answer(request_id, value, question_index=question_index)
+        raise ValueError("the answer does not match the current question")
+
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
@@ -1001,14 +1095,34 @@ class RemoteSession:
             if not self.is_cold or self._disposed or self._recovering:
                 return
             from local_operator.mobile.attach_client import find_owner_record
-            from local_operator.session.runtime.launch import WarmErrand, engage_runtime
-
-            await engage_runtime(
-                self._session_id,
-                self._cwd,
-                WarmErrand(),
-                config_dir=self._config_dir,
+            from local_operator.session.runtime.launch import (
+                ActionableConnectionError,
+                RuntimeStartupError,
+                WarmErrand,
+                engage_runtime,
             )
+
+            try:
+                await engage_runtime(
+                    self._session_id,
+                    self._cwd,
+                    WarmErrand(),
+                    config_dir=self._config_dir,
+                )
+            except RuntimeStartupError as error:
+                # engage_runtime now fails FAST once no candidate can start,
+                # carrying the child's own cause. Re-raised as ConnectionError
+                # so it takes the existing owner-unavailable path, but keeping
+                # the vetted user-facing sentence when there is one, instead of
+                # a generic timeout nobody can act on (QA Q1).
+                logger.warning("engage failed for %s: %s", self._session_id, error)
+                # The vetted sentence rides a TYPE, so a relay can echo it
+                # without having to guess from the text which messages are safe
+                # to show. Anything unvetted stays a plain ConnectionError and
+                # gets the generic sentence at the surface.
+                if error.actionable:
+                    raise ActionableConnectionError(error.actionable) from error
+                raise ConnectionError(self._unavailable_reason()) from error
             # Re-checked AFTER the engage, which is the long await here (a
             # spawn plus up to ~2 s of construction). The TUI engages at mount
             # now, so `/resume` or `/new` typed in that first second disposes
@@ -1145,6 +1259,7 @@ class RemoteSession:
             events=True,
             on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
+            surface=self._surface,
             # THE full-TUI viewer is the client that renders action-carrying
             # receipts: ``_render_authoritative_slash`` submits their
             # ``request`` as a user turn. Declaring them is what tells the
@@ -1177,6 +1292,21 @@ class RemoteSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        if self._surface == "desktop":
+            from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
+
+            # Reconnecting the proxy must not resurrect a renderer's expired
+            # visibility/notification lease. Only another host heartbeat may.
+            live = time.monotonic() - self._desktop_seen < DESKTOP_WATCH_LEASE_S
+            try:
+                await client.desktop_watch(
+                    visible=live and self._desktop_visible,
+                    can_notify=live and self._desktop_can_notify,
+                )
+            except BaseException:
+                client.close()
+                self._client = None
+                raise
 
     async def _await_frontend(self) -> FrontendSync:
         future = self._frontend_future

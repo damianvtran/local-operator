@@ -266,6 +266,25 @@ NAME_SCAN_CHARS = 64_000
 #: pasted body.
 _FRAGMENT_HEAD_CHARS = 400
 
+#: BYTES of a transcript's tail read when previewing its last reply.
+#:
+#: Bytes, not characters, because this seeks from the END of the file, and a
+#: byte offset is the only thing ``seek`` accepts. The window is decoded with
+#: ``errors="replace"`` and its first (probably partial) line dropped, so
+#: landing mid-codepoint is harmless.
+#:
+#: Sized for the same reason :data:`NAME_SCAN_CHARS` is: the preview is a
+#: convenience shown on a list row, and one pathological entry — a pasted file,
+#: a base64 image — must not turn painting that list into reading megabytes per
+#: session. 64 KiB comfortably holds the last several entries of an ordinary
+#: transcript while bounding the pathological one.
+PREVIEW_SCAN_BYTES = 64_000
+
+#: Characters of the previewed reply kept. A list row shows one line; anything
+#: past this is cut by the surface anyway, and carrying more over the wire for
+#: every row in the list is pure weight.
+PREVIEW_MAX_CHARS = 200
+
 #: The marker that says a fragment is a user message, and the first COMPLETE
 #: JSON string value of a ``text`` key. Both tolerate whitespace around the
 #: colon: the session writer emits compact JSON, but a transcript written by
@@ -1547,6 +1566,68 @@ def _text_from_fragment(fragment: str) -> str:
         return json.loads(f'"{match.group(1)}"')
     except ValueError:
         return ""
+
+
+def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) -> str:
+    """The session's most recent ASSISTANT reply, condensed for a list row.
+
+    The conversation-list counterpart to :func:`session_name`: the name says
+    what a conversation is about, the preview says where it got to.
+
+    Canonical sessions keep their conversation in ``transcript.jsonl`` and never
+    write the legacy agent record's ``last_message`` field, so a list rendering
+    that field showed "No messages yet" against conversations with a full
+    transcript on disk — a false statement about the user's own data, sitting
+    inches from the timestamp of the very message it denied (design D19).
+    Reading the transcript makes the durable conversation the ONE authority for
+    both facts.
+
+    Bounded like the name scan and tolerant for the same reasons, but it reads
+    the TAIL rather than the head: the newest entry is the last line. A
+    transcript shorter than the window is read whole; a longer one is seeked to
+    its final :data:`PREVIEW_SCAN_BYTES`, whose first line is dropped because a
+    seek to a byte offset lands mid-line.
+
+    An assistant entry with no text — a turn that only made tool calls — is
+    skipped rather than previewed as an empty string, so the row shows the last
+    thing the model actually SAID. Returns ``""`` when the transcript is
+    missing, unreadable, or contains no assistant text, and the caller renders
+    its own empty state.
+    """
+    transcript = session_dir / TRANSCRIPT_NAME
+    try:
+        size = transcript.stat().st_size
+        with transcript.open("rb") as handle:
+            if size > PREVIEW_SCAN_BYTES:
+                handle.seek(size - PREVIEW_SCAN_BYTES)
+                window = handle.read()
+                # The seek landed at an arbitrary byte, so the first line is a
+                # fragment. Unlike the name scan there is nothing to recover
+                # from it: the newest entry is at the other end.
+                _, _, window = window.partition(b"\n")
+            else:
+                window = handle.read()
+    except OSError:
+        return ""
+    for line in reversed(window.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            # Normal for a live session: the writer appends and we may read
+            # mid-write, so the final line can be half-written.
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        text = _first_text(payload.get("content"))
+        if text.strip():
+            return _condense(text, max_chars)
+    return ""
 
 
 def _first_text(content: object) -> str:

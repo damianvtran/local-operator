@@ -1,4 +1,6 @@
-from fastapi import Request, WebSocket
+import os
+
+from fastapi import Depends, Request, WebSocket
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients.radient import RadientClient
@@ -6,6 +8,7 @@ from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
+from local_operator.providers.auth_store import AuthStore
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
@@ -52,19 +55,38 @@ def get_scheduler_service(request: Request) -> SchedulerService:
     return request.app.state.scheduler_service
 
 
-def get_radient_client(request: Request) -> RadientClient:
-    """Get the Radient API client, configured with API key and base URL."""
+async def get_provider_auth_store(
+    request: Request,
+    manager: CredentialManager = Depends(get_credential_manager),
+) -> AuthStore:
+    # The managers are DECLARED rather than read off `app.state` inside the
+    # chain below. `dependency_overrides` only substitutes what a signature
+    # declares, and this dependency sits between the models routes and
+    # `get_desktop_auth`, so an override supplied by a caller that mounts one
+    # router in isolation was silently skipped on the way through.
+    from local_operator.server.desktop import require_desktop
+    from local_operator.server.routes.auth import get_desktop_auth
+
+    # A central login must not become usable through an unprotected legacy
+    # endpoint merely because that endpoint historically accepted local keys.
+    if os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"):
+        require_desktop(request)
+    # Passed explicitly: `get_desktop_auth` is invoked as a plain function here,
+    # so its own `Depends(...)` defaults would arrive as `Depends` objects
+    # rather than resolving themselves.
+    return (await get_desktop_auth(request, manager=manager)).store
+
+
+async def get_radient_client(request: Request) -> RadientClient:
+    """Use canonical credential precedence without duplicating a refresh store."""
+    from local_operator.providers.radient_credentials import resolve_radient_credential
+
     credential_manager = get_credential_manager(request)
     env_config = get_env_config(request)
-
-    api_key = None
-    try:
-        api_key = credential_manager.get_credential("RADIENT_API_KEY")
-    except KeyError:
-        # Key not found, RadientClient will be initialized without it.
-        # Operations requiring the key will fail gracefully within the client.
-        pass
-
+    store = await get_provider_auth_store(request)
+    api_key = await resolve_radient_credential(
+        credential_manager, env_config.radient_api_base_url, store=store
+    )
     return RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
 
 

@@ -30,13 +30,18 @@ from local_operator.model.registry import (
     qwen_models,
     xai_models,
 )
+from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.local import (
     LOCAL_PROVIDER_IDS,
     local_api_key,
     local_model_info,
     resolve_base_url,
 )
-from local_operator.server.dependencies import get_credential_manager, get_env_config
+from local_operator.server.dependencies import (
+    get_credential_manager,
+    get_env_config,
+    get_provider_auth_store,
+)
 from local_operator.server.models.schemas import (
     CRUDResponse,
     ModelEntry,
@@ -180,6 +185,7 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
 )
 async def list_models(
     credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
     query_params: ModelListQueryParams = Depends(),
     env_config: EnvConfig = Depends(get_env_config),
 ) -> CRUDResponse[ModelListResponse]:
@@ -393,7 +399,13 @@ async def list_models(
                         pass
             elif provider_detail.id == "radient":
                 # Then try to get Radient models if API key is configured
-                api_key = credential_manager.get_credential("RADIENT_API_KEY")
+                from local_operator.providers.radient_credentials import (
+                    resolve_radient_credential,
+                )
+
+                api_key = await resolve_radient_credential(
+                    credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+                )
                 if api_key:
                     try:
                         # Create the Radient client

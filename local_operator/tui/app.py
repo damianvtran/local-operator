@@ -26,7 +26,6 @@ import asyncio
 import inspect
 import logging
 import os
-import re
 import sys
 import time
 import uuid
@@ -109,12 +108,28 @@ from local_operator.mcp.verbs import _home_relative
 from local_operator.model.effort import next_effort
 from local_operator.session import naming
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
+
+# Shared loop semantics stay import-light for detached owners.
+from local_operator.session.goal_loop import (
+    _BOTCHED_COUNT_RE,
+    DEFAULT_LOOP_ITERATIONS,
+    LOOP_GOAL_PROMPT,
+    LOOP_JUDGE_PROMPT,
+    LOOP_PROMPT,
+    MAX_LOOP_ITERATIONS,
+    MAX_LOOP_JUDGE_FAILURES,
+    _parse_loop_verdict,
+)
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol
-from local_operator.slash_commands import PERSIST_HINT, SLASH_COMMANDS
+from local_operator.slash_commands import (
+    PERSIST_HINT,
+    SLASH_COMMANDS,
+    slash_command_for,
+)
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
 from local_operator.tui.events import (
@@ -469,34 +484,11 @@ _SUBAGENT_DOCK_ROWS = 10
 _BAND_SETTLE_PASSES = 3
 
 
-def slash_command_for(text: str) -> SlashCommand | None:
-    """The registry entry a typed line invokes, or ``None`` if nothing matches.
-
-    Resolves through :attr:`SlashCommand.names`, so an alias answers with the
-    same entry as its primary name — ``/quit`` must not get a different echo
-    policy from ``/exit`` just because it was spelled the other way.
-
-    Matching is case-insensitive because registry names are lowercase and this
-    is the ONE resolver both the echo permission and
-    :meth:`OperatorApp._run_slash_command`'s dispatch read. Only one function
-    ever decides what a typed word means, so ``/Usage`` cannot echo as one
-    command and run as another.
-    """
-    token = text.split(maxsplit=1)[0].lower() if text.strip() else ""
-    if not token.startswith("/"):
-        return None
-    name = token[1:]
-    return next((entry for entry in SLASH_COMMANDS if name in entry.names), None)
-
-
-#: Recognises a `/loop` argument that is number-SHAPED but not a clean integer
-#: — a fat-fingered count like `3e`, `5x`, `3.5`, `12.`, `1e3`. Deliberately
-#: NARROW: a single whitespace-free token that starts with a digit and contains
-#: only digits, letters, or a dot. A real goal written in words ("2fa the login
-#: flow") has spaces and so is never caught; a clean integer is parsed before
-#: this is ever consulted. The point is that a mistyped count must not silently
-#: launch an unbounded, judge-gated loop toward the literal typo as its goal.
-_BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")
+# The registry, its policy commentary and `slash_command_for` live in
+# `local_operator.slash_commands`, which the server front ends import too; both
+# are re-exported above so existing `tui.app` callers are unaffected.
+# `_BOTCHED_COUNT_RE` moved the same way, to `session.goal_loop`, so a detached
+# owner parses a `/loop` count identically without importing Textual.
 
 
 #: Longest goal string echoed into the launch notice. Independent of the
@@ -523,6 +515,37 @@ def _loop_goal_label(goal: str) -> str:
     return cleaned
 
 
+def _loop_status_line(data: dict[str, Any]) -> str:
+    """One line describing an OWNER-side loop, for a viewer that did not run it.
+
+    A viewer's `/loop` executes on the owner and comes back as a block payload;
+    the local path narrates its own loop as it goes, and this is the equivalent
+    sentence for a terminal that only sees the result. Kept in the local path's
+    vocabulary ("loop <state> after N iteration(s)") so the two hosts do not
+    describe the same loop two different ways.
+
+    Both free-text values here (`goal`, and the judge's `reason`) originate off
+    this machine, so they go through `_loop_goal_label`: it strips control
+    sequences -- a `\\x1b[2J` arriving in a judge's explanation must not clear
+    the reader's terminal -- and collapses a multi-line answer to one line.
+    """
+    status = str(data.get("status") or "idle")
+    completed = data.get("completed")
+    completed_n = completed if isinstance(completed, int) else 0
+    head = {
+        "running": f"loop running: {completed_n} iteration(s) done",
+        "judging": f"loop judging after {completed_n} iteration(s)",
+        "achieved": f"loop achieved the goal after {completed_n} iteration(s)",
+        "completed": f"loop finished after {completed_n} iteration(s)",
+        "cancelled": f"loop cancelled after {completed_n} iteration(s)",
+        "interrupted": f"loop interrupted after {completed_n} iteration(s)",
+        "failed": f"loop stopped after {completed_n} iteration(s)",
+        "idle": "no loop is running",
+    }.get(status, f"loop {status} after {completed_n} iteration(s)")
+    reason = _loop_goal_label(str(data.get("reason") or ""))
+    return f"{head} — {reason}" if reason else head
+
+
 def _looks_like_botched_count(arg: str) -> bool:
     """Whether ``arg`` reads as a mistyped integer count rather than a goal.
 
@@ -536,85 +559,6 @@ def _looks_like_botched_count(arg: str) -> bool:
     if not token or " " in token or "\t" in token:
         return False
     return bool(_BOTCHED_COUNT_RE.fullmatch(token))
-
-
-#: Tokeniser for the negation check in `_parse_loop_verdict`. Splits the
-#: uppercased verdict payload into words made of letters, digits, and an
-#: internal apostrophe (straight or curly), so a whole-word negator is testable
-#: as a token rather than a substring — the fix for the `NOTHING`/`CANNOT`
-#: false-continue. `NOT_ACHIEVED` (with an underscore) survives as one token so
-#: the spec's compound negative reads as a single negator.
-_NEGATION_TOKEN_RE = re.compile(r"[A-Z0-9_]+(?:['\u2019][A-Z]+)?")
-
-
-def _parse_loop_verdict(text: str) -> tuple[bool | None, str]:
-    """Parse a goal-mode judge answer into ``(achieved, reason)``.
-
-    ``achieved`` is ``True`` (ACHIEVED), ``False`` (CONTINUE), or ``None`` when
-    no ``VERDICT:`` line is readable — which the caller treats as a fail-safe
-    CONTINUE plus a judge-failure strike, never as a release. A pure module-level
-    function so a unit test can hammer it with garbage without standing up the app.
-
-    Two robustness rules are load-bearing:
-
-    - ``CONTINUE`` is checked BEFORE ``ACHIEVED`` on the verdict payload, so a
-      "not achieved" style answer (or any line that names both tokens) reads as
-      continue, never as a false release. A false release is the one
-      trust-breaking error under the notify-once contract.
-    - Negation is matched at the TOKEN level, not as a substring. `NOT` is a
-      substring of ordinary words a model naturally writes on the verdict line
-      (`NOTHING`, `ANOTHER`, `CANNOT`, `NOTE`), and `N'T` of `CAN'T`/`DON'T`;
-      an unbounded substring scan turned `VERDICT: ACHIEVED, nothing else
-      remains` into a false CONTINUE, spinning the loop forever (goal mode has
-      no iteration ceiling and a readable CONTINUE resets the failure breaker).
-      So we split the payload into alphanumeric-plus-apostrophe tokens and only
-      treat a WHOLE-word negator (`NOT`, a contraction ending in `N'T`, or the
-      compound `NOT_ACHIEVED`) as flipping ACHIEVED to CONTINUE.
-
-    We do NOT infer a verdict from free prose: an answer with no ``VERDICT:``
-    line at all is a judge failure (``None``), not a guess.
-    """
-    reason = ""
-    achieved: bool | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        upper = stripped.upper()
-        if "VERDICT:" in upper:
-            payload = upper.split("VERDICT:", 1)[1]
-            # CONTINUE first: a stray "not achieved" must never read as achieved.
-            if "CONTINUE" in payload:
-                achieved = False
-            elif "ACHIEVED" in payload:
-                # Token-level negation check (see docstring): only a whole-word
-                # negator flips a genuine ACHIEVED to CONTINUE, so an ordinary
-                # word that merely CONTAINS "not"/"n't" (nothing, cannot, another)
-                # no longer causes an unbounded false-continue.
-                tokens = _NEGATION_TOKEN_RE.findall(payload)
-                # The contraction suffix is checked for BOTH apostrophe forms:
-                # the tokeniser accepts a curly apostrophe (U+2019), which most
-                # editors and phones autocorrect a straight one into, so
-                # `can't`/`can’t` must both count as a negator. Missing the curly
-                # form would let `VERDICT: ACHIEVED but can’t verify` read as a
-                # false RELEASE — the one trust-breaking outcome R2 closed.
-                negated = any(
-                    tok in ("NOT", "NOT_ACHIEVED") or tok.endswith(("N'T", "N\u2019T"))
-                    for tok in tokens
-                )
-                achieved = not negated
-            continue
-        # The first non-empty line after a readable verdict is the reason.
-        if achieved is not None and not reason:
-            reason = stripped
-    return achieved, reason
-
-
-#: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
-#: iteration, so it is bounded by construction — an unbounded "keep going"
-#: is how an agent burns a budget unattended.
-DEFAULT_LOOP_ITERATIONS = 3
-MAX_LOOP_ITERATIONS = 25
 
 
 def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
@@ -733,61 +677,6 @@ def _gate_timeout_notice(details: dict[str, Any]) -> str:
         )
     return f"waited {waited_text} for approval with nobody attached, then denied it — {subject}"
 
-
-#: The prompt each loop iteration submits. Deliberately references the
-#: standing goal (carried in the system prompt) rather than restating it, so
-#: the goal text is never duplicated into the conversation history.
-LOOP_PROMPT = (
-    "Continue working toward the standing goal. Make concrete progress with "
-    "the tools available, then briefly state what advanced and what remains. "
-    "If the goal is already fully met, say so plainly and stop."
-)
-
-#: The prompt each GOAL-mode iteration (`/loop <goal text>`) submits. Unlike
-#: `LOOP_PROMPT`, it EMBEDS the goal text directly rather than referencing "the
-#: standing goal": goal mode deliberately does not call `set_goal`, so the
-#: system prompt's volatile tail is untouched and there is no standing goal in
-#: the context to reference. The goal is user text, so we format the TEMPLATE
-#: with the goal as the argument (`str.format` on the template) — braces inside
-#: the goal are then opaque replacement values, never format directives.
-LOOP_GOAL_PROMPT = (
-    "Work toward this goal:\n\n{goal}\n\n"
-    "Make concrete progress with the tools available, then briefly state what "
-    "advanced and what remains. If the goal is already fully met, say so plainly."
-)
-
-#: The off-the-record judge prompt asked (via `complete_aside`) after each
-#: goal-mode turn settles. It forces a machine-parseable verdict on its own
-#: line. The two verdict tokens are lexically DISTINCT on purpose: `ACHIEVED`
-#: and `CONTINUE` share no prefix, so `_parse_loop_verdict` can tell them apart
-#: even when a model appends prose to the verdict line. The parser matches the
-#: tokens (and any negator) at the WORD level, not as substrings — a genuine
-#: `VERDICT: ACHIEVED, nothing remains` must not read as CONTINUE just because
-#: an ordinary word contains "not". Judge strictly: a false release notifies
-#: "done" when it is not, the one trust-breaking outcome under the notify-once
-#: contract, so the prompt biases to CONTINUE when unsure.
-LOOP_JUDGE_PROMPT = (
-    "You are judging whether a standing goal has been fully achieved, based on "
-    "the conversation above (the work done so far).\n\n"
-    "GOAL: {goal}\n\n"
-    "Answer with a single line, exactly one of:\n"
-    "  VERDICT: ACHIEVED\n"
-    "  VERDICT: CONTINUE\n"
-    "Then, on the next line, one short sentence of reason. Judge strictly: "
-    "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
-    "in progress. If unsure, answer CONTINUE. Answer in text only and do not "
-    "call any tool: this is a verdict on the conversation above, and a tool "
-    "call here is discarded unread."
-)
-
-#: Consecutive-judge-failure breaker for goal mode. There is deliberately NO
-#: hard iteration ceiling in goal mode (a healthy judge answering CONTINUE runs
-#: unbounded, by design — `/loop stop`/Esc are the user's escape), but a judge
-#: that never returns a READABLE verdict (provider error, or unparseable
-#: output) would otherwise spin forever with no way out but a manual stop. This
-#: ceiling is on consecutive judge MALFUNCTION, not on progress: it trips only
-#: after this many unreadable verdicts in a row, and resets on any readable one.
-MAX_LOOP_JUDGE_FAILURES = 3
 
 #: How often the band re-counts running background jobs. Nothing emits an
 #: event when a job settles, so the subagent segment either polls or goes
@@ -15256,6 +15145,26 @@ class OperatorApp(App[None]):
             if block_type == "agent_list":
                 self._append_block(self._agent_list_block(data.get("items") or []))
                 return
+            if block_type == "forked":
+                # The OWNER did the fork, so the viewer cannot narrate it the way
+                # the local path does (no snapshot worker ran here). What the
+                # reader needs is the same thing that path ends with: the new id
+                # and how to open it. Without this branch the block fell through
+                # to a `text`-only notice, and the owner sends no text with it --
+                # so `/fork` completed and the terminal said nothing at all.
+                fork_id = str(data.get("session_id") or "")
+                self._notice(
+                    (
+                        f"fork saved: {fork_id}. Open it with /resume {fork_id}"
+                        if fork_id
+                        else "fork saved"
+                    ),
+                    "info",
+                )
+                return
+            if block_type == "loop":
+                self._notice(_loop_status_line(data), "info")
+                return
         if text:
             notice_kind: NoticeKind = "warning" if style == "warning" else "info"
             if style == "error":
@@ -18077,8 +17986,47 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), self._footer_persist_hint()),
+            status=_status_line(
+                note,
+                _catalogue_status(statuses),
+                self._owner_catalogue_clipped_note(),
+                self._footer_persist_hint(),
+            ),
         )
+
+    def _owner_catalogue_clipped_note(self) -> str:
+        """Footer clause for an owner catalogue the attach frame could not carry.
+
+        A follower's picker offers the OWNER's rows, and the wire clips that
+        list when the frame would otherwise exceed the socket's line limit
+        (``frontend_state.MODEL_CATALOGUE_FLOOR_ROWS``). Without this clause the
+        clipped list renders exactly like a complete one, so a user hunting for
+        a model the owner really does offer would conclude it does not exist —
+        the same false-completeness failure the `stale list:` clause exists to
+        prevent, and the reason the wire sets a flag rather than clipping
+        silently.
+
+        Owner-side and older-owner cases are both silent: the flag is absent
+        (``getattr`` default) on a facade that has no frontend state and on an
+        owner running a build without the field, and an unclipped catalogue is
+        the overwhelmingly common case — a footer that always says something is
+        a footer nobody reads (``_catalogue_status``).
+        """
+        state = getattr(self._session, "frontend_state", None)
+        if not getattr(state, "model_catalogue_truncated", False):
+            return ""
+        # Parallel to `stale list:` and sized like it: the clause sits after the
+        # access note in the same budgeted footer, and it names the CONSEQUENCE
+        # (the list is incomplete) rather than the mechanism (a frame budget),
+        # which is the half a user hunting for a model needs.
+        #
+        # 26 cells, matching `stale list: anthropic, xai` — the sibling clause
+        # this slot was budgeted around (39 cells after the access note at 100
+        # columns). The fuller `partial list — some models not shown` measured
+        # 36 and fit at 100, but clipped mid-word to `some models no…` at 60,
+        # losing the negation and inverting the meaning at exactly the width
+        # where the reader most needs it whole.
+        return "partial list — not all models"
 
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).

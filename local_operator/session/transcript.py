@@ -271,7 +271,11 @@ class TranscriptPage:
 
 
 def read_transcript_page(
-    directory: str | Path, *, before_id: str | None = None, limit: int = 100
+    directory: str | Path,
+    *,
+    before_id: str | None = None,
+    through_id: str | None = None,
+    limit: int = 100,
 ) -> TranscriptPage:
     """Read a tail page, or the page immediately before ``before_id``.
 
@@ -283,13 +287,18 @@ def read_transcript_page(
     during replacement, return the current tail with ``reconciled=True`` so a
     reader can dedupe by stable ID instead of getting stuck on a stale cursor.
     """
+    # An inclusive upper boundary pairs a durable page with a previously
+    # captured frontend snapshot. Reading an unbounded tail here would fold
+    # messages from AFTER that snapshot into its replay watermark.
+    if before_id is not None and through_id is not None:
+        raise ValueError("choose before_id or through_id, not both")
     if limit < 1:
         raise ValueError("limit must be at least 1")
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
     retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
-    found = before_id is None
+    found = before_id is None and through_id is None
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -301,6 +310,13 @@ def read_transcript_page(
                 found = True
                 break
             retained.append(entry)
+            if through_id is not None and entry.id == through_id:
+                found = True
+                break
+    if through_id is not None and not found:
+        # A replaced file cannot satisfy this snapshot. Do not silently return
+        # a newer tail under an older state cursor; the caller must reconcile.
+        return TranscriptPage((), False, True)
     if before_id is not None and not found:
         tail = read_transcript_page(directory, limit=limit)
         return TranscriptPage(tail.entries, tail.has_more, True)
