@@ -27,9 +27,9 @@ work, runs tools, browses, and remembers what it did. Give it a team and it
 becomes a manager that delegates to tool-restricted workers, messages sibling
 sessions in other repos, schedules its own follow-ups, and picks those
 follow-ups back up after you close the terminal. Everything runs on your
-machine and asks before it writes or executes. It draws on every ChatGPT,
-Claude, Kimi, Grok, Z.AI, and Qwen login you already have, pooled and
-load-balanced and used with the prompt cache in mind. It is MIT licensed.
+machine, asks before it writes or executes, and is MIT licensed. It draws on
+every ChatGPT, Claude, Kimi, Grok, Z.AI, and Qwen login you already have,
+pooled, load-balanced, and used with the prompt cache in mind.
 
 <div align="center">
   <a href="#-quickstart">Quickstart</a> •
@@ -71,13 +71,13 @@ load-balanced and used with the prompt cache in mind. It is MIT licensed.
 
 ## ✨ Why Local Operator
 
-- **Agent organizations.** Roles are capability boundaries
-  (a `reviewer` loses the tools to edit what it reviews), specialists carry
-  their own standing instructions, and a team is a saved roster (a manager
-  plus members) with two short briefs: how the group works together and what
-  product it owns. Reuse the same roster on a different product by swapping
-  one brief. Nested teams show in the chart today; a manager delegating into
-  a nested team's manager is coming.
+- **Agent organizations with enforced roles.** Roles are capability
+  boundaries (a `reviewer` loses the tools to edit what it reviews),
+  specialists carry their own standing instructions, and a team is a saved
+  roster (a manager plus members) with two short briefs: how the group works
+  together and what product it owns. Reuse the same roster on a different
+  product by swapping one brief. Nested teams show in the chart today; a
+  manager delegating into a nested team's manager is coming.
 - **Agents that talk to each other.** A manager peeks at, questions, steers,
   pauses, and resumes its workers through `hub`; independent sessions in
   different repos message each other with `send`, choosing whether to leave a
@@ -98,11 +98,11 @@ load-balanced and used with the prompt cache in mind. It is MIT licensed.
   cache keeps hitting turn after turn: stale tool output is cleared without
   invalidating the cache, large contexts automatically get the longer
   Anthropic cache window, skills and MCP tools load only when used, and
-  agents wait for events instead of polling. A long session doesn't re-pay
-  for its history every few minutes.
+  agents wait for events instead of polling. The result: a long session
+  doesn't re-pay for its history every few minutes.
 - **Approval-gated by default.** Reads run; writes and shell commands show the
-  exact command and ask. `/approvals auto` or `--yolo` is how you opt out.
-  Every tool call leaves a visible receipt in the transcript.
+  exact command and ask. Opting out is an explicit act: `/approvals auto` or
+  `--yolo`. Every tool call leaves a visible receipt in the transcript.
 - **Reach beyond the terminal.** Watch and steer sessions from your phone,
   and drive the Chromium browser you already use, with your real logins,
   through the published browser extension.
@@ -139,14 +139,18 @@ Start [LM Studio](https://lmstudio.ai), load a chat model, and enable its
 server in the Developer tab; then `/login lmstudio` inside Local Operator
 picks the endpoint and model. `/login` also offers Ollama, vLLM, llama.cpp,
 and a generic OpenAI-compatible server. See the
-[local-provider guide](docs/LOCAL_PROVIDERS.md). The CLI form still works for a
-model installed in [Ollama](https://ollama.com/download):
+[local-provider guide](docs/LOCAL_PROVIDERS.md). The CLI form still works for
+a model installed in [Ollama](https://ollama.com/download):
 
 ```bash
 lop --hosting ollama --model qwen2.5:14b
 ```
 
 ## 🏢 Agent Organizations
+
+Three layers: subagents are the parallel workers, roles decide what each one
+is allowed to touch, and a team is a saved roster you can point at a different
+product.
 
 **Subagents.** Ask for parallel work and the agent fans it out into concurrent
 background workers, then keeps working while they run. The subagent dock shows
@@ -156,16 +160,17 @@ read its transcript and plan (the reader's keys and limits are in
 
 **Roles are capability boundaries.** A subagent launched as `reviewer` carries
 vetted review guidance *and loses the tools to edit code*. It can read and run
-tests but cannot alter what it reviews. A restricted role cannot enable new MCP
-tools either, and the restriction is inherited by everything it delegates to,
-at any depth. Packaged starters for `reviewer`, `coder`, `architect`,
-`manager`, `designer`, and `scout` ship in the package: `task(agent=…)` and
-`/team` use them even on a fresh install, and `agent install` copies one into
-your registry so you can edit it. `lop agents list` shows what's installed, so
-a fresh install prints "No agents found." You can also author your own **agent
-profiles**: reusable roles and named specialists with their own instruction
-sets, matched to tasks by semantic routing. When a profile gives bad guidance,
-you fix the profile once instead of every prompt that uses it.
+tests, but it has no way to alter what it reviews. A restricted role cannot
+enable new MCP tools either, and the restriction is inherited by everything
+it delegates to, at any depth. Packaged starters for `reviewer`, `coder`,
+`architect`, `manager`, `designer`, and `scout` ship in the package:
+`task(agent=…)` and `/team` use them even on a fresh install, and
+`agent install` copies one into your registry so you can edit it.
+`lop agents list` shows what's installed, so a fresh install prints "No agents
+found." You can also author your own **agent profiles**: reusable roles and
+named specialists with their own instruction sets, matched to tasks by
+semantic routing. When a profile gives bad guidance, you fix the profile once
+instead of every prompt that uses it.
 
 **Teams.** A saved roster (a manager plus members with counts) layered with
 two briefs the individual agents never hard-code: a *collaboration* brief (how
@@ -184,7 +189,7 @@ them). `lop teams list` is empty until you create one.
   <img src="./static/tui-team-command.png" alt="Sending a real request to a team: /team lopdev Can you implement a mobile relay functionality in lop using tailwind, shadcn" width="720">
 </p>
 
-Sending a request to a team is one line. `/team <name> <request>` makes the
+Sending a request to a team is one line: `/team <name> <request>` makes the
 current agent that roster's manager, which breaks the work down and puts the
 right roles on it. Agents and teams can also be managed from the CLI:
 
@@ -197,7 +202,7 @@ lop teams show lopdev
 
 ## 🔁 Cross-Agent Communication
 
-Two shapes of conversation, both on one machine with no cloud in the middle.
+Two shapes of conversation, one machine, no cloud in the middle.
 
 **Down the tree.** Every worker a session spawns is addressable through `hub`:
 `peek` reads the last few steps of its transcript without spending its
@@ -318,12 +323,11 @@ per account and a hop would re-pay to rebuild it.
 - **Accounts on one provider form a rotation pool.** New sessions start on
   the account with the most remaining quota, and concurrent sessions fan out
   across those accounts instead of herding onto one.
-- **Failover walks a cascade.** On a quota, auth, or 5xx
-  failure the request rotates to a sibling account first. Only when the pool
-  is spent does it walk your **model fallback chain**
-  (`retry.fallbackChains` in `config.yml`), backing off between attempts.
-  `/failovers` prints the cascade and marks which account is serving right
-  now.
+- **Failover follows a fixed order.** On a quota, auth, or 5xx failure the
+  request rotates to a sibling account first. Only when the pool is spent
+  does it walk your **model fallback chain** (`retry.fallbackChains` in
+  `config.yml`), backing off between attempts. `/failovers` prints the
+  cascade and marks which account is serving right now.
 - **Cache-aware stickiness.** A session prefers the account it started on,
   because the provider's prompt cache is per account and moving would rewrite
   the whole conversation prefix at cache-write price. With the default
@@ -333,9 +337,10 @@ per account and a hop would re-pay to rebuild it.
 - **Opt-in proactive switching.** `retry.usageAwareFallback` spends one
   lightweight quota request per user message to leave a provider *before* it
   fails, with `retry.usageReservePercent` (default 10) as the headroom floor.
-- **Reporting.** `/usage` shows each provider's quota windows and account
-  spend; `/accounts` lists every stored credential; `/session` reports the
-  current session's cost, cache, and request diagnostics.
+- **Everything is visible in-app.** `/usage` shows each provider's quota
+  windows and account spend; `/accounts` lists every stored credential;
+  `/session` reports the current session's cost, cache, and request
+  diagnostics.
 
 <p align="center">
   <img src="./static/tui-usage.png" alt="The /usage panel showing per-provider quota windows and account spend" width="720">
@@ -347,7 +352,7 @@ explains the routing in full, including how to change the order.
 ## 🧮 Built for Token and Cache Efficiency
 
 Long-running agents spend most of their tokens re-sending context, so the
-harness is built around the provider prompt cache:
+harness treats the provider prompt cache as a resource to be managed:
 
 - **A stable prefix.** The tools array is built in a deterministic order and
   rides in the same cache prefix as the system prompt, so the provider can
@@ -393,11 +398,12 @@ is about to run before anything touches your system:
   <img src="./static/tui-approval.png" alt="An approval prompt showing the exact shell command awaiting user confirmation" width="720">
 </p>
 
-Switching models is a picker rather than a config file. `/model` lists every
-model your signed-in providers offer, with fuzzy filtering. ChatGPT OAuth uses the
-account's supported maximum context by default while keeping the provider
-default visible; [context limits and the opt-out](docs/openai-context.md)
-explain how without changing your compaction settings.
+Switching models goes through a picker rather than a config file. `/model`
+lists every model your signed-in providers offer, with fuzzy filtering.
+ChatGPT OAuth uses the account's supported maximum context by default while
+keeping the provider default visible;
+[context limits and the opt-out](docs/openai-context.md) explain how without
+changing your compaction settings.
 
 <p align="center">
   <img src="./static/tui-model-picker.png" alt="The /model picker with a fuzzy filter applied, showing context length and pricing per model" width="720">
@@ -424,10 +430,10 @@ with its title and age:
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
 | `/update` | Install the latest version from PyPI and relaunch |
 | `/goal`, `/loop` | Set an objective, then iterate autonomously toward it |
-| `/btw` | Ask a side question off the record: it never joins the conversation |
+| `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
-| `/session` | Current-session recorded usage, combined cost, cache and request diagnostics |
+| `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics |
 | `/failovers` | The model cascade for this session, and which account is serving |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
@@ -456,12 +462,12 @@ with its title and age:
 
 ## 🔌 Providers
 
-Use any of these providers with the same harness. OAuth providers sign in
-through the browser and use your existing subscription; API-key providers
-prompt once and store the key locally. Local servers use the same model
-picker and can be configured in the app with `/login`, including endpoints
-and optional masked API tokens.
-See [Local and self-hosted providers](docs/LOCAL_PROVIDERS.md) for setup,
+Every provider below runs on the same harness and the same model picker.
+OAuth providers sign in through the browser and use your existing
+subscription; API-key providers prompt once and store the key locally. Local
+servers can be configured in the app with `/login`, including endpoints and
+optional masked API tokens. See
+[Local and self-hosted providers](docs/LOCAL_PROVIDERS.md) for setup,
 metadata overrides, desktop-app support, and server-specific limitations.
 
 | Provider | Access |
@@ -580,7 +586,7 @@ lop exec "long migration" --background   # detach with a log file
 lop exec "audit deps" --json             # one JSON line per event
 ```
 
-Exit code 0 on success, so it composes in a pipeline.
+Exit code 0 on success, so `lop exec` composes in a pipeline.
 
 **Server mode** exposes the agent as a FastAPI service (used by the optional
 [desktop UI](https://github.com/damianvtran/local-operator-ui)):
@@ -593,8 +599,9 @@ lop serve                 # http://127.0.0.1:1111, docs at /docs
 The legacy HTTP API has no authentication and defaults to loopback. Keep it
 away from untrusted clients; an explicit `--host` can widen the bind only when
 you provide access controls in front. This is separate from the authenticated
-mobile relay. See [API filesystem boundaries](./docs/API_FILESYSTEM_BOUNDARIES.md)
-for fresh-ID profile imports, workspace-confined edit reads and live editor
+mobile relay. See
+[API filesystem boundaries](./docs/API_FILESYSTEM_BOUNDARIES.md) for
+fresh-ID profile imports, workspace-confined edit reads and live editor
 buffers.
 
 ## 📱 Phone Access (Mobile Relay)
@@ -634,7 +641,7 @@ shows up in the phone list live. No extra flag per session.
 ### Additional setup is required for remote access
 
 The daemon binds **loopback only** (`127.0.0.1:4098`) and never a wider
-address. That keeps it private, so reaching it from your
+address. That keeps it private by construction, so reaching it from your
 phone over the internet needs a secure path you put in front of it, together
 with an identity proxy so only you can open it.
 
@@ -687,7 +694,8 @@ connection within seconds. Each store release is recorded in
 
 ## 📦 Installation Options
 
-The default install is small. Optional features live behind extras:
+The default install is deliberately small. Optional features live behind
+extras:
 
 | Extra | Adds |
 | --- | --- |
@@ -700,7 +708,7 @@ The default install is small. Optional features live behind extras:
 | `all` | Everything above except `lsp` |
 
 ```bash
-pip install "local-operator[all]"    # quote it: shells glob the brackets
+pip install "local-operator[all]"    # quote it, or your shell globs the brackets
 ```
 
 If you hit a feature whose extra is missing, the agent tells you which one to
@@ -726,12 +734,12 @@ Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), `tui.theme` (any registered theme name, easier to set with
 `/theme`, which previews live), and `retry.fallbackChains` (the model
-cascade; see [Subscriptions](#-subscriptions)).
-`bash.shell` picks the interpreter the `bash` tool spawns: unset, it runs the
-first `bash` on `PATH` (Homebrew bash 5 when installed, else the system one)
-and falls back to `/bin/sh` only on a host with no bash, so process
-substitution and other bash syntax work as the tool's name promises. Every
-option is browsable in `/settings`.
+cascade). See [Subscriptions](#-subscriptions). `bash.shell` picks the
+interpreter the `bash` tool spawns: unset, it runs the first `bash` on `PATH`
+(Homebrew bash 5 when installed, else the system one) and falls back to
+`/bin/sh` only on a host with no bash, so process substitution and other bash
+syntax work as the tool's name promises. Every option is browsable in
+`/settings`.
 
 Credentials are stored in `~/.local-operator/credentials.env` and never
 echoed:
@@ -779,7 +787,8 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   (`lop search off`) and fetch (`lop fetch set enabled off`) for a setup
   where no prompt leaves the machine. Web search is on by default.
 - **MCP trust model.** Project-supplied MCP configs are treated as trusted
-  input and warned about on first connect; see [docs/mcp.md](./docs/mcp.md).
+  input and warned about on first connect. See [docs/mcp.md](./docs/mcp.md)
+  for the trust model.
 - **Credential hygiene.** Keys live in a local credential store, are entered
   through hidden prompts, and are kept out of transcripts.
 
@@ -788,11 +797,11 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
 👉 The [example notebooks](./examples/notebooks/) show real tasks completed
 with Local Operator, saved from live sessions:
 
-- 🔄 **[Automated commit message generation](examples/notebooks/github_commit.ipynb)** from git diffs
+- 🔄 **[Automated commit message generation](examples/notebooks/github_commit.ipynb)**: messages written from git diffs
 - 🔀 **[End-to-end pull request automation](examples/notebooks/github_pr.ipynb)**: creation, review, template completion
 - 🔢 **[MNIST digit recognition](examples/notebooks/kaggle_digit_recognizer.ipynb)**: 99.3% accuracy on the Kaggle competition
 - 🏠 **[House price prediction with XGBoost](examples/notebooks/kaggle_home_data_competition.ipynb)**: top 5% Kaggle score
-- 🚢 **[Titanic survival prediction](examples/notebooks/kaggle_titanic_competition.ipynb)** with LightGBM
+- 🚢 **[Titanic survival prediction](examples/notebooks/kaggle_titanic_competition.ipynb)**: a LightGBM model
 - 🌐 **[Web research and data extraction](examples/notebooks/web_research_scraping.ipynb)**: scraping a sanctions list
 - 📈 **[Business pricing analysis](examples/notebooks/business_pricing_margin.ipynb)**: optimal subscription pricing
 
@@ -829,7 +838,7 @@ implementation; any mistakes here are our own.
 
 ### A note on reuse and credit
 
-All of the projects above are MIT-licensed, as is Local Operator itself. Under
+All of the projects above are MIT licensed, as is Local Operator itself. Under
 the MIT license you are free to draw inspiration from or reuse code from Local
 Operator in your own work. Verbatim reuse of the code requires retaining the
 copyright notice and license text, as the license states. Beyond that legal
