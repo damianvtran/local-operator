@@ -44,10 +44,12 @@ from typing import Any, Mapping
 #: Why these boundaries and not finer ones: they are exactly the seams that are
 #: RECOVERABLE from the wire ``ChatRequest`` without the session having to hand
 #: the recorder a parallel structure. ``custom_instructions`` is the operator's
-#: ``system_prompt.md`` PLUS any selected agent/team profile prompt — the
-#: harness appends the profile inside the ``<user_instructions>`` span
-#: (``prompts_api.build_system_blocks``), so on the wire they are one tagged
-#: region and splitting them further would be a guess. ``system_prompt`` is the
+#: ``system_prompt.md``, PLUS any imported user-scope file
+#: (``~/.agents/AGENTS.md``, see ``local_operator.ecosystem_instructions``),
+#: PLUS any selected agent/team profile prompt — the harness joins all three
+#: inside the ``<user_instructions>`` span (``prompts_api.build_system_blocks``),
+#: so on the wire they are one tagged region and splitting them further would
+#: be a guess. ``system_prompt`` is the
 #: packaged persona plus repo guidance (AGENTS.md/CLAUDE.md), which share block
 #: 0's stable head with the persona and carry no wire delimiter of their own.
 #: ``images`` is APPENDED, never inserted, so the CREATE TABLE / docs /
@@ -84,8 +86,9 @@ COMPONENT_LABELS: dict[str, str] = {
 
 #: Marks the operator's custom-instructions section inside system block 0. Kept
 #: in sync with ``prompts_api.build_system_blocks``: the header text is the
-#: seam analytics uses to separate the operator's standing instructions (and
-#: the agent/team profile appended to them) from the packaged persona above.
+#: seam analytics uses to separate the operator's standing instructions (any
+#: imported user-scope file, then ``system_prompt.md``, then the agent/team
+#: profile) from the packaged persona above.
 _CUSTOM_INSTRUCTIONS_HEADER = "## User's custom instructions"
 
 
@@ -97,8 +100,12 @@ def split_system_prompt(block0: str) -> tuple[int, int]:
     instructions`` section wrapping ``<user_instructions>…</user_instructions>``
     (see ``prompts_api.build_system_blocks``). The header is the only seam that
     survives onto the wire, so everything from it onward is attributed to
-    ``custom_instructions`` (the operator prompt plus any agent/team profile),
-    and everything before it to ``system_prompt`` (persona + repo guidance).
+    ``custom_instructions`` — which is all three standing-instruction sources
+    the harness joins inside that one span: any imported user-scope file
+    (``~/.agents/AGENTS.md``), the operator's ``system_prompt.md``, and any
+    agent/team profile. Everything before it is ``system_prompt`` (persona +
+    repo guidance). See ``COMPONENT_KEYS`` above for why the three are not
+    split further: the span carries no wire delimiter between them.
 
     Best-effort: a block with no custom section attributes the whole thing to
     ``system_prompt``, which is exactly right — there were no custom
