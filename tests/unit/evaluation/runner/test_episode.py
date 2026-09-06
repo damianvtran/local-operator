@@ -21,7 +21,9 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     EnvironmentStepPayload,
     ErrorPayload,
+    ModelResponsePayload,
     ObservationPayload,
+    ReconciliationPayload,
     ScoreArtifact,
 )
 from local_operator.evaluation.evidence.store import EvidenceWriter
@@ -32,7 +34,9 @@ from local_operator.evaluation.runner.episode import (
     EpisodeRunner,
 )
 from tests.unit.evaluation.runner.conftest import (
+    ROUTE,
     FakeAdapter,
+    ModelUsage,
     RecordingResponder,
     ScriptedModel,
     build_config,
@@ -764,6 +768,84 @@ async def test_context_unrecoverable_seals_as_a_harness_error_not_a_provider_one
     assert len(errors) == 1
     assert errors[0].category == "adapter"
     assert errors[0].diagnostic_code == "contextunrecoverableerror"
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_stream_seals_as_provider_but_still_bills_its_input(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A refusal is unanswered, not unbilled, and the bundle must say so.
+
+    The provider read the whole prompt before declining -- the observed case
+    carried 48,000 input tokens -- so the attempt is a real cost. Without its
+    triple the episode sealed with NO ``usage_cost`` event, and ``_reconcile``
+    then published the resulting zero as an AVAILABLE (measured) figure: a
+    bundle whose only purpose is honest accounting claiming a paid turn cost
+    nothing. The episode still ends as a provider failure; what changes is that
+    the spend it caused is in the evidence.
+    """
+
+    from local_operator.evaluation.runner.provider_client import (
+        ProviderStreamAbortedError,
+    )
+
+    class RefusingModel:
+        async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+            raise ProviderStreamAbortedError(
+                "model refused: I can't help with that (stop_reason=refusal)",
+                route=ROUTE,
+                usage=ModelUsage(input_tokens=48_000, output_tokens=0),
+                cost_micros=144_000,
+                stop_reason="refusal",
+                provider_request_id="req-refused-1",
+            )
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=RefusingModel(),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.reason == "infrastructure_failure"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # The billed attempt is a full triple, not a hole: the counters are the
+    # verifier's own sum over the journal's usage events.
+    assert report.counters is not None
+    assert report.counters.model_request_count == 1
+    assert report.counters.model_response_count == 1
+    assert report.counters.input_tokens == 48_000
+    assert report.counters.cost_microusd == 144_000
+    # The provider's real marker is recorded rather than laundered into "stop".
+    responses = payloads(root, ModelResponsePayload)
+    assert [response.stop_reason for response in responses] == ["refusal"]
+    assert responses[0].provider_request_id == "req-refused-1"
+    # ``_reconcile`` reports that same spend, so the bundle's budget record and
+    # its journal agree instead of the record claiming a measured zero.
+    reconciliations = payloads(root, ReconciliationPayload)
+    assert reconciliations[0].provider_cost_microusd == 144_000
+    # Exactly one error event, the terminal provider one: writing the triple
+    # must not also mint a retryable model error the way a rejection does.
+    errors = payloads(root, ErrorPayload)
+    assert [(e.category, e.retryable) for e in errors] == [("provider", False)]
+    # The provider's own words survive into the bundle. They matter more here
+    # than anywhere else: ``diagnostic_code`` is derived from the wrapping
+    # ``_ProviderFailure``, so it buckets this identically to a transport
+    # outage, and the detail is the only thing naming which mechanism fired.
+    detail = errors[0].detail_artifact
+    assert detail is not None
+    recorded = (root / "artifacts" / detail.sha256).read_text()
+    assert "stop_reason=refusal" in recorded
+    assert "I can't help with that" in recorded
 
 
 # ---------------------------------------------------------------------------
