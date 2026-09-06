@@ -416,3 +416,195 @@ async def test_a_deliberate_stop_ends_the_turn_in_both_states(
     # lets a message reach it instead of the silent steer queue.
     with pytest.raises(ConnectionError, match="stopped"):
         await remote.prompt("the message typed after the stop")
+
+
+@pytest.mark.asyncio
+async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch) -> None:
+    """#642 (UX U11 from #619): a viewer going cold mid-turn gets a terminal state.
+
+    ``_go_cold`` cleared ``_streaming`` without emitting an ``AgentEndEvent``,
+    so the app — which keeps its working line, band and title open until an
+    end reaches it — held a spinner forever with the toast suppressed too.
+
+    The end must be delivered DIRECTLY, not buffered: a failed successor
+    ``_dial`` leaves ``_ready_for_events`` False, and a buffered end would be
+    drained by the NEXT bind's ``_finish_sync`` behind that bind's seeded
+    ``AgentStartEvent``, where the controller (which drops only ``gen <
+    current``) would let it tear down the fresh turn. So the assertion is on
+    both sides: exactly one aborted end reached the handler, and nothing was
+    left in the buffer for a later runtime to inherit.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = False
+    received: list[Any] = []
+    remote.subscribe(received.append)
+
+    remote._go_cold()
+
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1 and ends[0].aborted is True and ends[0].error is None
+    assert remote._buffered_events == []
+    assert remote.is_streaming is False
+    assert remote.is_cold
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
+    tmp_path, monkeypatch
+) -> None:
+    """The common path: ``_on_disconnected`` already ended the turn, so the
+    go-cold end is a no-op rather than a second "interrupted" notice.
+
+    ``_end_turn_locally`` returns on ``not self._streaming``, which is what
+    makes the two callers safe to stack — pinned here so a later rewrite of
+    either does not turn one owner loss into two aborted ends on the app.
+    """
+    from local_operator.harness.types import AgentEndEvent
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = True
+    received: list[Any] = []
+    remote.subscribe(received.append)
+
+    remote._on_disconnected("owner exited")
+    if remote._recovery_task is not None:
+        remote._recovery_task.cancel()
+        try:
+            await remote._recovery_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — teardown only
+            pass
+    remote._go_cold()
+
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1, f"one owner loss produced {len(ends)} aborted ends"
+    assert remote._buffered_events == []
+    assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
+async def test_going_cold_survives_a_controllers_higher_adopted_generation(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, BLOCKER-1: the go-cold end must reach the APP, not just
+    the handler list.
+
+    The sibling test above asserts the event is delivered, and that stayed true
+    while the defect was live — the ``EventController`` sitting one layer below
+    dropped it, so no ``TurnEnded`` was ever posted. This drives the REAL
+    controller for that reason: the drop happens where the event is consumed,
+    which is the only layer that can pin it.
+
+    The scenario is the one ``_go_cold``'s direct delivery exists for. Owner A
+    stamps its turn with a long-lived session's generation (6 here); the
+    controller adopts it. A successor binds and ``_apply_frontend_facades``
+    re-marks the turn live from ITS snapshot — a fresh runtime, so generation
+    1. Stamping the synthesised end with that number made
+    ``_handle_agent_end`` drop it as ``gen < current`` and, with the follower
+    band held by design and no wall-clock timeout, left the tab title asserting
+    ``working`` permanently. An unstamped end (``generation=0``) is the
+    controller's "belongs to whatever turn is open" encoding.
+    """
+    from local_operator.harness.types import AgentStartEvent
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.tui.events import EventController, TurnEnded, TurnStarted
+    from tests.unit.tui.test_events import FakeApp
+
+    previous_owner_generation = 6
+    successor_first_turn_generation = 1  # Session.__init__ starts a fresh count
+
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._ready_for_events = True
+
+    app = FakeApp()
+    controller = EventController(remote, app)  # type: ignore[arg-type]
+    app.controller = controller
+    controller.subscribe()
+
+    remote._on_wire_event(
+        AgentStartEvent(generation=previous_owner_generation).model_dump(mode="json")
+    )
+    assert controller.generation == previous_owner_generation
+    assert sum(isinstance(m, TurnStarted) for m in app.posted) == 1
+
+    remote._apply_frontend_facades(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="e1",
+            streaming=True,
+            generation=successor_first_turn_generation,
+        )
+    )
+    assert remote.is_streaming is True
+
+    remote._go_cold()
+
+    ends = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert len(ends) == 1, "the synthesised end never reached the app"
+    assert ends[0].aborted is True
+    assert remote.is_streaming is False
+
+
+@pytest.mark.asyncio
+async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, MINOR-1: a handler that raises must not strand teardown.
+
+    ``_go_cold`` already guards the client close and the went-cold callback
+    because "a viewer notice must not break teardown". The end-the-turn call
+    now sits between them and takes the same guard: without it a raising
+    handler skips ``_owner_ready.set()``, and the prompt path waits forever on
+    an event nothing else will set.
+
+    BOTH HALVES OF THE INVARIANT, deliberately (review round 2, MAJOR-2). The
+    caller's guard alone is not enough: the exception escapes from INSIDE
+    ``_end_turn_locally``, where the ``_streaming`` clear used to be the line
+    after the delivery, so it was skipped and the facade reported a live turn
+    forever on a cold session. Asserting only that teardown finished pinned
+    half of what the guard exists to protect and let that through — the flag
+    is what ``_retire_turn_band`` reads to decide whether to withhold the band
+    write, so a stuck True is a tab title asserting ``working`` for the life
+    of the process.
+    """
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._can_go_cold = True
+    remote._streaming = True
+    remote._ready_for_events = True
+
+    def explode(event: Any) -> None:
+        raise RuntimeError("handler blew up while pricing the turn")
+
+    remote.subscribe(explode)
+
+    remote._go_cold()
+
+    assert remote._owner_ready.is_set(), "teardown was stranded by a raising handler"
+    assert remote.is_cold
+    assert remote.is_streaming is False, "the facade reports a live turn forever on a cold session"
