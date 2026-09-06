@@ -1452,6 +1452,28 @@ def _rejection_prompt(reason: str, observation: Observation) -> str:
     )
 
 
+def _note_eval_session_name(session_id: str, *, route: RouteIdentity, episode_id: str) -> None:
+    """Label this episode's ledger row ``eval <provider>/<model> · <episode>``.
+
+    The route comes first because it is what a reader of a cost table is
+    comparing across episodes, and the episode id is kept (abbreviated) so a row
+    can still be traced back to its evidence bundle. ``short_session_label``
+    truncates to 32 characters for the table, which this shape survives with the
+    route intact.
+
+    Best-effort and import-local, like every other analytics touch: the
+    evaluation package is import-inert by contract, and an episode must never
+    fail because a diagnostic ledger could not be written.
+    """
+    try:
+        from local_operator.analytics import get_recorder
+
+        label = f"eval {route.provider_id}/{route.model_id} · {episode_id}"
+        get_recorder().note_session_name(session_id, label)
+    except Exception:  # noqa: BLE001 — analytics is never a dependency
+        logger.debug("analytics: eval session name failed", exc_info=True)
+
+
 def create_provider_model_client(
     *,
     auth_store: Any,
@@ -1495,6 +1517,20 @@ def create_provider_model_client(
         retry["modelFallback"] = False
         effective["retry"] = retry
     session_id = f"lop-eval-{episode_id}"
+    # Give the episode's spend a HUMAN label in the analytics ledger. An eval
+    # session never goes through the TUI's naming path — it has no conversation,
+    # no opening message and no model title — so before this every benchmark run
+    # rendered in ``/analytics`` as an anonymous ``lop-eval-ep-<hex>`` row and
+    # the operator could not tell a $5 OSWorld episode from an unnamed session
+    # that had gone wrong. The runner already knows exactly what the run IS, so
+    # the honest fix is to say so here rather than to teach the report to
+    # recognise an id prefix: a rendering rule would special-case the display of
+    # a name the harness could simply have supplied, and would still show
+    # nothing about WHICH task ran.
+    #
+    # Written at TITLE rank because it is a real, authoritative name — this is
+    # the eval equivalent of a user-set title, not a stand-in.
+    _note_eval_session_name(session_id, route=route, episode_id=episode_id)
     return ProviderModelClient(
         create_stream_fn(auth_store, effective, session_id=session_id),
         route=route,

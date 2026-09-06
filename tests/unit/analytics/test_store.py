@@ -11,7 +11,12 @@ from __future__ import annotations
 import time
 
 from local_operator.analytics.model import CallSnapshot
-from local_operator.analytics.store import AnalyticsStore
+from local_operator.analytics.store import (
+    SESSION_NAME_RANK_BACKFILL,
+    SESSION_NAME_RANK_PROVISIONAL,
+    SESSION_NAME_RANK_TITLE,
+    AnalyticsStore,
+)
 
 
 def _snap(
@@ -782,4 +787,124 @@ def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
         "SELECT session_id, cache_write_tokens, cache_write_1h_tokens FROM calls ORDER BY id"
     ).fetchall()
     assert rows == [("old", 500, 0), ("s1", 300, 120)]
+    store.close()
+
+
+# -- session-name precedence -------------------------------------------------
+#
+# The ledger's name row is now written by several sources that do not arrive in
+# quality order: the opener-derived stand-in lands at submit, the model's title
+# a second or two later, a resume restores whichever was journalled, and a
+# startup backfill reconstructs one from disk at any time. The rank gate is what
+# keeps the last writer from winning; these pin the rule.
+
+
+def _name_row(store: AnalyticsStore, session_id: str):
+    conn = store._connect()
+    assert conn is not None
+    return conn.execute(
+        "SELECT name, rank FROM session_names WHERE session_id = ?", (session_id,)
+    ).fetchone()
+
+
+def test_provisional_name_fills_an_empty_row(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.upsert_session_name("s", "Fix the flaky test", rank=SESSION_NAME_RANK_PROVISIONAL)
+    assert _name_row(store, "s") == ("Fix the flaky test", SESSION_NAME_RANK_PROVISIONAL)
+    store.close()
+
+
+def test_a_real_title_overwrites_a_provisional_one(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.upsert_session_name("s", "Fix the flaky test", rank=SESSION_NAME_RANK_PROVISIONAL)
+    store.upsert_session_name("s", "Flaky pilot test triage", rank=SESSION_NAME_RANK_TITLE)
+    assert _name_row(store, "s") == ("Flaky pilot test triage", SESSION_NAME_RANK_TITLE)
+    store.close()
+
+
+def test_a_provisional_name_never_displaces_a_real_title(tmp_path):
+    """The precedence rule ``session/naming.py`` documents, enforced in SQL.
+
+    A stand-in quotes the QUESTION; a title answers it. A later stand-in (a
+    reload, a second host painting the band) must not be able to undo that.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.upsert_session_name("s", "Flaky pilot test triage", rank=SESSION_NAME_RANK_TITLE)
+    store.upsert_session_name("s", "why is this test flaky", rank=SESSION_NAME_RANK_PROVISIONAL)
+    assert _name_row(store, "s") == ("Flaky pilot test triage", SESSION_NAME_RANK_TITLE)
+    store.close()
+
+
+def test_a_backfill_never_displaces_a_real_title(tmp_path):
+    """The sweep cannot tell a user-set title from disk, so it may only fill."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.upsert_session_name("s", "Renamed by hand", rank=SESSION_NAME_RANK_TITLE)
+    store.upsert_session_name("s", "opening message excerpt", rank=SESSION_NAME_RANK_BACKFILL)
+    assert _name_row(store, "s") == ("Renamed by hand", SESSION_NAME_RANK_TITLE)
+    store.close()
+
+
+def test_equal_rank_replaces_so_a_retitle_still_works(tmp_path):
+    """A re-title is the same rank as the title it supersedes and MUST win."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.upsert_session_name("s", "First title", rank=SESSION_NAME_RANK_TITLE)
+    store.upsert_session_name("s", "Second title", rank=SESSION_NAME_RANK_TITLE)
+    assert _name_row(store, "s") == ("Second title", SESSION_NAME_RANK_TITLE)
+    store.close()
+
+
+def test_rank_column_is_migrated_onto_an_older_name_table(tmp_path):
+    """A ledger from any earlier release has ``session_names`` without ``rank``.
+
+    Existing rows must default to TITLE: the only writer before this column
+    existed was ``set_conversation_name``, i.e. a real title. Defaulting to
+    PROVISIONAL would let the new backfill sweep overwrite genuine titles.
+    """
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+          updated_at_ms INTEGER NOT NULL
+        );
+        INSERT INTO session_names VALUES ('old', 'A real title', 1);
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store.upsert_session_name("new", "another", rank=SESSION_NAME_RANK_TITLE)
+    assert _name_row(store, "old") == ("A real title", SESSION_NAME_RANK_TITLE)
+    # ...and being TITLE rank, the migrated row resists a backfill.
+    store.upsert_session_name("old", "opener excerpt", rank=SESSION_NAME_RANK_BACKFILL)
+    assert _name_row(store, "old") == ("A real title", SESSION_NAME_RANK_TITLE)
+    store.close()
+
+
+def test_session_parents_excludes_the_self_parent_cycle_edge(tmp_path):
+    """224 rows on the real ledger carry ``parent_session_id == session_id``.
+
+    A consumer walking the map without the guard would loop, so the store
+    filters the edge once rather than asking every caller to remember it.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    import dataclasses
+
+    store.record_batch(
+        [
+            dataclasses.replace(_snap(session_id="child"), parent_session_id="parent"),
+            dataclasses.replace(_snap(session_id="loop"), parent_session_id="loop"),
+        ]
+    )
+    assert store.session_parents() == {"child": "parent"}
+    store.close()
+
+
+def test_sessions_missing_names_is_scoped_to_sessions_the_ledger_knows(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="named"), _snap(session_id="bare")])
+    store.upsert_session_name("named", "Has a title", rank=SESSION_NAME_RANK_TITLE)
+    assert store.sessions_missing_names() == {"bare"}
     store.close()

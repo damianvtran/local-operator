@@ -2173,3 +2173,52 @@ def test_create_provider_model_client_seals_fallback_and_mints_the_cache_key(
         fallback_policy="allow_any",
     )
     assert RetrySettings.from_settings(captured["settings"]).model_fallback is True
+
+
+def test_an_eval_episode_names_its_own_ledger_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An eval session never passes through the TUI's naming path.
+
+    It has no conversation, no opening message and no model title, so before
+    this every benchmark run rendered in ``/analytics`` as an anonymous
+    ``lop-eval-ep-<hex>`` row and the operator could not tell a $5 OSWorld
+    episode from a session that had gone wrong (measured: 42 such sessions,
+    $24.53, 100% unnamed). The runner already knows what the run IS, so it says
+    so — rather than teaching the report to recognise an id prefix, which would
+    still not say WHICH task ran.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.evaluation.runner import provider_client
+    from local_operator.model import configure
+
+    monkeypatch.setattr(
+        configure,
+        "create_stream_fn",
+        lambda auth_store, settings, *, session_id=None: object(),
+    )
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    recorder = reset_recorder_for_test(store)
+    try:
+        provider_client.create_provider_model_client(
+            auth_store=object(),
+            settings=None,
+            route=ROUTE,
+            model_spec=ModelSpec(provider="provider", model_id="model"),
+            artifact_root=tmp_path,
+            episode_id="ep-42",
+        )
+        recorder.flush_for_test()
+        conn = store._connect()
+        assert conn is not None
+        row = conn.execute(
+            "SELECT name FROM session_names WHERE session_id = 'lop-eval-ep-42'"
+        ).fetchone()
+        # The route leads, because that is what a reader of a cost table
+        # compares across episodes; the episode id is kept so a row still
+        # traces back to its evidence bundle.
+        assert row is not None
+        assert row[0] == f"eval {ROUTE.provider_id}/{ROUTE.model_id} · ep-42"
+    finally:
+        recorder.close()
