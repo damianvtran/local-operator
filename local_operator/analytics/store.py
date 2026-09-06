@@ -1061,6 +1061,18 @@ class AnalyticsStore:
             }
             purpose = col("purpose", "'unknown'")
             outcome = col("outcome", "'unknown'")
+            # Consumption per purpose, on the SAME ``measures`` contract as
+            # ``by_model`` — one extra GROUP BY on a column that already exists
+            # beside the token and cost sums, so no schema change and no second
+            # aggregation vocabulary. ``col`` folds an older ledger without the
+            # column into a single ``unknown`` row, which is honest: we know the
+            # tokens, we do not know what they were spent on.
+            by_purpose = {
+                str(row[0]): _aggregate_from_row(row[1:])
+                for row in conn.execute(
+                    f"SELECT {purpose}, {measures}" + scope + " GROUP BY 1", params
+                )
+            }
             groups = {
                 (str(row[0]), str(row[1])): int(row[2])
                 for row in conn.execute(
@@ -1117,6 +1129,7 @@ class AnalyticsStore:
                 session_id=session_id,
                 aggregate=aggregate,
                 by_model=by_model,
+                by_purpose=by_purpose,
                 by_purpose_outcome=groups,
                 missing_usage_calls=int(missing or 0),
                 unknown_usage_calls=int(unknown or 0),
