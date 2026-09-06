@@ -119,10 +119,25 @@ def _read_bounded(path: Path) -> str:
     """Read one regular file, following links, without exceeding the cap.
 
     Symlinks are followed (see the module docstring), but a non-regular target
-    is still refused: a fifo at this path would otherwise block session startup
-    forever, which is a strictly worse failure than having no instructions.
+    is still refused: this runs on the synchronous session-construction path
+    with no timeout above it, so a fifo here would block startup forever —
+    a strictly worse failure than having no instructions.
+
+    ``ecosystem_instruction_files`` already drops non-regular paths via
+    ``is_file()``, so in the ordinary arrangement this guard never fires. It
+    exists for the TOCTOU window: a regular file swapped for a fifo between
+    that listing and this open, which is precisely the case that would hang
+    rather than raise.
+
+    ``O_NONBLOCK`` is what makes the guard reachable at all, and is load-
+    bearing rather than defensive tidiness. Opening a fifo ``O_RDONLY`` blocks
+    in the kernel until a writer appears, so control would never reach the
+    ``fstat`` below — the check would be ordered after the syscall it exists to
+    protect. With the flag, the open returns a descriptor immediately and
+    ``S_ISREG`` refuses it. Regular files are unaffected: ``O_NONBLOCK`` has no
+    meaning for them, and the read below returns the same bytes either way.
     """
-    descriptor = os.open(path, os.O_RDONLY)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError(f"not a regular file: {path}")
@@ -170,6 +185,16 @@ def load_ecosystem_instructions(skip_digests: frozenset[str] = frozenset()) -> s
             logger.debug("skipping %s: identical to instructions already loaded", path)
             continue
         seen.add(digest)
-        logger.debug("loaded ecosystem instructions from %s (%d chars)", path, len(stripped))
+        # INFO, not DEBUG: this file is written by another tool and named in no
+        # lop-owned setting, yet it changes the system prompt of every session
+        # and every subagent — the one import whose provenance an operator
+        # cannot otherwise recover. It is not startup chatter: the record is
+        # emitted only when a file actually EXISTS and actually contributed, so
+        # the default install (no ``~/.agents/AGENTS.md``) stays silent, and on
+        # the TUI it lands in the rotating log file rather than on screen
+        # because ``file_logging`` detaches the console handlers. The dedup
+        # skip above stays at DEBUG: nothing reached the prompt, so there is
+        # nothing to account for.
+        logger.info("loaded ecosystem instructions from %s (%d chars)", path, len(stripped))
         parts.append(stripped)
     return "\n\n".join(parts)
