@@ -131,7 +131,16 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: is bounded by roster COUNT alone at roughly 1,400 children. That is stated
 #: rather than engineered away: the deepest roster observed across every session
 #: on the reference machine is 19.
-JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
+#:
+#: Reduced from 120,000 by the 128 bytes that `history_generation` and its
+#: sibling window fields add to every frame. The socket line limit is fixed at
+#: 1 MiB, so a new session-level field has to be PAID FOR out of an elastic
+#: budget rather than shrinking the guard's margin: at the worst case the size
+#: guard asserts, the frame had 13 bytes of headroom and the new field costs
+#: 25. Per-row text is the right place to take it from — it is already shared,
+#: already floored at a legible preview, and 128 chars spread across a roster
+#: is invisible, whereas an over-limit frame cannot be sent at all.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
 JOB_TEXT_FLOOR_CHARS = 200
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
