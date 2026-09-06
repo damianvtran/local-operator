@@ -52,6 +52,51 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.8 — submitted 2026-09-06, pending review as of 2026-09-06
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.8 (submitted; **not yet the approved version**) |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `ff9b16b5` (`feat(extension): scoped Allow (domain/site/once) and dangerous allow-all setting (0.1.8)`, PR #672, squash-merged to `main`) |
+| `extension/` tree hash | `0605d9a5c34a2681c49665a8b9e8aaaada89c50b` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not recoverable — see note below* |
+| Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 34000911184](https://github.com/damianvtran/local-operator/actions/runs/34000911184), dispatched with `ref=main` `version=0.1.8` |
+| Store state | `PENDING_REVIEW`, 100% deployment |
+| State last checked | 2026-09-06 |
+| Approval timestamp | *pending — append when review completes* |
+| Previously published | v0.1.7, live at 100% during review (promoted 2026-09-04, run 33926643637) |
+
+**First release to go out through the automated path.** Every prior release was
+a manual dashboard upload. The workflow validated and submitted in one run:
+`validated Chrome Web Store package v0.1.8 (12 files, no source maps)`, then
+`submitted ... v0.1.8 with STAGED_PUBLISH (PENDING_REVIEW)`.
+
+**Why there is no artifact hash for this entry.** The automated path builds the
+zip on an ephemeral GitHub runner, uploads it straight to the store, and retains
+nothing — the run publishes no build artifact and logs no digest, so no local
+copy of the uploaded file exists to hash. Do **not** fill this row in by running
+`pnpm --dir extension build:zip` here: as the audit note above explains, `zip`
+stamps entries with current mtimes, so a rebuild's hash would be a *different*
+number that never identified the uploaded file, and the rebuild would also
+overwrite `extension/local-operator-extension.zip`. Audit this release by its
+`extension/` tree hash (step 1 above), which pins the build input exactly and
+needs no artifact. Recording the digest in the workflow output is the durable
+fix, and it is a natural companion to the deterministic-`build:zip` follow-up
+noted under v0.1.5.
+
+**Permissions: byte-identical to the v0.1.7 base.** QA verified that the only
+diff in the built manifest is the version string and re-indentation — no
+permission added, removed, or changed. That is why the automated path applied:
+the standing rule in `submission-checklist.md` sends any permission-adding
+package to a human in the dashboard, because the Chrome Web Store API cannot set
+permission justifications.
+
+---
+
 ## v0.1.5 — submitted 2026-09-02, pending review as of 2026-09-02
 
 | Field | Value |
