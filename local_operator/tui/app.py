@@ -1332,6 +1332,27 @@ class _ProviderRows(NamedTuple):
     problem: str
 
 
+class _ApprovalsFollow(NamedTuple):
+    """What ``_follow_configured_approvals`` did, for a caller that must report it.
+
+    Two fields rather than the bare clause string it used to return, because
+    "the gate moved and another process is announcing it" and "the gate did NOT
+    move" both produce an empty clause and are not the same news (design round
+    2, D8). Only the caller knows about the ``applied:`` key list, and only this
+    method knows whether the write was refused, so the verdict has to cross that
+    boundary explicitly — read as a bare string it printed ``applied:
+    tool_approval_mode`` one row under a notice saying the gate was kept.
+
+    ``kept`` is specifically the KEEP path (a loosening refused on behalf of a
+    mode a human typed here), not "nothing to say": a mode that failed to parse
+    and a value the gate already held both leave ``kept`` False, because in
+    neither case did this listener refuse a change the file asked for.
+    """
+
+    clause: str
+    kept: bool
+
+
 #: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
 #: that card and no other. One `Toast` slot serves every caller, and a receipt
 #: may be SHOWING or HELD behind an actionable notice; the tag rides the card
@@ -2424,6 +2445,23 @@ class OperatorApp(App[None]):
         # gate armed, and will it still be tomorrow" — and the list, the band
         # and the bare report all have to answer both halves from the same pair.
         self._approvals_default_auto: bool = False
+        # The mode the user typed with `/approvals` in THIS pane, or None.
+        # Deliberately the same shape as `Session._explicit_model_choice` (and
+        # `OwnedSessionHandle._explicit_approvals_mode`, which is the authority
+        # whenever a runtime is attached), and the symmetry is the point: a
+        # config edit may not revoke a hardening a human typed here, exactly as
+        # it may not revoke an explicit `/model` pick.
+        #
+        # Records WHICH mode, not merely THAT one was chosen (review round 2,
+        # R6): as a boolean, a pane whose human typed `/approvals auto` was
+        # pinned to `ask` permanently by a single file tightening, since the
+        # loosening guard read the flag as "the human chose ask".
+        #
+        # INVARIANT: non-None only while the gate in force is the mode a human
+        # typed here — `_follow_configured_approvals` clears it when a file
+        # write moves the gate, which is what keeps the keep notice's "set with
+        # /approvals in this session" true.
+        self._explicit_approvals_mode: str | None = None
         # Which TURN a stop belongs to, rather than a flag someone has to clear.
         # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
@@ -5933,11 +5971,13 @@ class OperatorApp(App[None]):
         # Design review round 1 (D1) / QA round 2 (Q1) drove the real path and
         # proved the gap: an out-of-process write to `hosting` followed by
         # `/new` built with the OLD value. That was survivable while nothing
-        # said otherwise, but the config-change notice now tells the user in so
-        # many words that a NEW_SESSIONS key "takes effect on /new" — including
-        # `tool_approval_mode`, where believing it and being wrong is a safety
-        # problem. Making the promise true is the honest fix; wording around it
-        # would leave `/new` quietly serving stale settings.
+        # said otherwise, but the config-change notice tells the user in so
+        # many words that a NEW_SESSIONS key "takes effect on /new"
+        # (`local_providers` today; `tool_approval_mode` at the time, before
+        # it went LIVE). Making the promise true is the honest fix; wording
+        # around it would leave `/new` quietly serving stale settings — and the
+        # LIVE keys the factory also reads (`hosting`, `web_*.enabled`) must
+        # boot the new session on the current file too.
         # GUARDED, because that reload is destructive on a malformed file
         # (review round 3, B1). In production `_on_config_changed` is
         # `ConfigManager.reload` → `_load_config`, which RAISES on a non-mapping
@@ -5973,19 +6013,20 @@ class OperatorApp(App[None]):
     def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
         """Adopt on-disk config for the session `/new` is about to build.
 
-        Two consumers, both of which `/new` must reach for its own notice to be
-        true, and neither of which the other covers:
+        Two consumers, neither of which the other covers:
 
         * the launch-time ``ConfigManager`` the session factory closed over —
-          `hosting`, `model_name`, `auto_save_conversation`, `web_*.enabled`;
+          `hosting`, `model_name`, `web_*.enabled` and the `local_providers`
+          block. The first three are LIVE now (a running session follows them
+          on the watcher poll), but the factory still reads them at build, so
+          a stale manager would boot the NEW session on values the old one
+          had already moved past;
         * the TUI's own approval gate, which is process state rather than
-          session state and is otherwise written only by
-          ``_load_approvals_default`` at mount (review round 3, Q3). Missing it
-          meant `tool_approval_mode` was the ONE key of the four whose "takes
-          effect on /new" promise was not kept — and the one where believing it
-          and being wrong is a safety problem, in both directions: a tightened
-          `auto → ask` left the new session auto-approving writes with no
-          prompt.
+          session state. ``_on_config_change`` now moves it on every disk
+          change (`tool_approval_mode` is LIVE), so this re-read is the
+          belt-and-braces for a write the watcher never delivered — a file
+          that was unreadable at the tick and fixed since (review round 3,
+          Q3 first found the gap, when the key was still build-time).
 
         Refuses the reload outright when the file on disk is not parseable,
         because `ConfigManager._load_config` would move it aside and continue
@@ -10803,6 +10844,11 @@ class OperatorApp(App[None]):
             saved_to, problem = self._save_approvals_default(wanted_auto)
             if not problem:
                 self._approvals_default_auto = wanted_auto
+        # The user typed the mode in this pane, so a later LOOSENING disk write
+        # leaves this gate alone (see `_follow_configured_approvals`). The MODE
+        # is recorded, not merely the fact of a choice (review round 2, R6):
+        # both directions are recorded, but only a recorded `ask` refuses a file.
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if problem:
             notice(problem, "warning")
@@ -10836,11 +10882,29 @@ class OperatorApp(App[None]):
         from a mode they last chose days ago, and nothing else on the screen
         would ever mention it.
 
+        The saved half is read from the FILE at report time, not from the
+        cached ``_approvals_default_auto`` (UX round 1, U1/U2). This is the one
+        surface whose job is "what is in effect and why", and with the
+        asymmetric rule a pane can now legitimately hold a mode the file
+        disagrees with — a ``/approvals ask`` this pane kept against a
+        machine-wide ``auto``. Comparing against a cache that had been moved in
+        the same tick as the gate made this function report a MATCHED PAIR for
+        exactly the state it exists to disclose, so the user had no surface
+        anywhere in the app that would admit the divergence.
+
+        The read goes through the watcher's last-good snapshot and never
+        constructs a ``ConfigManager``: doing that in a report path would give
+        printing a line the power to move a malformed config file aside (the
+        module docstring of ``config_watch``). With no watcher running the
+        cached default stands in — it is what this process last saw of the file
+        and is right in every case but the one this comment is about.
+
         The `warning` tint follows the LIVE mode, not the saved one: the tint
         answers "is the gate disarmed right now".
         """
         live = mode_word(self._approve_all)
-        saved = mode_word(self._approvals_default_auto)
+        on_disk = self._configured_approvals_mode()
+        saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
         effect = (
             "every tool runs without asking"
             if self._approve_all
@@ -10854,9 +10918,32 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"new sessions open in {saved} — /approvals default {live} changes that",
+            f"config.yml says {saved} — /approvals default {live} changes that",
             "warning" if self._approve_all else "info",
         )
+
+    def _configured_approvals_mode(self) -> str | None:
+        """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
+
+        The read-only half of the report above. ``None`` means "no watcher on
+        this process" (a test host, an embed) rather than "no value": the
+        caller falls back to its own cached default instead of inventing a
+        comparison against a file nobody is reading. Never constructs a
+        ``ConfigManager`` — see :meth:`_report_approvals` for why a report path
+        must not.
+        """
+        try:
+            from local_operator.config_watch import existing_watcher
+            from local_operator.paths import config_dir
+
+            watcher = existing_watcher(config_dir())
+            if watcher is None:
+                return None
+            mode = str(watcher.values.get("tool_approval_mode", "")).strip().lower()
+            return mode if mode in ("ask", "auto") else None
+        except Exception:  # noqa: BLE001 — a report must never take down the app
+            logger.debug("tool_approval_mode could not be read for the report", exc_info=True)
+            return None
 
     def _save_approvals_default(self, auto: bool) -> tuple[str, str]:
         """Write the boot default to config: ``(saved_to, problem)``.
@@ -14412,28 +14499,57 @@ class OperatorApp(App[None]):
         loop it was started on, and ``notify_local`` hops there), so widgets
         are touched directly without ``call_from_thread``.
 
-        ``source == "local"`` is silent and applies nothing: the page or the
-        command in THIS process already showed its own result and already
-        repainted (``_persist_theme`` follows ``_apply_theme``;
-        ``settings_io`` already dropped the display cache). Announcing it
-        again would be the line the user just read, twice.
+        ``source == "local"`` is SILENT but no longer inert (review round 1,
+        R1). The page or the command in THIS process already showed its own
+        result and already repainted (``_persist_theme`` follows
+        ``_apply_theme``; ``settings_io`` already dropped the display cache),
+        so announcing it again would be the line the user just read, twice —
+        that is what the local return was for, and the notice stays suppressed.
+        What it must NOT suppress is the APPLY. ``SettingsView._write`` goes
+        through ``settings_io.write_setting``, which notifies the watcher
+        locally, so a ``tool_approval_mode`` written on the ``/settings`` page
+        arrived here as the one delivery that moved nothing: the section is
+        labelled LIVE and its help promises every running session follows from
+        its next decision, and the page painted that claim while this pane's
+        own gate stayed where it was. Reproduced in review in the UNSAFE
+        direction — page set to ``ask``, ``request_tool_approval`` still
+        auto-approving a command tool with no prompt. A page write is also an
+        explicit user action in this pane, so it moves the gate in BOTH
+        directions.
 
         For a change from another process, ONE notice per change listing the
         registry keys compactly, with the keys whose section is not LIVE named
-        separately as taking effect on ``/new`` — the honest answer for
-        ``tool_approval_mode``, which the design deliberately keeps
-        build-time. ``changed_keys`` is per registry key, so a write that only
-        bumped ``metadata.last_modified`` never reaches here and produces no
-        line. Then the two TUI-owned groups are applied: the display cache is
-        dropped so the next paint re-reads, and the theme is switched through
-        the same orchestrator ``/theme`` uses. An unknown theme name on disk is
-        reported rather than raised — a config bug should not take down the
-        listener.
+        separately as taking effect on ``/new`` or needing a relaunch.
+        ``changed_keys`` is per registry key, so a write that only bumped
+        ``metadata.last_modified`` never reaches here and produces no line.
+        Then the TUI-owned groups are applied: the display cache is dropped so
+        the next paint re-reads, the theme is switched through the same
+        orchestrator ``/theme`` uses, and the approval gate follows
+        ``tool_approval_mode`` through :meth:`_set_approve_all`. An unknown
+        theme name on disk is reported rather than raised — a config bug
+        should not take down the listener.
+
+        The ``model`` section is deliberately LEFT OUT of the line even though
+        it is LIVE. Whether ``hosting``/``model_name`` applied depends on a
+        rule only the SESSION can evaluate (config-sourced and no explicit
+        ``/model`` since boot — see ``Session._apply_config_change``), so an
+        "applied: model_name" printed here would be a claim this process
+        cannot back. The session's own receipt — the model-change repaint plus
+        its notice, or the keep notice — comes from the process that decided
+        and is the one the user should read.
         """
-        if getattr(change, "source", "disk") == "local":
-            return
         changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
+            return
+        local = getattr(change, "source", "disk") == "local"
+        if local:
+            # Apply, do not announce. The only group whose apply this process
+            # owns and has not already performed is the approval gate: the
+            # theme and display caches are written by the same handlers that
+            # repainted, while `tool_approval_mode` reaches the gate through
+            # nothing but this listener.
+            if "tool_approval_mode" in changed:
+                self._follow_configured_approvals(change, announce=False)
             return
         from local_operator import settings_io
 
@@ -14458,12 +14574,32 @@ class OperatorApp(App[None]):
             scope = scope_of.get(section) if section is not None else None
             if section == "retired":
                 retired.append(key)
+            elif section == "model":
+                # The session's receipt is the receipt (docstring above).
+                continue
             elif scope is settings_io.Scope.LIVE:
                 live.append(key)
             elif scope is settings_io.Scope.NEW_LAUNCH:
                 relaunch.append(key)
             else:
                 new_sessions.append(key)
+        # The gate decision is taken BEFORE the `applied:` list is assembled,
+        # because on the keep path the key must not appear in it (design round
+        # 2, D8). Read after assembly — which is how it used to run — the keep
+        # notice was followed one row later by `applied: tool_approval_mode`,
+        # two dim rows stating opposite facts about the same key, and a user
+        # scanning for "did my hardening survive?" could not tell which won.
+        #
+        # The refusing MODEL section is the standard this follows: it `continue`s
+        # above, prints no `config.yml changed:` line at all, and leaves the
+        # session's own receipt to speak. An `applied:` clause is a claim about
+        # keys that MOVED, so a key this listener just refused to move has no
+        # place in it.
+        follow = _ApprovalsFollow("", False)
+        if "tool_approval_mode" in changed:
+            follow = self._follow_configured_approvals(change, announce=True)
+            if follow.kept:
+                live = [key for key in live if key != "tool_approval_mode"]
         parts: list[str] = []
         if live:
             # "applied:" leads rather than trailing as "— applied" (design
@@ -14490,6 +14626,13 @@ class OperatorApp(App[None]):
                 "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
             )
             parts.append(f"{', '.join(retired)} {tail}")
+        if not parts and not follow.clause:
+            # Only ``model`` keys moved, or the sole live key was the approval
+            # mode this listener just REFUSED to move: nothing this process can
+            # truthfully say, and the receipt that matters (the session's, or the
+            # keep notice) is already on its way. `follow.clause` is checked too
+            # so a lone loosening that DID apply still prints its value clause.
+            return
         # The approval mode names its VALUE and raises the severity (design
         # review round 1, D2). "changed" is not actionable for a two-valued
         # safety switch: the user in the other pane cannot tell whether
@@ -14500,21 +14643,55 @@ class OperatorApp(App[None]):
         # grey inverted the priority.
         kind = "info"
         if "tool_approval_mode" in changed:
-            values = getattr(change, "values", {})
-            mode = str(values.get("tool_approval_mode", "")).strip().lower()
-            if mode == "auto":
-                parts.append("tool approvals now auto — every tool runs without asking")
-                kind = "warning"
-            elif mode == "ask":
-                parts.append("tool approvals now ask — tools prompt before running")
-                kind = "warning"
-            # The running session's gate deliberately does NOT move here: the
-            # key is NEW_SESSIONS and cell A4 of QA round 2 pins that. Only the
-            # cached default is refreshed, so a later bare `/approvals` reports
-            # what a new session would actually boot with instead of the value
-            # this process read at mount.
-            if mode in ("auto", "ask"):
-                self._approvals_default_auto = mode == "auto"
+            # ONE receipt per event, from the process that owns the gate
+            # (design round 1, D1). When a runtime is attached the gate lives
+            # there, `OwnedSessionHandle.follow_config` moves it and emits the
+            # accurate line, and a value clause here was a second sentence
+            # about one fact in a second vocabulary ("tool approvals now auto"
+            # over "tool approvals: auto") — read as two events, with the
+            # accurate one second and looking like an echo. Exactly the rule
+            # the `model` section already follows above, and for the same
+            # stated reason.
+            #
+            # `tool_approval_mode` stays in the `applied:` key list whenever the
+            # gate MOVED — that clause is about WHICH KEYS moved, not about what
+            # the gate now does, so it does not duplicate the runtime's line. On
+            # the keep path it moved nothing and was dropped from `live` above.
+            spoken = follow.clause
+            if spoken:
+                parts.append(spoken)
+                # Amber on the LOOSENING only (design round 1, D6). The house
+                # rule is `_report_approvals`' — "the tint answers 'is the gate
+                # disarmed right now'" — so `ask` is `info` and only `auto`
+                # earns the interrupt. A gate disarmed by a file the user did
+                # not touch, in a pane they were not looking at, is exactly the
+                # case that does. Painting `ask` amber here while the runtime
+                # sent `info` for the same transition put one event on screen
+                # with two urgency signals.
+                if "auto" in spoken:
+                    kind = "warning"
+        # The web switches name their VALUE too (UX round 1, U4). Both
+        # directions produced a byte-identical `applied: web_search.enabled`,
+        # so a user in another pane could not tell whether their agent had just
+        # lost web access or just gained it — the same reasoning that already
+        # made `tool_approval_mode` name its value, applied to another
+        # two-valued switch. "from your next turn" is the other half: the
+        # inventory reconciles at the turn boundary (`_reconcile_web_tools`),
+        # and nothing on screen mentioned that lag.
+        values = getattr(change, "values", {})
+        for key, label in (
+            ("web_search.enabled", "web search"),
+            ("web_fetch.enabled", "web fetch"),
+        ):
+            if key not in changed:
+                continue
+            block = values.get(key.split(".")[0])
+            enabled = bool(block.get("enabled", True)) if isinstance(block, Mapping) else True
+            parts.append(
+                f"{label} on — takes effect from your next turn"
+                if enabled
+                else f"{label} off — calls will be refused until it is turned back on"
+            )
         self._system_notice("config.yml changed: " + "; ".join(parts), kind)
 
         if any(key.startswith("display.") for key in changed):
@@ -14535,6 +14712,156 @@ class OperatorApp(App[None]):
                     self._apply_theme(wanted)
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
+
+    def _follow_configured_approvals(self, change: Any, *, announce: bool) -> _ApprovalsFollow:
+        """Move this app's gate to ``tool_approval_mode``. THE one apply path.
+
+        Returns an :class:`_ApprovalsFollow`: the value clause the caller should
+        add to its line (``""`` when this process has nothing to say — the mode
+        did not parse, the gate did not move, or another process owns the gate
+        and its own receipt is already on its way), plus ``kept``, which is True
+        only on the KEEP path below.
+
+        The caller needs ``kept`` separately from the clause because both a
+        refusal and a silent success return no clause, and only the refusal must
+        strike ``tool_approval_mode`` from the ``applied:`` key list (design
+        round 2, D8).
+
+        **The rule is asymmetric** (review round 1 R1, UX round 1 U1), and it
+        is the same rule ``OwnedSessionHandle.follow_config`` applies, stated
+        once there in full:
+
+        * tightening (``auto`` → ``ask``) follows the file unconditionally;
+        * loosening (``ask`` → ``auto``) does not move a pane whose human typed
+          ``/approvals ask`` in it, and prints a keep notice instead — the
+          CHOSEN MODE is what is consulted, so a pane whose human chose ``auto``
+          has no hardening to protect and still follows the file both ways;
+        * a pane that never chose follows the file in both directions, which is
+          the operator's "goes into effect for all my agents" case and is what
+          this change exists to deliver.
+
+        A write from THIS process (``announce=False``, the ``/settings`` page)
+        applies with no notice at all: the page is its own receipt, and it is
+        also an explicit action IN this pane, so it moves the gate in both
+        directions and re-bases the explicit-choice flag rather than being
+        blocked by it.
+
+        Written through :meth:`_set_approve_all`, the one writer of gate and
+        band, so the band cannot say something the gate does not do; the cached
+        default moves FIRST so the band's ``always`` marker is computed against
+        the new default. A prompt already on screen is deliberately NOT answered
+        here — ``_answer_live_approval_as_allowed`` is the ``/approvals auto``
+        COMMAND's gesture, where the human typed the loosening in this very pane
+        — but it IS repainted with a note, so the frame stops saying "every tool
+        runs without asking" two lines above "the agent needs your approval"
+        (UX round 1, U6). The deny latch is released on a tightening, since
+        "tools prompt again" is the promise being printed.
+        """
+        values = getattr(change, "values", {})
+        mode = str(values.get("tool_approval_mode", "")).strip().lower()
+        if mode not in ("auto", "ask"):
+            # A typo on disk is not "ask" by accident: the watcher only
+            # delivers parseable files, so the safe answer is to keep the mode
+            # in force rather than guess. Same policy as the runtime's.
+            #
+            # `kept=False`: nothing was refused on a human's behalf here, so the
+            # caller's `applied:` list is not this method's business — an
+            # unparseable value never reached the point of moving anything.
+            return _ApprovalsFollow("", False)
+        wanted_auto = mode == "auto"
+        # The SAVED default follows the file in every case, including the one
+        # where the live gate does not: the file IS the saved default, and
+        # `_report_approvals` needs the pair to be able to disagree.
+        self._approvals_default_auto = wanted_auto
+        if wanted_auto == self._approve_all:
+            self._set_approve_all(self._approve_all)  # re-assert the band's `always` marker
+            return _ApprovalsFollow("", False)
+        if announce and wanted_auto and self._explicit_approvals_mode == "ask":
+            # Loosening against this pane's own deliberate hardening: keep the
+            # gate. Shaped like the model half's keep notice — what is kept,
+            # why, and the command that adopts the file.
+            #
+            # `== "ask"` rather than a bare truth test (review round 2, R6):
+            # only a typed `ask` is a hardening worth refusing the file for.
+            #
+            # The NOTICE is gated on ownership for the same reason the value
+            # clause below is (design round 1 D1, extended to this branch by
+            # round 2 D8): with a runtime attached, both carriers hold the typed
+            # `ask`, both keep-branches fire on one poll, and the identical
+            # 118-character sentence printed twice in one viewport. The runtime
+            # owns the gate, so the runtime's keep notice is the one that speaks;
+            # this branch still returns `kept=True` because the local `applied:`
+            # list is this process's to correct either way.
+            if not self._gate_is_owned_elsewhere():
+                self._system_notice(
+                    "keeping tool approvals: ask — set with /approvals in this session; "
+                    "config.yml now says auto, /approvals auto adopts it",
+                    "info",
+                )
+            self._set_approve_all(self._approve_all)
+            return _ApprovalsFollow("", True)
+        if not announce:
+            # A page write in this pane is a choice made here, so it REPLACES
+            # whatever `/approvals` had recorded rather than being refused by
+            # it. Without this a pane that had typed `/approvals ask` could
+            # never loosen itself from its own settings page.
+            self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
+        else:
+            # An ANOTHER-PROCESS write that reaches here is one that moves the
+            # gate, so the file now owns the value in force and a mode typed
+            # here earlier no longer describes it. Clearing is what makes the
+            # keep notice's "set with /approvals in this session" true rather
+            # than a claim about a value the file chose (review round 2, R6).
+            self._explicit_approvals_mode = None
+        if not wanted_auto:
+            self._allow_approvals_again()
+        self._set_approve_all(wanted_auto)
+        if wanted_auto:
+            self._note_approvals_on_parked_prompt()
+        if not announce or self._gate_is_owned_elsewhere():
+            return _ApprovalsFollow("", False)
+        return (
+            _ApprovalsFollow("tool approvals now auto — every tool runs without asking", False)
+            if wanted_auto
+            else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
+        )
+
+    def _gate_is_owned_elsewhere(self) -> bool:
+        """Whether an attached RUNTIME, not this app, owns the approval gate.
+
+        When it does, ``OwnedSessionHandle.follow_config`` moves the real gate
+        and emits the receipt every attached viewer and the phone already see,
+        so a second value clause from here is one event told twice (design
+        round 1, D1). This app's own ``_approve_all`` still tracks the mode —
+        it governs this process's widgets and the band — but it is not the
+        thing the engine consults, so it is not the thing that gets to speak.
+        """
+        return bool(getattr(self._session, "is_remote", False))
+
+    def _note_approvals_on_parked_prompt(self) -> None:
+        """Tell a card already on screen why it still asks (UX round 1, U6).
+
+        A loosening that lands while a prompt is parked leaves a frame that
+        contradicts itself: "every tool runs without asking" two lines above
+        "the agent needs your approval", with a visible ``Allow all — stop
+        asking for this session`` row describing a state the session is already
+        in. The card is deliberately not auto-answered (the human did not type
+        this loosening in this pane), so the fix is that the card SAYS so.
+
+        Best-effort by construction: a repaint is cosmetic, and a card that has
+        already settled or unmounted between the config tick and this call is
+        the ordinary race, not an error.
+        """
+        prompt = self._approval
+        if prompt is None or prompt.answered or not prompt.is_attached:
+            return
+        try:
+            prompt.set_note(
+                "config.yml set approvals to auto; this call still needs your "
+                "answer, later calls will not"
+            )
+        except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
+            logger.debug("the parked approval card could not be annotated", exc_info=True)
 
     def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
         """A notice about the HARNESS that leaves the empty state intact.
@@ -21093,6 +21420,29 @@ class OperatorApp(App[None]):
         skill_note = Text()
         skill_note.append("$<skill>".ljust(name_width), style=muted)
         skill_note.append("runs a named skill on the rest of the line", style=dim)
+        # `/model saved` is documented here for the same reason as the rows
+        # above: nothing else durable advertises it. The command table's
+        # `/model` row is sized to 49 cells to stay whole at 80 columns and
+        # already spends its description on `PERSIST_HINT`, and the picker
+        # footer's budget is 43 cells against a 42-cell hint — so neither
+        # surface has room for a third verb.
+        #
+        # That was tolerable while the only mention was the bare-`/model`
+        # notice a user reads because they asked. It stopped being tolerable
+        # when the live-config keep notice started INSTRUCTING a user to type
+        # `/model saved` from a pane where they asked nothing: measured, the
+        # `/model` picker offers no `saved` row, `/model sav` completes to
+        # nothing, and `/help` did not name it either — so the instruction and
+        # every discovery surface disagreed (UX round 1, U5). `/help` is the
+        # surface reachable at any width and still there an hour in.
+        #
+        # MEASURED against the 74-cell ceiling this block documents above:
+        # `name_width` is 16 on the current registry and the description is 45,
+        # composing to 61.
+        model_saved_note = Text()
+        model_saved_note.append("/model saved".ljust(name_width), style=muted)
+        model_saved_note.append("switches back to the config.yml default", style=dim)
+        lines.append(model_saved_note)
         lines.append(copy_note)
         lines.append(copy_note_more)
         lines.append(paste_note)
@@ -22253,8 +22603,13 @@ class OperatorApp(App[None]):
                 style="warning",
             )
         else:
+            # Compared against the FILE, exactly as `_report_approvals` is and
+            # for the same reason (UX round 1, U1/U2): with the asymmetric rule
+            # a session can hold a mode the file disagrees with, and this is
+            # the surface a user asks.
             live = mode_word(self._approve_all)
-            saved = mode_word(self._approvals_default_auto)
+            on_disk = self._configured_approvals_mode()
+            saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
             effect = (
                 "every tool runs without asking"
                 if self._approve_all
@@ -22269,13 +22624,18 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"new sessions open in {saved} — /approvals default {live} changes that",
+                f"config.yml says {saved} — /approvals default {live} changes that",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
             self._answer_live_approval_as_allowed()
         else:
             self._allow_approvals_again()
+        # The user typed the mode here, so a later LOOSENING disk write leaves
+        # this pane's gate alone (see `_follow_configured_approvals`). The mode
+        # itself is recorded, so only a typed `ask` refuses a file loosening
+        # (review round 2, R6).
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if wanted_auto:
             return SlashResult(
@@ -24124,7 +24484,12 @@ class OperatorApp(App[None]):
         # empty and the splash is about to come back, so a preflight notice
         # must not land as a transcript row that the splash then sits on.
         if self._welcome_visible or self._welcome_pending:
-            self._announce_on_splash(message.text, message.kind)
+            # The emitter's own headline when it has one, rather than a blind
+            # 35-cell cut of the sentence (design round 1, D3). See
+            # `NoticeEvent.headline`.
+            self._announce_on_splash(
+                message.text, message.kind, headline=getattr(message, "headline", "") or None
+            )
             return
         self._append_block(NoticeBlock(message.text, message.kind))
 

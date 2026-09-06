@@ -317,6 +317,20 @@ async def _fetch_or_abort(coro, signal: AbortSignal | None):
         await asyncio.gather(fetch_task, abort_task, return_exceptions=True)
 
 
+#: The refusal a call gets while ``web_fetch.enabled`` is false. Returned
+#: through ``run_fetch`` so ``web_fetch`` and ``read <url>`` refuse with one
+#: sentence, naming the key and the page that flips it.
+#
+# Names the KEY without its VALUE (design round 1, D4). The key is what the
+# user greps for in ``config.yml`` and it is what distinguishes a policy
+# refusal from a provider outage; ``: false`` only restates the condition the
+# user is already living through, and being hardcoded rather than read from the
+# value that triggered the refusal, it is the one fragment that can go stale.
+WEB_FETCH_DISABLED_MESSAGE = (
+    "web_fetch is disabled by config (web_fetch.enabled) — " "turn it on in /settings › Web tools"
+)
+
+
 async def run_fetch(
     url: str,
     *,
@@ -337,6 +351,25 @@ async def run_fetch(
     """
     manager = ConfigManager(config_dir())
     settings = load_fetch_settings(manager)
+    # The master switch is re-checked PER CALL, not only at inventory build.
+    # ``web_fetch.enabled`` is LIVE: a top-level session drops the tool from
+    # its schema at the next turn boundary, but a call the model already
+    # emitted, a subagent's spawn-time inventory, and — the case that made
+    # this line necessary — the ``read <url>`` sugar all reach this engine
+    # with no createIf gate in front of them. "Disabled" now means no fetching
+    # through any spelling; before, ``read https://…`` fetched regardless.
+    if not settings.enabled:
+        # NO details mapping (UX round 1, U3). ``tool_card`` turns any details
+        # carrying a ``url`` into a row reading ``Fetched: <url> · cache miss``,
+        # so the refusal card told the user a request had gone out and
+        # something downstream had refused it — for a call that never opened a
+        # connection. That misreport matters most on exactly this key:
+        # ``web_fetch.enabled: false`` is the switch a privacy- or
+        # airgap-minded user flips, and the card claimed the URL was fetched.
+        # ``web_search``'s refusal already returns no details and reads
+        # correctly; this matches it, so the card shows the refusal sentence
+        # and nothing else.
+        return WEB_FETCH_DISABLED_MESSAGE, {}, True
 
     try:
         normalized = normalize_url(url)

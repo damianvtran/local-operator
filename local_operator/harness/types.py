@@ -778,15 +778,17 @@ class ToolContext(BaseModel):
     # single values on demand. ``None`` degrades those tools to the process
     # environment only.
     variables: VariableStoreProtocol | None = None
-    # Startup snapshot used only by the web_search createIf gate. Execution
-    # re-reads config so provider toggles apply to the next call without
-    # rebuilding the session; the master on/off switch removes the advertised
-    # tool on reload.
+    # Snapshot used only by the web_search createIf gate: it decides whether
+    # the tool is IN the inventory being built. Execution re-reads config per
+    # call — provider toggles AND the master ``enabled`` switch — so a
+    # disabled tool refuses at once even while still advertised. A top-level
+    # session rebuilds this from the config watcher's last-good values and
+    # reconciles its inventory at the next turn boundary
+    # (``Session._reconcile_web_tools``); a subagent keeps its spawn snapshot.
     web_search_settings: dict[str, Any] | None = None
-    # Startup snapshot used only by the web_fetch createIf gate, mirroring
-    # web_search: execution re-reads config so knobs (TTL, allow_private) apply
-    # to the next call without rebuilding the session, while the master on/off
-    # switch removes the advertised tool on reload.
+    # Same contract as ``web_search_settings`` for the fetch tool. The per-call
+    # ``enabled`` check lives in ``run_fetch``, so it also covers the
+    # ``read <url>`` sugar, which has no createIf gate of its own.
     web_fetch_settings: dict[str, Any] | None = None
     # Session-owned capability tools that built-ins may delegate to. This is
     # deliberately a mapping rather than a second MCP client: OAuth transports
@@ -1235,6 +1237,23 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
+    #: A SHORT glance for the boot toast, when the emitter knows the state.
+    #:
+    #: While the splash is up a notice is shown twice — as a durable splash row
+    #: carrying the full sentence, and as a toast, which is one clause with no
+    #: wrap. A toast with no headline falls through to a blind 35-cell cut
+    #: (``tui/app.py:_splash_toast_headline``), which lands mid-phrase:
+    #: ``tool approvals: auto — config.yml c…``. That fallback has already
+    #: regressed once when a sibling message was added without a headline, and
+    #: the fix recorded there is that callers which KNOW the state pass one
+    #: rather than have prose re-parsed for a magic phrase.
+    #:
+    #: On the event rather than at the terminal because these notices are
+    #: emitted by the RUNTIME, one process away: a headline derived at the
+    #: viewer could only be derived by matching on the sentence, which is the
+    #: fragile thing this field exists to replace. Empty means "no opinion" and
+    #: the existing fallback applies, so every other emitter is unaffected.
+    headline: str = ""
 
 
 class WakeDeliveredEvent(AgentEvent[Literal["wake_delivered"]]):
