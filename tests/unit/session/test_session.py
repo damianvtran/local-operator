@@ -41,6 +41,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import (
+    _PRE_ABORT_DROP_NOTICE_AT,
     IMAGE_DROPPED_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
@@ -4335,4 +4336,104 @@ async def test_in_gap_abort_still_stops_a_continuation(tmp_path):
 
     assert len(stream.requests) == spent_before, "the stopped continuation ran"
     assert session._continuation_queue == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dropped_plain_message_is_persisted_exactly_once(tmp_path):
+    """The drop path must not double-write a plain ``Message``.
+
+    The two parking paths have opposite persistence contracts:
+    ``_append_or_park_journal`` (CustomMessage) only touches live context, so
+    the durable write is owed at the drop; the steering queue's consumer
+    (``_drain_steering``) persists whatever it drains, so appending there too
+    wrote the row twice. The duplicate survived into replayed history, so a
+    resumed session showed the message twice and sent it to the model twice.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    marker = "held-plain-message"
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([Message.user(marker)])
+
+    # The drain is the single writer, so the next real turn is what persists it.
+    session._abort_requested = False
+    await session.prompt("next turn")
+
+    rows = [
+        entry
+        for entry in Transcript(tmp_path / "sess").entries()
+        if entry.type == "message"
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict) and marker in str(block.get("text", ""))
+    ]
+    assert len(rows) == 1, f"the held message was persisted {len(rows)} times"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_prompt_is_never_dropped_silently(tmp_path):
+    """A prompt caught by an abort mid-pipeline is interrupted, not swallowed.
+
+    ``prompt()`` clears the flag under the lock, but the pipeline awaits twice
+    before ``_run_turn`` reads it. An abort landing in that window (submit,
+    then immediately Esc) would otherwise send the user's OWN prompt down the
+    silent drop path: no start/end pair, and ``prompt()`` returning success for
+    work that never ran. Arriving work may drop because nobody is waiting on
+    it; a synchronous caller may not.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    # Fire the abort inside the pipeline gap the race opens.
+    original = session._refresh_context_metadata
+    fired = False
+
+    async def racing_refresh(*args, **kwargs):
+        nonlocal fired
+        result = await original(*args, **kwargs)
+        if not fired:
+            fired = True
+            session.abort("interrupted")
+        return result
+
+    session._refresh_context_metadata = racing_refresh  # type: ignore[method-assign]
+
+    await session.prompt("my typed prompt")
+
+    # The turn is VISIBLY interrupted: the UI gets its pair, not silence.
+    assert [e for e in events if isinstance(e, AgentStartEvent)]
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_drop_notice_fires_once_across_a_stuttering_run(tmp_path):
+    """One notice per run, held by a latch rather than counter equality.
+
+    With ``==`` a run interrupted by a real turn at count 2 restarts the
+    counter, so a long stuttering run could clear the threshold repeatedly and
+    still never say anything.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(6)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+    notices: list[NoticeEvent] = []
+    session.subscribe(lambda e: notices.append(e) if isinstance(e, NoticeEvent) else None)
+
+    session.abort("interrupted")
+    for index in range(_PRE_ABORT_DROP_NOTICE_AT + 3):
+        async with session._turn_lock:
+            await session._run_turn([Message.user(f"held {index}")])
+
+    assert len(notices) == 1, f"expected one notice for the run, got {len(notices)}"
+    # ...and the text does not tell the user to act, because a new arrival
+    # clears the abort on its own.
+    assert "send a message" not in notices[0].text.lower()
     await session.dispose()
