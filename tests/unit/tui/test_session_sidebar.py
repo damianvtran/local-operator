@@ -450,3 +450,37 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         await pilot.click("#session-sidebar", offset=(4, 1))
         assert not app._session_sidebar.display
+
+
+@pytest.mark.asyncio
+async def test_speculative_prepare_does_not_ensure_bound_on_a_cold_owner():
+    """P1-d: prewarm must not engage a runtime. A cold speculative prepare
+    raises instead of calling ``_ensure_bound`` — that is how speculation
+    stays look-only.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    bound = AsyncMock()
+    remote = MagicMock(spec=RemoteSession)
+    remote.session_id = "other"
+    remote.is_cold = True
+    remote._ensure_bound = bound
+    remote.frontend_state = SimpleNamespace(pending_gate=None)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        source = SessionInteraction(remote)
+        app._sidebar_sources["other"] = source
+
+        async def lease(session_id, *, speculative=False):
+            source.preparations += 1
+            return source
+
+        app._lease_sidebar_source = lease  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="no longer ready"):
+            await app._prepare_sidebar_session("other", speculative=True)
+        bound.assert_not_awaited()

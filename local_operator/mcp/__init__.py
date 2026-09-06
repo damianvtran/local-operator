@@ -45,8 +45,15 @@ async def discover_and_load_mcp_tools(
 
     A hard discovery failure never raises: it yields the manager, an empty
     tool list, and one synthetic error entry (established behavior).
+
+    ``tool_cache`` defaults to :class:`McpToolCache` under :func:`config_dir`
+    so a deferred server can advertise last-good schemas at the 250 ms gate
+    without every runtime waiting on spawn+handshake. The owner still spawns;
+    live ``tools/list`` after connect overwrites the row. Passing ``None``
+    used to mean "no cache", which made every runtime pay the handshake even
+    when a sibling had just listed the same server.
     """
-    manager = McpManager(cwd, tool_cache, auth_store=auth_store)
+    manager = McpManager(cwd, tool_cache or McpToolCache(), auth_store=auth_store)
     try:
         result = await manager.discover_and_connect()
     except Exception as exc:

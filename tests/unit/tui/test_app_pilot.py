@@ -2039,6 +2039,54 @@ async def test_follower_model_picker_lists_the_owners_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_picker_first_frame_is_initial_catalogue_not_live() -> None:
+    """P1-c: opening /model paints initial_catalogue; live_catalogue is a worker.
+
+    Boot must not call live_catalogue. The first painted rows are the disk
+    catalogue; the network refresh is the worker `_refresh_catalogue`.
+    """
+    from local_operator.providers.controller import CatalogueEntry
+
+    calls: list[str] = []
+
+    class RecordingController(FakeProviderController):
+        def initial_catalogue(self, *, cache_dir: Any = None) -> list[Any]:
+            calls.append("initial")
+            return [
+                CatalogueEntry(
+                    provider="anthropic",
+                    model_id="claude-sonnet-4-6",
+                    label="Claude Sonnet 4.6",
+                    context_window=1_000_000,
+                    input_price=3.0,
+                    output_price=15.0,
+                    connected=True,
+                    aggregated=False,
+                )
+            ]
+
+        async def live_catalogue(
+            self, *, ttl_s: float | None = None
+        ) -> tuple[list[Any], dict[str, str]]:
+            calls.append("live")
+            return [], {}
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=RecordingController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        assert "live" not in calls, "boot/mount must not call live_catalogue"
+        app._populate_model_picker()
+        assert calls[0] == "initial", calls
+        assert calls.count("initial") == 1
+        # live_catalogue is the worker, not the first frame.
+        assert "live" not in calls[:1]
+
+
+@pytest.mark.asyncio
 async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, tmp_path) -> None:
     """A live owner becomes a RemoteSession in the existing OperatorApp.
 

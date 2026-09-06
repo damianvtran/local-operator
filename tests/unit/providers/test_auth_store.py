@@ -170,6 +170,53 @@ async def test_oauth_auto_refresh_with_skew(
     assert rows[-1].data["access"] == "access-2"
 
 
+async def test_cross_process_refresh_lease_lets_only_one_store_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two AuthStores on one db: the loser does not POST a rotating token.
+
+    This is the PR-24 race: N TUI+runtime processes, one refresh token.
+    The lease is the same atomic upsert as usage; clients stay per-store.
+    """
+    import time
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    db = tmp_path / "auth.db"
+    a = AuthStore(db)
+    b = AuthStore(db)
+    expired = _oauth(expires=int(time.time() * 1000) + 1000)
+    expired["org_id"] = "org-1"
+    a.upsert_credential("openai", expired)
+    row = a.list_credentials("openai")[-1]
+    posts: list[str] = []
+    release = asyncio.Event()
+    held = asyncio.Event()
+
+    async def slow_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        posts.append(creds["refresh"])
+        held.set()
+        await release.wait()
+        return {
+            "access": "access-2",
+            "refresh": "rotated",
+            "expires": int(time.time() * 1000) + 3600_000,
+        }
+
+    monkeypatch.setattr(a, "_refresh_fn", lambda provider: slow_refresh)
+    monkeypatch.setattr(b, "_refresh_fn", lambda provider: slow_refresh)
+
+    task = asyncio.create_task(a.get_api_key("openai"))
+    await asyncio.wait_for(held.wait(), 2)
+    assert b._try_refresh_lease(row.id) is False
+    key_b = await b.get_api_key("openai")
+    assert posts == [expired["refresh"]]
+    release.set()
+    key_a = await task
+    assert key_a == "access-2"
+    assert len(posts) == 1
+    assert key_b in {expired["access"], "access-2"}
+
+
 async def test_force_refresh_failure_blocks_and_raises(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
