@@ -3637,14 +3637,29 @@ class OperatorApp(App[None]):
         )
         editor.move_cursor(editor._end_of_buffer())
 
-    def _sidebar_source_releasable(self, source: SessionInteraction) -> bool:
+    def _sidebar_source_releasable(
+        self, source: SessionInteraction, *, reason: str = "idle"
+    ) -> bool:
+        """May this leased viewer be disposed now?
+
+        ``reason="idle"`` is the opportunistic path: retention of any kind
+        wins, because the source may still be needed. ``reason="closed"`` is
+        the sidebar-close drain, which additionally drops sources retained
+        ONLY by the owner's turn (:attr:`retained_for_auto_work`): that is a
+        remote fact about a read-only projection, it is unbounded, and each
+        one costs a deep state copy per owner delta forever. Local retention
+        — our own workers, an unsent gate answer — still wins in both.
+        """
         from local_operator.session.remote import RemoteSession
 
+        retained = source.retained_for_local_work or (
+            reason != "closed" and source.retained_for_auto_work
+        )
         return (
             isinstance(source.session, RemoteSession)
             and source is not self._interaction
             and not source.retired
-            and not source.must_retain
+            and not retained
             and not source.preparations
             and not getattr(source.session, "has_pending_gate_reply", False)
             and source.session is not None
@@ -3652,8 +3667,10 @@ class OperatorApp(App[None]):
             and source.session.session_id not in self._sidebar_presentations
         )
 
-    async def _release_sidebar_source(self, source: SessionInteraction) -> None:
-        if not self._sidebar_source_releasable(source) or source.session is None:
+    async def _release_sidebar_source(
+        self, source: SessionInteraction, *, reason: str = "idle"
+    ) -> None:
+        if not self._sidebar_source_releasable(source, reason=reason) or source.session is None:
             return
         session = source.session
         try:
@@ -3668,7 +3685,7 @@ class OperatorApp(App[None]):
             return
         # Saving overflow yields. A rapid return may have acquired this same
         # source; neither its event controller nor its socket may close then.
-        if not self._sidebar_source_releasable(source):
+        if not self._sidebar_source_releasable(source, reason=reason):
             return
         source.retired = True
         if source.unsubscribe_frontend is not None:
@@ -4092,6 +4109,24 @@ class OperatorApp(App[None]):
                     source = self._sidebar_sources.get(session_id)
                     if source is not None:
                         self.run_worker(self._release_sidebar_preparation((source, presentation)))
+                # Then the sources with NO retained presentation. The loop
+                # above only reaches sources the presentation LRU happened to
+                # be holding, so a prewarmed viewer that never became visible
+                # was never visited by any path — `_sidebar_sources` grew
+                # without bound (25 open/close cycles leaked 50 sources, 0
+                # dispose calls). Each leaked viewer keeps a socket and a
+                # frontend subscription alive, and every owner delta then
+                # costs a deep state copy per leak: ~1.2 ms each, which is the
+                # background lag that ends in a frozen TUI.
+                #
+                # `reason="closed"` drops owner-turn retention but never local
+                # work, so a source running our worker or holding an unsent
+                # gate answer survives the close. Closing has the same meaning
+                # as `on_unmount`, which already disposes every non-current
+                # session, and the presentations that could have used a parked
+                # source were just discarded above.
+                for source in list(self._sidebar_sources.values()):
+                    self.run_worker(self._release_sidebar_source(source, reason="closed"))
         if not opened and sidebar.has_focus:
             self._restore_sidebar_focus()
 

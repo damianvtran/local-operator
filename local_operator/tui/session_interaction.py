@@ -139,20 +139,49 @@ class SessionInteraction:
         return self.draft.notices
 
     @property
-    def must_retain(self) -> bool:
-        state = getattr(self.session, "frontend_state", None)
-        auto_work = self.draft.approve_all and (
-            getattr(self.session, "is_streaming", False)
-            or any(getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ()))
-        )
+    def retained_for_local_work(self) -> bool:
+        """Retention this process OWNS: our coroutines, the user's unsent state.
+
+        Every clause is something only WE hold — an in-flight worker awaiting
+        this socket, a shell or loop we started, a held prompt, a gate answer
+        the user typed and has not sent. Disposing the source breaks a live
+        worker or loses that answer, so nothing may drain these. They are also
+        bounded by user action: a turn has to be started before it can be
+        abandoned by switching away.
+        """
         return bool(
             self.active_workers
             or self.loop.running
             or self.shell.worker is not None
             or self.compaction.held_prompt
-            or auto_work
             or self.gate_draft is not None
         )
+
+    @property
+    def retained_for_auto_work(self) -> bool:
+        """Retention driven by the OWNER's turn — a remote fact, and unbounded.
+
+        Kept so an auto-approving viewer keeps noticing a background turn finishing;
+        but the viewer is a read-only projection (``no_takeover``), so dropping
+        it cannot stop or corrupt the owner's turn. Unbounded is the problem:
+        prewarming any busy background agent mints one, and each retained
+        viewer costs a deep state copy on EVERY owner delta, so closing the
+        sidebar must be allowed to drop these (see ``_release_sidebar_source``).
+        """
+        state = getattr(self.session, "frontend_state", None)
+        return bool(
+            self.draft.approve_all
+            and (
+                getattr(self.session, "is_streaming", False)
+                or any(
+                    getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ())
+                )
+            )
+        )
+
+    @property
+    def must_retain(self) -> bool:
+        return self.retained_for_local_work or self.retained_for_auto_work
 
     def worker_group(self, name: str) -> str:
         return f"{name}:{self.token}"

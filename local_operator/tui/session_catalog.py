@@ -169,12 +169,94 @@ def decorate_rows(
     return sort_needs_you_first(updated)
 
 
+#: Rows the poll materialises. The sidebar paints a fixed window (~38 rows at a
+#: usual height) and pages within what it holds, so the untruncated answer
+#: `/resume` wants is waste here: on a 665-directory store the poll built 56
+#: rows every 2 s and spent 92-99% of itself doing it. Headroom well past the
+#: viewport keeps paging and ranking honest without materialising the tail.
+CATALOG_SCAN_LIMIT = 200
+
+#: `session_id -> ((activity_mtime, transcript_size), SessionRow)`. A row's
+#: name and fork mark change only when its transcript does, and the scan
+#: already stats that file to rank the session, so the key is free. Only the
+#: DURABLE fields are cached: `live_state`, `pending`, `wakes` and `unseen` are
+#: layered on afterwards by `decorate_rows`/attention on every poll, because
+#: caching a live fact would freeze the list.
+_ROW_CACHE: dict[str, tuple[tuple[float, int], SessionRow]] = {}
+
+
+def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
+    """``(activity_mtime, size)`` for the transcript, or ``None`` if unreadable.
+
+    Deliberately the same file :func:`session.retention.session_activity`
+    ranks by, so a row whose key is unchanged is a row whose transcript has not
+    been appended to — which is exactly the condition under which its name and
+    fork mark cannot have changed. Size is carried alongside mtime because a
+    coarse filesystem timestamp can hide an append inside the same second.
+    """
+    from local_operator.session.retention import TRANSCRIPT_FILENAME
+
+    try:
+        stat = (session_dir / TRANSCRIPT_FILENAME).stat()
+    except OSError:
+        return None
+    return (stat.st_mtime, stat.st_size)
+
+
+def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[SessionRow]:
+    """:func:`recent_session_rows` for the poll, memoized on transcript stat.
+
+    The ``O(directories)`` scan underneath is NOT what this avoids — it still
+    runs, and bounding it is what ``limit`` does. What this avoids is the
+    per-row work above the scan: the bounded head read that builds the name,
+    and the fork-title probe, on rows whose transcript has not been appended to
+    since the last poll two seconds ago.
+
+    Deliberately reimplements ``recent_session_rows``'s loop instead of calling
+    it, because the saving is inside that loop; the scan it calls is the shared
+    one, so ranking and visibility stay identical to ``/resume``. Rows absent
+    from the current answer are dropped, keeping the cache bounded by the live
+    store rather than by every session ever listed.
+    """
+    from local_operator.resume import (
+        ORIGIN_FORK,
+        _recent_sessions_with_origin,
+        session_name,
+        wears_inherited_title,
+    )
+
+    rows: list[SessionRow] = []
+    fresh: dict[str, tuple[tuple[float, int], SessionRow]] = {}
+    for session_id, mtime, origin in _recent_sessions_with_origin(directory, limit):
+        session_dir = directory / "sessions" / session_id
+        key = _row_stat_key(session_dir)
+        cached = _ROW_CACHE.get(session_id)
+        if key is not None and cached is not None and cached[0] == key:
+            # Same transcript bytes as last poll: the name and the fork mark
+            # cannot have changed, so neither read is repeated. `mtime` is
+            # taken fresh from the scan regardless — it also tracks the inbox
+            # spool, which ranks a row without touching the transcript.
+            row = cached[1]._replace(mtime=mtime)
+        else:
+            row = SessionRow(
+                session_id,
+                mtime,
+                session_name(session_dir),
+                forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
+            )
+        rows.append(row)
+        if key is not None:
+            fresh[session_id] = (key, row)
+    _ROW_CACHE.clear()
+    _ROW_CACHE.update(fresh)
+    return rows
+
+
 def load_catalog(directory: Path) -> list[CatalogEntry]:
     """One off-loop summary snapshot; never acknowledge or read full histories."""
-    from local_operator.resume import recent_session_rows
     from local_operator.session.attention import AttentionStore, conversation_identity
 
-    rows = decorate_rows(directory, recent_session_rows(directory, limit=None), include_live=True)
+    rows = decorate_rows(directory, cached_session_rows(directory), include_live=True)
     identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
     attention = AttentionStore(directory / "attention.db").state_many(identities.values())
     return list(

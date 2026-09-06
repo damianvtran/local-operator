@@ -573,3 +573,82 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     assert straight[1].startswith(" ›   Session alpha"), repr(straight[1])
     assert straight[3].startswith(" »   Session gamma"), repr(straight[3])
     assert mirrored[1].startswith(" »   Session alpha"), repr(mirrored[1])
+
+
+@pytest.mark.asyncio
+async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
+    """Open/close cycles must not accumulate live viewers (the freeze).
+
+    `_sidebar_presentations` is LRU-bounded and drained on close, but
+    `_sidebar_sources` was neither: the close path walked the presentations it
+    had just emptied, so a prewarmed viewer that never became visible was
+    never visited by any path. Measured at 25 cycles: 50 leaked sources, 0
+    dispose calls. Each one keeps a socket and a frontend subscription alive,
+    and every owner delta then costs a deep state copy per leak (~1.2ms), so
+    the cost grows with time-open until the UI stops responding.
+
+    Both directions are asserted. Draining owner-turn retention is safe — the
+    viewer is a read-only projection and cannot stop the owner's turn — but
+    draining LOCAL retention would kill a live worker or lose an unsent gate
+    answer, so a source with local work must survive the close. That second
+    assertion is the guard against over-fixing.
+    """
+    from unittest.mock import MagicMock
+
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    disposed: list[str] = []
+    unsubscribed: list[str] = []
+
+    def lease(app, session_id: str, *, kind: str) -> SessionInteraction:
+        remote = MagicMock(spec=RemoteSession)
+        remote.session_id = session_id
+        remote.is_cold = False
+        remote.has_pending_gate_reply = False
+        remote.is_streaming = kind == "owner-busy"
+
+        async def _dispose() -> None:
+            disposed.append(session_id)
+
+        remote.dispose = MagicMock(side_effect=_dispose)
+        source = SessionInteraction(remote)
+        # approve_all + owner streaming is the `auto_work` clause: what a
+        # prewarmed viewer of a busy background agent looks like.
+        source.draft.approve_all = True
+        if kind == "local-work":
+            # A turn WE submitted over that socket and are still awaiting.
+            source.active_workers = 1
+        source.unsubscribe_frontend = lambda: unsubscribed.append(session_id)
+        source.controller = MagicMock()
+        app._sidebar_sources[session_id] = source
+        app._interactions[id(remote)] = source
+        app._event_sources[source.controller] = source
+        return source
+
+    cycles = 8
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        current = str(getattr(app._session, "session_id", ""))
+        keep = lease(app, "local-work", kind="local-work")
+
+        for cycle in range(cycles):
+            app.action_toggle_sidebar()
+            await pilot.pause()
+            lease(app, f"ownerbusy{cycle}", kind="owner-busy")
+            lease(app, f"idle{cycle}", kind="idle")
+            await pilot.pause()
+            app.action_toggle_sidebar()
+            await pilot.pause()
+            await pilot.pause()
+
+        leftover = set(app._sidebar_sources) - {current}
+        assert leftover == {"local-work"}, f"leaked {sorted(leftover - {'local-work'})}"
+        # Every leased viewer released its socket AND its subscription; the
+        # count does not climb with cycles.
+        assert len(disposed) == cycles * 2, disposed
+        assert len(unsubscribed) == cycles * 2, unsubscribed
+        # The over-fix guard: local in-flight work was never touched.
+        assert "local-work" not in disposed
+        assert not keep.retired
