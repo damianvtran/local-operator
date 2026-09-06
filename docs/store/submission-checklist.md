@@ -19,10 +19,11 @@ them settled forever.
 - **v0.1.8 is submitted and `PENDING_REVIEW`** at 100% deployment, from source
   commit `ff9b16b5` (PR #672). See the release record in
   `docs/store/release-record.md`.
-- **Automated publishing has now run a real release.** v0.1.8 went out through
-  `chrome-web-store.yml` (run 34000911184) — the first submission not driven by
-  hand — and is the intended path for every subsequent release. See "Automated
-  updates after the first public release" below.
+- **Automated publishing has now carried two real releases.** v0.1.7 was the
+  first, submitted and published end to end through the workflows (runs
+  33815585846 and 33926643637); v0.1.8 followed through `chrome-web-store.yml`
+  (run 34000911184). It is the intended path for every subsequent release. See
+  "Automated updates after the first public release" below.
 - **Known platform limit, still true:** Chrome forbids the debugger API on the
   Web Store domains ("The extensions gallery cannot be scripted"), so the
   extension cannot auto-fill the developer console — a human drives the console
@@ -296,15 +297,18 @@ and what control remains with the user.
 
 ### Automated updates after the first public release
 
-**Status (2026-09-06): configured, verified end to end, and proven on a real
-release.** Both protected environments, the workload identity provider, the
+**Status (2026-09-06): configured, verified end to end, and proven on two real
+releases.** Both protected environments, the workload identity provider, the
 service-account IAM binding, and the store's authorization of that service
 account were confirmed working on 2026-09-02; the evidence is in
-`release-record.md`. **v0.1.8 was the first version actually submitted through
-the workflow** (run 34000911184, 2026-09-06): it validated the package, uploaded
-it, and submitted with `STAGED_PUBLISH`, no dashboard step. Every release before
-it went out by hand. The workflow fails closed before uploading anything, so a
-surprise there is recoverable.
+`release-record.md`. **v0.1.7 was the first version actually released through
+the workflows** — submitted 2026-09-03 (run 33815585846) and published
+2026-09-04 (run 33926643637), no dashboard step in either half. **v0.1.8**
+followed on 2026-09-06 (run 34000911184), validating and submitting with
+`STAGED_PUBLISH`. Every release before v0.1.7 went out by hand. The workflow
+fails closed before uploading anything — two earlier staged attempts (33793517588,
+33766746870) died on a 403 during authentication without touching the store — so
+a surprise there is recoverable.
 
 The workflows use Chrome Web Store API v2 directly with `curl` and exchange a
 GitHub OIDC token for a short-lived service-account access token through
