@@ -521,7 +521,9 @@ one PR alone while other merged work is sitting on `main` unreleased.
 
 `main` is governed by a ruleset that requires one approving review from a code
 owner (`.github/CODEOWNERS`) and carries a configured **bypass for the admin
-repository role** (`bypass_mode: always`). Those two settings together encode a
+repository role** (`bypass_actors`: `RepositoryRole` 5, `bypass_mode: always`
+— diff this sentence against `gh api repos/<owner>/<repo>/rulesets/<id>` rather
+than trusting it). Those two settings together encode a
 deliberate two-tier policy, and this section exists so nobody "fixes" one half
 without understanding what the other half is for.
 
@@ -578,9 +580,9 @@ Two things this does not license:
   waving through someone else's.
 
 An agent that is **not** acting for a code owner prepares the PR, records the
-review rounds, and hands it to an owner — who then approves it as a human (the
-tier-2 click) and merges, or has their own agent complete it once that
-approval is on the PR.
+review rounds, and hands it to an owner. The owner approves it as a human
+first — that click is the tier-2 requirement and nothing else satisfies it —
+and only then merges, or lets their own agent complete the merge.
 
 **One side effect to manage: GitHub requests code owners automatically at PR
 open.** The standing practice is the opposite — human reviewers are added only
