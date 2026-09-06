@@ -129,6 +129,21 @@ class SessionDiagnostics:
     context_is_estimate: bool | None = None
     generation: int | None = None
     epoch: str | None = None
+    #: Whether the status band is showing a RESTORED spend floor (its ``≥``
+    #: mark). App state, not session state, so it is passed at the call site
+    #: rather than read by ``capture``.
+    #:
+    #: This is a DIFFERENT deficit from the ledger's ``+`` and the two must not
+    #: be merged: ``+`` means "every call was counted, some had no published
+    #: price", while ``≥`` means "this figure includes money restored from a
+    #: resumed conversation, where only the last reported turn's usage survived
+    #: in priceable form". The ledger has no ``≥`` state and should not grow one
+    #: — for a resumed session it holds the actual retained rows, which is
+    #: usually MORE complete than the restored figure. ``/session`` is where the
+    #: two are reconciled, in prose; ``UsageAggregate`` stays free of a
+    #: transcript-restoration concept it has no way to know about (and which the
+    #: desktop HTTP route that also consumes it has no notion of).
+    spend_is_floor: bool = False
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -698,7 +713,7 @@ def build_session_report(
         # ledger — a fresh session's one true visual.
         _draw_context_gauge(body, gauge, _measure_columns([gauge] if gauge else [], width), width)
     else:
-        _draw_recorded_usage(body, report, gauge, width, metric)
+        _draw_recorded_usage(body, report, runtime, gauge, width, metric)
 
     _draw_runtime_and_scope(body, report, runtime)
     return body.to_text()
@@ -780,6 +795,7 @@ def _shared_columns(
 def _draw_recorded_usage(
     body: _Body,
     report: SessionReport,
+    runtime: SessionDiagnostics,
     gauge: _BarRow | None,
     width: int,
     metric: str,
@@ -793,7 +809,13 @@ def _draw_recorded_usage(
     meta = f"{aggregate.calls} requests"
     if aggregate.ok_calls != aggregate.calls:
         meta += f" ({aggregate.calls - aggregate.ok_calls} failed)"
-    body.header("Totals", meta + " · measured", meta)
+    # SCOPE LABEL, not chrome. Est. cost below is the whole TREE while every
+    # other row and section here is this session alone, and an unlabelled
+    # asymmetry is just the next inconsistency report. Only said when the
+    # session actually has subagents — on a childless session the two scopes are
+    # identical and the distinction would be noise.
+    scope = " · cost incl. subagents" if report.has_descendants else ""
+    body.header("Totals", meta + " · measured" + scope, meta)
     body.kv(
         "Total billed",
         format_tokens(aggregate.total_tokens) + " tokens",
@@ -813,17 +835,43 @@ def _draw_recorded_usage(
         f"{format_tokens(aggregate.reasoning_tokens)} thinking",
     )
     body.kv("Cache hit rate", format_percent(aggregate.cache_hit_rate), "of context from cache")
-    body.kv(
-        "Est. cost",
-        format_cost(aggregate),
-        "≈ list price × tokens" if aggregate.cost_is_known else "no published price",
-    )
+    # The HEADLINE is the tree: this row answers "what has this session cost
+    # me", and a session that spent through 20 subagents did not spend only its
+    # own $31.28 of it. The split goes in the note slot the row already has — no
+    # new layout, no width risk — so the own figure every other section here is
+    # scoped to stays legible beside the total. Falls back to the own scope
+    # verbatim when there are no children or the ledger could not be walked.
+    subtree = report.subtree_aggregate
+    if report.has_descendants:
+        note = (
+            f"{format_cost(aggregate)} own · "
+            f"{format_cost(report.descendants_aggregate or aggregate)} subagents"
+        )
+    else:
+        note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
+    body.kv("Est. cost", format_cost(subtree), note)
+    if report.has_descendants:
+        # Says which question the headline answered and how many children are in
+        # it, since the note above spends its width on the two figures.
+        body.note(
+            f"Est. cost is this session plus {len(report.descendant_ids)} subagent "
+            "sessions; every other section below is this session alone."
+        )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:
         body.note(
             f"{report.missing_usage_calls:,} requests missing usage · "
             f"{report.unknown_usage_calls:,} unknown"
+        )
+    if runtime.spend_is_floor:
+        # Reconcile the band's ≥ against this screen's figure instead of copying
+        # the mark over. They measure different deficits (see
+        # ``SessionDiagnostics.spend_is_floor``), and the ledger figure is
+        # usually the better one — saying which is which is the honest move.
+        body.note(
+            "The status band shows ≥ (a restored floor from a resumed "
+            "conversation); this figure is what the ledger actually retained."
         )
     body.blank()
 
@@ -853,10 +901,28 @@ def _draw_recorded_usage(
     # so the three sources below are exhaustive. A future section rendering a
     # cost cell from a scope outside them would silently suppress the legend
     # for a ``+`` or ``$—`` that is on screen; add its scopes here.
-    scopes = [aggregate, *report.by_model.values(), *report.by_purpose.values()]
+    # ``subtree`` is listed because the Est. cost row now renders IT, not the
+    # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
+    # own scope has no reason to report, and omitting it here would put that
+    # mark on screen with its footnote suppressed.
+    scopes = [aggregate, subtree, *report.by_model.values(), *report.by_purpose.values()]
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()
+
+
+def _own_scope(report: SessionReport) -> str:
+    """The ``share of ...`` prefix, naming the scope when it could be ambiguous.
+
+    These sections are THIS session's calls only, while the Totals block's Est.
+    cost row above them is the whole tree. That split is deliberate — by_model
+    and by_purpose answer "where did MY context go", and folding a child's model
+    mix in would corrupt a diagnostic that is currently correct — but a reader
+    who just saw a tree figure needs telling, or the next row they read looks
+    like it disagrees with it. Said only when the session HAS subagents; with no
+    children the two scopes are the same and the longer wording is noise.
+    """
+    return "share of this session only" if report.has_descendants else "share of session"
 
 
 def _unpriced_note(body: _Body, metric: str, priced: bool) -> bool:
@@ -880,7 +946,7 @@ def _draw_by_model(
         return
     groups = [(f"{provider}/{model}", agg) for (provider, model), agg in report.by_model.items()]
     rows, priced = _group_rows(groups, metric)
-    body.header("By model", _metric_meta(metric, "share of session"), _metric_meta(metric, ""))
+    body.header("By model", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     _unpriced_note(body, metric, priced)
     body.extend(_render_rows(rows, cols, width))
     body.blank()
@@ -900,7 +966,7 @@ def _draw_by_purpose(
     if not report.by_purpose:
         return
     rows, priced = _group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))
-    body.header("By purpose", _metric_meta(metric, "share of session"), _metric_meta(metric, ""))
+    body.header("By purpose", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     # Only when there is a contrast to explain: the legend defines ``turn``
     # against the harness's own purposes, so it is noise when the rows are all
     # ``turn``, and meaningless on a legacy ledger whose single row is

@@ -783,3 +783,145 @@ def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
     ).fetchall()
     assert rows == [("old", 500, 0), ("s1", 300, 120)]
     store.close()
+
+
+def _child(parent, session_id, **kw):
+    """A snapshot stamped as a subagent call of ``parent``."""
+    import dataclasses
+
+    return dataclasses.replace(_snap(session_id=session_id, **kw), parent_session_id=parent)
+
+
+def test_session_report_rolls_up_descendant_spend(tmp_path):
+    """``/session``'s headline question is "what did this cost me", and a
+    session that spent through subagents did not spend only its own rows."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch(
+        [
+            _snap(session_id="root", cost_micro=1_000_000),
+            _child("root", "kid1", cost_micro=2_000_000),
+            _child("root", "kid2", cost_micro=3_000_000),
+            # A grandchild: the ledger is one level deep today, but fork()
+            # stamps the MIDDLE session as parent the moment a subagent spawns
+            # its own, so the walk must be recursive rather than one level.
+            _child("kid1", "grandkid", cost_micro=4_000_000),
+            _snap(session_id="stranger", cost_micro=9_000_000),
+        ]
+    )
+    report = store.session_report("root")
+    assert report.aggregate.cost_micro == 1_000_000
+    assert report.descendants_aggregate is not None
+    assert report.descendants_aggregate.cost_micro == 9_000_000
+    assert report.subtree_aggregate.cost_micro == 10_000_000
+    assert set(report.descendant_ids) == {"kid1", "kid2", "grandkid"}
+    # The unrelated session is not swept in by the recursion.
+    assert "stranger" not in report.descendant_ids
+    # And the own scope stays own: the diagnostic sections read this.
+    assert report.aggregate.calls == 1
+    store.close()
+
+
+def test_session_report_without_children_reports_empty_not_unknown(tmp_path):
+    """A childless session must be distinguishable from an unwalkable ledger:
+    the first shows no subagent split, the second must not claim $0.00."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="solo")])
+    report = store.session_report("solo")
+    assert report.descendants_aggregate is not None
+    assert report.descendants_aggregate.calls == 0
+    assert report.has_descendants is False
+    assert report.subtree_aggregate.cost_micro == report.aggregate.cost_micro
+    store.close()
+
+
+def test_descendant_walk_survives_a_self_parent_cycle(tmp_path):
+    """224 rows in the operator's real ledger carry parent == session. A walk
+    that follows that edge either loops or double-counts; this one does
+    neither."""
+    import sqlite3
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="root"), _child("root", "kid")])
+    conn = store._connect()
+    assert conn is not None
+    # Stamp the child as its own parent too — the degenerate shape the real
+    # ledger contains — alongside the legitimate edge.
+    conn.execute("UPDATE calls SET parent_session_id = 'kid' WHERE session_id = 'kid'")
+    conn.commit()
+    report = store.session_report("root")
+    assert report.descendant_ids == ()  # the self-loop replaced the real edge
+    # The point is that it TERMINATED and stayed honest, not what it found.
+    assert report.subtree_aggregate.cost_micro == report.aggregate.cost_micro
+
+    # And with both edges present the child is counted exactly once.
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens, cost_micro, cost_known, parent_session_id) "
+        "VALUES (1, 'kid', 'anthropic', 'claude', 1, 1, 1, 0, 0, 0, 1, 500, 1, 'root')"
+    )
+    conn.commit()
+    report = store.session_report("root")
+    assert report.descendant_ids == ("kid",)
+    assert report.descendants_aggregate is not None
+    # Both of kid's rows, once each.
+    assert report.descendants_aggregate.calls == 2
+    assert isinstance(sqlite3.connect(str(tmp_path / "a.db")), sqlite3.Connection)
+    store.close()
+
+
+def test_parent_index_is_created_and_survives_an_old_ledger(tmp_path):
+    """The index is load-bearing for the rollup (154 ms -> 1 ms), and it must
+    reach a database written before ``parent_session_id`` existed WITHOUT
+    aborting the schema script that also creates the rollup tables."""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    # A pre-parent_session_id ledger: putting the index in _SCHEMA rather than
+    # after _migrate makes executescript raise "no such column" here and lose
+    # every statement after it.
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens) VALUES (1, 'old', 'anthropic', 'claude', 1, 1, 1, 0, 0, 0, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    assert store.record_batch([_snap(session_id="new")]) == 1
+    live = store._connect()
+    assert live is not None
+    names = {row[0] for row in live.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_calls_parent" in names
+    # The rest of the schema script survived: the rollup tables exist.
+    tables = {row[0] for row in live.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"usage_daily", "usage_monthly"} <= tables
+    store.close()
+
+
+def test_aggregate_exposes_parent_edges_for_the_table_rollup(tmp_path):
+    """``/analytics`` re-partitions the per-session table with these edges."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="root"), _child("root", "kid"), _snap(session_id="solo")])
+    agg = store.aggregate()
+    parents = getattr(agg, "session_parents", {})
+    assert parents == {"kid": "root"}
+    # Every session still gets its OWN row in by_session: the rollup is the
+    # renderer's job, so the aggregate keeps summing to the headline total.
+    assert set(agg.by_session) == {"root", "kid", "solo"}
+    assert sum(a.cost_micro for a in agg.by_session.values()) == agg.cost_micro
+    store.close()

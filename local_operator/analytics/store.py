@@ -278,6 +278,29 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
 )
 
+#: Indexes over OPTIONAL columns, created after ``_migrate`` rather than in
+#: ``_SCHEMA``. They cannot live in the schema script: ``executescript`` runs it
+#: as one unit BEFORE the ALTERs, so on a ledger written by a release that
+#: predates the column, ``CREATE INDEX ... ON calls(parent_session_id)`` raises
+#: "no such column" and aborts the REST of the script — losing the rollup tables
+#: and latching ``_broken`` for the process. Verified against a pre-column DB.
+#:
+#: ``idx_calls_parent`` is load-bearing for the subagent rollup: without it a
+#: recursive subtree walk is a full scan (measured 154 ms on a 475k-row ledger
+#: vs 1.03 ms with it), which is the difference between a viable ``/session``
+#: tree total and an unviable one. It is NOT free: building it over an existing
+#: 475k-row ledger costs a ONE-TIME ~677 ms stall on the first open after
+#: upgrade and ~4.9 MB of file growth (82.2 -> 87.1 MB). That stall lands on
+#: the recorder's background thread in the normal path, and buys every later
+#: report a two-orders-of-magnitude faster walk, so it is paid once and
+#: deliberately.
+_OPTIONAL_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "parent_session_id",
+        "CREATE INDEX IF NOT EXISTS idx_calls_parent ON calls(parent_session_id)",
+    ),
+)
+
 #: The names in ``_MIGRATION_COLUMNS`` as a set, for the "is this column optional
 #: (i.e. possibly absent on an old DB)?" test. A column NOT in here — the base
 #: token columns and the original eight ``c_*`` components — is present on every
@@ -661,6 +684,25 @@ class AnalyticsStore:
             name for name, _ in _MIGRATION_COLUMNS if name in existing
         )
         self._rebuild_insert_plan()
+        self._create_optional_indexes(conn, existing)
+
+    @staticmethod
+    def _create_optional_indexes(conn: sqlite3.Connection, existing: set[str]) -> None:
+        """Index the optional columns that this DB actually has.
+
+        Runs AFTER the ALTERs so the column is guaranteed present; see
+        ``_OPTIONAL_INDEXES`` for why this cannot be part of ``_SCHEMA``. Each
+        statement is guarded on its own so one failure (a read-only file, a
+        disk-full during the ~677 ms build) costs its index and nothing else —
+        analytics degrades to the slower scan rather than failing to open.
+        """
+        for column, statement in _OPTIONAL_INDEXES:
+            if column not in existing:
+                continue
+            try:
+                conn.execute(statement)
+            except Exception:  # noqa: BLE001 — a missing index is slow, not broken
+                logger.debug("analytics: could not create index on %s", column, exc_info=True)
 
     def _rebuild_insert_plan(self) -> None:
         """Recompute the insert SQL + value selector from ``_present_optional``.
@@ -967,8 +1009,16 @@ class AnalyticsStore:
                 "GROUP BY provider",
                 params,
             ).fetchall()
+            # ``MAX(parent_session_id)`` rides the GROUP BY the query already
+            # computes rather than costing a second pass: it is EXACT here, not
+            # a heuristic, because parent is functionally dependent on session
+            # (verified: zero sessions carry more than one distinct parent).
+            # Measured +6 ms on 475k rows, against +58 ms for a global recursive
+            # CTE and 610 ms (vs 290) for widening the GROUP BY to two columns,
+            # which forces a temp B-tree for identical output.
+            parent_col = "MAX(parent_session_id)" if self._has_parent_column() else "''"
             per_session = conn.execute(
-                f"SELECT session_id, {base_cols}, {component_sum} FROM calls{clause} "
+                f"SELECT session_id, {parent_col}, {base_cols}, {component_sum} FROM calls{clause} "
                 "GROUP BY session_id",
                 params,
             ).fetchall()
@@ -988,20 +1038,47 @@ class AnalyticsStore:
         result.by_provider = {
             str(row[0]): _aggregate_from_row(row[1:]) for row in per_provider if row[0]
         }
+        parents: dict[str, str] = {}
         for row in per_session:
             sid = str(row[0])
-            agg = _aggregate_from_row(row[1:])
+            parent = str(row[1] or "")
+            agg = _aggregate_from_row(row[2:])
             # Stash the human name (when known) on the id key's aggregate via a
             # side map the caller reads; kept on the object would widen the
             # dataclass for one table, so the report reads names from here.
             result.by_session[sid] = agg
+            # Reject the self-parent edge (224 such rows exist, from a
+            # degenerate empty id) here, at the single point the edge enters the
+            # rollup, so no downstream walk has to know about it.
+            if parent and parent != sid:
+                parents[sid] = parent
         # Attach names as an attribute the report layer reads without widening
         # the dataclass contract used elsewhere.
         result_session_names: dict[str, str] = {
             sid: names.get(sid, "") for sid in result.by_session
         }
         setattr(result, "session_names", result_session_names)
+        # The parent edges the /analytics table re-partitions itself with. Same
+        # side-map convention as ``session_names`` and for the same reason: one
+        # table's structure is not worth widening a dataclass three other
+        # consumers (including the desktop HTTP route) also read.
+        #
+        # WINDOW RULE: ``since_ms``/``until_ms`` filter CALLS, then the rollup
+        # runs over whatever survived. A child's calls can fall outside a window
+        # containing its parent's; any other rule makes the per-session column
+        # stop summing to the headline total, which is the invariant this whole
+        # re-partition exists to protect.
+        setattr(result, "session_parents", parents)
         return result
+
+    def _has_parent_column(self) -> bool:
+        """Whether this DB carries ``parent_session_id`` (absent on old ledgers).
+
+        Reads the migration's own record rather than re-inspecting the schema:
+        an absent column must degrade to "no edges, every session is a root",
+        which renders exactly today's flat table.
+        """
+        return "parent_session_id" in self._present_optional
 
     def session_report(self, session_id: str, *, recent_limit: int = 12) -> SessionReport:
         """Read one exact session ID without creating, migrating or pricing data.
@@ -1125,9 +1202,14 @@ class AnalyticsStore:
                     (*params, max(0, min(int(recent_limit), 50))),
                 )
             )
+            descendants, descendant_ids = self._descendant_usage(
+                conn, session_id, columns, measures
+            )
             return SessionReport(
                 session_id=session_id,
                 aggregate=aggregate,
+                descendants_aggregate=descendants,
+                descendant_ids=descendant_ids,
                 by_model=by_model,
                 by_purpose=by_purpose,
                 by_purpose_outcome=groups,
@@ -1144,6 +1226,87 @@ class AnalyticsStore:
         finally:
             if conn is not None:
                 conn.close()
+
+    #: How deep a session tree is walked before the walk stops. The ledger's
+    #: tree is one level today (33 parents, 467 children, zero sessions that are
+    #: both), but depth is a property of USAGE, not of schema: a subagent that
+    #: launches its own subagent is stamped with the middle session as parent by
+    #: ``SessionStreamFn.fork``, and ``AsyncJobManager`` already carries the
+    #: ``child_jobs``/``descendant_usage`` machinery for it. So the walk is
+    #: recursive, and this is the backstop that keeps a malformed or cyclic
+    #: ledger from turning a report into a hang. 32 is far past any real nesting.
+    _MAX_TREE_DEPTH = 32
+
+    def _descendant_usage(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        columns: set[str],
+        measures: str,
+    ) -> tuple[UsageAggregate | None, tuple[str, ...]]:
+        """Sum every DESCENDANT session's usage, own scope excluded.
+
+        Returns ``(None, ())`` when the walk cannot run \u2014 an older ledger with
+        no ``parent_session_id`` column \u2014 which the report renders as "unknown"
+        rather than as "$0.00 of subagent spend". Runs on the caller's pinned
+        read transaction so the subtree and the own scope describe the same WAL
+        snapshot.
+
+        A recursive CTE descending through ``idx_calls_parent`` rather than a
+        Python level-by-level descent: the Python version measures marginally
+        faster (0.71 ms vs 1.03 ms) but costs N+1 round trips and gives up the
+        single pinned snapshot this method exists to maintain. Without the index
+        it is a full scan per level (154 ms) \u2014 see ``_OPTIONAL_INDEXES``.
+
+        Two guards, because the ledger contains a real cycle edge (224 rows
+        carry ``parent_session_id == session_id``, all from a degenerate empty
+        id):
+
+        1. The edge predicate rejects a row that is its own parent and a child
+           id that is empty, so a self-loop is never traversed.
+        2. ``depth < _MAX_TREE_DEPTH`` bounds the walk whatever the data does,
+           and the final ``DISTINCT`` plus the root exclusion mean a cycle that
+           re-reaches an already-visited session cannot double-count it.
+
+        Note on retention: ``prune`` deletes by ``ts_ms``, so a root whose
+        children aged out first reports a smaller subtree than it really spent.
+        Parent and child age out together in practice; a shrinking figure here
+        is retention, not a rollup bug.
+        """
+        if "parent_session_id" not in columns or not session_id:
+            return None, ()
+        # Depth rides in the recursive row purely to arm the cap; the final
+        # SELECT dedupes on the id alone, so a diamond or a cycle contributes
+        # its calls exactly once however many paths reach it.
+        walk = (
+            "WITH RECURSIVE tree(sid, depth) AS ("
+            "  SELECT ?, 0"
+            "  UNION"
+            "  SELECT c.session_id, t.depth + 1 FROM calls c JOIN tree t"
+            "    ON c.parent_session_id = t.sid"
+            "   WHERE t.depth < ? AND c.session_id <> '' AND c.session_id <> c.parent_session_id"
+            ")"
+            " SELECT DISTINCT sid FROM tree WHERE sid <> ?"
+        )
+        try:
+            rows = conn.execute(walk, (session_id, self._MAX_TREE_DEPTH, session_id)).fetchall()
+        except Exception:  # noqa: BLE001 \u2014 a failed walk is unknown, not zero
+            logger.debug("analytics: descendant walk failed", exc_info=True)
+            return None, ()
+        ids = tuple(str(row[0]) for row in rows if row[0])
+        if not ids:
+            return UsageAggregate(), ()
+        # Bind the ids rather than interpolating: they are ledger-sourced, and a
+        # bounded IN list keeps this one statement on the same snapshot.
+        placeholders = ", ".join("?" for _ in ids)
+        try:
+            row = conn.execute(
+                f"SELECT {measures} FROM calls WHERE session_id IN ({placeholders})", ids
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("analytics: descendant aggregate failed", exc_info=True)
+            return None, ()
+        return _aggregate_from_row(row), ids
 
     # -- rollup reads (calendar time series) ---------------------------------
     def _series(self, table: str, key: str, buckets: int, *, by_model: bool) -> list[UsagePeriod]:

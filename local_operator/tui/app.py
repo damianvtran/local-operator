@@ -19589,6 +19589,8 @@ class OperatorApp(App[None]):
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger; never interpret arguments as a prompt."""
+        import dataclasses
+
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
             SessionScreen,
@@ -19607,6 +19609,11 @@ class OperatorApp(App[None]):
         # or /resume during the disk read must not put an old bill over a new
         # conversation. Object identity also catches resuming the same ID.
         runtime = SessionDiagnostics.capture(session)
+        # The band's restored-floor state is APP state, not session state, so it
+        # is attached here rather than read inside capture(). /session reconciles
+        # the band's ≥ against the ledger figure in prose; see the field's own
+        # note for why the two marks stay separate.
+        runtime = dataclasses.replace(runtime, spend_is_floor=self._spend_is_floor)
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
         screen = SessionScreen(None, runtime)

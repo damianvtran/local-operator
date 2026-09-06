@@ -881,3 +881,96 @@ def test_sequence_chart_never_renders_an_absent_duration_as_zero():
     )
     assert sum("█" in r for r in rows) == 1
     assert any("4,000 ms" in r for r in rows) and any("unknown" in r for r in rows)
+
+
+def _tree_report(**kw):
+    """A session that spent $31.28 itself and $71.06 through 20 subagents —
+    the operator's real numbers, which is what makes the assertions readable."""
+    return SessionReport(
+        "sess",
+        aggregate=UsageAggregate(
+            calls=248,
+            ok_calls=248,
+            context_tokens=47_000_000,
+            cost_micro=31_276_032,
+            cost_known_calls=248,
+        ),
+        descendants_aggregate=UsageAggregate(
+            calls=896,
+            ok_calls=896,
+            context_tokens=200_000_000,
+            cost_micro=71_059_322,
+            cost_known_calls=896,
+        ),
+        descendant_ids=tuple(f"kid{n:02d}" for n in range(20)),
+        **kw,
+    )
+
+
+def test_est_cost_headline_is_the_tree_with_the_split_beneath_it():
+    """The defect: /session showed $31.28 while the composer showed $102.60 for
+    the same session. The headline becomes the tree; the split explains it."""
+    text = build_session_report(_tree_report(), runtime(), width=120).plain
+    assert "$102.34" in text  # the headline: what this session cost
+    assert "$31.28 own · $71.06 subagents" in text  # the split, in the note slot
+    # The asymmetry with every other section is LABELLED, not left to be found.
+    assert "cost incl. subagents" in text
+    assert "plus 20 subagent sessions" in text
+    assert "every other section below is this session alone" in text
+
+
+def test_own_only_sections_say_they_are_own_only():
+    """by_model/by_purpose stay this session's calls — they answer "where did MY
+    context go" — so their meta must say so once the headline is a tree."""
+    report = _tree_report(
+        by_model={("anthropic", "claude"): UsageAggregate(calls=248, context_tokens=47_000_000)},
+        by_purpose={"turn": UsageAggregate(calls=248, context_tokens=47_000_000)},
+    )
+    text = build_session_report(report, runtime(), width=120).plain
+    assert "share of this session only" in text
+
+    # A childless session has one scope, so the longer wording would be noise.
+    solo = SessionReport(
+        "sess",
+        aggregate=UsageAggregate(calls=2, context_tokens=100, cost_micro=5, cost_known_calls=2),
+        descendants_aggregate=UsageAggregate(),
+        by_model={("anthropic", "claude"): UsageAggregate(calls=2, context_tokens=100)},
+    )
+    solo_text = build_session_report(solo, runtime(), width=120).plain
+    assert "share of session" in solo_text
+    assert "share of this session only" not in solo_text
+    assert "own ·" not in solo_text
+
+
+def test_tree_total_carries_the_lower_bound_mark_from_a_child():
+    """Sum the counters, not the booleans: a fully-priced parent whose child
+    used an unpriced model has a tree total that IS a lower bound — and the
+    legend explaining the ``+`` must not be suppressed."""
+    report = SessionReport(
+        "sess",
+        aggregate=UsageAggregate(
+            calls=2, context_tokens=10, cost_micro=1_000_000, cost_known_calls=2
+        ),
+        descendants_aggregate=UsageAggregate(
+            calls=4, context_tokens=10, cost_micro=500_000, cost_known_calls=1
+        ),
+        descendant_ids=("kid",),
+    )
+    text = build_session_report(report, runtime(), width=120).plain
+    assert "$1.50+" in text
+    assert "lower bound" in text  # COST_LEGEND, drawn from the subtree scope
+
+
+def test_restored_floor_is_reconciled_in_prose_not_copied():
+    """``≥`` (restored transcript floor) and ``+`` (unpriced calls) are different
+    deficits. /session says which figure is which instead of merging them."""
+    text = build_session_report(
+        _tree_report(), replace(runtime(), spend_is_floor=True), width=120
+    ).plain
+    assert "restored floor" in text
+    assert "what the ledger actually retained" in text
+    # The mark itself is NOT copied onto the ledger figure.
+    assert "≥$" not in text
+
+    plain = build_session_report(_tree_report(), runtime(), width=120).plain
+    assert "restored floor" not in plain
