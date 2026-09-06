@@ -5421,8 +5421,14 @@ class Editor(TextArea):
         R10's sticky latch from swallowing Tab everywhere else (R1): line 1's
         Esc has no claim on a `/them` the user is typing on line 2.
 
-        A caret sitting outside both — plain prose, a `$skill` token, another
-        command's argument — is claimed by neither, which is the whole point.
+        What is left over is PLAIN PROSE, and only plain prose: a caret that no
+        parse claims returns ``False`` and Tab keeps its ordinary
+        ``TextArea`` meaning — the literal indent. A `$skill` token and another
+        command's argument are NOT in that leftover; R14 moved both under
+        ``self._picker`` above, so each is answered by its own list's latch
+        rather than falling through. That is the intended split: every live
+        list holds its own Esc, and the only Tab that still reaches the buffer
+        is one pressed where no list exists.
         """
         text = self.text
         cursor = self._caret_offset()
