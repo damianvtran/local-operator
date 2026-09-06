@@ -78,7 +78,16 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             # Provider exceptions can carry response bodies or credential URLs.
             failures = {key: "Model listing unavailable" for key in raw_failures}
         else:
-            entries = await asyncio.to_thread(controller.initial_catalogue)
+            # NOT `asyncio.to_thread`. `initial_catalogue` is synchronous and
+            # I/O-free by contract (it exists to paint on the keystroke that
+            # opens the picker; measured 0.21 ms median, 0.77 ms max), so the
+            # hop bought nothing -- and it cost correctness: the AuthStore's
+            # sqlite connection is created on the event-loop thread, so reading
+            # it from a worker raised `ProgrammingError`, which
+            # `usable_providers()` reported as "store unreadable" and the
+            # catalogue turned into "everything is connected" on a machine with
+            # no credentials (D18). Keep this call on the loop thread.
+            entries = controller.initial_catalogue()
         # `CatalogueEntry.connected` is True both when a provider IS usable and
         # when the credential store could not be read at all -- the deliberate
         # "show everything rather than claim you own no models" degradation. For
@@ -247,9 +256,13 @@ async def entities(
         if spec.name == "model":
             controller = auth.controller()
             try:
+                # On the loop thread for the same reason as `/v1/desktop/models`
+                # above: the store's connection belongs to this thread, and a
+                # worker turns an unreadable-store degradation into a false
+                # "connected" for every model in the `/model` picker (D18).
                 rows = [
                     dataclasses.asdict(row) | {"value": row.selector}
-                    for row in await asyncio.to_thread(controller.initial_catalogue)
+                    for row in controller.initial_catalogue()
                 ]
                 current = state.selected_model
             finally:

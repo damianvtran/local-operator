@@ -18,6 +18,7 @@ import asyncio
 import dataclasses
 import logging
 import random
+import sqlite3
 import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -262,6 +263,17 @@ class ProviderController:
         One store scan for the whole registry, where :meth:`is_usable` costs one
         per provider: the catalogue asks this question about a dozen providers on
         the keystroke that opens the picker.
+
+        The ``except`` is deliberately NARROW. It used to be a bare
+        ``except Exception``, which caught ``sqlite3.ProgrammingError`` from
+        calling a connection across threads and reported it as "store
+        unreadable" — so :meth:`initial_catalogue` took its show-everything
+        degradation and every model in the catalogue was labelled connected on a
+        machine with no credentials at all (D18). A locked or corrupt store is an
+        ENVIRONMENT fact this method must survive; a connection used from the
+        wrong thread is a BUG in the caller, and a bug that dresses itself as a
+        plausible degraded state is one nobody finds. Only the environment
+        failures degrade here; everything else raises and gets fixed.
         """
         try:
             stored_rows = self.auth_store.list_credentials(provider=None)
@@ -269,7 +281,14 @@ class ProviderController:
             oauth_providers = {
                 row.provider for row in stored_rows if row.credential_type == "oauth"
             }
-        except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
+        except sqlite3.ProgrammingError:
+            # Misuse of the sqlite API — a connection crossing threads, a closed
+            # handle. Re-raised BEFORE the degradation below because it subclasses
+            # `DatabaseError`, so any except clause broad enough to cover a corrupt
+            # store would swallow it again.
+            raise
+        except (sqlite3.Error, OSError):
+            # Locked, busy, corrupt, or unreadable on disk — genuinely unknowable.
             return None
         usable: set[str] = set()
         for definition in PROVIDER_REGISTRY:

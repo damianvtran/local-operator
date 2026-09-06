@@ -8,6 +8,7 @@ httpx transport.
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -685,10 +686,17 @@ def test_usable_providers_agrees_with_is_usable_in_one_store_read(
 
 def test_an_unreadable_store_answers_none_rather_than_empty(controller, store) -> None:
     """ "You have no credentials" and "I could not look" are different answers, and
-    a caller that filters a model list on the first would show an empty picker."""
+    a caller that filters a model list on the first would show an empty picker.
+
+    Raises the error sqlite ACTUALLY raises for a locked database. It used to
+    raise ``RuntimeError``, which no sqlite call produces, and that mattered: it
+    let the test pass against a catch-all ``except Exception`` that also
+    swallowed ``ProgrammingError`` from cross-thread use, reporting a bug as
+    this designed degradation (D18).
+    """
 
     def boom(provider=None):
-        raise RuntimeError("database is locked")
+        raise sqlite3.OperationalError("database is locked")
 
     store.list_credentials = boom  # type: ignore[assignment]
     assert controller.usable_providers() is None
@@ -700,7 +708,7 @@ def test_a_catalogue_survives_a_store_that_cannot_be_read(controller, store) -> 
     alternative marks every model as needing a login the app never checked for."""
 
     def boom(provider=None):
-        raise RuntimeError("database is locked")
+        raise sqlite3.OperationalError("database is locked")
 
     store.list_credentials = boom  # type: ignore[assignment]
     entries = controller.static_catalogue()
