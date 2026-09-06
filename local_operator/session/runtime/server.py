@@ -410,7 +410,18 @@ class RuntimeServer:
         # (see ``app.py``'s update imports) is to keep it off the import graph.
         from local_operator.update import installed_build
 
-        build = installed_build()
+        # ``LOP_BUILD_PREFIX`` is the e2e stage's seam only (see
+        # ``process._build_prefix``): the boot stamp and the reaper's re-read
+        # must come from the SAME root, or a runtime under test would compare
+        # a real install against a fake marker and retire at once.
+        build = installed_build(os.environ.get("LOP_BUILD_PREFIX") or None)
+        #: What this process LOADED, kept for the runtime's self-refresh check:
+        #: ``process._should_refresh`` compares it against the install on disk
+        #: on the reaper's tick and retires an idle runtime whose build has
+        #: moved under it (design-runtime-autorefresh §3.2). Frozen dataclass,
+        #: so the boot snapshot cannot drift toward the disk value it is
+        #: compared against.
+        self._boot_build = build
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -612,6 +623,41 @@ class RuntimeServer:
             return
         if not written.wait(timeout=_ANNOUNCE_WRITE_TIMEOUT_S):
             logger.debug("stop announcement did not reach viewers before the teardown")
+
+    async def announce_retiring(self, reason: str, *, to: str = "") -> None:
+        """Tell attached viewers this runtime is leaving so a NEWER build can
+        take its place — a planned refresh, not a stop and not a death.
+
+        A sibling of :meth:`announce_stop` rather than a reuse of it, and that
+        distinction is the whole point: a viewer that reads ``stopping`` parks
+        in the stopped state and tells the user ``/resume`` reopens it, which
+        is the wrong story for a runtime that retired only because
+        ``lop-update`` ran. ``retiring`` says "a fresh runtime is owed; engage
+        one" and the viewer does so eagerly (``RemoteSession._go_cold(refresh=
+        True)``). Additive on the wire: an old viewer ignores the unknown op,
+        sees the EOF, and runs its ordinary recovery (cold after 8 s) — the
+        pre-refresh behaviour, so no ``PROTOCOL_VERSION`` bump.
+
+        Sent to ATTACH clients only. The phone daemon's projection path stays
+        byte-identical, and the daemon already handles owner exit by adopting
+        the next record it sees.
+
+        Awaited (unlike ``announce_stop``) because its one caller is the
+        reaper on the runtime's own loop, which has time to drain: the exit
+        follows this frame, and a viewer that receives it late merely goes
+        cold the slow way.
+        """
+        if self._closed.is_set():
+            return
+        frame: dict[str, Any] = {
+            "op": "retiring",
+            "session_id": self._record.session_id,
+            "reason": reason,
+            "from": self._boot_build.label(),
+            "to": to,
+        }
+        viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
+        await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
 
     def _write_now(self, frame: dict[str, Any]) -> None:
         """Buffer one frame to every viewer without awaiting a drain.
@@ -829,6 +875,15 @@ class RuntimeServer:
             if self._closed.is_set():
                 return
             try:
+                # The FLOOR for the record's ``busy`` bit, not its fix: the
+                # handle republishes at every turn boundary (the session's
+                # ``on_turn_settled`` hook), and this only bounds how stale a
+                # missed publish can get to one heartbeat. A 15 s-stale bit is
+                # still wrong for the picker; it is right for a `lop sessions`
+                # run hours later, which is the case the hook's absence cost.
+                is_busy = getattr(self._handle, "is_busy", None)
+                if callable(is_busy):
+                    self.set_busy(bool(is_busy()))
                 # A dead renderer can leave its main-process socket alive.
                 # Expiring the lease must reroute a parked gate even when no
                 # TCP disconnect arrives to trigger the ordinary detach path.
@@ -1379,6 +1434,24 @@ class RuntimeServer:
                     detail = f"kept: {observers} viewer(s) still attached"
                 else:
                     detail = await self._retire_if_pristine(leaving=conn)
+            elif op == "refresh_if_idle":
+                # The viewer-side belt for the runtime's own self-refresh
+                # (design-runtime-autorefresh §3.3): a `lop --resume` in the
+                # seconds after `lop-update`, before the reaper has noticed,
+                # binds to a stale idle owner. Rather than paint a notice and
+                # wait ~15-40 s for the reaper, the viewer asks the runtime to
+                # retire NOW if it is idle, and re-engages a fresh one on the
+                # ``retiring`` frame. Same predicate as the reaper
+                # (``OwnedSessionHandle.may_refresh``), same announce, same
+                # re-check after it; no stagger, because one viewer asking for
+                # one runtime is not the sixteen-at-once storm the stagger
+                # bounds. Answers ``retiring`` or ``kept: <reason>``; the
+                # viewer paints its busy notice only on a ``kept: busy``.
+                #
+                # Handled here rather than in ``_dispatch`` for symmetry with
+                # ``retire_if_pristine``: both are lifecycle ops that must not
+                # trigger the post-ack refresh (the exemption list below).
+                detail = await self._refresh_if_idle()
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -1429,6 +1502,7 @@ class RuntimeServer:
                 "unwatch_job",
                 "stop",
                 "retire_if_pristine",
+                "refresh_if_idle",
             ):
                 await self._handle.refresh()
                 await self._push()
@@ -1515,6 +1589,54 @@ class RuntimeServer:
         if inspect.isawaitable(result):
             await result
         return "retired"
+
+    async def _refresh_if_idle(self) -> str:
+        """Retire this runtime for the build on disk iff it is idle and stale.
+
+        The viewer-driven twin of the reaper's ``process._refresh_for``, with
+        the stagger removed (see the dispatch comment). Every failure path
+        RETURNS ``kept: …`` rather than raising, and every one keeps the
+        runtime alive — the same asymmetry ``_retire_if_pristine`` records: a
+        wrong "retire" aborts nothing (the predicate is idle by construction)
+        but costs the user a cold start they did not need, a wrong "keep"
+        costs the reaper's next check.
+        """
+        h = self._handle
+        may_refresh = getattr(h, "may_refresh", None)
+        if not callable(may_refresh):
+            return "kept: this runtime cannot judge itself idle"
+        from local_operator.session.runtime import process as process_mod
+
+        newer = process_mod._build_changed(self._boot_build)
+        if newer is None:
+            return "kept: build on disk matches (or has not settled)"
+        try:
+            reason = str(may_refresh() or "")
+        except Exception as exc:  # noqa: BLE001 — uncertainty keeps the runtime
+            return f"kept: idle probe failed ({exc})"
+        if reason:
+            return f"kept: {reason}"
+        request_stop = getattr(h, "request_stop", None)
+        if not callable(request_stop):
+            return "kept: this runtime cannot stop itself gracefully"
+        await self.announce_retiring("stale-build", to=newer.label())
+        # The one await between decision and stop; re-ask, as
+        # ``_retire_if_pristine`` does after its broadcast.
+        try:
+            reason = str(may_refresh() or "")
+        except Exception as exc:  # noqa: BLE001
+            return f"kept: idle probe failed ({exc})"
+        if reason:
+            return f"kept: {reason} (arrived while retiring was announced)"
+        logger.info(
+            "session runtime: viewer asked for a refresh; build on disk is %s, loaded %s; retiring",
+            newer.label(),
+            self._boot_build.label(),
+        )
+        result = request_stop()
+        if inspect.isawaitable(result):
+            await result
+        return "retiring"
 
     def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
         """Is this a retry of a turn the transcript already carries?

@@ -15,8 +15,11 @@ Three notices close that, and each is a different fact:
 
 * **disk drift** — the install moved under this process, so anything spawned
   from here will be newer than this terminal. ``/reload`` is the remedy.
-* **owner skew** — the bound runtime reports a different build. ``/stop`` then
-  resend is the remedy.
+* **owner skew** — the bound runtime reports a different build. The remedy
+  is the RUNTIME's: an idle stale runtime is asked to retire now and the
+  viewer re-engages a fresh one silently; a busy one earns one info line
+  saying it will move over when its work finishes. No notice ever tells the
+  user to ``/stop`` (design-runtime-autorefresh §3.3/§3.5).
 * **owner predates reporting** — the runtime cannot say what it runs, which by
   construction makes it older than a terminal that can read the field.
 
@@ -47,8 +50,9 @@ def _notices(app: OperatorApp) -> list[str]:
 # batch of unrelated test failures. These name the one phrase that identifies
 # each notice.
 DRIFT = "was updated after this window opened"
-OWNER_SKEW = "but this window is"
+OWNER_SKEW = "(this window is"
 OWNER_UNKNOWN = "running an older version than this window"
+MOVES_OVER = "will move to the new version when its current work finishes"
 
 
 class _BoundViewer(FakeSession):
@@ -70,10 +74,16 @@ class _BoundViewer(FakeSession):
         owner_source_ref: str = "",
         session_id: str = "",
         conversation_name: str = "",
+        idle: bool = False,
     ) -> None:
         super().__init__()
         self.owner_version = owner_version
         self.owner_source_ref = owner_source_ref
+        # ``idle`` is what a real ``RemoteSession.owner_idle`` reads off the
+        # canonical snapshot. The default is BUSY so every pre-existing cell
+        # keeps exercising the notice path; the refresh cells opt in.
+        self._skew_idle = idle
+        self.refresh_requests = 0
         # ``session_id`` and ``conversation_name`` are read-only properties on
         # the base double. The debounce is keyed by the first and the notice
         # names the session with the second, so a test that needs two DISTINCT
@@ -88,6 +98,13 @@ class _BoundViewer(FakeSession):
     @property
     def conversation_name(self) -> str:  # type: ignore[override]
         return self._skew_conversation_name
+
+    def owner_idle(self) -> bool:
+        return self._skew_idle
+
+    async def request_refresh(self) -> str:
+        self.refresh_requests += 1
+        return "retiring" if self._skew_idle else "kept: busy"
 
 
 @pytest.mark.asyncio
@@ -226,13 +243,15 @@ async def test_a_matching_build_says_nothing(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_older_runtime_is_named_with_the_stop_remedy(monkeypatch, tmp_path) -> None:
-    """Owner skew: the bound runtime reports a build this terminal is not on.
+async def test_a_busy_older_runtime_is_told_it_will_move_over(monkeypatch, tmp_path) -> None:
+    """Owner skew on a BUSY runtime: one info line, and no chore for the user.
 
-    ``/stop`` then resend is the remedy rather than ``/reload``: the terminal
-    is fine, it is the runtime that is stale, and a bare ``/stop`` on a
-    follower asks the owner to stop so the next prompt engages a fresh one
-    from the current install.
+    The runtime's own reaper retires it when its work finishes, so the notice
+    only says that. ``note`` rather than ``warning`` because nothing is wrong
+    and nothing is asked. The ``/stop`` sentence that used to end this notice
+    is the chore the operator refused ("the user should never need to run
+    /stop to refresh or update a runtime"), so its absence is asserted on the
+    whole ledger, not just this row.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -244,15 +263,76 @@ async def test_an_older_runtime_is_named_with_the_stop_remedy(monkeypatch, tmp_p
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        app._session = _BoundViewer(owner_version="0.46.23")
+        viewer = _BoundViewer(owner_version="0.46.23", idle=False)
+        app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
         notices = _notices(app)
+        tokens = [block._token for block in app.query(NoticeBlock) if MOVES_OVER in block._text]
 
     skew = [n for n in notices if "running 0.46.23" in n and OWNER_SKEW in n]
     assert len(skew) == 1, notices
     assert "0.49.0" in skew[0]
-    assert "/stop" in skew[0]
+    assert MOVES_OVER in skew[0]
+    assert tokens == ["muted"], "a note, never a warning: nothing is wrong and nothing is asked"
+    assert viewer.refresh_requests == 0, "a busy runtime is never asked to retire"
+    assert not any("/stop" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_an_idle_older_runtime_is_refreshed_silently(monkeypatch, tmp_path) -> None:
+    """Owner skew on an IDLE runtime: request the refresh, paint nothing.
+
+    The belt for the reaper (design-runtime-autorefresh §3.3): a resume in
+    the seconds after ``lop-update`` binds to a stale idle owner before its
+    reaper has noticed. The viewer asks it to retire now and re-engages on
+    its ``retiring`` frame; the user sees the band's ``starting…`` for a
+    second and no prose at all.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.49.0")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        viewer = _BoundViewer(owner_version="0.46.23", idle=True)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert viewer.refresh_requests == 1, "an idle stale owner is asked to retire"
+    assert not [n for n in notices if OWNER_SKEW in n or MOVES_OVER in n], notices
+    assert not any("/stop" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_callback_re_engages_eagerly(monkeypatch, tmp_path) -> None:
+    """The ``retiring`` frame lands as a re-engage, not as a cold band.
+
+    ``_warm_engage_started`` was latched by the engage that bound the runtime
+    which just left; without the reset the next engage would be a no-op and
+    the first keystroke after ``lop-update`` would pay a cold start in the
+    foreground.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        reasons: list[str] = []
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: reasons.append(reason))
+        app._warm_engage_started = True
+        app._on_runtime_refreshed()
+        await pilot.pause()
+
+    assert reasons == ["refresh"]
+    assert app._warm_engage_started is False
 
 
 @pytest.mark.asyncio
@@ -282,7 +362,8 @@ async def test_a_runtime_without_a_stamp_is_reported_as_predating_it(monkeypatch
 
     predates = [n for n in notices if OWNER_UNKNOWN in n]
     assert len(predates) == 1, "one session, repeatedly checked, speaks once"
-    assert "/stop" in predates[0]
+    assert MOVES_OVER in predates[0]
+    assert "/stop" not in predates[0]
 
 
 @pytest.mark.asyncio
@@ -483,7 +564,7 @@ async def test_a_pre_attach_runtime_noop_degrades_loudly(monkeypatch, tmp_path) 
     stale = [n for n in notices if "too old to attach a team" in n]
     assert len(stale) == 1, notices
     assert "nothing was attached" in stale[0], "the user must learn the attach did NOT happen"
-    assert "/stop" in stale[0]
+    assert "/stop" not in stale[0], "the runtime refreshes itself; the user is never told to /stop"
 
 
 @pytest.mark.asyncio

@@ -2820,6 +2820,13 @@ class OperatorApp(App[None]):
             set_stopped = getattr(session, "set_stopped_callback", None)
             if callable(set_stopped):
                 set_stopped(self._on_watched_session_stopped)
+            # The third outcome, and the only one that is housekeeping rather
+            # than an ending: the runtime retired ITSELF because `lop-update`
+            # put a newer build on disk. Re-engage at once so the band never
+            # shows the cold state for a refresh nobody asked for.
+            set_refresh = getattr(session, "set_refresh_callback", None)
+            if callable(set_refresh):
+                set_refresh(self._on_runtime_refreshed)
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
@@ -8497,6 +8504,27 @@ class OperatorApp(App[None]):
         before the user commits to a message.
         """
         self._start_runtime_engage(reason="draft")
+
+    def _on_runtime_refreshed(self) -> None:
+        """The bound runtime retired itself for a newer build; re-engage now.
+
+        Eager rather than lazy (design-runtime-autorefresh §2.3): the next
+        prompt would have engaged anyway (``_ensure_bound``), but the band
+        would show the cold state until the user typed, and the mount path
+        already engages eagerly for exactly that band-completeness reason.
+        The latch is reset because it was set by the engage that bound the
+        runtime that just left — without the reset the first keystroke after
+        ``lop-update`` would pay, in the foreground, a cold start this could
+        have paid in the background. No notice is painted: the operator's bar
+        is "never see this message", the band's ``starting…`` state covers
+        the ~1 s the re-engage takes, and a line of prose for a background
+        housekeeping event is noise. After the bind ``_check_build_skew``
+        runs again and, with a fresh runtime, the owner stamp equals the disk
+        stamp and stays silent.
+        """
+        logger.debug("runtime retired for a newer build; re-engaging")
+        self._warm_engage_started = False
+        self._start_runtime_engage(reason="refresh")
 
     def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
@@ -14889,10 +14917,13 @@ class OperatorApp(App[None]):
         * **owner skew** \u2014 the runtime this session is bound to reports a
           different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
-          construction). ``/stop`` then sending again is the remedy: the bare
-          ``/stop`` on a follower asks the owner to stop, and the next prompt
-          engages a fresh runtime from the current install. Both keep working
-          in the meantime.
+          construction). The remedy is the RUNTIME's, never the user's: an
+          idle stale runtime is asked to retire now (``request_refresh``, the
+          belt for the reaper's own self-refresh) and this viewer re-engages
+          a fresh one on its ``retiring`` frame with no notice at all; a busy
+          one is left to finish, and the notice says only that it will move
+          over when its current work does. No notice ever asks the user to
+          ``/stop`` (design-runtime-autorefresh \u00a73.3/\u00a73.5).
 
         The COPY deliberately says "session" and "window" rather than
         "runtime" and "terminal": the runtime/terminal split is real and
@@ -14922,7 +14953,15 @@ class OperatorApp(App[None]):
             # only produce false alarms.
             return
 
-        def announce(kind: str, before: str, after: str, body: str, scope: str = "") -> None:
+        def announce(
+            kind: str,
+            before: str,
+            after: str,
+            body: str,
+            scope: str = "",
+            *,
+            notice_kind: NoticeKind = "warning",
+        ) -> None:
             # ``scope`` narrows the debounce from per-process to per-SUBJECT
             # where the subject is what varies: an owner notice describes ONE
             # session's runtime, so a second stale session adopted in the same
@@ -14935,7 +14974,7 @@ class OperatorApp(App[None]):
                 return
             self._skew_notice_shown.add(key)
             logger.debug("build skew (%s) noticed at %s: %s -> %s", kind, reason, before, after)
-            self._system_notice(body, "warning")
+            self._system_notice(body, notice_kind)
 
         # --- A: has the install on disk moved under this process? ----------
         try:
@@ -14981,34 +15020,69 @@ class OperatorApp(App[None]):
         # see; "this session" survives only as the fallback for an unnamed one.
         title = str(getattr(session, "conversation_name", "") or "").strip()
         subject = f"\u201c{title}\u201d" if title else "this session"
-        if not owner_version:
+        from local_operator.update import BuildStamp
+
+        owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
+        if owner is not None and owner == loaded:
+            return
+        # Stale owner. IDLE: ask it to retire now and say nothing \u2014 the
+        # ``retiring`` frame it answers with re-engages this viewer onto a
+        # fresh runtime (``_on_runtime_refreshed``), and the bind that follows
+        # re-runs this check against a matching stamp. BUSY: one ``note``
+        # line (never a warning: nothing is wrong and nothing is asked of the
+        # user; not ``info`` either, whose dim ink the widget reserves for a
+        # receipt nobody has to read \u2014 this answers "why is my session on
+        # an older version?") saying it will move over when its work finishes,
+        # which the
+        # runtime's own reaper does. The request is fired-and-logged, not
+        # awaited: a runtime that answers ``kept`` (it became busy between
+        # our reading and its own, or it predates the op) is repaired by its
+        # reaper within a settle + stagger, and the notice for THAT state is
+        # painted on the next seam that finds it still stale and busy.
+        idle_probe = getattr(session, "owner_idle", None)
+        ask = getattr(session, "request_refresh", None)
+        owner_idle = bool(idle_probe()) if callable(idle_probe) else False
+        if owner_idle and callable(ask):
+            logger.debug(
+                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                reason,
+                owner.label() if owner is not None else "<unstamped>",
+                loaded.label(),
+            )
+
+            async def request() -> None:
+                try:
+                    detail = await cast(Callable[[], Awaitable[str]], ask)()
+                except Exception:  # noqa: BLE001 \u2014 the reaper is the fallback
+                    logger.debug("refresh request failed", exc_info=True)
+                    return
+                logger.debug("refresh request answered: %s", detail)
+
+            self.run_worker(request(), group="refresh-request", exclusive=False)
+            return
+        if owner is None:
             # A runtime older than the field itself. It cannot tell us what it
             # is running, but the absence is informative: the field ships in
             # this build, so anything without it is older than this window.
-            # Every resident runtime legitimately trips this once in the
-            # release window, and it is telling the truth each time.
             announce(
                 "owner-unknown",
                 "",
                 loaded.label(),
-                f"{subject} is running an older version than this window \u2014 some "
-                f"commands may not work. /stop, then send again to restart it.",
+                f"{subject} is running an older version than this window \u2014 it "
+                f"will move to the new version when its current work finishes.",
                 scope,
+                notice_kind="note",
             )
             return
-        from local_operator.update import BuildStamp
-
-        owner = BuildStamp(version=owner_version, source_ref=owner_ref)
-        if owner != loaded:
-            announce(
-                "owner",
-                owner.label(),
-                loaded.label(),
-                f"{subject} is running {owner.label()} but this window is "
-                f"{loaded.label()} \u2014 some commands may not work. /stop, then send "
-                f"again to restart it.",
-                scope,
-            )
+        announce(
+            "owner",
+            owner.label(),
+            loaded.label(),
+            f"{subject} is running {owner.label()} (this window is {loaded.label()}) "
+            f"\u2014 it will move to the new version when its current work finishes.",
+            scope,
+            notice_kind="note",
+        )
 
     def _echo_user_command(self, text: str) -> None:
         """Write a slash command into the ledger as the user's own row, IF its
@@ -15121,8 +15195,9 @@ class OperatorApp(App[None]):
                 # consumers rather than the reverse.
                 self._notice(
                     "this session is running a version too old to attach a team "
-                    "(before 0.46.25); nothing was attached. /stop, then send again "
-                    "to restart it.",
+                    "(before 0.46.25); nothing was attached. It will move to the new "
+                    "version when its current work finishes \u2014 send the request "
+                    "again then.",
                     "warning",
                 )
                 return
