@@ -2520,6 +2520,10 @@ class RemoteSession:
             on_delta(answer)
         return answer
 
+    @property
+    def supports_completion_ack(self) -> bool:
+        return bool(self._client and self._client.supports_completion_ack)
+
     async def refresh_attention(self) -> dict[str, Any]:
         return dict(self.frontend_state.attention)
 

@@ -196,6 +196,10 @@ class AttachClient:
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def supports_completion_ack(self) -> bool:
+        return self.connected and self._attention_supported
+
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Dial, authenticate as an attach client, and verify identity.
 

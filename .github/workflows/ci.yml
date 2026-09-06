@@ -146,6 +146,39 @@ jobs:
           # match" is exit 1 and must stay non-fatal, so the two are separated.
           changed=$(printf '%s\n' "$diff" | { grep -E '^[+-]version[[:space:]]*=' || true; })
           if [ -z "$changed" ]; then
+            # A release PR that changes NOTHING is the mirror-image failure,
+            # and it is the more dangerous direction. The feature-PR case below
+            # burns a number nobody released; this one ships the PREVIOUS
+            # release's CODE under a new number, so
+            # `pip install local-operator==X.Y.Z` delivers the version before
+            # it, and the tag, the Release and PyPI all agree with each other
+            # about the wrong tree.
+            #
+            # It was nearly shipped as v0.50.4. The owner amended the bump onto
+            # a DETACHED HEAD, so the branch ref never followed the amend, and
+            # every signal said it had worked: `push --force-with-lease`
+            # reported success (honestly — nothing needed overwriting, so the
+            # lease was never violated), the retitle and un-draft applied
+            # because PR metadata is independent of the ref, CI went green, and
+            # THIS JOB PASSED through the early exit below. Four green signals
+            # on a broken state, because each answered a question about a
+            # different object than the one being released.
+            case "$PR_TITLE" in
+              'chore(release): bump version to '*)
+                echo "::error file=pyproject.toml::A release PR must actually change the version."
+                echo "This PR is titled '$PR_TITLE' but its diff does not touch"
+                echo "the version line in pyproject.toml, so the release would carry"
+                echo "the previous version's code under a new number."
+                echo
+                echo "The usual cause is an amend made on a detached HEAD: the branch"
+                echo "ref never moved, and --force-with-lease still reports success"
+                echo "because nothing needed overwriting. Check what the FORGE has,"
+                echo "not what your local clone has:"
+                echo "  gh pr view <n> --json headRefOid --jq .headRefOid"
+                echo "  git show <that-sha>:pyproject.toml | grep '^version'"
+                exit 1
+                ;;
+            esac
             echo "No version change in pyproject.toml."
             exit 0
           fi
@@ -153,6 +186,57 @@ jobs:
             'chore(release):'*)
               echo "Release PR, version change allowed:"
               echo "$changed"
+              # The new version must sort ABOVE the highest existing release
+              # tag. A published version cannot be corrected: PyPI refuses to
+              # reuse a filename even after a yank, and a number that sorts
+              # below what a source installer already holds means
+              # `pip install -U` silently declines to move them onto the real
+              # release. Numbers consumed by an unreleased in-PR bump are
+              # skipped, never reused.
+              #
+              # The tag comes from `ls-remote`, NOT `git describe`, and that is
+              # load-bearing rather than a preference. `actions/checkout@v4`
+              # passes `--no-tags` unless `fetch-tags: true` (its default is
+              # false), so this shallow checkout carries ZERO tags and
+              # `git describe` exits 128 on every real run — a first draft of
+              # this check used it and was dead code that passed a backward
+              # bump green. `fetch-tags: true` does not fix it either: at
+              # depth 2 the tag object arrives but is not REACHABLE in the
+              # truncated history, so `describe` still fails whenever the base
+              # has moved past the tag, which is the normal state during a
+              # release window. `ls-remote` asks the forge instead of the local
+              # object store, in one network call, and needs no history at all.
+              #
+              # It is therefore the highest tag REPO-WIDE rather than the
+              # newest reachable one. That is the stricter reading and the
+              # right one here: a release must be forward of everything ever
+              # published, not merely of its own ancestry.
+              new=$(printf '%s\n' "$changed" \
+                | sed -n 's/^+version[[:space:]]*=[[:space:]]*["'"'"']\{0,1\}\([0-9][^"'"'"' 	]*\).*/\1/p')
+              if [ -z "$new" ]; then
+                echo "::error file=pyproject.toml::Could not parse the new version."
+                echo "The diff adds a version line this job cannot read:"
+                printf '%s\n' "$changed"
+                echo "Expected: version = \"X.Y.Z\". Fix the line, or update this"
+                echo "job if the project's version syntax has genuinely changed;"
+                echo "an unparsable version must never pass unchecked."
+                exit 1
+              fi
+              last=$(git ls-remote --tags --refs origin 'v[0-9]*' \
+                | sed 's#.*refs/tags/v##' | sort -V | tail -1)
+              if [ -n "$last" ]; then
+                highest=$(printf '%s\n%s\n' "$new" "$last" | sort -V | tail -1)
+                if [ "$new" = "$last" ] || [ "$highest" != "$new" ]; then
+                  echo "::error file=pyproject.toml::Release version must be above the highest tag."
+                  echo "New version '$new' does not sort above the highest release tag 'v$last'."
+                  echo "A published version cannot be corrected, so pick the next unused"
+                  echo "number above v$last rather than reusing or rewinding one."
+                  exit 1
+                fi
+                echo "Version $new sorts above the highest release tag v$last."
+              else
+                echo "No release tags found on the remote; skipping the ordering check."
+              fi
               ;;
             *)
               echo "::error file=pyproject.toml::A feature PR must not change the project version."
