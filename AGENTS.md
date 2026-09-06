@@ -301,10 +301,16 @@ releasing. The sections below say why, then how.
 fix branch. A PR never touches it, and the reviewer round treats a version
 change inside a feature PR as a finding.
 
-**CI enforces this**, in the `version-bump-guard` job. A pull request whose
-diff changes the `version =` line fails unless its title starts with
+**CI checks this**, in the `version-bump-guard` job. A pull request whose diff
+changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
+
+It makes the violation loud; it does not make it impossible. `main` has no
+branch protection, so no check is *required* and an `--admin` merge lands over
+a red guard. Treat a failing `version-bump-guard` as a stop signal rather than
+an obstacle to route around: the job is the reviewer's missing memory, not a
+lock.
 
 The job exists because the prose above was not enough. It was already written,
 and it already told reviewers to treat a bump as a finding, when #701 and #706

@@ -109,9 +109,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The three-dot diff below needs both branches, which the default
-          # single-commit fetch does not provide.
-          fetch-depth: 0
+          # Two commits is all the diff below needs, but the checkout is the
+          # `refs/pull/N/merge` commit, so HEAD^1 (the base side) and HEAD^2
+          # (the PR side) must both be present.
+          fetch-depth: 2
 
       - name: Reject a version bump outside a release PR
         env:
@@ -119,13 +120,31 @@ jobs:
           # script: a PR title is attacker-controlled text, and inlining it
           # directly would let a crafted title inject shell.
           PR_TITLE: ${{ github.event.pull_request.title }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Three-dot: compare against the MERGE BASE, so a branch that is
-          # merely behind a release does not look like it reverted the version.
-          changed=$(git diff "$BASE_SHA"...HEAD -- pyproject.toml \
-            | grep -E '^[+-]version[[:space:]]*=' || true)
+          # `HEAD^1 HEAD` and NOT a three-dot diff against
+          # `github.event.pull_request.base.sha`. Actions checks out the
+          # RECOMPUTED `refs/pull/N/merge`, whose first parent is the base
+          # branch as of this run, while `base.sha` is frozen when the event
+          # fires. Once `main` moves, the frozen SHA becomes an ancestor of
+          # HEAD, `merge-base` returns it unchanged, and the three-dot form
+          # silently degrades to two-dot — sweeping in every version bump
+          # `main` itself landed in the meantime and failing an innocent PR
+          # for a diff it never wrote. Measured on the six PRs before this
+          # one, `base.sha` was already stale for four of them (#700, #704,
+          # #706, #708), and it goes stale precisely during the busy release
+          # window this guard exists to protect. The first person failed by a
+          # version diff they did not write is the person who disables the
+          # guard.
+          #
+          # The merge commit's own diff against its base parent is exactly
+          # "what this PR would introduce", which is the question being asked.
+          diff=$(git diff HEAD^1 HEAD -- pyproject.toml)
+          # Not `|| true` on the grep: that discards git's exit status too, so
+          # a failed diff would report "no version change" and the guard would
+          # fail OPEN on a head that carries a real bump. grep's own "no
+          # match" is exit 1 and must stay non-fatal, so the two are separated.
+          changed=$(printf '%s\n' "$diff" | { grep -E '^[+-]version[[:space:]]*=' || true; })
           if [ -z "$changed" ]; then
             echo "No version change in pyproject.toml."
             exit 0
