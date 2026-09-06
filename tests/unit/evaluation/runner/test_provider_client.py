@@ -675,6 +675,113 @@ async def test_client_still_rejects_a_reply_the_provider_cut_short() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_attributes_a_normal_stop_carrying_an_error_to_the_provider() -> None:
+    """A NORMAL stop and a set ``error`` together, which only the first half of
+    the guard's condition catches.
+
+    Real and reachable: a provider whose content filter fires after it has
+    committed to a normal terminal marker reports ``stop`` and puts the reason
+    in ``error``, so the stop alone says the turn was fine while the stream in
+    fact delivered nothing. Dropping the ``stream_error or`` half of the
+    condition leaves every other case in this file passing, so without this
+    test that half is unpinned and the empty reply goes back to being reported
+    as bad JSON.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="stop",
+        usage=Usage(input_tokens=48_000, output_tokens=0),
+        error="content filter blocked the response (stop_reason=content_filter)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert "content filter blocked the response" in str(info.value)
+    # The normal marker is reported as-is; the abort is justified by the error,
+    # not by rewriting what the provider said it did.
+    assert info.value.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_client_treats_a_length_end_with_no_text_as_a_correctable_rejection() -> None:
+    """``length`` is in the allow-list, and its membership is load-bearing.
+
+    A token cap that truncates before any parseable JSON is a MODEL problem the
+    runner can correct by re-prompting -- not an outage. Dropping ``length``
+    from ``_NORMAL_CONTENT_STOPS`` would convert every legitimate cap-truncated
+    turn into a sealed unscored infrastructure failure, and no other test in
+    this file notices, because the allow-list is otherwise only exercised
+    through ``stop``.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="length",
+        usage=Usage(input_tokens=48_000, output_tokens=4_096),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.stop_reason == "length"
+    assert info.value.diagnostic.startswith("Your previous reply was rejected:")
+
+
+@pytest.mark.asyncio
+async def test_client_does_not_normalize_an_absent_stop_marker_into_a_normal_stop() -> None:
+    """An empty ``stop_reason`` is an ABSENT marker, not a normal content stop.
+
+    ``event.stop_reason or "stop"`` coerced it into one, punching a fail-OPEN
+    hole through an allow-list built to fail closed: a stream that said nothing
+    about how it ended took the parse path and produced exactly the "not valid
+    JSON" misdiagnosis this guard removes.
+    """
+
+    current = observation()
+    stream = ScriptedStream("", stop_reason="", usage=Usage(input_tokens=48_000, output_tokens=0))
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert "JSON" not in str(info.value)
+    # Recorded verbatim rather than laundered into a stop the provider never
+    # sent, and a valid ``StrictIdentifier`` so the bundle can carry it.
+    assert info.value.stop_reason == "unspecified"
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_stream_carries_the_usage_the_refused_turn_was_billed() -> None:
+    """A refusal is unanswered, not unbilled.
+
+    The provider read the whole prompt before declining, so the episode owes
+    for those input tokens. Carrying nothing meant a refused episode sealed
+    with no usage event at all and reported that zero as a MEASURED spend.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=48_000, output_tokens=0),
+        provider_payload={"id": "req-refused-1"},
+        error="model refused: I can't help with that (stop_reason=refusal)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.usage.input_tokens == 48_000
+    assert info.value.usage.output_tokens == 0
+    assert info.value.route == ROUTE
+    assert info.value.stop_reason == "refusal"
+    assert info.value.provider_request_id == "req-refused-1"
+
+
+@pytest.mark.asyncio
 async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> None:
     """Regression guard on the fix's blast radius.
 
