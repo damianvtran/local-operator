@@ -237,6 +237,7 @@ class DesktopSessionBridge:
         # A transient store error must cost one poll, not the feature. Matches
         # the suppression `_expire_watches` already uses for the same reason.
         store = AttentionStore(self.root / "attention.db")
+        failing = 0
         while True:
             try:
                 # `revision()` exists for exactly this loop and is far cheaper
@@ -257,8 +258,29 @@ class DesktopSessionBridge:
                 if key != self.attention_poll_key:
                     await self.refresh_attention()
                     self.attention_poll_key = key
+                if failing:
+                    logger.info(
+                        "attention poll recovered for %s after %d failure(s)",
+                        self.session_id,
+                        failing,
+                    )
+                    failing = 0
             except Exception as error:
-                logger.warning("attention poll failed for %s: %s", self.session_id, error)
+                # Log the TRANSITION, not the tick. A transient error costs one
+                # line, but a persistent one (corrupt schema, permissions, full
+                # disk) would otherwise write ~3,600 identical warnings an hour
+                # per bridge, across up to BRIDGE_COUNT bridges, burying
+                # whatever else the operator needs to read. Recovery is logged
+                # too, so the pair brackets the outage rather than leaving a
+                # single warning of unknown duration.
+                failing += 1
+                if failing == 1:
+                    logger.warning(
+                        "attention poll failed for %s (further failures quiet "
+                        "until it recovers): %s",
+                        self.session_id,
+                        error,
+                    )
             await asyncio.sleep(1)
 
     def state(self) -> dict[str, Any]:
