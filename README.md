@@ -14,27 +14,27 @@
 <br />
 
 <p align="center">
-  <img src="./static/tui-hero.png" alt="Local Operator TUI running a real task: streamed response, an expanded tool card showing a command and its output, and a live status line" width="720">
+  <img src="./static/tui-subagents.png" alt="A manager session with three concurrent workers in the subagent dock, each showing elapsed time, context usage, and cost, above a shared todo list" width="720">
 </p>
 
-<p align="center"><i>The Local Operator TUI mid-task: streamed responses, expandable tool cards, and one-line receipts for everything the agent does.</i></p>
+<p align="center"><i>A manager session with three workers running in the background — each with its own role, budget, and progress — while the shared plan updates.</i></p>
 
 <br />
 
-**Local Operator** is a harness for running not one agent but an
-organization of them. A single session plans, runs tools, browses, and
-remembers; give it a team and it becomes a manager delegating to
-tool-restricted workers, messaging sibling sessions in other repos, scheduling
-its own follow-ups, and picking those follow-ups back up after you close the
-terminal. Everything runs on your machine, asks before it writes or executes,
-and draws on every ChatGPT, Claude, Kimi, xAI, Z.AI, and Qwen login you
-already have — pooled, load-balanced, and used with the prompt cache in mind.
-MIT-licensed.
+**Local Operator** is a harness — the runtime that hosts, supervises, and
+connects agents — for running not one agent but an organization of them. A
+single session plans, runs tools, browses, and remembers; give it a team and
+it becomes a manager delegating to tool-restricted workers, messaging sibling
+sessions in other repos, scheduling its own follow-ups, and picking those
+follow-ups back up after you close the terminal. Everything runs on your
+machine, asks before it writes or executes, and draws on every ChatGPT,
+Claude, Kimi, Grok, Z.AI, and Qwen login you already have — pooled,
+load-balanced, and used with the prompt cache in mind, under the MIT license.
 
 <div align="center">
   <a href="#-quickstart">Quickstart</a> •
   <a href="#-agent-organizations">Organizations</a> •
-  <a href="#-use-every-subscription-you-already-pay-for">Subscriptions</a> •
+  <a href="#-subscriptions">Subscriptions</a> •
   <a href="#-always-on">Always On</a> •
   <a href="#-providers">Providers</a> •
   <a href="#-contributing">Contribute</a>
@@ -45,11 +45,11 @@ MIT-licensed.
 - [✨ Why Local Operator](#-why-local-operator)
 - [🚀 Quickstart](#-quickstart)
 - [🏢 Agent Organizations](#-agent-organizations)
-- [↔ Cross-Agent Communication](#-cross-agent-communication)
+- [🔁 Cross-Agent Communication](#-cross-agent-communication)
 - [🌙 Always On](#-always-on)
-- [💳 Use Every Subscription You Already Pay For](#-use-every-subscription-you-already-pay-for)
+- [💳 Subscriptions](#-subscriptions)
 - [🧮 Built for Token and Cache Efficiency](#-built-for-token-and-cache-efficiency)
-- [🖥️ A Tour of the TUI](#️-a-tour-of-the-tui)
+- [🖥️ A Tour of the Terminal UI (TUI)](#️-a-tour-of-the-terminal-ui-tui)
   - [Slash commands](#slash-commands)
   - [Keys worth knowing](#keys-worth-knowing)
 - [🔌 Providers](#-providers)
@@ -62,7 +62,7 @@ MIT-licensed.
 - [🌐 Drive Your Own Browser (Browser Extension)](#-drive-your-own-browser-browser-extension)
 - [📦 Installation Options](#-installation-options)
 - [🔧 Configuration & Credentials](#-configuration--credentials)
-- [🌟 Radient Agent Hub](#-radient-agent-hub)
+- [🌟 Radient: automatic model selection and agent sharing](#-radient-automatic-model-selection-and-agent-sharing)
 - [🔒 Safety Model](#-safety-model)
 - [📝 Examples](#-examples)
 - [👥 Contributing](#-contributing)
@@ -73,30 +73,33 @@ MIT-licensed.
 
 - **Agent organizations, not a lone agent.** Roles are capability boundaries
   (a `reviewer` loses the tools to edit what it reviews), specialists carry
-  their own standing instructions, and a team is a manager plus a roster plus
-  two briefs — how the group collaborates and what product it owns. Rosters
-  can declare nested teams, and `/team chart` draws the org chart.
+  their own standing instructions, and a team is a saved roster — a manager
+  plus members — with two short briefs: how the group works together and what
+  product it owns. Reuse the same roster on a different product by swapping
+  one brief. Nested teams show in the chart today; a manager delegating into
+  a nested team's manager is coming.
 - **Agents that talk to each other.** A manager peeks at, questions, steers,
-  pauses, and resumes its subagents through `hub`; independent sessions in
+  pauses, and resumes its workers through `hub`; independent sessions in
   different repos message each other with `send`, choosing whether to leave a
   note, wake an idle peer, or redirect one mid-turn. Loopback only, your OS
   account only.
 - **Always on.** Wakes persist and fire on schedule even after the terminal is
   closed; long commands and subagents run as background jobs whose results
   auto-deliver when the session is idle; `lop exec --background` detaches a
-  whole task; a paused subagent resumes after a process restart; the mobile
+  whole task; a paused worker resumes after a process restart; the mobile
   daemon keeps every session reachable from your phone.
-- **Every subscription you already pay for.** OAuth into ChatGPT, Claude,
-  Kimi, xAI, Z.AI, and Qwen. Several accounts on one provider form a
-  rotation pool; the least-loaded account is picked first, a quota failure
-  rotates to a sibling, and only when the pool is spent does the cascade walk
-  your model fallback chain.
-- **Built for token and cache efficiency.** A stable tool array and
-  `cache_control` on stable system blocks keep the prompt-cache prefix warm;
-  superseded tool output is pruned without disturbing the warm suffix; the
-  Anthropic 1-hour cache TTL switches on automatically for large contexts;
-  skills and MCP schemas load only on demand; and `wait` returns on job
-  settle or message arrival so agents never poll and re-buy their context.
+- **Every subscription you already pay for.** Sign in to ChatGPT, Claude,
+  Kimi, Grok, Z.AI, and Qwen with the accounts you already have. Have two
+  Claude or ChatGPT accounts? They're pooled: new sessions start on the one
+  with the most quota left, a rate-limit moves the request to the other, and
+  only when both are exhausted does it fall back to the next model you've
+  listed.
+- **Cheaper long sessions.** The prompt is laid out so your provider's prompt
+  cache keeps hitting turn after turn: stale tool output is cleared without
+  invalidating the cache, large contexts automatically get the longer
+  Anthropic cache window, skills and MCP tools load only when used, and
+  agents wait for events instead of polling — so a long session doesn't re-pay
+  for its history every few minutes.
 - **Approval-gated by default.** Reads run; writes and shell commands show the
   exact command and ask. `/approvals auto` or `--yolo` opts out deliberately.
   Every tool call leaves a visible receipt in the transcript.
@@ -106,12 +109,12 @@ MIT-licensed.
 
 ## 🚀 Quickstart
 
-Bring Python 3.12+ and one of: a provider login (ChatGPT, Claude, Kimi, xAI,
-Z.AI, or Qwen), an API key, or a local model server.
+Bring Python 3.12+ and one of: a provider login (see the [subscription
+table](#-subscriptions) for the ids), an API key, or a local model server.
 
 ```bash
-pip install local-operator     # pipx install local-operator on Linux (PEP 668)
-lop login anthropic            # OAuth sign-in in your browser; `lop login` lists providers
+pip install local-operator     # pipx install local-operator on systems whose Python is externally managed (Debian/Ubuntu, Homebrew)
+lop login anthropic            # opens your browser; paste the code back if asked. `lop login` lists providers
 lop                            # start it, then type what you want done
 ```
 
@@ -122,17 +125,20 @@ very next `lop` just works. Skip the login and an interactive `lop` opens in a
 setup state and walks you through `/login`; a headless or piped run prints the
 exact commands to configure hosting, model, and a key instead.
 
-Inside, `esc` stops the agent, `/help` lists commands, `/exit` quits. `lop
-update` upgrades the install from PyPI.
+Inside, `esc` stops the agent, `/help` lists commands, `/exit` quits. Try
+something like *summarise this repo and list what's untested*. `lop update`
+upgrades the install from PyPI and restarts the mobile daemon when the
+LaunchAgent is installed.
 
 <p align="center">
   <img src="./static/tui-welcome.png" alt="The Local Operator welcome screen with rotating tips and the composer ready for a first prompt" width="720">
 </p>
 
-Prefer a local model? Start [LM Studio](https://lmstudio.ai), load a chat model,
-and enable its server in the Developer tab; then `/login lmstudio` inside
-Local Operator picks the endpoint and model. `/login` also offers Ollama, vLLM,
-llama.cpp, and a generic OpenAI-compatible server — see the
+Prefer a local model? A 7–14B model needs roughly 10–16 GB of RAM or VRAM.
+Start [LM Studio](https://lmstudio.ai), load a chat model, and enable its
+server in the Developer tab; then `/login lmstudio` inside Local Operator
+picks the endpoint and model. `/login` also offers Ollama, vLLM, llama.cpp,
+and a generic OpenAI-compatible server — see the
 [local-provider guide](docs/LOCAL_PROVIDERS.md). The CLI form still works for a
 model installed in [Ollama](https://ollama.com/download):
 
@@ -150,43 +156,41 @@ each worker's status, spend, and progress live, and you can open any of them to
 read its transcript and plan (the reader's keys and limits are in
 [docs/subagent-reader.md](./docs/subagent-reader.md)).
 
-<p align="center">
-  <img src="./static/tui-subagents.png" alt="The subagent dock in an alternate built-in theme: three concurrent workers with elapsed time, context usage, and cost per worker, above the shared todo list" width="720">
-</p>
-
 **Roles are capability boundaries, not just prompts.** A subagent launched as
 `reviewer` carries vetted review guidance *and loses the tools to edit code*
 — it can read and run tests but cannot alter what it reviews, which is what
 keeps a review honest. A restricted role cannot enable new MCP tools either,
 and the restriction is inherited by everything it delegates to, at any depth.
-Packaged starters ship for `reviewer`, `coder`, `architect`, `manager`,
-`designer`, and `scout`, and you can author your own **agent profiles**:
-reusable roles and named specialists with their own instruction sets, matched
-to tasks by semantic routing. When a profile gives bad guidance, you fix the
-profile once — not every prompt that uses it.
+Packaged starters for `reviewer`, `coder`, `architect`, `manager`,
+`designer`, and `scout` ship in the package: `task(agent=…)` and `/team`
+use them even on a fresh install, and `agent install` copies one into your
+registry so you can edit it. `lop agents list` shows what's installed, so a
+fresh install prints "No agents found." You can also author your own
+**agent profiles**: reusable roles and named specialists with their own
+instruction sets, matched to tasks by semantic routing. When a profile
+gives bad guidance, you fix the profile once — not every prompt that uses
+it.
 
 **Teams.** A saved roster — a manager plus members with counts — layered with
 two briefs the individual agents never hard-code: a *collaboration* brief (how
 this group works together, who blocks a release) and a *project* brief (what
 product this instance owns). Swap the project brief and the same roster staffs
 a different product. A roster slot can name another team (`team:<name>`), so a
-team becomes an org of teams; `/team chart <name>` draws it as an org chart.
-The runtime that lets a manager delegate *into* a nested team's manager is a
-follow-up, and the chart tags those nodes `(declared)` so it never implies a
-wiring that is not live yet.
+team becomes an org of teams; `/team chart <name>` draws it as an org chart
+(nested teams show as `(declared)` until a manager can actually delegate into
+them). `lop teams list` is empty until you create one.
 
 <p align="center">
-  <img src="./static/tui-teams.png" alt="The /team picker listing the saved lopdev team" width="720">
+  <img src="./static/tui-teams.png" alt="The /team picker listing a saved team" width="720">
 </p>
-
-<p align="center"><i>The team picker. Launch one with <code>/team &lt;name&gt; &lt;request&gt;</code> — the current agent becomes that roster's manager and delegates from there:</i></p>
 
 <p align="center">
   <img src="./static/tui-team-command.png" alt="Sending a real request to a team: /team lopdev Can you implement a mobile relay functionality in lop using tailwind, shadcn" width="720">
 </p>
 
-Sending a request to a team is one line — the manager breaks it down and puts
-the right roles on it. Agents and teams can also be managed from the CLI:
+Sending a request to a team is one line — `/team <name> <request>` makes the
+current agent that roster's manager, which breaks the work down and puts the
+right roles on it. Agents and teams can also be managed from the CLI:
 
 ```bash
 lop agents create "My Agent"
@@ -195,7 +199,7 @@ lop teams list
 lop teams show lopdev
 ```
 
-## ↔ Cross-Agent Communication
+## 🔁 Cross-Agent Communication
 
 Two shapes of conversation, one machine, no cloud in the middle.
 
@@ -222,12 +226,12 @@ terminals.
 pid, kind, conversation, model, memory footprint, uptime, and heartbeat age
 (`--json` adds `cwd` and `session_id`). From a shell you use `lop send`; from
 inside a session the agent uses its own `send` tool, which lands as an
-auditable card in its transcript. Both share three delivery modes: the default
-mailbox writes the message to the target's history and lets an idle session
-stay idle; `--wake` also starts a turn if the target is idle; `--now` injects
-mid-turn to redirect a session that is actively working. A running `bash`,
-`eval`, or MCP call is never cut short, and a session parked in `wait` returns
-early to read the message.
+auditable card in its transcript. Both share the same three delivery modes
+and differ only in the default: the CLI drops to the mailbox unless you ask
+otherwise, while an agent's `send` wakes an idle peer. `--wake` starts a
+turn if the target is idle; `--now` injects mid-turn to redirect a session
+that is actively working. A running `bash`, `eval`, or MCP call is never cut
+short, and a session parked in `wait` returns early to read the message.
 
 ```bash
 lop sessions
@@ -257,17 +261,23 @@ built so work keeps moving after you walk away.
 
 - **Scheduled wakes that survive a closed terminal.** The agent's `wake` tool
   schedules a future turn ("check the build again in 30 minutes"). Schedules
-  persist with the session, and on macOS a small **wake supervisor**
-  (installed on demand as a LaunchAgent the first time a wake is scheduled)
-  starts a runtime for whichever session's wake is due — so a wake fires even
-  if you closed the terminal that scheduled it. A session that was asleep past
-  a due time fires the wake late and reports how many occurrences it skipped,
-  rather than replaying six hourly checks at once. `lop wake status` and `lop
-  wake list` show what is installed and what fires next.
-- **Background jobs that report back on their own.** `bash` and `task` run in
-  the background; a long command interrupted by a steer detaches instead of
-  dying; and every settled job auto-delivers its result when the session is
-  idle. `jobs` peeks at new output since your last look.
+  persist with the session. On macOS a small **wake supervisor** (installed
+  on demand as a LaunchAgent the first time a wake is scheduled) starts a
+  runtime for whichever session's wake is due — so a wake fires even if you
+  closed the terminal that scheduled it (a session that is still open fires
+  its own). On Linux and Windows there is no supervisor: a wake fires the
+  next time that session is running. If a wake fires unattended and a tool
+  needs approval, the turn stalls at the prompt until you answer from the
+  phone or `/resume`; `/approvals auto` or `--yolo` opts into unattended
+  execution. A session that was asleep past a due time fires the wake late
+  and reports how many occurrences it skipped, rather than replaying six
+  hourly checks at once. `lop wake status` and `lop wake list` show what is
+  installed and what fires next.
+- **Background jobs that report back on their own.** `task` always runs in
+  the background and `bash` can (`background=true`); a long command
+  interrupted by a steer detaches instead of dying; and every settled job
+  auto-delivers its result when the session is idle. `jobs` peeks at new
+  output since your last look.
 - **`lop exec --background`** detaches a whole task with a log file and exits
   immediately.
 - **Waiting without polling.** `wait` blocks up to 60 minutes and returns the
@@ -276,38 +286,55 @@ built so work keeps moving after you walk away.
   short polls that each re-send the whole context.
 - **Resume after a restart.** Transcripts persist and `/resume` picks a
   session back up; a paused or settled subagent can be resumed with `hub
-  op='resume'` after the parent process has restarted; inside a multiplexer,
-  `lop` publishes a per-pane crash-restore binding
-  ([multiplexer-resume.md](./docs/multiplexer-resume.md)) and reports its live
-  state to a [Herdr](https://herdr.dev) Agents panel
-  ([herdr-agents.md](./docs/herdr-agents.md)).
+  op='resume'` after the parent process has restarted.
 - **A daemon that keeps sessions reachable.** `lop mobile install` runs a
-  supervised session daemon; every interactive session registers with it, and
-  you watch, steer, and start sessions from your phone — see
-  [Phone Access](#-phone-access-mobile-relay).
+  supervised session daemon (LaunchAgent on macOS; on Linux and Windows the
+  daemon is portable and foreground-runnable, with no installer yet); every
+  interactive session registers with it, and you watch, steer, and start
+  sessions from your phone — see [Phone Access](#-phone-access-mobile-relay).
+  `lop update` restarts the daemon when the LaunchAgent is installed.
 
-## 💳 Use Every Subscription You Already Pay For
+## 💳 Subscriptions
 
-Sign in to ChatGPT, Claude, Kimi, xAI, Z.AI, and Qwen with the accounts you
-already have — `lop login <provider>` opens the OAuth flow, and running it
-again for the same provider adds another account rather than replacing the
-first. API keys and local servers sit alongside. Then:
+Sign in with the accounts you already have. `lop login` lists every
+login-capable provider; the ids and plan requirements:
 
-- **Accounts on one provider form a rotation pool.** A session's first pick
-  is usage-aware: the accounts with the most remaining quota form a bucket,
-  and a per-session hash rotates within it so concurrent sessions fan out
-  instead of herding onto one row. This exists because a plain hash left three
-  of five accounts at 65–99% of their window while two sat near idle.
-- **Failover is a cascade, not a coin flip.** On a quota or auth failure the
-  request rotates to a sibling account first (Tier 1). Only when the pool is
-  spent does it walk your **model fallback chain** (Tier 2, `retry.fallbackChains`
-  in `config.yml`, entries as `provider/model` or `{provider, model, effort}`),
-  backing off between attempts. `/failovers` prints the cascade and marks
-  which row is serving right now.
-- **Cache-aware by design.** A session sticks to the account it started on
-  even when that account runs low, because the provider's prompt cache is per
-  account and moving would rewrite the whole conversation prefix at
-  cache-write price. Only a depleted account moves a running session.
+| You pay for | Type | Plan needed |
+| --- | --- | --- |
+| ChatGPT | `lop login openai` (`openai-device` on a headless box) | ChatGPT Plus/Pro |
+| Claude | `lop login anthropic` | Claude Pro/Max |
+| Kimi | `lop login kimi` | Kimi (Moonshot) |
+| Grok | `lop login xai-oauth` (`xai` = API key) | Grok OAuth |
+| Z.AI / GLM | `lop login zai-oauth` (`zai` = API key) | GLM Coding Plan |
+| Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan |
+
+OpenAI, Anthropic, Z.AI, and Qwen logins are keyed by account identity, so a
+second login adds to the pool; Kimi holds one account (xAI identity is
+best-effort). API keys and local servers sit alongside.
+
+**What this means for you.** With one account per provider, Local Operator
+uses that account's plan quota (no API bill) and, when it is rate-limited,
+falls back to the next model you listed. With two or more accounts on the
+same provider, it spreads your sessions across them so you hit the
+5-hour/weekly limits later, and it deliberately does *not* hop accounts to
+balance load mid-conversation, because each provider caches your conversation
+per account and a hop would re-pay to rebuild it.
+
+- **Accounts on one provider form a rotation pool.** New sessions start on
+  the account with the most remaining quota, and concurrent sessions fan out
+  across those accounts instead of herding onto one.
+- **Failover is a cascade, not a coin flip.** On a quota, auth, or 5xx
+  failure the request rotates to a sibling account first. Only when the pool
+  is spent does it walk your **model fallback chain**
+  (`retry.fallbackChains` in `config.yml`), backing off between attempts.
+  `/failovers` prints the cascade and marks which account is serving right
+  now.
+- **Cache-aware by design.** A session prefers the account it started on,
+  because the provider's prompt cache is per account and moving would rewrite
+  the whole conversation prefix at cache-write price. With the default
+  config a quota, auth, or 5xx failure still rotates to a sibling; with
+  `retry.usageAwareFallback: true` a low account is never an eviction — only
+  a depleted one moves a running session.
 - **Opt-in proactive switching.** `retry.usageAwareFallback` spends one
   lightweight quota request per user message to leave a provider *before* it
   fails, with `retry.usageReservePercent` (default 10) as the headroom floor.
@@ -328,21 +355,16 @@ Long-running agents spend most of their tokens re-sending context, so the
 harness treats the provider prompt cache as a first-class resource:
 
 - **A stable prefix.** The tools array is built in a deterministic order and
-  rides in the same cache prefix as the system prompt; stable system blocks
-  carry `cache_control` markers. Adding a core tool is treated as a permanent
-  per-call tax, so most capabilities live behind gated tools, skills, or MCP
-  instead.
+  rides in the same cache prefix as the system prompt, so the provider can
+  reuse it turn after turn. Most extra capabilities live behind gated tools,
+  skills, or MCP instead of sitting in every prompt.
 - **Cache-aware pruning.** Superseded tool outputs (an older read of a file
-  that was read again, a zero-match search) are blanked in place — but only
-  outside the warm cache suffix, so pruning never forces a cache rewrite. Once
-  a session has idled past the cache TTL, the cache is provably cold and
-  everything eligible flushes at once.
-- **Automatic 1-hour cache TTL.** Above 150k context tokens, Anthropic
-  requests switch from the 5-minute to the 1-hour cache TTL. Measured over a
-  day of this harness's own traffic, idle-expiry rewrites of large contexts
-  cost roughly ten times the incremental writes they were protecting;
-  `providers.anthropic.cache_ttl_1h_min_context_tokens` tunes the threshold
-  (0 disables it).
+  that was read again, a zero-match search) are blanked in place without
+  forcing a cache rewrite. Once a session has idled past the cache TTL, the
+  cache is provably cold and everything eligible flushes at once.
+- **Automatic 1-hour cache TTL.** At or above 150k context tokens, Anthropic
+  requests switch from the 5-minute to the 1-hour cache window; tunable via
+  `providers.anthropic.cache_ttl_1h_min_context_tokens` (0 disables it).
 - **Compaction before overflow.** Context compacts itself before the window
   fills; `/compact` runs it on demand and `/context` reports what is occupying
   the prefix right now.
@@ -351,12 +373,23 @@ harness treats the provider prompt cache as a first-class resource:
   tool schemas enter the context only when enabled; `wait` returns on job
   settle or message arrival so a long job costs one round trip, not twelve.
 
-## 🖥️ A Tour of the TUI
+## 🖥️ A Tour of the Terminal UI (TUI)
 
 The TUI is a full-screen [Textual](https://textual.textualize.io/) app, not a
 REPL. Everything the agent does shows up as a card or a one-line receipt: tool
 cards expand (`enter`/`space`) to show the full command and output, and the
-status line tracks the current step, token usage, and cost.
+status line tracks the current step, token usage, and cost. Inside a
+terminal multiplexer (tmux, wezterm, [cmux](https://cmux.com/), and others),
+`lop` publishes a per-pane crash-restore binding
+([multiplexer-resume.md](./docs/multiplexer-resume.md)) and, in a
+[Herdr](https://herdr.dev) Agents panel, reports whether it is idle, working,
+or blocked ([herdr-agents.md](./docs/herdr-agents.md)).
+
+<p align="center">
+  <img src="./static/tui-hero.png" alt="Local Operator TUI running a real task: streamed response, an expanded tool card showing a command and its output, and a live status line" width="720">
+</p>
+
+<p align="center"><i>One session mid-task: streamed responses, expandable tool cards, and one-line receipts for everything the agent does.</i></p>
 
 When a tool call needs your sign-off, the approval prompt shows exactly what
 is about to run before anything touches your system:
@@ -400,7 +433,7 @@ with its title and age:
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
 | `/session` | Current-session recorded usage, combined cost, cache and request diagnostics |
-| `/failovers` | The model cascade for this session, and which row is serving |
+| `/failovers` | The model cascade for this session, and which account is serving |
 | `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>`; `/team chart <name>` draws its org chart |
@@ -437,12 +470,12 @@ metadata overrides, desktop-app support, and server-specific limitations.
 
 | Provider | Access |
 | --- | --- |
-| OpenAI / ChatGPT | OAuth (browser or device code) or `OPENAI_API_KEY` |
-| Anthropic / Claude | OAuth or `ANTHROPIC_API_KEY` |
-| Kimi (Moonshot) | OAuth or `KIMI_API_KEY` |
-| xAI / Grok | OAuth or `XAI_API_KEY` |
-| Z.AI (GLM) | OAuth or `ZAI_API_KEY` |
-| Qwen (Alibaba) | OAuth (token plan) or API key |
+| OpenAI / ChatGPT | `openai` / `openai-device`, or `OPENAI_API_KEY` |
+| Anthropic / Claude | `anthropic`, or `ANTHROPIC_API_KEY` |
+| Kimi (Moonshot) | `kimi`, or `KIMI_API_KEY` |
+| xAI / Grok | `xai-oauth`, or `xai` / `XAI_API_KEY` |
+| Z.AI (GLM) | `zai-oauth`, or `zai` / `ZAI_API_KEY` |
+| Qwen (Alibaba) | `alibaba-token-plan-oauth`, or API key |
 | Google Gemini | `GOOGLE_AI_STUDIO_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Mistral | `MISTRAL_API_KEY` |
@@ -453,7 +486,7 @@ metadata overrides, desktop-app support, and server-specific limitations.
 
 ```bash
 lop login              # list login-capable providers
-lop login openai       # OAuth flow; repeat to add a second account to the pool
+lop login openai       # OAuth flow; for OpenAI/Anthropic/Z.AI/Qwen, repeat to add a second account
 lop login-status       # what's signed in
 lop logout kimi
 ```
@@ -608,7 +641,7 @@ address. That keeps it private by construction, so reaching it from your
 phone over the internet needs a secure path you put in front of it, together
 with an identity proxy so only you can open it.
 
-The **recommended method is a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)**
+The **recommended method is a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)**
 with Cloudflare Access in front: the tunnel gives the daemon a public
 hostname without opening a port on your machine, and Access enforces
 sign-in before any request reaches loopback. A WireGuard-based mesh such as
@@ -623,7 +656,8 @@ derived from it, so rotating the password invalidates every logged-in phone.
 
 ## 🌐 Drive Your Own Browser (Browser Extension)
 
-The `browser` tool normally drives the cmux browser panel. On any Chromium
+The `browser` tool can drive a [cmux](https://cmux.com/) panel — a macOS
+terminal built for running agents side by side. On any Chromium
 browser (Chrome, Edge, Arc, Brave) the free **Local Operator browser extension**
 gives the agent the same capability against the browser you already use, with
 your real logins, entirely on your machine. A small loopback **bridge daemon**
@@ -641,13 +675,13 @@ lop browser pair        # print the 6-digit code to type into the extension popu
 Then install the extension from the
 [Chrome Web Store](https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof)
 (or build it from `extension/` in this repo with `pnpm -C extension build` and
-load `extension/dist` unpacked at `chrome://extensions`), click its toolbar
-icon, and enter the pairing code. Once paired, `browser` tool calls drive a
-dedicated tab in your real browser. The first time the agent wants a new site,
-the extension asks you to pick a scope (all pages on this domain, only this
-site, just this once) or Deny; you stay in control of which sites it can reach,
-and can revoke the whole browser any time from the extension's Settings or with
-`lop browser pair --reset`.
+load `extension/dist` unpacked at `chrome://extensions` with Developer mode
+on), click its toolbar icon, and enter the pairing code. Once paired, `browser`
+tool calls drive a dedicated tab in your real browser. The first time the
+agent wants a new site, the published store build (v0.1.7) asks **Allow
+once**, **Always allow**, or **Deny**; you stay in control of which sites it
+can reach, and can revoke the whole browser any time from the extension's
+Settings or with `lop browser pair --reset`.
 
 The bridge daemon binds **loopback only** and is pinned to your extension by the
 pairing code; a compromised page cannot reach it, and a revoke drops any live
@@ -665,6 +699,7 @@ extras:
 | `mcp` | Model Context Protocol client support |
 | `images` | HEIC/HEIF image attachment decoding |
 | `tokenizer` | Exact BPE token counting (estimated otherwise) |
+| `fetch` | Markdownify renderer for `web_fetch` |
 | `lsp` | Jedi-backed symbol-aware Python navigation for the `lsp` tool |
 | `all` | Everything above except `lsp` |
 
@@ -695,7 +730,7 @@ Commonly set values: `hosting` and `model_name` (skip the CLI flags),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), `tui.theme` (any registered theme name — easier to set with
 `/theme`, which previews live), and `retry.fallbackChains` (the model
-cascade — see [Use Every Subscription](#-use-every-subscription-you-already-pay-for)).
+cascade — see [Subscriptions](#-subscriptions)).
 `bash.shell` picks the interpreter the `bash` tool spawns: unset, it runs the
 first `bash` on `PATH` (Homebrew bash 5 when installed, else the system one)
 and falls back to `/bin/sh` only on a host with no bash — so process
@@ -712,14 +747,14 @@ lop credential delete TAVILY_API_KEY
 
 OAuth tokens from `lop login` are stored separately and refresh themselves.
 
-## 🌟 Radient Agent Hub
+## 🌟 Radient: automatic model selection and agent sharing
 
 [Radient](https://console.radienthq.com) adds two optional capabilities:
 
 - **Automatic model selection** — `lop --hosting radient` picks
   the best model per step to balance quality and cost, no `--model` needed.
-- **Agent sharing** — push your agents to the public hub, pull agents others
-  published:
+- **Agent sharing** — push your agents to Radient's public registry, pull
+  agents others published:
 
 ```bash
 lop credential update RADIENT_API_KEY
@@ -733,7 +768,10 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   files or executes commands prompts first, showing the exact command.
   `/approvals auto` or `--yolo` disables prompts only when you say so.
   Scheduling a `wake` is a write-tier action too — it is the one tool that
-  arms unattended future execution, so it prompts like a mutation.
+  arms unattended future execution, so it prompts like a mutation. If a wake
+  fires unattended and a tool needs approval, the turn stalls at the prompt
+  until you answer from the phone or `/resume`; `/approvals auto` or
+  `--yolo` is how you opt into unattended execution.
 - **Visible receipts.** Every tool call leaves a card or one-line receipt in
   the transcript — there is no invisible action, and a peer message from
   another session is a distinct inbound card, never disguised as your turn.
@@ -741,8 +779,9 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   but cannot enable new MCP tools, and neither can anything it delegates to.
 - **Loopback only.** Peer messaging, the mobile daemon, and the browser bridge
   all bind to loopback and authenticate; the trust boundary is your OS account.
-- **Local-first options.** Run Ollama models for closed-circuit operation
-  where nothing leaves your machine.
+- **Local-first options.** Run a local model and disable web search
+  (`lop search off`) and fetch (`lop fetch set enabled off`) for a setup
+  where no prompt leaves the machine. Web search is on by default.
 - **MCP trust model.** Project-supplied MCP configs are treated as trusted
   input and warned about on first connect — see [docs/mcp.md](./docs/mcp.md).
 - **Credential hygiene.** Keys live in a local credential store, are entered
@@ -784,7 +823,7 @@ their authors and contributors for building in the open.
   handling.
 - **[oh-my-pi](https://github.com/can1357/oh-my-pi)** — authored and maintained
   by [Can Bölük (`can1357`)](https://github.com/can1357), building on
-  [Pi](https://github.com/badlogic/pi-mono) by
+  [Pi](https://github.com/earendil-works/pi) by
   [Mario Zechner (`mariozechner`)](https://github.com/mariozechner). Its
   approach to agent orchestration and harness ergonomics inspired aspects of our
   subagent and tooling implementation.
