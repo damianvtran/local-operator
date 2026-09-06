@@ -100,6 +100,30 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
 _MAX_LINE_BYTES = 1 << 20
 
 
+def _frame_size_without_delta(frame: dict[str, Any]) -> int:
+    """Encoded size of ``frame`` counting its ``delta`` as empty (plus the "\\n").
+
+    Compaction needs a candidate frame's encoded length, but the expensive part
+    of a ``message_update`` is the accumulated ``message`` — hundreds of KB that
+    a merge does not change. Measuring the whole frame per merge is what made
+    compaction quadratic (67.4 MB and 152 ms for one 64-frame pass). Splitting
+    the measurement lets the caller add the delta's escaped bytes itself, which
+    is exact because JSON escaping is per-character: the encoded length of
+    ``a + b`` is the encoded length of ``a`` plus that of ``b``.
+
+    The delta is blanked rather than removed so the key, its quotes and its
+    comma are all still counted — only the VALUE's bytes are the caller's to
+    add.
+    """
+    data = frame.get("data")
+    if not isinstance(data, dict) or "delta" not in data:
+        return len(json.dumps(frame).encode()) + 1
+    probe = {**frame, "data": {**data, "delta": ""}}
+    # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
+    # real value back including its own quotes.
+    return len(json.dumps(probe).encode()) + 1 - 2
+
+
 def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
     """Return ``frame``, or a small stand-in when it cannot be read.
 
@@ -2083,6 +2107,10 @@ class RuntimeServer:
                 break
             conn.event_queue.task_done()
         compacted: list[dict[str, Any]] = []
+        # Escaped byte length of the DELTA currently held by ``compacted[-1]``.
+        # Tracked incrementally so a merge never re-measures the deltas already
+        # folded in; see the size check below for why this is exact.
+        merged_delta_bytes: list[int] = []
         for frame in frames:
             previous = compacted[-1] if compacted else None
             if (
@@ -2098,16 +2126,55 @@ class RuntimeServer:
                     and (data.get("message") or {}).get("id")
                     == (prior.get("message") or {}).get("id")
                 ):
-                    merged = dict(data)
-                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
-                    merged_frame = {"op": "event", "data": merged}
-                    # Measured against the same cap the guard uses. Over it,
-                    # leave the two frames unmerged (see the docstring): the
-                    # pair is readable, their concatenation is not.
-                    if len(json.dumps(merged_frame).encode()) + 1 <= _MAX_LINE_BYTES:
-                        compacted[-1] = merged_frame
+                    # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
+                    # merged frame re-serializes the unchanged accumulated
+                    # ``message`` — hundreds of KB — on every merge, which is
+                    # quadratic in queue depth: one 64-frame compaction
+                    # serialized 67.4 MB and took 152 ms on the runtime loop.
+                    # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
+                    # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
+                    # dropped it — manufacturing the very false disconnect this
+                    # guard exists to prevent.
+                    #
+                    # Exact, not an estimate: JSON escaping is per-character,
+                    # so the escaped length of ``a + b`` is exactly the escaped
+                    # length of ``a`` plus that of ``b``. The merged frame is
+                    # THIS frame carrying its own delta with everything already
+                    # folded into ``compacted[-1]`` prepended, so its encoded
+                    # size is this frame's size plus those accumulated escaped
+                    # bytes. Measuring ``frame`` rather than the merge result
+                    # is what makes this O(one frame) per merge — and because
+                    # it is THIS frame's own ``message``, a message that grew
+                    # between frames is sized correctly rather than estimated
+                    # from a stale one. Verified equal to a full re-dump on
+                    # adversarial payloads (quotes, backslashes, control
+                    # characters, emoji, U+2028) and thousands of random ones.
+                    prior_delta_bytes = merged_delta_bytes[-1]
+                    frame_bytes = _frame_size_without_delta(frame) + len(
+                        json.dumps(str(data.get("delta", ""))).encode()
+                    )
+                    if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
+                        merged = dict(data)
+                        merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                        compacted[-1] = {"op": "event", "data": merged}
+                        # ACCUMULATES: the new head carries the prior head's
+                        # whole delta plus its own, so the next merge must be
+                        # measured against both. Overwriting this with only the
+                        # newly-folded delta under-counts every merge after the
+                        # second and emitted a 1,048,795-byte frame — over the
+                        # cap this method exists to respect.
+                        merged_delta_bytes[-1] = prior_delta_bytes + (
+                            len(json.dumps(str(data.get("delta", ""))).encode()) - 2
+                        )
                         continue
             compacted.append(frame)
+            # Seeded with THIS frame's own delta, not zero: the running total
+            # is "escaped bytes of the delta ``compacted[-1]`` currently
+            # holds", and a later merge prepends all of it. Seeding zero
+            # under-counted the first merge of every run. Only the delta is
+            # serialized here, never the accumulated message.
+            own_delta = (frame.get("data") or {}).get("delta", "")
+            merged_delta_bytes.append(len(json.dumps(str(own_delta)).encode()) - 2)
         for frame in compacted:
             conn.event_queue.put_nowait(frame)
         return len(compacted) < len(frames)

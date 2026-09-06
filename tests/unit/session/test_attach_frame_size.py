@@ -1454,6 +1454,8 @@ async def test_compaction_never_assembles_an_unreadable_frame() -> None:
     for frame in list(conn.event_queue._queue):
         assert len(json.dumps(frame).encode()) + 1 <= _MAX_LINE_BYTES
 
+    before = "".join(str(f["data"]["delta"]) for f in list(conn.event_queue._queue))
+
     server = RuntimeServer.__new__(RuntimeServer)
     server._compact_event_queue(cast(Any, conn))
 
@@ -1463,3 +1465,9 @@ async def test_compaction_never_assembles_an_unreadable_frame() -> None:
     for frame in out:
         size = len(json.dumps(frame).encode()) + 1
         assert size <= _MAX_LINE_BYTES, f"compaction emitted an unreadable {size}-byte frame"
+
+    # LOSSLESSNESS is the property that makes refusing (rather than degrading)
+    # defensible, and without this assertion the test above still passes
+    # against a compaction that keeps the first frame and discards 63 deltas.
+    # The delta stream is append-only, so concatenating it must be unchanged.
+    assert "".join(str(f["data"]["delta"]) for f in out) == before

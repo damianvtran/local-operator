@@ -17,6 +17,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     AgentTool,
     ChatRequest,
@@ -4436,4 +4437,82 @@ async def test_the_drop_notice_fires_once_across_a_stuttering_run(tmp_path):
     # ...and the text does not tell the user to act, because a new arrival
     # clears the abort on its own.
     assert "send a message" not in notices[0].text.lower()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["plain", "custom"])
+async def test_a_held_message_survives_dispose(tmp_path, kind):
+    """A dropped turn's message must be durable BEFORE the next turn.
+
+    Round 1 removed the duplicate row by letting the steering drain be the only
+    writer — but the drain runs on the next turn, and ``dispose()`` consumes
+    the same queue and rejects without persisting. A session ending while a
+    message was held therefore destroyed it: exactly-once had become
+    exactly-zero for the peer/wake traffic this path exists to hold safely.
+
+    Both message kinds are covered because they take different branches of the
+    drop and only one of them regressed.
+    """
+    message: AgentMessage = (
+        Message.user("held work")
+        if kind == "plain"
+        else CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": "held work", "schedule_id": "w1"},
+        )
+    )
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([message])
+
+    # Durable while merely HELD — before any later turn, and before dispose.
+    assert Transcript(tmp_path / "sess").has_entry(message.id)
+
+    await session.dispose()
+
+    # ...and still there after the session ends without ever running a turn.
+    assert Transcript(tmp_path / "sess").has_entry(message.id), "the held message was lost"
+
+
+@pytest.mark.asyncio
+async def test_a_held_message_is_still_persisted_only_once(tmp_path):
+    """The M4 fix must not reintroduce M1's duplicate row.
+
+    The drop persists, so the steering drain must skip what the transcript
+    already holds rather than writing it a second time.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    marker = "held-then-drained"
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([Message.user(marker)])
+
+    # A later turn drains the queue; the row must not be written again.
+    session._abort_requested = False
+    await session.prompt("next turn")
+
+    rows = [
+        entry
+        for entry in Transcript(tmp_path / "sess").entries()
+        if entry.type == "message"
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict) and marker in str(block.get("text", ""))
+    ]
+    assert len(rows) == 1, f"the held message was persisted {len(rows)} times"
+    # ...and the model sees it exactly once on replay.
+    replayed = [
+        message
+        for message in Transcript(tmp_path / "sess").build_llm_history()
+        if marker in str(getattr(message, "text", ""))
+    ]
+    assert len(replayed) == 1
     await session.dispose()
