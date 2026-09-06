@@ -24,6 +24,8 @@ from textual import messages
 from textual.events import AppBlur, AppFocus
 from textual.widgets import Static
 
+from local_operator.harness.comms import SubagentComms
+from local_operator.session.session import Session
 from local_operator.tui import animation
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SPINNER_INTERVAL_S, SubagentPanel
@@ -52,6 +54,32 @@ async def _open_running_child(pilot: Any, app: OperatorApp) -> SubagentView:
 def _running_app() -> OperatorApp:
     session = FakeSession()
     session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path", status="running"))
+    return OperatorApp(_async_factory(session))
+
+
+def _running_app_with_running_grandchild() -> OperatorApp:
+    """A running child that itself owns a running child, so the DOCK animates.
+
+    ``_running_app`` is enough for any surface the child PAGE owns, but not for
+    the subagent panel: ``_subagent_roster`` scopes the dock to the direct
+    children of the job whose page is open, so a lone ``sub-1`` leaves the dock
+    legitimately empty and its spinner legitimately stopped. A test that wants
+    to observe the panel's cadence has to give it something to animate ABOUT,
+    or it is asserting against a surface the app is entitled to keep still.
+
+    The lineage is recorded through the real ``SubagentComms`` rather than a
+    stub with a ``children`` method, because the roster is resolved from the
+    ownership graph and a fake that answers only the one call the current code
+    makes would stop being a fixture the moment that resolution changes.
+    """
+    parent = _Job("sub-1", "audit the ingest path", status="running")
+    grandchild = _Job("sub-1a", "read the ingest schema", status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(parent, grandchild)
+    comms = SubagentComms(cast(Session, session))
+    comms.record_launch(parent.id, parent.label)
+    comms.record_launch(grandchild.id, grandchild.label, parent_job_id=parent.id)
+    session._subagent_comms = comms
     return OperatorApp(_async_factory(session))
 
 
@@ -245,21 +273,57 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
     The rate is asserted through each surface's own recorded interval rather
     than by timing a real timer: the point is which cadence was requested, and
     a duration assertion under load measures the box, not the app.
+
+    EVERY SURFACE HERE MUST BE GENUINELY ANIMATING FIRST, and that is a
+    correctness requirement rather than tidiness. ``SPINNER_INTERVAL_S`` (0.08)
+    is BOTH the focused cadence and the value every ``_spinner_rate`` is
+    constructed with, so ``rate == SPINNER_INTERVAL_S`` is satisfied by a
+    surface that never started a spinner at all. Asserting it alone cannot tell
+    "correctly animating at the fast rate" from "never animated", and the blur
+    assertions below then fail against an untouched default rather than against
+    a rate the fan-out declined to change.
+
+    That is not hypothetical: it is what made this test the repo's dominant
+    flake (7 of 11 CI failures over 40 runs, always ``assert 0.08 == 1.0`` at
+    the PANEL line while the VIEW line above it passed). The panel was rowless,
+    because with a child page open ``_subagent_roster`` scopes the dock to the
+    DIRECT CHILDREN of the viewed job and this fixture's ``sub-1`` had none —
+    so the app's 1 Hz ``_poll_subagents`` correctly cleared the roster and
+    ``_tick`` correctly stopped a timer with nothing left to animate. The old
+    ``panel._start_spinner()`` fabricated an animation the app then reclaimed,
+    and whether it survived to the assertion depended on whether a poll landed
+    in between — a race that only loses under load, which is why it read as a
+    timing flake and is not one.
+
+    So the panel is given a running GRANDCHILD through the real
+    ``SubagentComms`` graph: a reason to animate that the app's own poll
+    re-affirms every tick instead of revoking. Each surface is then pinned by
+    TIMER IDENTITY across the transition (AGENTS.md, "prefer a structural
+    invariant to a numeric one") — re-rating REPLACES a Textual timer, since
+    its interval is fixed at creation, so a surface that was skipped keeps its
+    object and a surface that was re-rated does not. That distinguishes the two
+    states the bare number cannot, and it holds no matter how loaded the box is.
     """
-    app = _running_app()
+    app = _running_app_with_running_grandchild()
     async with app.run_test(size=(100, 30)) as pilot:
         view = await _open_running_child(pilot, app)
         panel = app._subagent_panel
         assert panel is not None
-        panel._start_spinner()
         band = app._status
         assert band is not None
         band._streaming = True
         band._sync_spinner_timer()
         await pilot.pause()
 
+        # Liveness BEFORE cadence: see the docstring — the rate assertions
+        # under this line are vacuous without it.
+        assert view._spinner_timer is not None, "the child page is not animating"
+        assert panel._spinner_timer is not None, "the dock has no live spinner to re-rate"
+        assert band._spinner_timer is not None, "the band is not animating"
         assert view._spinner_rate == SPINNER_INTERVAL_S
         assert panel._spinner_rate == SPINNER_INTERVAL_S
+        assert band._spinner_rate == SPINNER_INTERVAL_S
+        before = (view._spinner_timer, panel._spinner_timer, band._spinner_timer)
 
         app._set_animation_focused(False)
         await pilot.pause()
@@ -273,6 +337,12 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
         assert view._spinner_timer is not None
         assert panel._spinner_timer is not None
         assert band._spinner_timer is not None
+        # The structural half of the claim: a re-rate is a REPLACED timer, so
+        # an identical object here means the surface was silently skipped even
+        # though the number above happened to read correctly.
+        assert (view._spinner_timer, panel._spinner_timer, band._spinner_timer) != before
+
+        blurred = (view._spinner_timer, panel._spinner_timer, band._spinner_timer)
 
         app._set_animation_focused(True)
         await pilot.pause()
@@ -280,6 +350,7 @@ async def test_blur_slows_every_animated_surface_and_focus_restores_it() -> None
         assert view._spinner_rate == SPINNER_INTERVAL_S
         assert panel._spinner_rate == SPINNER_INTERVAL_S
         assert band._spinner_rate == SPINNER_INTERVAL_S
+        assert (view._spinner_timer, panel._spinner_timer, band._spinner_timer) != blurred
 
 
 @pytest.mark.asyncio

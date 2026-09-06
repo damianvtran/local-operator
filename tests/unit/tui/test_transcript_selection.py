@@ -53,15 +53,16 @@ consequences worth naming rather than discovering:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, cast
 
 import pytest
+import textual.message as message_module
 from rich.cells import cell_len
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
+from textual import _time as textual_time
 from textual import events
 from textual.content import Content
 from textual.document._document import Selection as DocumentSelection
@@ -2518,7 +2519,9 @@ async def test_a_multi_click_on_the_last_empty_row_stays_collapsed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_deliberately_slow_double_click_is_still_a_double_click() -> None:
+async def test_a_deliberately_slow_double_click_is_still_a_double_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A gesture 0.7 s apart selects, rather than eating the draft.
 
     Regression for design round 1, D3. Textual's default
@@ -2532,12 +2535,38 @@ async def test_a_deliberately_slow_double_click_is_still_a_double_click() -> Non
     pilot builds the `Click` with the chain count already decided, so it cannot
     exercise the arithmetic under test. Real MouseDown/MouseUp pairs are what
     the chain is computed from.
+
+    THE GAP IS STAMPED, NOT SLEPT, and that is what makes this deterministic.
+    Textual computes the chain from `event.time`, which `Message.__init__`
+    reads from `textual._time.get_time()` at construction — so a real
+    `asyncio.sleep(0.7)` was only an INDIRECT way to move that clock, and it
+    moved it by 0.7 s plus however long the runner took to schedule the second
+    click. Measured here: a 0.7 s sleep produced a 0.732 s gap against the
+    0.9 s threshold, leaving 168 ms of headroom for everything between the two
+    `on_event` calls. That is a wall-clock bet in the sense AGENTS.md forbids,
+    and it is the one that lost — this test failed CI as `assert '' == 'ingest'`
+    when contention ate the margin and the pair stopped being a chain.
+
+    Driving `get_time` directly asserts the property the design decision is
+    actually about: what the app does with a gesture whose gap IS 0.7 s. The
+    test now states that gap exactly instead of hoping the scheduler
+    approximates it, so it cannot be decided by machine load, and it no longer
+    spends 0.7 s of real time. The threshold itself is untouched: 0.9 s is a
+    D3 decision protecting the user's draft, not a knob for making tests pass.
+
+    The 1.5 s case is asserted alongside it so this still fails if the chain
+    window ever widens without bound — a test that only proves "0.7 chains"
+    would pass just as happily against an infinite threshold.
     """
     app = _pilot_app()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         editor = await _composer(app, pilot, "summarise the ingest path please")
         app._clipboard = "SOMETHING THE USER PUT THERE"
+        # Patched on the module `Message` resolves through, so every event this
+        # test constructs is stamped from this clock and nothing else is.
+        now = {"t": textual_time.get_time()}
+        monkeypatch.setattr(message_module._time, "get_time", lambda: now["t"])
 
         async def press_and_release() -> None:
             """One physical click, as the driver delivers it."""
@@ -2562,7 +2591,7 @@ async def test_a_deliberately_slow_double_click_is_still_a_double_click() -> Non
 
         await press_and_release()
         # Longer than Textual's 0.5 s default, inside this app's own threshold.
-        await asyncio.sleep(0.7)
+        now["t"] += 0.7
         await press_and_release()
         await pilot.pause()
 
@@ -2572,6 +2601,12 @@ async def test_a_deliberately_slow_double_click_is_still_a_double_click() -> Non
         await pilot.pause()
         assert app._clipboard == "ingest"
         assert editor.text == "summarise the ingest path please", "the draft was cleared"
+
+        # The other side of the window: a pair the user cannot have meant as one
+        # gesture is still two clicks, so the chain is bounded rather than open.
+        now["t"] += 1.5
+        await press_and_release()
+        assert editor.selected_text == "", "a 1.5 s gap was still read as a chain"
 
 
 @pytest.mark.asyncio
