@@ -190,10 +190,6 @@ def test_token_plan_models_ship_their_real_windows() -> None:
         "deepseek-v4-flash-0731": (1_000_000, 393_216),
     }
     assert qwencloud_token_plan_models["qwen3.8-max"].supports_images is True
-    # Twice qwen3.6-flash's cap, which is the reason to prefer this row over
-    # that one for the cheap tier; pinned because a wrong cap truncates output
-    # rather than failing loudly.
-    assert qwencloud_token_plan_models["qwen3.8-flash"].max_tokens == 131_072
 
     # Both the exact-id chain and the enumerable map must answer, because
     # `build_model_spec` reaches the former and discovery merges over the
@@ -283,26 +279,45 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
 
 
 def test_token_plan_models_declare_prompt_caching() -> None:
-    """The flag is what gates `cache_control`, so False means "never cache".
+    """The flag picks the cache MODE, and the evidence for it is per row.
 
     `OpenAICompatClient._message_cache_markers` is called only when
     `request.model.supports_prompt_cache` is set, and this provider speaks the
     OpenAI-compatible wire. These rows shipped `False`, so lop emitted no
-    markers and the gateway fell back to its implicit cache — the 20% tier
-    rather than the 10% one an explicit marker buys.
+    `cache_control` at all and the gateway's implicit cache — which cannot be
+    disabled — was the only thing running.
 
-    That the gateway caches at all was measured, not read off a doc page: an
-    identical 6.5k-token system prefix sent twice with
-    `cache_control: {"type": "ephemeral"}` reports
-    `cache_creation_input_tokens=6547` on the first call and
-    `cached_tokens=6547` on the second, for every text row here.
+    The expected value is keyed by evidence class rather than asserted map-wide,
+    because explicit-cache support is per model AND per region on this provider.
+    A map-wide `is True` would force the next correctly-added row to carry a
+    flag nobody checked, and would read as authority for it. Adding a row here
+    fails this test until its evidence class is stated, which is the point.
 
-    Asserted over the whole map rather than one row, because the failure is
-    invisible at runtime: a row added with the flag unset does not error, it
-    just quietly re-bills its prefix on every turn. On agent traffic — a
-    transcript resent each turn, measured at a 97% cache-read share — that is
-    roughly a 6x difference in billed input.
+    The classes, and the note beside the map for the full derivation:
+
+    * MEASURED_EXPLICIT — `cache_creation_input_tokens` observed on the first
+      call, which is the only explicit-cache-only signal the wire carries.
+    * MARKED_HIT_ONLY — markers sent, second call reported `cached_tokens`, but
+      `cache_creation_input_tokens` was not captured. Weaker than it looks: the
+      implicit cache reports `cached_tokens` too, so this does not by itself
+      prove the marker did anything.
+    * INFERRED_INERT — not driven, and/or not on this region's (ap-southeast-1,
+      International) explicit-cache list. True because an unrecognised marker is
+      ignored and the implicit cache still applies, so the flag is inert here
+      rather than wrong.
     """
+    measured_explicit = {"qwen3.8-max", "qwen3.8-flash"}
+    marked_hit_only = {"qwen3.7-plus", "qwen3.6-flash", "glm-5.2", "deepseek-v4-pro"}
+    inferred_inert = {"qwen3.7-max", "deepseek-v4-flash-0731"}
+
+    # Every row is classified exactly once, so a new row cannot ride in on a
+    # blanket assertion.
+    assert measured_explicit.isdisjoint(marked_hit_only)
+    assert inferred_inert.isdisjoint(measured_explicit | marked_hit_only)
+    assert (
+        measured_explicit | marked_hit_only | inferred_inert
+    ) == qwencloud_token_plan_models.keys()
+
     for model_id, info in qwencloud_token_plan_models.items():
         assert info.supports_prompt_cache is True, model_id
 

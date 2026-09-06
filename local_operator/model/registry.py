@@ -1665,32 +1665,68 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
     # leaves `cache_writes_price`/`cache_reads_price` unset: the cache discount
     # is real, but it is a CREDIT multiplier rather than a USD rate.
     #
-    # PROMPT CACHING is supported, and was MEASURED rather than inferred. Each
-    # text row below was driven twice with an identical 6.5k-token system
-    # prefix carrying `cache_control: {"type": "ephemeral"}`, over the
-    # OpenAI-compatible wire this provider actually uses. The second call
-    # reported the prefix as a hit every time:
-    #
-    #   req 1  prompt_tokens_details.cache_creation_input_tokens = 6547
-    #   req 2  prompt_tokens_details.cached_tokens               = 6547
-    #
-    # These rows previously said `supports_prompt_cache=False`, and that flag
-    # is exactly what gates `_message_cache_markers` in
-    # `providers/clients.py`. With it off lop sent no markers at all, so every
-    # turn re-billed the entire prefix as fresh input. That is the expensive
-    # direction for agent traffic, where a growing transcript is resent on
-    # each turn: a week of real subagent sessions measured 1.5B input tokens
-    # at a 97% cache-read share, where the flag alone is a ~6x difference in
-    # billed input.
-    #
-    # Alibaba documents two modes, mutually exclusive per request
+    # PROMPT CACHING. Every row below ships `supports_prompt_cache=True`, but
+    # the evidence behind that differs per row, so it is recorded per row
+    # rather than as one blanket claim. Alibaba documents two modes, mutually
+    # exclusive per request
     # (https://www.alibabacloud.com/help/en/model-studio/context-cache):
-    # IMPLICIT applies automatically to every supported model and cannot be
-    # disabled, billing hits at 20% of the input price; EXPLICIT is what a
-    # `cache_control` marker selects, billing hits at 10% with a 5-minute TTL
-    # renewed on each hit. So the flag is not the difference between caching
-    # and no caching — the server caches either way — it is the difference
-    # between the 20% path and the 10% one.
+    # IMPLICIT applies automatically to every supported model and CANNOT be
+    # disabled; EXPLICIT is what a `cache_control` marker selects, with a
+    # 5-minute TTL renewed on each hit. `supports_prompt_cache` is what gates
+    # `_message_cache_markers` in `providers/clients.py`, so the flag chooses
+    # between those two modes — it is never the difference between caching and
+    # no caching, because the gateway caches either way.
+    #
+    # WHAT WAS ACTUALLY MEASURED. An identical ~6.5k-token system prefix was
+    # sent twice over this gateway's OpenAI-compatible wire carrying
+    # `cache_control: {"type": "ephemeral"}`, reading back
+    # `prompt_tokens_details` on each response (`creation` below is
+    # `cache_creation_input_tokens`, `cached` is `cached_tokens`):
+    #
+    #   qwen3.8-max             req 1 creation=6547   req 2 cached=6547
+    #   qwen3.8-flash           req 1 creation=6547   req 2 cached=6547
+    #   qwen3.7-plus            req 1 not captured    req 2 cached=6509
+    #   qwen3.6-flash           req 1 not captured    req 2 cached=6509
+    #   glm-5.2                 req 1 not captured    req 2 cached=6016
+    #   deepseek-v4-pro         req 1 not captured    req 2 cached=5120
+    #   qwen3.7-max             not driven
+    #   deepseek-v4-flash-0731  not driven
+    #
+    # `cached_tokens` ALONE DOES NOT DISCRIMINATE the two modes: the implicit
+    # cache reports the same field and cannot be switched off, so a hit on the
+    # second call is the expected result whether or not the marker did
+    # anything. `cache_creation_input_tokens` is the only explicit-only signal,
+    # and it was captured for the top two rows only. The four middle rows
+    # therefore show something weaker but still worth having: markers were sent
+    # and the request neither errored nor lost its hit. The bottom two rows
+    # were never driven at all — nothing here is measured for them.
+    #
+    # WHICH ROWS THE VENDOR LISTS FOR EXPLICIT CACHE. This gateway is
+    # ap-southeast-1 (Singapore, International deployment scope), and that
+    # region's explicit-cache model list covers the five qwen rows here but NOT
+    # `glm-5.2`, `deepseek-v4-pro` or `deepseek-v4-flash-0731`, which appear
+    # under implicit cache only. For those three the True flag is INFERRED, not
+    # measured: an unrecognised `cache_control` marker is ignored and the
+    # implicit cache still applies, which is consistent with the glm-5.2 and
+    # deepseek-v4-pro probes above. It is left True because it is inert where
+    # explicit cache is not offered and correct where it is. A future
+    # maintainer who measures `cache_creation_input_tokens` on those rows and
+    # finds nothing has confirmed implicit-only, not contradicted this note.
+    #
+    # BILLING, and why the flag is still worth setting. Explicit hits bill at
+    # 10% of standard input against implicit's 20% — but the exceptions land on
+    # exactly the rows that matter most here. The explicit hit price for
+    # `qwen3.8-max` and `qwen3.8-flash` is documented as NOT 10% (console-
+    # quoted), the implicit rate for `glm-5.2` is 25% rather than 20%, and
+    # `deepseek-v4-pro`'s implicit rate is likewise console-quoted, so the flat
+    # "20 to 10" improvement does not hold row by row. Explicit also bills
+    # CREATION at 125% of standard input where implicit bills 100%, so it wins
+    # only when a prefix is re-hit often enough to repay that premium. Agent
+    # traffic is that case: a growing transcript resent every turn, measured
+    # over a week of real subagent sessions on this machine at 1.5B input
+    # tokens and a 97% cache-read share. None of these percentages is a USD
+    # rate on this plan anyway (credits, see above) — they are the ratio
+    # between the two paths.
     "qwen3.8-max": ModelInfo(
         id="qwen3.8-max",
         name="Qwen3.8 Max",
