@@ -107,3 +107,23 @@ class AnswerReceipt(BaseModel):
 
 class WatchReceipt(BaseModel):
     lease_seconds: Literal[45]
+
+
+class AttentionState(BaseModel):
+    """The shared read watermark, mirrored by the UI's `CompletionAttention`.
+
+    Typed rather than `dict[str, Any]` so the renderer's hand-written copy of
+    this shape cannot drift from the authority silently: the field set is the
+    contract both sides agree on.
+    """
+
+    conversation_id: str
+    completion_token: str | None
+    anchor_id: str | None
+    kind: Literal["complete", "error", "interrupted"] | None
+    unseen: bool
+    #: ``[published, acknowledged]`` -- monotonic, and independent of the owner
+    #: epoch, which is why a client merges on it rather than on arrival order.
+    revision: list[int]
+    #: Absent on the cold list path; only a live owner can answer it.
+    supported: bool | None = None
