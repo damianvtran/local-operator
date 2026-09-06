@@ -67,6 +67,7 @@ from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_TERMINATE_DENIED,
     EVIDENCE_TERMINATE_UNCONFIRMED,
 )
+from lop_osworld_v2_adapter.providers.base import GUEST_COMMAND_TIMEOUT_S
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -777,7 +778,9 @@ class AwsProvider:
                 try:
                     from local_operator.computer_input import python_source_argv
 
-                    result = self._run_guest_command(python_source_argv(script), timeout=90)
+                    result = self._run_guest_command(
+                        python_source_argv(script), timeout=GUEST_COMMAND_TIMEOUT_S
+                    )
                 except Exception:
                     # Neither transport exceptions nor guest stderr are safe to
                     # expose: they may echo the command, credentials or UI text.

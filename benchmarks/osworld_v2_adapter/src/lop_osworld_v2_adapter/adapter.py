@@ -292,6 +292,7 @@ class OSWorldV2Adapter:
                 scoring=True,
                 paste_text=actions.ACTION_SURFACE.paste_text,
                 type_text_mode=actions.ACTION_SURFACE.type_text_mode,
+                max_type_chars=actions.ACTION_SURFACE.max_type_chars,
             ),
         )
         # Per-episode state. None until the corresponding method runs.

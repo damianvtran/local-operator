@@ -19,6 +19,34 @@ from typing import Any, Protocol, runtime_checkable
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
+# How long the client waits for ONE guest statement before giving up. Matches
+# upstream's own client deadline (python.py:670) and is a hang detector, not a
+# throughput budget: a statement that legitimately needs longer than this is a
+# statement we should not be sending. It lives here, at the provider seam,
+# rather than inline at its single call site because the action compiler must
+# derive an admission bound from it (``actions.MAX_TYPE_CHARS``) — the two
+# drifting apart is precisely the defect that cost two episodes.
+GUEST_COMMAND_TIMEOUT_S = 90.0
+
+# Budgeted cost of delivering ONE character through the guest's X11 synthetic
+# key path, with pyautogui's default (zero) inter-key interval.
+#
+# Regression over 21 real batches measured 4.18 ms/char (R^2 = 0.998) on a
+# healthy guest. This is budgeted at ~2x that because the measurement is a
+# single sample of one instance type on one AMI, and that AMI is burstable —
+# the same credit starvation that has already blinded this adapter's screenshot
+# server (see ``providers.fake.blind_observations``) also slows key delivery.
+# Budgeting the measured figure exactly would make the bound below a prediction
+# of the median guest rather than a limit safe on a slow one.
+GUEST_TYPE_MS_PER_CHAR = 8.0
+
+# The largest share of the deadline a single type may be budgeted to consume.
+# The remaining 40% is not slack for typing: it absorbs the fixed per-command
+# overhead the same regression measured at 3.6 s (transport, the guest server's
+# own dispatch, screenshot settle) plus the tail of a guest that is slower than
+# the envelope above already assumes.
+GUEST_TYPE_DEADLINE_FRACTION = 0.6
+
 
 @runtime_checkable
 class EnvironmentProvider(Protocol):

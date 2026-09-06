@@ -234,6 +234,27 @@ def build_system_prompt(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> str:
         if surface.type_text_mode == "ascii"
         else "This adapter supports Unicode native text input."
     )
+    # STATED, not left to be discovered. The bound is a real keyboard's speed
+    # against the adapter's execution deadline, and a model that meets it only
+    # as a rejection spends corrective re-prompts bisecting for a limit it was
+    # never shown -- the avoidable cost the named-key vocabulary is spelled out
+    # to prevent. The alternative is named in the same breath, because a length
+    # limit with no way to send long text reads as "give up".
+    length_text = (
+        ""
+        if surface.max_type_chars is None
+        else (
+            f"\n  Text is limited to {surface.max_type_chars} characters per "
+            '"type"; longer text is rejected before any batch action, because '
+            "typing it cannot finish inside the adapter's execution deadline. "
+            + (
+                'Use "paste_text" for anything longer -- it goes through the '
+                "clipboard, so its cost does not grow with length."
+                if surface.paste_text
+                else 'Split it across several "type" actions.'
+            )
+        )
+    )
     ask_text = (
         '* "ask_user" -- you need a human answer. '
         "THE EPISODE PAUSES until the answer is delivered. "
@@ -308,7 +329,7 @@ name all require typing.
 * "type" enters literal text wherever the keyboard focus already is. It does
   NOT click first, so focus the field with a click (or Tab) in an earlier
   action, then type. It uses native keyboard input, not the clipboard.
-  {native_text}
+  {native_text}{length_text}
   It does not press Enter for you.
 {_paste_instructions(surface)}
 * "key" presses named keys, and presses the ones in a single action TOGETHER
