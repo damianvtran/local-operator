@@ -6,7 +6,14 @@
  * currently reviewing. Keeping ordering boring is intentional: it makes two
  * popup contexts and a restarted worker converge on the same next entry. */
 
-export type OriginDecision = "once" | "always" | "all_ports" | "deny";
+import { registrableDomain, type BroadGrant } from "./origin-policy";
+
+/** The popup's answer to a prompt, defined ONCE here and `import type`d by
+ * access-flow, origin-flow and origins. `site` is the exact-origin grant
+ * (scheme, host and port; the old "always"), `domain` the registrable-domain
+ * or loopback-host grant carried by the entry's `broad` field, `once` a
+ * single navigation. Deny is never persisted. */
+export type OriginDecision = "once" | "site" | "domain" | "deny";
 export type AccessKind = "async" | "in_command";
 export type AccessState = "allowed" | "denied" | "pending" | "cancelled" | "superseded" | "none";
 
@@ -29,6 +36,10 @@ export interface AccessQueueEntry {
   expiresAt: number;
   sequence: number;
   commandId?: string;
+  /** The broad grant the popup may offer, computed by the worker at enqueue.
+   * Absent on entries persisted by 0.1.7 and on /health-only renders, in
+   * which case the popup omits the domain option (fail closed). */
+  broad?: BroadGrant;
 }
 
 export interface AccessReceipt {
@@ -114,10 +125,16 @@ export function newEntry(
   now: number,
   sequence: number,
   commandId?: string,
-  entryId: string = crypto.randomUUID().replaceAll("-", ""),
+  entryId?: string,
+  broad?: BroadGrant | null,
 ): AccessQueueEntry {
   return {
-    entryId,
+    // `||`, not a default parameter: a default fires only on `undefined`, so a
+    // legacy pendingOrigin record carrying `promptId: ""` would mint a live
+    // entry with an empty id. An empty id reads as "no generation" in the ack
+    // latch and would be swallowed as the previous decision's own echo.
+    // Unreachable today (every writer minted a UUID) and defensive only (A12).
+    entryId: entryId || crypto.randomUUID().replaceAll("-", ""),
     origin,
     displayAuthority,
     requester,
@@ -126,6 +143,7 @@ export function newEntry(
     expiresAt: now + (kind === "async" ? ACCESS_REQUEST_TTL_MS : IN_COMMAND_TTL_MS),
     sequence,
     ...(commandId ? { commandId } : {}),
+    ...(broad ? { broad } : {}),
   };
 }
 
@@ -155,22 +173,36 @@ export function receiptForRequester(
     .sort((a, b) => b.decidedAt - a.decidedAt)[0];
 }
 
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
 /** The one reconciliation matcher for durable grants. Exact grants retain
- * origin semantics; loopback all-port grants cover only the same scheme and
- * exact literal hostname, never aliases, IP families, or HTTP/HTTPS peers. */
+ * origin semantics. `domain` covers every hostname with the same registrable
+ * domain and `host` every port on the same literal loopback hostname, both
+ * regardless of scheme: the trust the user asserts with a broad grant is in
+ * the site operator, not the transport, and http-to-https redirect chains
+ * are gated per hop, so a scheme-bound grant would re-prompt on the first
+ * hop of nearly every `open http://` (the fatigue these scopes remove).
+ * Legacy loopback all-port grants keep their same-scheme semantics. */
 export function policyCovers(
   grantedOrigin: string,
   candidateOrigin: string,
-  scope: "origin" | "loopback_all_ports" = "origin",
+  scope: "origin" | "domain" | "host" | "loopback_all_ports" = "origin",
 ): boolean {
   if (scope === "origin") return grantedOrigin === candidateOrigin;
   try {
     const granted = new URL(grantedOrigin);
     const candidate = new URL(candidateOrigin);
+    if (scope === "domain") {
+      const domain = registrableDomain(granted);
+      return domain !== null && registrableDomain(candidate) === domain;
+    }
+    if (scope === "host") {
+      return granted.hostname === candidate.hostname && LOOPBACK_HOSTS.includes(granted.hostname);
+    }
     return (
       granted.protocol === candidate.protocol &&
       granted.hostname === candidate.hostname &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(granted.hostname)
+      LOOPBACK_HOSTS.includes(granted.hostname)
     );
   } catch {
     return false;

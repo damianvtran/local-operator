@@ -492,10 +492,15 @@ Default-deny. On `open`/`goto`/click-navigation to an origin not in the
 allowlist, the extension:
 
 1. Holds the command, sets the toolbar badge (`!`), and shows the pending
-   request in the popup: "Local Operator wants to open **github.com** —
-   Allow once / Always allow / Deny".
+   request in the popup.
 2. The user's choice resolves the command: allow → proceed (and persist on
-   "Always"); deny or 60 s of silence → `origin_denied` with the origin named.
+   a standing grant); deny or 60 s of silence → `origin_denied` with the
+   origin named.
+
+**2026-09-05 (extension 0.1.8):** the prompt is now a scope dropdown
+(domain / site / once) with Allow and Deny buttons, replacing the three
+fixed buttons above. See the PR for the scoped-grant design and the
+dangerous allow-all setting.
 
 Redirect handling: the allowlist is checked against the **final** origin too
 (via `webNavigation.onBeforeNavigate` per hop); a redirect into an unlisted

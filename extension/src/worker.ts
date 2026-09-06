@@ -7,8 +7,8 @@ import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
 import { BridgeCommandError } from "./cdp";
-import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost } from "./access-grants";
-import { ACCESS_EXPIRY_ALARM } from "./approval-store";
+import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
+import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
@@ -429,6 +429,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.accessQueue) {
     void chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue });
   }
+  // The all-sites switch is written by the options page directly (never by
+  // a message to this worker or a daemon RPC: there is deliberately no such
+  // path). This listener only reacts to it turning ON, resolving prompts
+  // that are now moot so paused navigations resume instead of timing out.
+  if (area === "local" && changes.allowAllSites && changes.allowAllSites.newValue === true) {
+    void allowAllPending().catch((error) => console.warn("allow-all queue resolution failed", error));
+  }
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Decisions are keyed by ORIGIN (finding A6) and carry the prompt
@@ -442,6 +449,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.event === "host_grant_revoke") {
     revokeLoopbackHost(String(message.canonicalKey))
+      .then((applied) => sendResponse({ applied }))
+      .catch(() => sendResponse({ applied: false }));
+    return true;
+  }
+  if (message?.event === "site_grant_revoke") {
+    revokeSiteGrant(String(message.key))
       .then((applied) => sendResponse({ applied }))
       .catch(() => sendResponse({ applied: false }));
     return true;

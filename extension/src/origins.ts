@@ -30,7 +30,9 @@ function reconcileWaiters(snapshot: QueueSnapshot): void {
     const receipt = Object.values(snapshot.results).find((candidate) => candidate.entryId === entryId);
     if (!receipt) continue;
     waiting.delete(entryId);
-    const decision: OriginDecision = receipt.state === "allowed" ? "always" : "deny";
+    // Waiters only test `!== "deny"`, so any allowed receipt maps to one
+    // non-deny value; the grant scope was already committed by decideAccess.
+    const decision: OriginDecision = receipt.state === "allowed" ? "site" : "deny";
     for (const resolve of resolvers) resolve(decision);
   }
 }
@@ -53,9 +55,14 @@ export function setPendingObserver(observer: (snapshot: QueueSnapshot) => void):
   onPendingChange = observer;
 }
 
+/** The single choke point every gate funnels through (ensureTopLevelAccess,
+ * askOrigin, withOriginGate, and request_access/await_access via
+ * callerAlreadyAllowed). The options-only `allowAllSites` bypass lives ONLY
+ * here, so there is exactly one place to audit for it. */
 export async function originAllowed(url: URL): Promise<boolean> {
-  const { origins = {}, hostGrants } = await getLocal();
-  return storedOriginAllowed(origins, url, hostGrants);
+  const { origins = {}, hostGrants, siteGrants, allowAllSites } = await getLocal();
+  if (allowAllSites === true) return true;
+  return storedOriginAllowed(origins, url, hostGrants, siteGrants);
 }
 
 export interface OriginAdmission {
@@ -146,7 +153,7 @@ export async function resolveOrigin(
   decision: OriginDecision,
   entryId: string = "",
 ): Promise<boolean> {
-  if (!["once", "always", "all_ports", "deny"].includes(decision)) return false;
+  if (!["once", "site", "domain", "deny"].includes(decision)) return false;
   let targetId = entryId;
   const session = await getSession();
   const queue = liveQueue(session.accessQueue, Date.now());
