@@ -171,14 +171,47 @@ class OwnedSessionHandle(SessionHandle):
         *,
         cwd: str,
         auto_approve: bool = False,
+        approval_pinned: bool = False,
     ) -> None:
         self._session = session
         self._loop = loop
         # When the owner's saved default is full-auto (``tool_approval_mode:
         # auto``), the phone must not park a card the TUI would never show —
-        # the gate is answered ``True`` inline instead. Stored so a future
-        # per-session toggle can flip it without reconstructing the handle.
+        # the gate is answered ``True`` inline instead. Read PER DECISION by
+        # the gate closure, which is what lets ``/approvals`` and a
+        # ``config.yml`` change (:meth:`follow_config`) move it without
+        # reconstructing the handle.
         self._auto_approve = auto_approve
+        # ``approval_pinned`` marks the value as an explicit FLAG (``lop exec
+        # --yolo``), which outranks the config key: a ``tool_approval_mode``
+        # edit must not re-arm a gate the operator disabled on the command
+        # line for this run. A separate kwarg rather than inferred from
+        # ``auto_approve`` because ``spawn_owned_session`` passes the
+        # CONFIG-derived value — the same ``True`` that must keep following
+        # the file.
+        self._approval_pinned = approval_pinned
+        #: The mode a human typed with ``/approvals`` in THIS session, or
+        #: ``None``. Deliberately the same shape as
+        #: ``Session._explicit_model_choice``, and the symmetry is the point:
+        #: the model half of this change already protects an explicit ``/model``
+        #: pick from a ``config.yml`` default, and approvals is the more
+        #: dangerous key of the two.
+        #:
+        #: It records WHICH mode was chosen, not merely THAT one was (review
+        #: round 2, R6). A boolean conflated the two and the loosening guard
+        #: read it as "the human chose ask", so a session whose human typed
+        #: ``/approvals auto`` was pinned to ``ask`` forever by one file
+        #: tightening \u2014 the operator's originating complaint ("if I change a
+        #: setting I want it to go into effect for all my agents") reappearing
+        #: on the very key this change is centred on.
+        #:
+        #: INVARIANT: non-``None`` only while the gate in force is the mode a
+        #: human typed here. :meth:`_on_config_change` clears it whenever a
+        #: file write MOVES the gate, because at that moment the file, not the
+        #: human, owns the value \u2014 which is also what keeps the keep notice's
+        #: "set with /approvals in this session" a true statement.
+        self._explicit_approvals_mode: str | None = None
+        self._unsubscribe_config_watch: Callable[[], None] | None = None
         #: The (kind, title, detail) of the gate currently parked, or None.
         #: Kept so the announcement can be re-run when the last viewer
         #: detaches — the routing decision is made when the gate opens, and
@@ -371,6 +404,160 @@ class OwnedSessionHandle(SessionHandle):
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
 
+    # -- live config -------------------------------------------------------------
+
+    def follow_config(self, watcher: Any) -> None:
+        """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
+
+        The handle, not the session, owns the approval mode the RUNTIME's
+        tools consult (``_auto_approve``), so it needs its own listener on the
+        process :class:`~local_operator.config_watch.ConfigWatcher` beside the
+        session's. Wired by the spawn sites (``spawn_owned_session``,
+        ``start_exec_control``) rather than in ``__init__`` so a handle built
+        around a test double never touches the real config directory.
+        Idempotent; unsubscribed in :meth:`dispose`.
+        """
+        if self._unsubscribe_config_watch is not None:
+            return
+        self._unsubscribe_config_watch = watcher.subscribe(self._on_config_change)
+
+    def _on_config_change(self, change: Any) -> None:
+        """Move the gate to the mode on disk; the next DECISION sees it.
+
+        A ``config.yml`` write is the operator's machine-wide intent ("if I
+        change a setting I want it to go into effect for all my agents"), so a
+        session that never made a choice of its own follows the file in BOTH
+        directions. ``source`` is ignored on purpose: the runtime is never the
+        process that wrote, so every delivery is another process's edit.
+
+        **The rule is asymmetric, and only for a session that chose** (review
+        round 1 R1, UX round 1 U1):
+
+        * **Tightening (``auto`` → ``ask``) always follows the file**,
+          unconditionally, in every session. Safety propagates without
+          exception; a user ends up safer than they asked, which is never the
+          wrong surprise.
+        * **Loosening (``ask`` → ``auto``) does not move a session whose human
+          typed ``/approvals ask`` in it.** That session keeps its gate and
+          reads a keep notice naming the way to adopt the file instead. It is
+          the CHOSEN MODE that is consulted, not merely the fact of a choice:
+          a session whose human chose ``auto`` has no hardening to protect and
+          follows the file in both directions like any other.
+
+        The asymmetry is the whole point. The operator asked for settings to
+        REACH running sessions, which was broken and is what this change fixes;
+        they did not ask for a file write to revoke a hardening a human typed
+        into a specific pane thirty seconds earlier. The parked-prompt rule
+        below already encodes that principle — a card on screen is not
+        auto-answered *because the human's presence outranks the file* — and it
+        applies one step earlier to a human who typed the mode. This mirrors
+        the model half of the same change exactly (``Session.
+        _on_configured_model_changed``, ``_explicit_model_choice``, and its
+        ``keeping …`` notice), and approvals is the more dangerous of the two
+        keys: an explicit ``/model`` pick was already protected while an
+        explicit ``/approvals ask`` was not, which reversed the safer default
+        on the key where it matters more.
+
+        Two further limits, unchanged. ``--yolo`` (``_approval_pinned``)
+        outranks the key entirely — an explicit flag on this run is narrower
+        and newer than a default in a file — and a prompt already PARKED
+        (``_pending_futures``) is left alone: the gate reads ``_auto_approve``
+        when a decision is made, so a card on screen keeps waiting for the
+        human, never auto-answered on a loosening and never auto-denied on a
+        tightening.
+
+        The receipt goes out as a :class:`NoticeEvent` from THIS process, the
+        one that owns the gate, so every attached viewer and the phone see
+        the effect ("every tool runs without asking"). It is now the ONLY
+        receipt for the event: the TUI no longer prints a value clause when a
+        runtime is attached (design round 1, D1), on the same "the process that
+        decided is the one the user should read" rule the ``model`` section
+        already follows. Subagents inherit this gate closure, so they follow
+        too.
+        """
+        if self._disposing or "tool_approval_mode" not in getattr(change, "changed_keys", ()):
+            return
+        if self._approval_pinned:
+            return
+        values = getattr(change, "values", {})
+        mode = str(values.get("tool_approval_mode", "ask")).strip().lower()
+        if mode not in ("ask", "auto"):
+            # An unknown spelling is not "ask" by accident: the watcher only
+            # delivers parseable files, so this is a typo, and the safe answer
+            # is to keep the mode in force rather than guess.
+            logger.warning("tool_approval_mode=%r ignored; use ask or auto", mode)
+            return
+        wanted_auto = mode == "auto"
+        if wanted_auto == self._auto_approve:
+            return
+        if wanted_auto and self._explicit_approvals_mode == "ask":
+            # LOOSENING against a human's explicit hardening: keep the gate and
+            # say so. Shaped like the model half's keep notice — what is kept,
+            # why, and the exact command that adopts the file — so the two
+            # conflicts read as one rule rather than two behaviours.
+            #
+            # `== "ask"` and not a bare truth test: only a typed `ask` is a
+            # hardening this may refuse a file for. A typed `auto` is an
+            # opinion about the same key, but refusing a loosening on its
+            # behalf would pin a session to a mode its human never asked for.
+            self._emit_notice(
+                "keeping tool approvals: ask — set with /approvals in this session; "
+                "config.yml now says auto, /approvals auto adopts it",
+                "info",
+                headline="Approvals unchanged",
+            )
+            return
+        self._auto_approve = wanted_auto
+        # The FILE now owns the value in force, so a mode the human typed here
+        # earlier no longer describes this gate. Clearing keeps the invariant on
+        # `_explicit_approvals_mode` exact (review round 2, R6): without it, a
+        # session tightened off a typed `auto` would still be carrying that
+        # `auto`, and the keep notice's "set with /approvals in this session"
+        # would be describing a choice the file, not the human, had made.
+        self._explicit_approvals_mode = None
+        self._notify()
+        self._emit_notice(
+            (
+                "tool approvals: auto — config.yml changed; every tool runs without asking"
+                if wanted_auto
+                else "tool approvals: ask — config.yml changed; write and command tools "
+                "prompt again"
+            ),
+            "warning" if wanted_auto else "info",
+            headline=f"Approvals: {mode}",
+        )
+
+    def _emit_notice(self, text: str, kind: str, headline: str = "") -> None:
+        """Fire-and-forget a ``NoticeEvent`` through the session's emit seam.
+
+        Same shape as :meth:`_grant_notice`: the channel every attached
+        terminal and the phone already listen on. Held on
+        ``_mcp_reload_tasks`` because it is the same class of sub-second
+        best-effort work, and ``dispose`` cancels that set.
+
+        ``headline`` is the SHORT glance a boot toast shows instead of a blind
+        cell cut of ``text`` (design round 1, D3; see ``NoticeEvent.headline``).
+        Passed by callers that know the state; "" keeps the existing fallback.
+        """
+        from local_operator.harness.types import NoticeEvent
+
+        emit = getattr(self._session, "_emit", None)
+        if not callable(emit):
+            logger.info("notice: %s", text)
+            return
+        event_kind = kind if kind in ("info", "warning", "error") else "info"
+        typed_emit = cast("Callable[[Any], Awaitable[Any]]", emit)
+
+        async def _emit_notice() -> None:
+            try:
+                await typed_emit(NoticeEvent(text=text, kind=event_kind, headline=headline))
+            except Exception:  # noqa: BLE001 — a failed notice must not kill the loop
+                logger.debug("runtime notice failed", exc_info=True)
+
+        task = self._loop.create_task(_emit_notice())
+        self._mcp_reload_tasks.add(task)
+        task.add_done_callback(self._mcp_reload_tasks.discard)
+
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -378,6 +565,9 @@ class OwnedSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        if self._unsubscribe_config_watch is not None:
+            self._unsubscribe_config_watch()
+            self._unsubscribe_config_watch = None
         drain = self._prompt_drain_task
         if drain is not None and not drain.done():
             drain.cancel()
@@ -2369,7 +2559,9 @@ class OwnedSessionHandle(SessionHandle):
 
         The persist half is declined for the machine-locality reason
         `/approvals default` gives: a default belongs to the terminal whose
-        launches it governs, not to a runtime that outlives it.
+        launches it governs, not to a runtime that outlives it. ``saved`` is
+        NOT declined on those grounds — it only READS that default and switches
+        this session, which is this handle's own mutation (QA round 2, Q49).
         """
         target = (arg or "").strip()
         lowered = target.lower()
@@ -2390,14 +2582,55 @@ class OwnedSessionHandle(SessionHandle):
                 "switches the shared session now",
                 style="warning",
             )
-        provider, sep, model_id = target.partition("/")
-        if not sep or not model_id:
-            return SlashResult(
-                kind="notice",
-                text="usage: /model <provider>/<model-id> "
-                "(e.g. openrouter/deepseek/deepseek-chat)",
-                style="warning",
-            )
+        if lowered == "saved":
+            # ``/model saved`` — adopt the CONFIGURED default (#369). Handled
+            # here because this method is what serves a DETACHED runtime's
+            # `/model`: `OperatorApp` intercepts `saved` before routing, so a
+            # local pane always worked while the phone and any viewer on a
+            # runtime-owned session fell through to the `<provider>/<model-id>`
+            # usage error — `saved` has no `/` (QA round 2, Q49). That made the
+            # keep notice this same change emits (`session.py`, "/model saved
+            # adopts it") a dead end on the one surface that prints it from a
+            # runtime, and contradicted the `/help` text round 1's U5 added.
+            #
+            # UNLIKE `/model default`, this is a READ of config, not a write, so
+            # the machine-locality reason that declines the persist above does
+            # not apply: adopting a value is a switch on this session, which is
+            # exactly what this handle owns. The read is direct rather than a
+            # cached boot value, matching `OperatorApp._cmd_model_saved`, so a
+            # default written during this session is what gets adopted.
+            try:
+                from local_operator.config import ConfigManager
+                from local_operator.paths import config_dir
+
+                manager = ConfigManager(config_dir())
+                saved_provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
+                saved_model = str(manager.get_config_value("model_name", "") or "").strip()
+            except Exception as error:  # noqa: BLE001 — reported, never fatal
+                return SlashResult(
+                    kind="notice",
+                    text=f"could not read the saved default: {error}",
+                    style="error",
+                )
+            if not saved_provider or not saved_model:
+                # Honest "there is nothing to go back to", in the app's own
+                # words so both surfaces answer an empty config identically.
+                return SlashResult(
+                    kind="notice",
+                    text="no boot default saved yet — /model default <provider>/<model-id> "
+                    "sets one",
+                    style="warning",
+                )
+            provider, model_id = saved_provider, saved_model
+        else:
+            provider, sep, model_id = target.partition("/")
+            if not sep or not model_id:
+                return SlashResult(
+                    kind="notice",
+                    text="usage: /model <provider>/<model-id> "
+                    "(e.g. openrouter/deepseek/deepseek-chat)",
+                    style="warning",
+                )
         old_label = getattr(session, "model_label", "")
         try:
             await self.set_model(provider.lower(), model_id)
@@ -2529,6 +2762,21 @@ class OwnedSessionHandle(SessionHandle):
                 if self._auto_approve
                 else "write and command tools prompt before running"
             )
+            # Compared against the FILE, not against a cached default (UX round
+            # 1, U1/U2). This is the surface whose job is "what is in effect and
+            # why", and a session that kept its own mode against a config edit
+            # has to be able to learn that here — otherwise the one place a user
+            # asks reports a matched pair while the two genuinely disagree.
+            on_disk = self._configured_approval_mode()
+            if on_disk is not None and on_disk != live:
+                return SlashResult(
+                    kind="notice",
+                    text=(
+                        f"tool approvals: {live} (this session) — {effect}; "
+                        f"config.yml says {on_disk}"
+                    ),
+                    style="warning" if self._auto_approve else "info",
+                )
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} — {effect}",
@@ -2545,6 +2793,12 @@ class OwnedSessionHandle(SessionHandle):
                 style="warning",
             )
         self._auto_approve = wanted_auto
+        # A human typed the mode in this session, so a later LOOSENING disk
+        # write leaves this gate alone (see :meth:`_on_config_change`). The MODE
+        # is recorded, not merely the fact of a choice (review round 2, R6):
+        # both directions are worth recording, but only a recorded `ask` is a
+        # hardening a file loosening must not revoke.
+        self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._notify()
         return SlashResult(
             kind="notice",
@@ -2555,6 +2809,30 @@ class OwnedSessionHandle(SessionHandle):
             ),
             style="warning" if wanted_auto else "info",
         )
+
+    def _configured_approval_mode(self) -> str | None:
+        """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
+
+        Read off ``existing_watcher().values`` — the last-good snapshot — and
+        never from a fresh ``ConfigManager``. Constructing one here would give
+        a report path the power to MOVE A MALFORMED FILE ASIDE (the module
+        docstring of ``config_watch`` explains why), so asking "what does the
+        file say?" could rewrite the user's config as a side effect. ``None``
+        when no watcher is running (a headless embed, a test host): the caller
+        then reports the live mode alone rather than inventing a comparison.
+        """
+        try:
+            from local_operator.config_watch import existing_watcher
+            from local_operator.paths import config_dir
+
+            watcher = existing_watcher(config_dir())
+            if watcher is None:
+                return None
+            mode = str(watcher.values.get("tool_approval_mode", "")).strip().lower()
+            return mode if mode in ("ask", "auto") else None
+        except Exception:  # noqa: BLE001 — a report must never take down the session
+            logger.debug("tool_approval_mode could not be read for the report", exc_info=True)
+            return None
 
     def _compact_slash(self, session: Any, SlashResult: Any) -> Any:
         """Kick the real pass; the ACCEPT receipt is the answer.
@@ -2906,6 +3184,8 @@ async def spawn_owned_session(
     # device set to full-auto still pops an approval card the desktop would
     # not. ``yolo`` stays False so the gate is INSTALLED (a per-session toggle
     # can still switch to asking); the handle short-circuits it when auto.
+    # This is only the BOOT value: ``follow_config`` below keeps the gate on
+    # the file for the session's life.
     try:
         approval_mode = (
             str(config_manager.get_config_value("tool_approval_mode", "ask")).strip().lower()
@@ -2932,4 +3212,31 @@ async def spawn_owned_session(
         has_ui=False,
         cwd=cwd,
     )
-    return OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=auto_approve)
+    # NOT pinned: this value came from config, so it must keep following
+    # config. ``create_session`` has already started the process watcher for
+    # this directory (``attach_config_watch``), so ``process_watcher`` returns
+    # the running one; the guard mirrors that seam's "boot must not depend on
+    # the watcher" degrade.
+    handle = OwnedSessionHandle(
+        session, loop, cwd=cwd, auto_approve=auto_approve, approval_pinned=False
+    )
+    attach_gate_config_watch(handle, config_directory)
+    return handle
+
+
+def attach_gate_config_watch(handle: OwnedSessionHandle, config_directory: Path) -> None:
+    """Hang the handle's approval listener on the process watcher, or degrade.
+
+    Shared by the phone/TUI runtime spawn and ``exec --control`` so the two
+    cannot drift on how the gate follows config. Degrades to "this gate does
+    not follow config" rather than failing the spawn, the same policy as
+    ``session_factory.attach_config_watch``.
+    """
+    try:
+        from local_operator.config_watch import process_watcher
+
+        watcher = process_watcher(config_directory)
+        watcher.start(asyncio.get_running_loop())
+        handle.follow_config(watcher)
+    except Exception:  # noqa: BLE001 — the gate keeps its boot value
+        logger.warning("config watcher could not be attached to the runtime gate", exc_info=True)

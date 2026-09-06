@@ -3247,8 +3247,24 @@ class SettingsView(Vertical):
             )
             for rung in rungs:
                 rendered = self._join_detail(rung)
-                if cell_len(rendered.plain) <= width or rung is rungs[-1]:
+                if cell_len(rendered.plain) <= width:
                     text.append_text(rendered)
+                    break
+                if rung is rungs[-1]:
+                    # THE LAST RUNG IS CUT, NOT EMITTED WHOLE (design round 1,
+                    # D2). The ladder sheds until only the help remains, and
+                    # there is nothing below that to shed — so a help string
+                    # longer than the footer used to be handed over intact for
+                    # `.settings-view-detail` (`height: 2`, no wrap) to clip.
+                    # That clip leaves NO mark: the Web fetch footer painted 73
+                    # cells of a 79-cell sentence and stopped dead on the word
+                    # "every", which is exactly the "half of a sentence cut
+                    # mid-clause reads as a rendering fault" this ladder exists
+                    # to prevent. Truncating here degrades the next overlong
+                    # string to a visible `…` instead. The copy fix is still
+                    # the real fix — this is the floor under it, so a future
+                    # long string is ugly rather than silently broken.
+                    text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
                     break
         self._detail_text = text
         self._detail.update(text)

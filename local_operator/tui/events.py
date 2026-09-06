@@ -309,13 +309,19 @@ class PeerMessageDelivered(Message):
 class NoticePosted(Message):
     """A notice to surface in the transcript."""
 
-    def __init__(self, text: str, kind: NoticeKind) -> None:
+    def __init__(self, text: str, kind: NoticeKind, headline: str = "") -> None:
         super().__init__()
         self.text = text
         # Annotated, not inferred: pyright WIDENS a literal to ``str`` when it
         # infers an attribute's type from an assignment, which silently undid the
         # typing at the one hop that carries a kind across a thread boundary.
         self.kind: NoticeKind = kind
+        #: The emitter's SHORT glance for the boot toast, or "" for none. See
+        #: ``NoticeEvent.headline``: a toast with no headline falls through to a
+        #: blind cell cut that lands mid-phrase, and these notices are emitted
+        #: one process away, where the viewer could only recover a headline by
+        #: matching on prose.
+        self.headline = headline
 
 
 class CompactionStarted(Message):
@@ -715,7 +721,7 @@ class EventController:
             self._pending_tool_ends[event.tool_call_id] = event
 
     def _handle_notice(self, event: NoticeEvent) -> None:
-        self._post(NoticePosted(event.text, event.kind))
+        self._post(NoticePosted(event.text, event.kind, getattr(event, "headline", "") or ""))
 
     def _handle_wake_delivered(self, event: WakeDeliveredEvent) -> None:
         # No generation guard: a wake receipt is a state fact about the

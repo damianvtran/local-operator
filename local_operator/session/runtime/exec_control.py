@@ -150,7 +150,10 @@ async def start_exec_control(
     ``yolo`` maps to the handle's ``auto_approve``, so ``exec --control --yolo``
     keeps approving every tier inline instead of parking a card no supervisor
     may be watching. Without it the gates park for an attached supervisor —
-    the behavioural difference this module's header calls out.
+    the behavioural difference this module's header calls out. The flag is
+    also the handle's ``approval_pinned``: an explicit ``--yolo`` on this run
+    outranks a later ``tool_approval_mode`` edit, while an un-flagged run
+    follows the file like every other runtime gate.
 
     Imports are function-local by contract, not by habit: ``owned`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
@@ -160,11 +163,15 @@ async def start_exec_control(
 
     from local_operator.paths import config_dir
     from local_operator.session.runtime import registry
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.owned import (
+        OwnedSessionHandle,
+        attach_gate_config_watch,
+    )
     from local_operator.session.runtime.server import RuntimeServer
 
     loop = asyncio.get_running_loop()
-    handle = OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=yolo)
+    handle = OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=yolo, approval_pinned=yolo)
+    attach_gate_config_watch(handle, config_dir())
     # The ``stop`` control op (and therefore `lop stop`, which can now see this
     # run because it publishes a record) reaches ``request_stop`` -> this hook.
     # Without one the handle falls back to disposing in place, UNDER the prompt
