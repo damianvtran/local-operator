@@ -6,6 +6,7 @@ import asyncio
 import sqlite3
 import threading
 from dataclasses import replace
+from datetime import datetime
 
 import pytest
 from rich.style import Style
@@ -493,11 +494,17 @@ def test_tool_surface_percentages_match_where_input_went():
 
 def test_request_sequence_uses_window_max_not_share_of_total():
     """A tail does not partition the session; share-of-total would say nothing."""
-    text = build_session_report(_populated(), runtime(), 88).plain
+    report = _populated()
+    text = build_session_report(report, runtime(), 88).plain
     rows = _rows(text, "Last 12 requests")
     assert len(rows) == 12
-    # Oldest first, so the chart reads left-to-right in time like the transcript.
-    assert rows[0].strip().startswith("06:00:00")
+    # Oldest first, so the chart reads left-to-right in time like the
+    # transcript. The expected label is DERIVED in the ambient zone rather than
+    # written out: the renderer formats local time, so a hardcoded stamp pins
+    # the developer's timezone and fails on a UTC CI runner.
+    oldest = min(request.ts_ms for request in report.recent)
+    expected = datetime.fromtimestamp(oldest / 1000).astimezone().strftime("%H:%M:%S")
+    assert rows[0].strip().startswith(expected)
     # The largest request fills the bar completely — the window-max rule.
     assert "·" not in rows[-1].split()[1]
     assert "·" in rows[0].split()[1]
