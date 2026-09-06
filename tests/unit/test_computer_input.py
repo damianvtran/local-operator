@@ -153,7 +153,7 @@ def test_source_arguments_are_literals_not_caller_injection(
 
 
 def test_small_python_commands_keep_legacy_bytes() -> None:
-    source = "pyautogui.typewrite('abc', interval=0.01)"
+    source = "pyautogui.typewrite('abc')"
     assert python_source_argv(source) == ["python", "-c", source]
 
 

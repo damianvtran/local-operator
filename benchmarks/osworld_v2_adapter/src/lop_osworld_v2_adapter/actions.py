@@ -131,7 +131,18 @@ def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None
         # repr(), NEVER f-string interpolation: the text is model output and
         # may contain quotes, backslashes, or newlines. repr() produces a
         # Python literal that re-parses to exactly the same string.
-        return f"pyautogui.typewrite({action.text!r}, interval=0.01)"
+        #
+        # NO ``interval``: upstream types with pyautogui's default of 0.0
+        # (python.py:895) and this is the one place we may not deviate.
+        # ``typewrite`` is a per-character loop with an UNCONDITIONAL
+        # ``time.sleep(interval)`` per character, so an interval is not a rate
+        # hint — it is a hard floor of ``interval x len(text)`` seconds that the
+        # guest must burn before the statement can return. At the 0.01 we used
+        # to pass, two real episodes died typing 7332 and 6912 characters: 73 s
+        # and 69 s of mandated sleep alone, against the 90 s guest read deadline
+        # in ``providers/aws.py``, while the guest itself was healthy and idle at
+        # a shell prompt. 71% of our typing time was our own sleep.
+        return f"pyautogui.typewrite({action.text!r})"
 
     if isinstance(action, KeyAction):
         names = [_key_name(key) for key in action.keys]
