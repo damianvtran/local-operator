@@ -20,11 +20,12 @@ import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator.harness.types import ModelSpec, Usage
+from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
@@ -1264,6 +1265,21 @@ def test_the_catalogue_budget_tracks_the_socket_line_limit() -> None:
     assert _MODEL_CATALOGUE_LINE_LIMIT == _MAX_LINE_BYTES
 
 
+def test_the_client_read_limit_tracks_the_socket_line_limit() -> None:
+    """The reader's limit must equal the writer's, or one side is wrong.
+
+    Same pin as the catalogue budget above, for the third copy of this value.
+    ``attach_client`` declares its own ``_READ_LIMIT_BYTES`` because the
+    transport is deliberately import-light, so nothing but this assertion keeps
+    the two honest. Drift IS caught today, but only incidentally, by e2e tests
+    whose failure message never names the cause: a client limit BELOW the
+    server's turns a legal frame into "owner sent a frame too large to read",
+    and one ABOVE it means the guard this module tests stops matching what the
+    reader will actually refuse.
+    """
+    assert _READ_LIMIT_BYTES == _MAX_LINE_BYTES
+
+
 @pytest.mark.asyncio
 async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
     tmp_path: Path, monkeypatch
@@ -1303,3 +1319,155 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+def _oversized_event_frame() -> dict[str, Any]:
+    """An ``event`` frame the size the operator's real transcript produced.
+
+    A single 1,039,374-byte transcript row serialized to a 1,129,319-byte
+    ``event`` frame — past the 1 MiB line limit both sides enforce.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    return {
+        "op": "event",
+        "data": {
+            "type": "message_update",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x" * (_MAX_LINE_BYTES + 80_000)}],
+            },
+            "delta": "x",
+        },
+    }
+
+
+def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
+    """``event`` is guarded the way ``frontend_sync`` already was.
+
+    An oversized line makes the client's ``readline`` raise
+    ``LimitOverrunError``, and the overrun does NOT consume the buffer, so every
+    later read re-raises: the pump dies and the viewer paints "owner sent a
+    frame too large to read". Degrading one delta is safe — the viewer recovers
+    through ``frontend_sync`` plus durable history — while killing the socket
+    is not.
+    """
+    from local_operator.session.remote import deserialize_event
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = _oversized_event_frame()
+    assert len(json.dumps(frame).encode()) + 1 > _MAX_LINE_BYTES
+
+    sendable = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+
+    # It now fits, so the client can read it...
+    assert len(json.dumps(sendable).encode()) + 1 <= _MAX_LINE_BYTES
+    assert sendable["op"] == "event"
+    # ...and it is still a VALID event: the client deserializes every relayed
+    # payload, and a bare marker would raise there and be silently swallowed.
+    event = deserialize_event(sendable["data"])
+    assert event.type == "notice"
+
+
+def test_oversized_frontend_update_keeps_its_sequence():
+    """Canonical deltas are not replacement-safe, so the placeholder is not one.
+
+    The client closes the connection on an ``epoch``/``sequence`` gap by design.
+    A placeholder that dropped those fields would trip that check and kill the
+    connection this guard exists to save, so only the oversized BODY is shed.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "epoch-1",
+            "sequence": 42,
+            "snapshot": {"jobs": "y" * (_MAX_LINE_BYTES + 10_000)},
+        },
+    }
+
+    sendable = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+
+    assert len(json.dumps(sendable).encode()) + 1 <= _MAX_LINE_BYTES
+    assert sendable["data"]["epoch"] == "epoch-1"
+    assert sendable["data"]["sequence"] == 42
+    assert sendable["data"]["degraded"] is True
+
+
+def test_ordinary_relay_frames_pass_through_untouched():
+    """The guard is on the hot path, so the common case must not rewrite."""
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = {"op": "event", "data": {"type": "notice", "text": "hello", "kind": "note"}}
+    assert relay_frame_or_degraded(frame, _MAX_LINE_BYTES) is frame
+
+
+@pytest.mark.asyncio
+async def test_compaction_never_assembles_an_unreadable_frame() -> None:
+    """Merging individually-legal frames must not produce an oversized one.
+
+    The guard runs at ``_enqueue_client_frame``, but ``_compact_event_queue``
+    runs AFTER it and is the one operation that makes a frame bigger than
+    anything the guard was shown: it concatenates ``delta`` fields and
+    re-queues the result, which ``_send_to`` then writes with no size re-check.
+    Measured on the real path, 20 frames of 908,157 B — every one legal on its
+    own — merged to 1,060,157 B and killed a real pump with the precise failure
+    the relay guard exists to prevent.
+
+    The merge is refused rather than degraded because refusing is lossless:
+    both frames are individually sendable.
+    """
+    from local_operator.session.runtime.server import _EVENT_QUEUE_MAX
+
+    conn = SimpleNamespace(event_queue=asyncio.Queue(maxsize=_EVENT_QUEUE_MAX))
+
+    # Ordinary streaming shape: a near-limit accumulated message with small
+    # deltas, which is exactly the burst compaction exists to absorb.
+    chunk = "z" * 1024
+    # Near the limit but under it: a long assistant message still streaming.
+    # Each frame is legal; 64 concatenated deltas are what push the merge over.
+    accumulated = "y" * 1_020_000
+    for _ in range(_EVENT_QUEUE_MAX):
+        conn.event_queue.put_nowait(
+            {
+                "op": "event",
+                "data": {
+                    "type": "message_update",
+                    "message": {"id": "m1", "role": "assistant", "text": accumulated},
+                    "delta": chunk,
+                },
+            }
+        )
+
+    # Precondition: every input frame is individually legal, so the guard at
+    # the chokepoint passes all of them and cannot be what saves us here.
+    for frame in list(conn.event_queue._queue):
+        assert len(json.dumps(frame).encode()) + 1 <= _MAX_LINE_BYTES
+
+    before = "".join(str(f["data"]["delta"]) for f in list(conn.event_queue._queue))
+
+    server = RuntimeServer.__new__(RuntimeServer)
+    server._compact_event_queue(cast(Any, conn))
+
+    # Whatever came out, every frame must be readable by the client.
+    out = list(conn.event_queue._queue)
+    assert out, "compaction must not empty the queue"
+    for frame in out:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"compaction emitted an unreadable {size}-byte frame"
+
+    # LOSSLESSNESS is the property that makes refusing (rather than degrading)
+    # defensible, and without this assertion the test above still passes
+    # against a compaction that keeps the first frame and discards 63 deltas.
+    # The delta stream is append-only, so concatenating it must be unchanged.
+    assert "".join(str(f["data"]["delta"]) for f in out) == before

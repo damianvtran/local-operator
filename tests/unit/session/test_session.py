@@ -17,6 +17,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     AgentTool,
     ChatRequest,
@@ -38,8 +39,10 @@ from local_operator.harness.types import (
     ToolResult,
     Usage,
 )
+from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import (
+    _PRE_ABORT_DROP_NOTICE_AT,
     IMAGE_DROPPED_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
@@ -4192,4 +4195,324 @@ async def test_the_offered_count_and_the_stopped_count_agree(tmp_path):
     assert offered == 2, "a queued child is still a child the user asked to stop"
     assert stopped == offered, "the confirmation must not contradict the offer"
     await asyncio.sleep(0.3)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_arriving_work_clears_a_stale_abort(tmp_path):
+    """A peer message or wake arriving AFTER an abort is fresh intent.
+
+    The regression: ``_abort_requested`` is sticky and was cleared only by
+    ``prompt()``, so one abort left every later wake/peer/catch-up turn
+    pre-aborted forever. Each arrival opened a turn that died before doing
+    anything and spent a provider call doing it — observed live as `wait`/`jobs`
+    pairs ending ``interrupted`` at sub-second cadence.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("hello")
+    spent_before = len(stream.requests)
+
+    session.abort("interrupted")
+    assert session._abort_requested is True
+
+    await session.receive_peer_message(
+        "child reporting in",
+        mode="mailbox",
+        wake=True,
+        sender={"pid": 42, "conversation_name": "child"},
+    )
+    # The delivery is spawned in the background, so wait for the turn it opens
+    # rather than for idleness — which is already true before it starts.
+    await wait_for(lambda: len(stream.requests) > spent_before)
+    await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
+
+    # The arrival ran a real turn, and cleared the stale stop while doing it.
+    assert len(stream.requests) == spent_before + 1
+    assert session._abort_requested is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_abort_stops_work_already_queued_behind_the_turn(tmp_path):
+    """One Esc stops the running turn AND the arrivals queued behind it.
+
+    Arrivals wait on ``_turn_lock``. Treating each as unconditionally fresh
+    intent would clear the abort N times and run all N, so the user had to
+    press Esc once per queued item and the loop looked unstoppable. Work that
+    arrived BEFORE the abort is part of what the user is stopping; the abort
+    epoch is what distinguishes it from work arriving after.
+    """
+    releases: list[asyncio.Event] = []
+
+    async def slow_stream(request, signal):
+        gate = asyncio.Event()
+        releases.append(gate)
+        await asyncio.wait([asyncio.ensure_future(gate.wait())], timeout=2.0)
+        yield StreamEndEvent(stop_reason="stop")
+
+    session = make_session(tmp_path, slow_stream)
+    prompt_task = asyncio.ensure_future(session.prompt("start working"))
+    await wait_for(lambda: bool(releases))
+
+    # Three units of work arrive and queue behind the running turn.
+    for n in range(3):
+        message = CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": f"arrival {n}", "schedule_id": f"w{n}"},
+        )
+        session._spawn_background(session._prompt_messages([message]))
+    await asyncio.sleep(0.05)
+    queued_at_abort = len(releases)
+
+    session.abort("interrupted")
+    releases[0].set()
+    await prompt_task
+    await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
+
+    # None of the queued arrivals opened a model call.
+    assert len(releases) == queued_at_abort
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pre_aborted_turn_is_dropped_and_its_message_kept(tmp_path):
+    """A turn born pre-aborted is not run — and its message is not lost.
+
+    Running it spends a provider request for an ``aborted`` end with no output:
+    a paid no-op. Dropping it must still persist the arriving row, so the
+    message reaches the model on the session's next real turn (the same
+    guarantee the record-only delivery path gives a busy session).
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("hello")
+    spent_before = len(stream.requests)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    session.abort("interrupted")
+    message = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "held work", "schedule_id": "w1"},
+    )
+    # Straight to _run_turn: the arrival path clears the flag by design, so the
+    # drop is exercised where a continuation-shaped caller would reach it.
+    async with session._turn_lock:
+        await session._run_turn([message])
+
+    # No provider call, and no start/end pair painted for a turn that never ran.
+    assert len(stream.requests) == spent_before
+    assert not [e for e in events if isinstance(e, (AgentStartEvent, AgentEndEvent))]
+    # The message is durable, so the next turn still reads it.
+    assert any(
+        entry.payload.get("custom_type") == WAKE_PROMPT_MESSAGE_TYPE
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_in_gap_abort_still_stops_a_continuation(tmp_path):
+    """The case the sticky flag EXISTS for, guarded against the fix above.
+
+    A Ctrl+C between a turn and its post-compaction continuation has no live
+    signal to fire, so only the flag carries it. Clearing the flag for arriving
+    work must not clear it for a continuation of the turn being stopped.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("hello")
+    spent_before = len(stream.requests)
+
+    session._continuation_queue.append(Message.user("continue"))
+    session.abort("interrupted")
+    await session._drain_continuation()
+
+    assert len(stream.requests) == spent_before, "the stopped continuation ran"
+    assert session._continuation_queue == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dropped_plain_message_is_persisted_exactly_once(tmp_path):
+    """The drop path must not double-write a plain ``Message``.
+
+    The two parking paths have opposite persistence contracts:
+    ``_append_or_park_journal`` (CustomMessage) only touches live context, so
+    the durable write is owed at the drop; the steering queue's consumer
+    (``_drain_steering``) persists whatever it drains, so appending there too
+    wrote the row twice. The duplicate survived into replayed history, so a
+    resumed session showed the message twice and sent it to the model twice.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    marker = "held-plain-message"
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([Message.user(marker)])
+
+    # The drain is the single writer, so the next real turn is what persists it.
+    session._abort_requested = False
+    await session.prompt("next turn")
+
+    rows = [
+        entry
+        for entry in Transcript(tmp_path / "sess").entries()
+        if entry.type == "message"
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict) and marker in str(block.get("text", ""))
+    ]
+    assert len(rows) == 1, f"the held message was persisted {len(rows)} times"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_prompt_is_never_dropped_silently(tmp_path):
+    """A prompt caught by an abort mid-pipeline is interrupted, not swallowed.
+
+    ``prompt()`` clears the flag under the lock, but the pipeline awaits twice
+    before ``_run_turn`` reads it. An abort landing in that window (submit,
+    then immediately Esc) would otherwise send the user's OWN prompt down the
+    silent drop path: no start/end pair, and ``prompt()`` returning success for
+    work that never ran. Arriving work may drop because nobody is waiting on
+    it; a synchronous caller may not.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    # Fire the abort inside the pipeline gap the race opens.
+    original = session._refresh_context_metadata
+    fired = False
+
+    async def racing_refresh(*args, **kwargs):
+        nonlocal fired
+        result = await original(*args, **kwargs)
+        if not fired:
+            fired = True
+            session.abort("interrupted")
+        return result
+
+    session._refresh_context_metadata = racing_refresh  # type: ignore[method-assign]
+
+    await session.prompt("my typed prompt")
+
+    # The turn is VISIBLY interrupted: the UI gets its pair, not silence.
+    assert [e for e in events if isinstance(e, AgentStartEvent)]
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_drop_notice_fires_once_across_a_stuttering_run(tmp_path):
+    """One notice per run, held by a latch rather than counter equality.
+
+    With ``==`` a run interrupted by a real turn at count 2 restarts the
+    counter, so a long stuttering run could clear the threshold repeatedly and
+    still never say anything.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(6)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+    notices: list[NoticeEvent] = []
+    session.subscribe(lambda e: notices.append(e) if isinstance(e, NoticeEvent) else None)
+
+    session.abort("interrupted")
+    for index in range(_PRE_ABORT_DROP_NOTICE_AT + 3):
+        async with session._turn_lock:
+            await session._run_turn([Message.user(f"held {index}")])
+
+    assert len(notices) == 1, f"expected one notice for the run, got {len(notices)}"
+    # ...and the text does not tell the user to act, because a new arrival
+    # clears the abort on its own.
+    assert "send a message" not in notices[0].text.lower()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["plain", "custom"])
+async def test_a_held_message_survives_dispose(tmp_path, kind):
+    """A dropped turn's message must be durable BEFORE the next turn.
+
+    Round 1 removed the duplicate row by letting the steering drain be the only
+    writer — but the drain runs on the next turn, and ``dispose()`` consumes
+    the same queue and rejects without persisting. A session ending while a
+    message was held therefore destroyed it: exactly-once had become
+    exactly-zero for the peer/wake traffic this path exists to hold safely.
+
+    Both message kinds are covered because they take different branches of the
+    drop and only one of them regressed.
+    """
+    message: AgentMessage = (
+        Message.user("held work")
+        if kind == "plain"
+        else CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": "held work", "schedule_id": "w1"},
+        )
+    )
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([message])
+
+    # Durable while merely HELD — before any later turn, and before dispose.
+    assert Transcript(tmp_path / "sess").has_entry(message.id)
+
+    await session.dispose()
+
+    # ...and still there after the session ends without ever running a turn.
+    assert Transcript(tmp_path / "sess").has_entry(message.id), "the held message was lost"
+
+
+@pytest.mark.asyncio
+async def test_a_held_message_is_still_persisted_only_once(tmp_path):
+    """The M4 fix must not reintroduce M1's duplicate row.
+
+    The drop persists, so the steering drain must skip what the transcript
+    already holds rather than writing it a second time.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("warm up")
+
+    marker = "held-then-drained"
+    session.abort("interrupted")
+    async with session._turn_lock:
+        await session._run_turn([Message.user(marker)])
+
+    # A later turn drains the queue; the row must not be written again.
+    session._abort_requested = False
+    await session.prompt("next turn")
+
+    rows = [
+        entry
+        for entry in Transcript(tmp_path / "sess").entries()
+        if entry.type == "message"
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict) and marker in str(block.get("text", ""))
+    ]
+    assert len(rows) == 1, f"the held message was persisted {len(rows)} times"
+    # ...and the model sees it exactly once on replay.
+    replayed = [
+        message
+        for message in Transcript(tmp_path / "sess").build_llm_history()
+        if marker in str(getattr(message, "text", ""))
+    ]
+    assert len(replayed) == 1
     await session.dispose()
