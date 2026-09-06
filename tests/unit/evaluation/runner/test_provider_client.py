@@ -36,6 +36,7 @@ from local_operator.evaluation.runner.provider_client import (
     MAX_TOLERATED_TRAILING_CHARS,
     DecisionParseError,
     ProviderModelClient,
+    ProviderStreamAbortedError,
     build_system_prompt,
     parse_decision,
 )
@@ -110,12 +111,18 @@ class ScriptedStream:
         stop_reason: str = "stop",
         chunk: int = 7,
         provider_payload: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> None:
         self.text = text
         self.usage = usage
         self.stop_reason = stop_reason
         self.chunk = chunk
         self.provider_payload = provider_payload
+        # The provider's own words about an abnormal end. Scripted here because
+        # the wire clients are the only layer that sees the real terminal
+        # marker, so a fake that cannot carry one cannot exercise the refusal
+        # path at all -- which is how that path shipped unhandled.
+        self.error = error
         self.requests: list[Any] = []
 
     def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
@@ -134,6 +141,7 @@ class ScriptedStream:
             stop_reason=self.stop_reason,
             usage=self.usage,
             provider_payload=self.provider_payload,
+            error=self.error,
         )
 
 
@@ -579,6 +587,114 @@ async def test_client_raises_on_an_unparseable_reply() -> None:
     assert rejected.provider_request_id == "chatcmpl-REJ"
     assert rejected.route == ROUTE
     assert rejected.diagnostic.startswith("Your previous reply was rejected:")
+
+
+# ---------------------------------------------------------------------------
+# Abnormal stream ends. A provider that refused (or died mid-stream) without
+# producing content is NOT a model that replied badly: there is no reply to
+# correct, so re-prompting for better JSON cannot converge and the failure
+# belongs to the provider. Observed on a paid run whose three refusals were
+# recorded as "decision is not valid JSON: Unterminated string".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_refusal_with_prose_to_the_provider() -> None:
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=11, output_tokens=0),
+        error="model refused: I can't help with that (stop_reason=refusal)",
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    # The provider's own marker reaches the diagnostic verbatim: it is the only
+    # thing that says WHICH mechanism fired, and the bundle is unreadable
+    # without it.
+    assert "stop_reason=refusal" in str(info.value)
+    assert "I can't help with that" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_wordless_zero_token_refusal_to_the_provider() -> None:
+    """The exact observed case: ``refusal``, no prose, zero tokens both ways.
+
+    Nothing was streamed and nothing was billed, so there is no model output to
+    blame and no reply a correction prompt could repair.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="refusal",
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    # Never the JSON diagnosis the old path produced against an empty string.
+    assert "JSON" not in str(info.value)
+    assert "refusal" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_client_attributes_a_wordless_mid_stream_error_to_the_provider() -> None:
+    current = observation()
+    stream = ScriptedStream("   \n  ", stop_reason="error")
+
+    with pytest.raises(ProviderStreamAbortedError):
+        await _client(stream).decide(current, _turns(current))
+
+
+@pytest.mark.asyncio
+async def test_client_still_rejects_a_reply_the_provider_cut_short() -> None:
+    """An abnormal end AFTER real text is the model's output, not an outage.
+
+    A safety stop that truncates a partially-streamed batch leaves bytes the
+    model actually wrote, so it stays on the correctable rejection path where
+    the runner can feed the defect back and re-prompt.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        '{"actions": [{"kind": "click", "observation',
+        stop_reason="refusal",
+        usage=Usage(input_tokens=12, output_tokens=9),
+        error="model refused and cut the reply short (stop_reason=refusal)",
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert isinstance(info.value.__cause__, DecisionParseError)
+    assert info.value.stop_reason == "refusal"
+
+
+@pytest.mark.asyncio
+async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> None:
+    """Regression guard on the fix's blast radius.
+
+    A normal ``stop`` carrying an unparseable reply must keep raising
+    ``DecisionRejected`` -- widening the provider path to swallow it would
+    convert every recoverable formatting mistake into a sealed unscored
+    episode.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        '{"actions": [',
+        usage=Usage(input_tokens=11, output_tokens=4),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert info.value.stop_reason == "stop"
+    assert info.value.diagnostic.startswith("Your previous reply was rejected:")
 
 
 # ---------------------------------------------------------------------------
