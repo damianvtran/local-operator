@@ -5803,8 +5803,21 @@ class Session:
                 )
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
+        #
+        # ``_is_streaming`` is the third term, and it is what makes a RECONNECT
+        # work. A headless runtime has ``_has_ui=False``, so when its only
+        # viewer's socket drops the server unsubscribes and ``has_subscribers``
+        # goes False — the fold then stops, and everything the runtime does for
+        # the rest of the turn is absent from ``live_events``. The viewer
+        # re-binds moments later to a snapshot that has forgotten the tool the
+        # runtime started while it was away: the card never paints and its real
+        # ``tool_execution_end`` arrives orphaned, to be discarded unrendered at
+        # ``agent_end``. That is the whole point of the bounded seed ("a
+        # frontend that joins mid-turn"), and a mid-turn drop is exactly when a
+        # frontend joins. Bounded to a live turn, so a genuinely unobserved
+        # idle session still does no work.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (self._has_ui or store.has_subscribers):
+        if store is not None and (self._has_ui or store.has_subscribers or self._is_streaming):
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
             # compaction, pruning, or a fold; unchanged events do no extra work.

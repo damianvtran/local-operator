@@ -3028,7 +3028,16 @@ class FrontendStateStore:
             live.append(data)
         elif kind == "tool_execution_end":
             call_id = str(data.get("tool_call_id") or "")
+            # The END REPLACES the start rather than erasing the call. A
+            # frontend that joins mid-turn needs to learn the outcome of a
+            # call that finished while it was away: dropping the row left the
+            # viewer holding a card it had painted live with no way to settle
+            # it, so ``_retire_live_tool_cards`` marked it ``⊘ interrupted``
+            # at turn end — on a call that had SUCCEEDED (QA round 1, Q2).
+            # A joiner that never saw the start still renders correctly: the
+            # app buffers an unmatched end in ``_pending_tool_ends``.
             live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
+            live.append(data)
         # Shallow copy on purpose: this runs per streaming delta on the session
         # loop, and a deep copy re-clones a 500-event trajectory each token.
         # ``live`` is freshly built above, and every other field is replaced
