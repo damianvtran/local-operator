@@ -20,6 +20,7 @@ import pytest
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -369,3 +370,77 @@ async def test_choosing_the_current_row_says_you_are_already_there(tmp_path: Pat
 
         assert session.moves == [], "the current row must not issue a move"
         assert any("already in" in t for t in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_rebind_warns_that_the_eval_kernel_was_lost(tmp_path: Path) -> None:
+    """A move that restarts the runtime destroys the persistent `eval`
+    namespace, and the user must be TOLD rather than find out from a
+    `NameError` two turns later.
+
+    `tools/eval.py` caches one interpreter per session in `_KERNELS`, and
+    `Session` registers `close_session_kernel` as a dispose hook — so retiring
+    the runtime takes every variable, import and function built up in `eval`
+    with it, while the conversation, transcript and session id all survive.
+    That survival is exactly what makes the loss surprising: nothing else on
+    screen changes. Reported by a peer session during round 3, verified in
+    source.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        # A real `eval` call in the conversation: the signal the receipt reads.
+        app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
+        await pilot.pause()
+        await _submit(pilot, app, f"/move {destination}")
+
+        texts = _notices(app)
+        assert any(
+            "eval kernel" in t for t in texts
+        ), f"a rebind destroyed the eval namespace without saying so: {texts}"
+        # The move still HAPPENS: this is narration, not a refusal.
+        assert session.moves == [str(destination)]
+        assert str(destination) in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_used_eval_is_not_warned_about_it(tmp_path: Path) -> None:
+    """The other half, so the warning cannot become noise on every rebind.
+
+    A user who has never touched `eval` has no kernel to lose, and a receipt
+    that mentions one invents a consequence that did not happen.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, f"/move {destination}")
+
+        texts = _notices(app)
+        assert any("runtime restarted" in t for t in texts), texts
+        assert not any("eval kernel" in t for t in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_a_COLD_move_never_mentions_the_eval_kernel(tmp_path: Path) -> None:
+    """A cold move retires nothing, so no kernel is disposed — even in a
+    session that has used `eval`. Warning there would be a lie about a loss
+    that did not occur."""
+    session = MovableSession(cwd=str(tmp_path), outcome="cold")
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
+        await pilot.pause()
+        await _submit(pilot, app, f"/move {destination}")
+
+        texts = _notices(app)
+        assert any("moved to" in t for t in texts), texts
+        assert not any("eval kernel" in t for t in texts), texts
