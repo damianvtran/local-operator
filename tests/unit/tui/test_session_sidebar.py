@@ -21,9 +21,14 @@ from local_operator.tui.session_catalog import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import (
+    APP_SCREEN_INSET,
     SIDEBAR_GUTTER,
+    SIDEBAR_MAIN_COMFORT_WIDTH,
     SIDEBAR_MAIN_MIN_WIDTH,
+    SIDEBAR_MAX_WIDTH,
     SIDEBAR_SPINNER_INTERVAL_S,
+    SIDEBAR_WIDTH,
+    sidebar_content_width,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -1025,3 +1030,393 @@ async def test_the_outer_title_yields_to_section_headers_but_survives_quiet_stat
     ):
         quiet = await first_lines(setup)
         assert quiet[0] == "Sessions", quiet[:2]
+
+
+# ---------------------------------------------------------------------------
+# Responsive width
+#
+# The list is the one surface whose whole job is "recognise your own
+# conversation", and at the fixed base width it could not do it: the reported
+# frame ellipsized eleven of twelve titles, several of them before the word
+# that told them apart from the row above. These pin the growth rule and, more
+# importantly, the two ways widening a docked panel usually goes wrong — eating
+# the conversation, and regressing narrow terminals.
+# ---------------------------------------------------------------------------
+
+
+def test_a_narrow_terminal_is_left_exactly_as_it_was():
+    """Growth must be unable to regress the sizes that already worked.
+
+    Everything at or below the comfort threshold resolves to the base width, so
+    the layout, the overlay switch and every existing geometry test describe the
+    same app they did before.
+    """
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    for width in (60, 80, 100, threshold - 1, threshold):
+        assert sidebar_content_width(width) == SIDEBAR_WIDTH, width
+
+
+def test_growth_spends_only_surplus_and_stops_at_the_cap():
+    """One column of terminal buys at most one column of list, up to the cap."""
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    assert sidebar_content_width(threshold + 1) == SIDEBAR_WIDTH + 1
+    assert sidebar_content_width(threshold + 5) == SIDEBAR_WIDTH + 5
+    assert sidebar_content_width(threshold + 500) == SIDEBAR_MAX_WIDTH
+    # Monotonic: dragging a window wider never narrows the list.
+    widths = [sidebar_content_width(w) for w in range(40, 400)]
+    assert widths == sorted(widths)
+
+
+def test_the_conversation_never_pays_for_the_list_getting_wider():
+    """The structural invariant, as arithmetic over the whole width range.
+
+    At every terminal width, whatever the sidebar and its gutter take must
+    leave the main lane at least its comfort width. Checked across the range
+    rather than at the two sizes a screenshot happens to use.
+
+    The app's own outer inset is part of the sum. Leaving it out is what made
+    the documented guarantee wrong by two cells (code review round 1, M1) while
+    this test still passed — arithmetic that models the layout inaccurately
+    proves only that the arithmetic is self-consistent, which is why the
+    companion test below measures the REAL widget instead.
+    """
+    for width in range(40, 400):
+        content = sidebar_content_width(width)
+        if content == SIDEBAR_WIDTH:
+            continue  # not growing: the pre-existing floors govern
+        lane = width - APP_SCREEN_INSET - (content + SIDEBAR_GUTTER)
+        assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
+
+
+@pytest.mark.asyncio
+async def test_the_measured_conversation_lane_matches_the_documented_guarantee():
+    """The same invariant, MEASURED, across the sizes where growth is active.
+
+    The arithmetic test above cannot catch a wrong model of the layout, and did
+    not: it agreed with a helper that ignored the app's inset, so the lane sat
+    at 78 cells while the constant promised 80 (M1). This drives the real app
+    and reads the real widget at every width across the growth band and past
+    the cap, which is the only assertion that can fail when the model drifts
+    from the layout again.
+
+    Sampled every third column rather than every column: each size boots a
+    Textual app, and the property is continuous in width, so the sampling
+    catches a systematic error without making the file's runtime unreasonable
+    on a loaded machine.
+    """
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    for width in range(threshold, threshold + 40, 3):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
+            # hand-built rows below get replaced by the empty isolated catalog
+            # mid-test and the row lookup raises.
+            #
+            # The timer is the 2 s poll (code review round 2, M3). The
+            # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
+            # launches on the very next line after resuming that timer (round
+            # 3, M4): its `set_entries` is gated only on this counter, so
+            # pausing the timer alone leaves the identical race on the sibling
+            # path — reproduced by slowing the off-loop read.
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            app._sidebar_refresh_generation += 1
+            lane = app.query_one("#session-conversation").size.width
+            assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
+            assert app.screen.virtual_size == app.screen.size, width
+            assert not app.screen.show_vertical_scrollbar, width
+
+
+@pytest.mark.asyncio
+async def test_a_wide_terminal_actually_shows_more_of_the_title():
+    """The user-visible payoff, measured on the RENDERED rows.
+
+    The arithmetic above proves the budget; this proves the budget reaches the
+    text. A long title is rendered at a base-width terminal and a wide one, and
+    the wide frame must carry strictly more of it — otherwise the extra cells
+    went to padding somewhere and the report would be unfixed.
+    """
+    name = "Article-search-svc schema review and rollout plan"
+    entries = [
+        CatalogEntry(SessionRow(id="aaaaaaaaaaa1", mtime=time.time(), name=name, live_state="idle"))
+    ]
+
+    async def rendered(size) -> str:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
+            # hand-built rows below get replaced by the empty isolated catalog
+            # mid-test and the row lookup raises.
+            #
+            # The timer is the 2 s poll (code review round 2, M3). The
+            # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
+            # launches on the very next line after resuming that timer (round
+            # 3, M4): its `set_entries` is gated only on this counter, so
+            # pausing the timer alone leaves the identical race on the sibling
+            # path — reproduced by slowing the off-loop read.
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
+            app._sidebar_refresh_generation += 1
+            sidebar = app._session_sidebar
+            sidebar.set_entries(entries)
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            from textual.geometry import Region
+
+            lines = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            return next(line for line in lines if "Article" in line)
+
+    narrow = await rendered((100, 30))
+    wide = await rendered((160, 40))
+
+    def visible_title(line: str) -> str:
+        # Everything up to the ellipsis is what the user can actually read,
+        # minus the leading chrome (cursor cells and the state glyph) which is
+        # fixed-width and not part of the title budget under test.
+        text = line.split("…")[0]
+        return text[text.index("Article") :].strip() if "Article" in text else text.strip()
+
+    narrow_title, wide_title = visible_title(narrow), visible_title(wide)
+    assert len(wide_title) > len(narrow_title), (narrow, wide)
+    # Numbers, not just "more": the base width shows about 20 cells of title
+    # and the cap about 38, so the gain is worth the change rather than
+    # cosmetic. Asserted as a floor so a future tweak to the chrome does not
+    # fail the test for being one cell off.
+    assert len(narrow_title) < 25, narrow_title
+    assert len(wide_title) >= 35, wide_title
+    # A title that FITS the grown budget is shown outright, with no ellipsis:
+    # the previous frame ellipsized even short names.
+    short = "Article-search-svc schema review"
+    assert len(short) <= len(wide_title)
+    assert wide_title.startswith(short), wide_title
+
+
+@pytest.mark.asyncio
+async def test_the_grown_list_still_leaves_the_conversation_its_lane():
+    """The same invariant, through the real layout rather than the helper."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(200, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
+        # hand-built rows below get replaced by the empty isolated catalog
+        # mid-test and the row lookup raises.
+        #
+        # The timer is the 2 s poll (code review round 2, M3). The
+        # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
+        # launches on the very next line after resuming that timer (round
+        # 3, M4): its `set_entries` is gated only on this counter, so
+        # pausing the timer alone leaves the identical race on the sibling
+        # path — reproduced by slowing the off-loop read.
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._sidebar_refresh_generation += 1
+        sidebar = app._session_sidebar
+        assert sidebar.content_region.width > SIDEBAR_WIDTH - SIDEBAR_GUTTER
+        assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_COMFORT_WIDTH
+        # A wider list must not introduce a scrollbar or a reflow.
+        assert app.screen.virtual_size == app.screen.size
+        assert not app.screen.show_vertical_scrollbar
+
+
+def test_the_tooltip_never_names_a_different_state_from_the_glyph():
+    """Description and marker are two renderings of one precedence.
+
+    The glyph is a single character, so the description is where a user finds
+    out what it meant; the two disagreeing is worse than either being terse.
+    When wakes were promoted above presence in ``row_state_mark``, a status map
+    keyed only on ``live_state`` would have gone on saying "Ready" beside a
+    wake glyph.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        WAKE_MARKER,
+        row_state_mark,
+    )
+
+    now = time.time()
+    armed = CatalogEntry(SessionRow("wake00000001", now, "armed", live_state="idle", wakes=2))
+    assert row_state_mark(armed.row, 0)[0] == WAKE_MARKER
+    assert armed.status == "Scheduled (2 wakes)"
+
+    single = CatalogEntry(SessionRow("wake00000002", now, "one", live_state="idle", wakes=1))
+    assert single.status == "Scheduled (1 wake)", "the count must not be pluralised at 1"
+
+    # A dormant wake does not win the glyph on a LIVE row, so it must not win
+    # the words there either.
+    dormant = CatalogEntry(
+        SessionRow("dorm00000001", now, "stopped", live_state="idle", wakes=1, wakes_dormant=True)
+    )
+    assert row_state_mark(dormant.row, 0)[0] == IDLE_MARKER
+    assert dormant.status == "Ready"
+
+    # ...but on a COLD row it IS the glyph, so it must be the words (D1).
+    cold_dormant = CatalogEntry(
+        SessionRow("dorm00000002", now, "cold+stopped", wakes=1, wakes_dormant=True)
+    )
+    assert row_state_mark(cold_dormant.row, 0)[0] == WAKE_MARKER
+    assert cold_dormant.status == "Stopped (1 wake dormant)"
+
+    # Presence outranks an armed wake: "a terminal is watching this" answers
+    # "where am I?", which bare residency does not (D2).
+    watched = CatalogEntry(
+        SessionRow("att000000001", now, "watched", live_state="attached", wakes=2)
+    )
+    assert row_state_mark(watched.row, 0)[0] == ATTACHED_MARKER
+    assert watched.status == "Open"
+
+    # And the states above wakes are unchanged.
+    busy = CatalogEntry(SessionRow("busy00000001", now, "working", live_state="busy", wakes=4))
+    assert busy.status == "Working"
+    gate = CatalogEntry(
+        SessionRow("gate00000001", now, "waiting", live_state="idle", pending="approval", wakes=4)
+    )
+    assert gate.status == "Approval needed"
+
+
+def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
+    """The invariant itself, over EVERY reachable combination.
+
+    The two round-1 design findings were both a glyph and its description
+    disagreeing in a state no frame happened to cover: a cold row with a
+    stopped schedule drew the wake mark while the tooltip said "Recent" (D1),
+    and the individual glyph and status assertions above each passed. Testing
+    the pairing one hand-picked row at a time is what let that through, so this
+    enumerates the product of every live state, wake count and dormancy and
+    asserts the two renderings agree by construction.
+
+    ``unseen`` is a fourth dimension and is covered SEPARATELY, below, rather
+    than folded in here (code review round 1, M2). It short-circuits ``status``
+    ahead of every branch this function enumerates, and the sidebar likewise
+    overrides the glyph for an unseen row — so the pair that actually reaches a
+    user is neither the one ``row_state_mark`` returns nor the one this table
+    describes. Enumerating it here would assert a pairing no surface renders;
+    the companion test drives the real render path instead.
+    """
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        NEEDS_YOU_MARKER,
+        WAKE_MARKER,
+        WEDGED_MARKER,
+        row_state_mark,
+    )
+
+    #: Which descriptions may accompany each glyph. A status not listed for the
+    #: glyph a row drew is a contradiction the user would have to resolve.
+    ALLOWED = {
+        NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
+        WEDGED_MARKER: {"Not responding"},
+        ATTACHED_MARKER: {"Open"},
+        IDLE_MARKER: {"Ready"},
+        WAKE_MARKER: {"Scheduled", "Stopped"},
+        "": {"Recent"},
+    }
+    now = time.time()
+    checked = 0
+    for state in ("", "idle", "attached", "busy", "wedged"):
+        for pending in (None, "approval", "ask"):
+            for wakes, dormant in ((0, False), (1, False), (3, False), (1, True), (2, True)):
+                row = SessionRow(
+                    "x" * 12,
+                    now,
+                    "a conversation",
+                    live_state=state,
+                    pending=pending,
+                    wakes=wakes,
+                    wakes_dormant=dormant,
+                )
+                glyph = row_state_mark(row, 0)[0]
+                status = CatalogEntry(row).status
+                if glyph in SPINNER_FRAMES:
+                    assert status == "Working", (state, pending, wakes, dormant, status)
+                else:
+                    allowed = ALLOWED[glyph]
+                    assert any(status.startswith(prefix) for prefix in allowed), (
+                        f"glyph {glyph!r} paired with {status!r} "
+                        f"(state={state!r} pending={pending!r} wakes={wakes} dormant={dormant})"
+                    )
+                checked += 1
+    assert checked == 75, checked
+
+
+@pytest.mark.asyncio
+async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
+    """The ``unseen`` dimension, asserted on the RENDERED row.
+
+    Raised as M2 in code review round 1: `CatalogEntry.status` returns "Unseen
+    completion" ahead of every state branch, so pairing it with
+    ``row_state_mark``'s answer would show `◷` beside those words. That pairing
+    never reaches a user — the sidebar substitutes its own `✓`/`✗` for an
+    unseen row — but the only thing establishing that is the render, so the
+    render is what this test reads.
+
+    Written as a pilot test rather than as a call to ``row_state_mark`` for
+    exactly that reason: the helper's answer is not what is painted here, and a
+    unit-level assertion would describe a surface that does not exist.
+    """
+    from textual.geometry import Region
+
+    now = time.time()
+    cases = [
+        ("complete", "✓", "Unseen completion"),
+        ("error", "✗", "Unseen error"),
+        ("interrupted", "✗", "Unseen interruption"),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
+        # hand-built rows below get replaced by the empty isolated catalog
+        # mid-test and the row lookup raises.
+        #
+        # The timer is the 2 s poll (code review round 2, M3). The
+        # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
+        # launches on the very next line after resuming that timer (round
+        # 3, M4): its `set_entries` is gated only on this counter, so
+        # pausing the timer alone leaves the identical race on the sibling
+        # path — reproduced by slowing the off-loop read.
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._sidebar_refresh_generation += 1
+        sidebar = app._session_sidebar
+        for kind, glyph, words in cases:
+            # An ARMED WAKE on the row is the case M2 names: without the
+            # override this row would draw the wake glyph beside "Unseen …".
+            entry = CatalogEntry(
+                SessionRow("u" * 12, now, f"unseen {kind}", live_state="idle", wakes=2),
+                unseen=True,
+                completion_kind=kind,
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            row = next(line for line in painted if f"unseen {kind}" in line)
+            assert glyph in row, (kind, row)
+            assert entry.status == words, (kind, entry.status)
+            # The wake glyph must NOT be what a user sees on an unseen row.
+            assert "◷" not in row, (kind, row)

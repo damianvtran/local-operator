@@ -50,6 +50,11 @@ def cases() -> list[dict[str, Any]]:
                 args += ["100x30", variant]
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
+            elif script == "sidebar_shot.py":
+                # Two widths, because the whole point of the sample is the
+                # trade-off between them: "base" is the size at which the list
+                # does not grow at all, "wide" the size at which it does.
+                args += ["160x40" if variant == "wide" else "100x30"]
             elif script == "stop_ladder_shot.py":
                 args += [variant, "100x30"]
             elif script == "org_chart_shot.py":

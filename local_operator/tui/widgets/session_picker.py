@@ -426,11 +426,39 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     "which of these is actually running, and which one wants me" has to be
     answerable at a glance. Precedence is by URGENCY, not by state machine:
     needs-you outranks everything (a person is blocked), then wedged (broken),
-    then busy, then attached, then wakes.
+    then busy, then an ARMED wake, then the runtime's own presence.
+
+    **An armed wake outranks the IDLE glyph**, which is a change from the
+    original ordering and is what the user asked for: "show the wake symbol if
+    it's just scheduled wakes, or the circle icon that there's a runtime but no
+    activity". ``●`` idle is the least informative thing true of a row — every
+    resident session has it — while "this one will act on its own at some
+    point" is a fact about the future that nothing else on the row conveys.
+    Under the old order the wake glyph was unreachable for any live session,
+    because a session with a wake armed is by definition resident and
+    ``idle``/``attached`` matched first; it could only ever appear on a COLD
+    row, i.e. one whose wake had no runtime to fire in.
+
+    **``attached`` stays ABOVE the wake**, because the "least informative"
+    argument does not extend to it (round 1, D2). ``○`` does not mean merely
+    "resident"; it means *a terminal is watching this session*, which on a list
+    the user is scanning is the one mark that answers "where am I?". A wake is
+    worth more than bare residency and less than presence.
+
+    **A DORMANT wake does not**, and stays below presence. ``wakes_dormant``
+    means the session was deliberately stopped, so the schedule is not going to
+    fire; promoting it would advertise a future that is not coming, over a
+    runtime that is genuinely here. On a cold row it still renders (dimmed) as
+    the last thing worth saying about the session.
 
     The spinner reuses ``terminal_title.SPINNER_FRAMES`` rather than a second
     animation vocabulary — the same glyphs the band and the terminal title
     already animate with, so "this is working" looks the same everywhere.
+
+    ``live_state == "busy"`` is now the CONVERSATION's activity rather than the
+    runtime's residency (see ``OwnedSessionHandle.is_conversationally_active``),
+    which is what makes the spinner honest: it had been pinned on by any
+    background job or subagent the session had ever launched.
     """
     if row.pending:
         return NEEDS_YOU_MARKER, "warning"
@@ -440,10 +468,12 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
+    if row.wakes and not row.wakes_dormant:
+        return WAKE_MARKER, "muted"
     if row.live_state == "idle":
         return IDLE_MARKER, "muted"
     if row.wakes:
-        return WAKE_MARKER, "dim" if row.wakes_dormant else "muted"
+        return WAKE_MARKER, "dim"
     return "", "dim"
 
 
