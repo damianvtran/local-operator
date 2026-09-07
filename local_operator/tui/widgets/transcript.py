@@ -247,10 +247,12 @@ GAP_CLASS = "gap-above"
 #: composition (a system notice under the splash). The app writes the card's
 #: width AND its offset onto the block (``OperatorApp._sync_boot_column_width``),
 #: which is the whole of the centring: the block is moved onto the card's column,
-#: while its TEXT keeps the same left edge it has on the spine. The class remains
-#: a content signal rather than only a style one, because the width it carries
-#: changes where the text folds and so needs a re-wrap (``NoticeBlock.set_class``).
-#: Defined here, with the block that reads it, because app.py already imports
+#: while its TEXT keeps the same left edge it has on the spine. The class itself
+#: carries NO rule and no behaviour — it is the app's reconciliation marker for
+#: which blocks it has already moved. The re-wrap at the card's width comes from
+#: the block's ``on_resize``, which is how the assigned width arrives; see the
+#: tombstone on :class:`NoticeBlock` for why no ``set_class`` override does it.
+#: Defined here, beside the block the app marks, because app.py already imports
 #: this module and the reverse would be a cycle.
 BOOT_COLUMN_CLASS = "boot-column"
 

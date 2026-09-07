@@ -11211,8 +11211,11 @@ class OperatorApp(App[None]):
         membership FOLLOW the card rather than the moment the notice was
         written: a notice gains the class and the card's exact width while the
         card is up, and sheds both — back to the full-width spine — when it is
-        not. ``set_class`` only fires the block's re-centre (``NoticeBlock.set_class``)
-        on a real change, so an unchanged sync costs nothing.
+        not. An unchanged sync still costs nothing, but the guard is Textual's
+        own: ``add_class``/``remove_class`` return early when the class set is
+        already what was asked for, so no style update is queued. The block has
+        no ``set_class`` override to fire — the re-wrap comes from ``on_resize``,
+        which is how the width assigned below arrives.
         """
         transcript = self._transcript_view()
         card = boot_card_width(box)
