@@ -19326,14 +19326,23 @@ class OperatorApp(App[None]):
         # warning: nothing is wrong and nothing is asked of the user; not
         # ``info`` either, whose dim ink the widget reserves for a receipt
         # nobody has to read \u2014 this answers "why is my session on an older
-        # version?") saying it will move over when its work finishes, which
-        # the runtime's own reaper does.
+        # version?") saying it will switch over once it is idle, which the
+        # runtime's own reaper does.
+        #
+        # "when it is next idle", NOT "when its current work finishes": the
+        # notice paints on a brand-new ``/new`` splash with no work in flight,
+        # where promising the end of work that does not exist is confusing and
+        # arguably untrue. ``may_refresh`` gates the retire on ``is_busy()``
+        # being false, so idleness \u2014 not the completion of a particular task \u2014
+        # is literally the condition the runtime waits for, and it is the one
+        # that is also true of a session sitting at an empty prompt (design
+        # review round 1, D3).
         idle_probe = getattr(session, "owner_idle", None)
         ask = getattr(session, "request_refresh", None)
         owner_idle = bool(idle_probe()) if callable(idle_probe) else False
 
         def announce_stale() -> None:
-            """C\u2032: this session is on an older build and will move on its own.
+            """C\u2032: this session is on an older build and will switch on its own.
 
             One function, two callers (the busy branch and the ``kept`` answer
             of the idle branch) so the two states cannot drift into two
@@ -19361,7 +19370,7 @@ class OperatorApp(App[None]):
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
-                    f"will move to the new version when its current work finishes.",
+                    f"will switch to the new version when it is next idle.",
                     scope,
                     notice_kind="note",
                 )
@@ -19371,7 +19380,7 @@ class OperatorApp(App[None]):
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
-                f"move to the new version when its current work finishes.",
+                f"switch to the new version when it is next idle.",
                 scope,
                 notice_kind="note",
             )
