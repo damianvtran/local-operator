@@ -2917,6 +2917,39 @@ class OperatorApp(App[None]):
         self._sidebar_frame_pending = False
         self._sidebar_focus_restore: ReferenceType[Widget] | None = None
         self._sidebar_presentations: dict[str, SessionPresentation] = {}
+        #: Sessions whose prepared presentation `retainable()` refused, so
+        #: prewarm stops re-preparing them.
+        #:
+        #: A refused presentation is never inserted into
+        #: `_sidebar_presentations`, so without this set it never stops matching
+        #: the prewarm candidate filter below: every 2 s poll re-selected it and
+        #: paid a full `_prepare_sidebar_session` — connect, display window,
+        #: replay, MOUNT into the DOM, a layout wait, then teardown — on the
+        #: event loop, for a result guaranteed to be discarded. Three of the
+        #: reporting operator's ten live sessions were stuck in that loop, which
+        #: saturated both `PREWARM_PER_REFRESH` slots and starved legitimate
+        #: prewarming of the other seven. It read as "the UI lags while the
+        #: sidebar is open, and is fine when I close it", because closing pauses
+        #: `_sidebar_timer`.
+        #:
+        #: This converts an unbounded retry loop into ONE attempt per CONTENT
+        #: change. The value is `_sidebar_refusal_stamp(source)` — the pair the
+        #: refusal is actually evidence about — and NOT `presentation_revision`,
+        #: which an earlier revision of this fix used and which reopened the
+        #: whole loop on the population that provoked the report: `_on_message`
+        #: bumps `presentation_revision` on ANY event on a hidden session, so a
+        #: refused session that was also streaming a turn got a fresh stamp on
+        #: every 2 s poll and was re-prepared every single time (measured: 10
+        #: full prepares over 10 polls while busy, against 1 while idle).
+        #: `_sidebar_presentation_current` had already rejected that stamp as
+        #: too strict for exactly this reason; the admission cache had
+        #: inherited the strictness rather than the conclusion.
+        #:
+        #: This is the half that makes the fix durable rather than merely
+        #: re-tuned — some session will always exceed any finite budget (this
+        #: operator holds a 218 MB journal), and without it the next such
+        #: session reproduces the identical lag.
+        self._sidebar_unretainable: dict[str, tuple[int, int]] = {}
         #: The source whose draft was snapshotted at ``pending(id)`` and whose
         #: editor buffer was handed to the transition. ``None`` outside a
         #: switch. Commit consumes it (buffer appended to the target's draft);
@@ -4194,6 +4227,94 @@ class OperatorApp(App[None]):
             self._interactions.pop(id(session), None)
         await session.dispose()
 
+    @staticmethod
+    def _sidebar_refusal_stamp(source: SessionInteraction) -> tuple[int, int]:
+        """What a `retainable()` refusal is evidence about: content, not events.
+
+        `(display_history_revision, history_message_count)`. Deliberately NOT
+        `presentation_revision`: that counts EVENTS (`_on_message`), so a
+        session streaming a turn bumps it dozens of times per poll while its
+        retained cost is unchanged, and a refusal keyed on it expires
+        immediately for precisely the busy sessions that make the re-
+        preparation loop expensive.
+
+        Both terms move only on durable content. `display_history_revision` is
+        bumped by compaction, prune and recovery (`remote.py:1385,1506`) — the
+        rewrites that can make an over-budget window SMALLER.
+        `history_message_count` is the durable row count.
+        """
+        session = source.session
+        return (
+            int(getattr(session, "display_history_revision", 0) or 0),
+            int(getattr(session, "history_message_count", 0) or 0),
+        )
+
+    def _admit_sidebar_presentation(
+        self,
+        session_id: str,
+        source: SessionInteraction,
+        presentation: SessionPresentation,
+    ) -> bool:
+        """Ask `retainable()` once, and REMEMBER a refusal.
+
+        The single place either retain site consults the predicate, so the
+        refusal record cannot drift from the decision that produced it. A
+        refusal is recorded against `_sidebar_refusal_stamp`, so a session
+        whose CONTENT has changed since it was refused gets exactly one fresh
+        attempt rather than being blacklisted for the life of the app.
+
+        Admission clears the record, because a session that fits now must not
+        keep a stale refusal that would suppress its next prewarm.
+        """
+        if presentation.retainable():
+            self._sidebar_unretainable.pop(session_id, None)
+            return True
+        self._sidebar_unretainable[session_id] = self._sidebar_refusal_stamp(source)
+        return False
+
+    def _sidebar_prewarm_refused(self, session_id: str) -> bool:
+        """Whether prewarm should skip `session_id` because it was refused.
+
+        Only for SPECULATIVE preparation. An explicit click must still prepare
+        a too-large session — the user asked for it, they see a transition, and
+        that path runs once instead of on every poll.
+
+        A refusal expires only on a change that could plausibly REVERSE it.
+        Every refusal cause is monotone in content — the text budget, the
+        128-block cap, the node cap, and a block whose `retained_payloads()`
+        declines — so APPENDING rows can never turn a refusal into an
+        admission, and retrying on growth is pure waste on the busiest
+        sessions. Only a rewrite (`display_history_revision`, i.e. compaction /
+        prune / recovery) or a drop in the durable row count can, so those are
+        the only two events that reopen the attempt.
+
+        The deliberate cost: a display window that slides a large message out
+        of range without a rewrite stays suppressed until one of those happens
+        or the sidebar closes (`_set_sidebar_open(False)` clears the map, so
+        every sidebar open is a fresh attempt and this is never permanent).
+        That is the safe direction — a missed cache entry costs one cold
+        switch, whereas an over-eager retry is the 2 s re-preparation loop this
+        whole change exists to close.
+
+        A source that has been released has no readable stamp; the refusal is
+        then trusted until the sidebar closes. Bounded and benign: it
+        suppresses only speculation, and an explicit click still prepares.
+        """
+        refused_at = self._sidebar_unretainable.get(session_id)
+        if refused_at is None:
+            return False
+        source = self._sidebar_sources.get(session_id)
+        if source is None:
+            return True
+        replay_revision, history_size = self._sidebar_refusal_stamp(source)
+        refused_replay_revision, refused_history_size = refused_at
+        if replay_revision != refused_replay_revision or history_size < refused_history_size:
+            # Rewritten or shrunk: the old refusal says nothing about what it
+            # would cost to retain now. Retry once.
+            del self._sidebar_unretainable[session_id]
+            return False
+        return True
+
     async def _release_sidebar_preparation(
         self, prepared: tuple[SessionInteraction, SessionPresentation]
     ) -> None:
@@ -4315,7 +4436,9 @@ class OperatorApp(App[None]):
         if previous is not None:
             self._sidebar_sources[previous.session_id] = outgoing
             outgoing_presentation = self._capture_sidebar_presentation()
-            if outgoing_presentation.retainable():
+            if self._admit_sidebar_presentation(
+                previous.session_id, outgoing, outgoing_presentation
+            ):
                 self._sidebar_presentations[previous.session_id] = outgoing_presentation
                 outgoing_presentation = None
         self._park_sidebar_aside(outgoing)
@@ -4658,6 +4781,13 @@ class OperatorApp(App[None]):
                 if self._sidebar_prefetch is not None:
                     self._sidebar_prefetch.cancel()
                 retained, self._sidebar_presentations = self._sidebar_presentations, {}
+                # Refusals are stamped from a source (`_sidebar_refusal_stamp`),
+                # and every source is disposed below — so those stamps become
+                # unreadable and a session that was compacted or pruned while
+                # the sidebar was shut would never be reconsidered. Dropping
+                # them costs at most one retry per session per sidebar open,
+                # which is bounded; keeping them risks a permanent blacklist.
+                self._sidebar_unretainable.clear()
                 for session_id, presentation in retained.items():
                     source = self._sidebar_sources.get(session_id)
                     if source is not None:
@@ -4778,6 +4908,11 @@ class OperatorApp(App[None]):
             if entry.id != current
             and entry.row.live_state
             and entry.id not in self._sidebar_presentations
+            # Never speculatively re-prepare what `retainable()` already
+            # refused at this revision: the result would be discarded again
+            # and the poll would re-select it forever. An explicit click still
+            # prepares it — the user asked, and that path does not loop.
+            and not self._sidebar_prewarm_refused(entry.id)
         ][:PREWARM_PER_REFRESH]
         if not candidates:
             return
@@ -4798,7 +4933,7 @@ class OperatorApp(App[None]):
                         and not self._sidebar_navigation.requested_id
                         and candidate.id not in self._sidebar_presentations
                         and candidate.id != str(getattr(self._session, "session_id", ""))
-                        and prepared[1].retainable()
+                        and self._admit_sidebar_presentation(candidate.id, prepared[0], prepared[1])
                     ):
                         self._sidebar_presentations[candidate.id] = prepared[1]
                         prepared = None
