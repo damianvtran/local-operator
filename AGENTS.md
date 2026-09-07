@@ -1240,13 +1240,28 @@ profile=$(mktemp -d /tmp/lo-harness.XXXXXX)
   --remote-debugging-port=0 \
   --use-mock-keychain --password-store=basic \
   --no-first-run --no-default-browser-check about:blank &
+chrome_pid=$!
 
 # Chrome writes DevToolsActivePort asynchronously, so WAIT for it rather than
 # reading it straight after launch: an immediate read gets a missing or empty
 # file and the connect fails intermittently, which reads like a flaky harness.
 until [ -s "$profile/DevToolsActivePort" ]; do sleep 0.2; done
 port=$(head -1 "$profile/DevToolsActivePort")
+
+# Tear THIS one down by PID, not by process group: `&` leaves Chrome in the
+# caller's group, so `kill -TERM -$pgid` from a plain shell kills the shell too.
+kill "$chrome_pid"
 ```
+
+**The process-group teardown below applies to a harness that owns its own
+group, not to this shell snippet.** A backgrounded `&` puts Chrome in the
+*caller's* process group, so signalling that group signals whatever is running
+the script — verified here: the child inherited the caller's pgid and
+`kill -TERM -$pgid` terminated the calling shell with `-15`. Kill the captured
+PID from a shell; use the pgid form only from a harness that started Chrome
+with `start_new_session=True` (Python) or an equivalent, which is what puts it
+in a group of its own. `setsid` is not the escape hatch on macOS — it does not
+exist there.
 
 **Load the extension over CDP, not `--load-extension`.** Branded Chrome removed
 that switch in 137 (`PSA: Removing --load-extension flag in Chrome branded
