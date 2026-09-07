@@ -50,6 +50,7 @@ from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.tui import theme as theme_mod
@@ -123,6 +124,28 @@ _SUGGEST_KEYS = frozenset({_HOSTING_KEY, _MODEL_KEY})
 #: `/model` picker's own visible-window feel at this height and leaves the
 #: section under the edited row reachable without scrolling.
 _SUGGEST_ROWS = 8
+
+
+class _Capture(NamedTuple):
+    """A hotkey row that is listening, or holding a key awaiting confirmation.
+
+    Two states in one value rather than an enum plus a nullable key, because
+    the states differ ONLY by whether a key has been detected: ``key == ""``
+    is CAPTURING ("press a key…") and a non-empty ``key`` is PENDING ("enter
+    confirms"). Anything that could disagree — a mode enum beside a key —
+    would be a second source of truth for one question.
+
+    ``refused`` carries the reason the LAST press was rejected, so a reserved
+    key says why instead of appearing to do nothing: a key that silently does
+    nothing in capture mode is indistinguishable from a broken terminal.
+    """
+
+    #: The setting key being remapped, so a rebuild can find its row again.
+    setting_key: str
+    #: The detected key, or ``""`` while still listening.
+    key: str = ""
+    #: Why the last press was refused, or ``""``.
+    refused: str = ""
 
 
 class _Suggestion(NamedTuple):
@@ -277,6 +300,21 @@ class _ChromeStatic(Static):
     """
 
     ALLOW_SELECT = False
+
+
+class SettingsCapture(Message):
+    """The page is entering or leaving hotkey CAPTURE mode.
+
+    A message rather than a direct ``self.app`` poke for the reason every other
+    page→app signal here is one: the page must not reach across into the app's
+    internals, and the app is the only thing that can disarm its own bindings
+    (``check_action``). ``capturing`` False is sent on every exit route,
+    including the ones the page did not choose.
+    """
+
+    def __init__(self, capturing: bool) -> None:
+        super().__init__()
+        self.capturing = capturing
 
 
 class SettingsViewDismissed(Message):
@@ -468,6 +506,20 @@ class SettingsView(Vertical):
         #: Clamped on every rebuild in `_suggest_rows`, since typing can shrink
         #: the list under the cursor.
         self._suggest_index = 0
+        #: The hotkey row that is listening for a key, or ``None``. Mirrors
+        #: ``_editing``: one row at a time, and the same "open, accept,
+        #: cancel" contract — except that what the row is open FOR is a
+        #: keypress rather than a buffer.
+        #:
+        #: While this is set the app has every binding disarmed (see
+        #: ``OperatorApp.check_action``), so clearing it is not optional
+        #: bookkeeping: a leaked capture leaves the app with no hotkeys at all,
+        #: ctrl+c included. Every exit route goes through
+        #: :meth:`_end_capture`, and the page's unmount is one of them because
+        #: the mode is also torn down by paths the page never hears about (a
+        #: session swap, a `/clear`) — the same reasoning
+        #: `revert_preview_for_teardown` records for the theme preview.
+        self._capture: _Capture | None = None
         #: Whether the dropdown has been explicitly DISMISSED for the open
         #: editor (a first Esc). This is the extra rung the Esc ladder needed:
         #: Esc closes the suggestions before it cancels the editor, so a user
@@ -1151,6 +1203,27 @@ class SettingsView(Vertical):
             # expansion read as having failed to open.
             self._scroll_to_expansion()
             return
+        if setting.kind is Kind.HOTKEY:
+            capture = self._capture
+            if capture is None or capture.setting_key != setting.key:
+                # IDLE -> CAPTURING. `enter` opens, exactly as it does for
+                # every other kind; what "open" means here is "start
+                # listening" rather than "show a list" or "open a buffer".
+                self._begin_capture(setting)
+            elif capture.key:
+                # PENDING -> committed. This is the SECOND `enter`, on a key
+                # the user has seen echoed back, and it is the only gesture on
+                # this row that writes config.yml — the page's #440 contract,
+                # unchanged for the new kind.
+                self._commit_capture()
+            else:
+                # `enter` pressed while still listening. Enter is not
+                # capturable (it is reserved — it submits the composer), so
+                # this is the user asking to back out of a row they opened by
+                # mistake. Cancelling is the conservative reading.
+                self._end_capture()
+            self._repaint()
+            return
         if setting.kind is Kind.READONLY:
             self._error = "this setting is retired and cannot be changed"
             self._repaint()
@@ -1486,6 +1559,145 @@ class SettingsView(Vertical):
         self.post_message(SettingsChanged(setting.key, value))
         self._repaint()
 
+    # -- hotkey capture -----------------------------------------------------
+    def _begin_capture(self, setting: Setting) -> None:
+        """Start listening for the key to bind to ``setting``.
+
+        Arming the app's capture gate is what makes the listening possible:
+        without it an app-level PRIORITY binding (`shift+tab`,
+        `ctrl+shift+up`) fires its action before this widget's ``on_key`` ever
+        runs, and the user cannot bind the very chords most worth rebinding.
+        """
+        # Leaving whatever the previous row had open is the same settle every
+        # other activation performs, so a half-typed editor two rows up is not
+        # left behind by a gesture that looks unrelated.
+        self._settle_row()
+        self._capture = _Capture(setting_key=setting.key)
+        self._error = ""
+        self._notice = ""
+        self.post_message(SettingsCapture(True))
+
+    def _end_capture(self) -> None:
+        """Leave capture mode without writing. Safe to call when not capturing.
+
+        THE disarm path, and every exit route calls it — esc, a commit, a
+        click elsewhere, moving the cursor, leaving the page, unmounting. It is
+        unconditional rather than guarded on ``_capture`` being set because the
+        cost of a missed disarm is the whole app losing its hotkeys (including
+        ctrl+c) with nothing on screen explaining why, while the cost of a
+        redundant one is a no-op message.
+        """
+        self._capture = None
+        self.post_message(SettingsCapture(False))
+
+    def _capture_key(self, key: str) -> None:
+        """Interpret one keypress made while a hotkey row is listening.
+
+        Reserved keys are refused WITH THEIR REASON rather than ignored, and
+        the refusal is rendered on the detail row: a press that appears to do
+        nothing is indistinguishable from a terminal that failed to send it.
+
+        `escape` is handled by the caller before this runs, because in capture
+        mode the app's own `escape` binding is disarmed — so this widget has
+        to supply the cancel meaning locally, exactly as ``KeyPromptBlock``
+        binds escape locally for the analogous reason.
+
+        A second key while PENDING REPLACES the first. A user who fumbles a
+        chord should be able to press the right one, not have to cancel and
+        re-enter — and correcting is by far the common case, which is also why
+        capture takes exactly ONE key rather than accumulating alternates
+        (Textual has no chord support; a comma means alternates, and a UI that
+        kept listening could not tell a correction from an addition).
+        """
+        capture = self._capture
+        if capture is None:
+            return
+        reason = keymap_mod.validate_key(key)
+        if reason is not None:
+            self._capture = capture._replace(refused=reason)
+            self._repaint()
+            return
+        self._capture = capture._replace(key=keymap_mod.normalize_key(key), refused="")
+        self._repaint()
+
+    def _commit_capture(self) -> None:
+        """Store the pending key. The only capture transition that writes.
+
+        Routed through :meth:`_write` like every other write on this page, so
+        validation, the error surface and the ``SettingsChanged`` receipt are
+        the same ones the rest of the rows use. A REFUSED write keeps capture
+        open with the reason showing, matching the editor's own rejection rule
+        — the user can press another key rather than losing the row.
+        """
+        capture = self._capture
+        if capture is None or not capture.key:
+            return
+        setting = settings_io.BY_KEY.get(capture.setting_key)
+        if setting is None:
+            self._end_capture()
+            return
+        self._write(setting, capture.key)
+        if self._error:
+            return
+        self._end_capture()
+        # The written key is now simply the stored value, so the row's own
+        # rendering carries it; the notice states the one thing the row cannot,
+        # which is that other panes will follow within a second or two.
+        self._notice = f"{keymap_mod.format_key_display(capture.key)} saved"
+
+    def _capture_conflict(self) -> str:
+        """What the pending key would cost, or ``""``.
+
+        Two sources, because neither covers the other. Textual's own clash
+        report covers APP-level bindings and is authoritative for them; it
+        reports NOTHING for a composer key (measured), which is the class that
+        matters most under a non-priority binding — so
+        ``keymap.conflict_note`` supplies a static table for those.
+        """
+        capture = self._capture
+        if capture is None or not capture.key:
+            return ""
+        note = keymap_mod.conflict_note(capture.setting_key, capture.key)
+        if note:
+            return note
+        victim = self._app_binding_victim(capture.key)
+        if victim:
+            return f"takes {capture.key} from \u201c{victim}\u201d"
+        return ""
+
+    def _app_binding_victim(self, key: str) -> str:
+        """The description of the app binding ``key`` already answers to.
+
+        Read from the app's DECLARED binding map, not from
+        ``screen.active_bindings``. That distinction is the whole correctness
+        of this method: while a row is capturing, ``check_action`` returns
+        False for every app action, which removes them all from the active map
+        — so the active map is empty of exactly the bindings this is trying to
+        find, and the warning silently never fired (observed driving the real
+        app: capturing `ctrl+t` reported no conflict at all).
+
+        Read live rather than from a table here so it stays true as the app's
+        own bindings change. Never raises: the page must still render on the
+        unit hosts, which have no app to ask.
+        """
+        capture = self._capture
+        try:
+            declared = self.app._bindings.key_to_bindings
+        except Exception:  # noqa: BLE001 — no app, or Textual moved the map
+            return ""
+        for binding in declared.get(key, ()):  # type: ignore[union-attr]
+            # Never name the row being edited as its own victim, and never
+            # name the OTHER hotkey action's default either: `_capture_key`
+            # has not applied anything yet, so the map still holds both
+            # remappable bindings at their current keys and one of them is
+            # legitimately the row in hand.
+            binding_id = getattr(binding, "id", None)
+            if binding_id is not None and binding_id.startswith(keymap_mod.KEYMAP_PREFIX):
+                if capture is not None and binding_id == capture.setting_key:
+                    continue
+            return str(getattr(binding, "description", "") or "")
+        return ""
+
     # -- text editing -------------------------------------------------------
     def _begin_edit(self, row: "_Row") -> None:
         """Open the inline editor on ``row``, seeded with its STORED value.
@@ -1601,6 +1813,13 @@ class SettingsView(Vertical):
         # never by drifting off the row: an ask that survived the cursor moving
         # away would fire on a row the user is no longer looking at.
         self._confirm_delete = None
+        # Leaving the row CANCELS a capture, for the same reason and with more
+        # urgency: a capture that survived the cursor moving away would leave
+        # the app with every binding disarmed while the user is looking at an
+        # unrelated row, with nothing on screen saying so. Nothing is written
+        # — a captured-but-unconfirmed key is an action the user has not taken.
+        if self._capture is not None:
+            self._end_capture()
         # The notice answered a keypress on THIS row, so it stops being true
         # the moment the cursor leaves it — the same lifetime `_error` has.
         # Set again below when the discard itself is what needs announcing.
@@ -2068,6 +2287,31 @@ class SettingsView(Vertical):
         (UX round 1, U2/U3).
         """
         key = event.key
+        if self._capture is not None:
+            # CAPTURE OWNS EVERY KEY, and it is checked before the editor and
+            # before the Esc ladder because that is the whole point: a user
+            # pressing a key to bind it must not have it interpreted, whatever
+            # it is. The app's bindings are already disarmed
+            # (`OperatorApp.check_action`), so this handler is the only thing
+            # standing between the press and nothing at all — which is also
+            # why `escape` has to be given its cancel meaning HERE rather than
+            # being left to the app's `stop` binding or the page's own ladder,
+            # neither of which can fire while capture is live.
+            event.stop()
+            event.prevent_default()
+            if key == "escape":
+                self._end_capture()
+                self._repaint()
+                return
+            if key == "enter" and self._capture.key:
+                # The confirm. Reserved as a bindable key precisely so it stays
+                # available as the accept gesture, which is the page's contract
+                # everywhere else: enter opens, enter accepts, esc cancels.
+                self._commit_capture()
+                self._repaint()
+                return
+            self._capture_key(key)
+            return
         if self._editing is not None:
             # Is a suggestion dropdown live for this editor? Computed once so the
             # branches below read the same state, and only ever true on the two
@@ -2337,8 +2581,22 @@ class SettingsView(Vertical):
                 self._commit_edit()
             return
         if not row.selectable:
+            # A click on a header or a group line is still a click AWAY from a
+            # listening row, and the cost of treating it as nothing is the app
+            # left with every binding disarmed. The cursor deliberately does
+            # not move — an unselectable row is not a destination — so this
+            # cancels the capture and changes nothing else.
+            if self._capture is not None:
+                self._end_capture()
+                self._repaint()
             return
         if index == self._selected:
+            # Click-to-start and click-to-confirm both land here, through the
+            # same select-then-activate rhythm every other row uses: the first
+            # click selects, the second opens capture, and the third — on a row
+            # now holding a detected key — confirms it. A mouse user therefore
+            # has a complete route through the gesture without touching the
+            # keyboard except to press the key being bound.
             self.action_activate()
             return
         # WHICH row was clicked is resolved before the commit and WHERE it
@@ -2760,6 +3018,26 @@ class SettingsView(Vertical):
             # line below carries the explanation.
             line.append("—", style=dim)
             return line
+        if setting.kind is Kind.HOTKEY:
+            capture = self._capture
+            if capture is not None and capture.setting_key == setting.key:
+                # The row shows WHAT WAS DETECTED, not what the user meant.
+                # That is the honest rendering: on a terminal that mangles a
+                # chord the detected key is the only thing that will ever
+                # fire, so echoing the intent would be a lie the user only
+                # discovers later.
+                if capture.key:
+                    line.append(keymap_mod.format_key_display(capture.key), style=accent)
+                else:
+                    line.append("press a key\u2026", style=accent)
+                return line
+            line.append(keymap_mod.format_key_display(str(value)), style=value_style)
+            if selected:
+                # The same cursor-row-only affordance glyph the bool/enum rows
+                # carry, answering "what does `enter` do here?" before the
+                # press rather than after it.
+                line.append(" \u25b8", style=dim)
+            return line
         line.append(_render_value(value), style=value_style)
         if setting.kind in (Kind.BOOL, Kind.ENUM):
             if self._expanded == setting.key:
@@ -3159,6 +3437,36 @@ class SettingsView(Vertical):
             # string about an invisible setting would repeat #431's lie
             # in words. The constraint is the only useful thing to say.
             text.append(_TOO_SHORT, style=faint)
+        elif self._capture is not None:
+            # Above everything but the too-short constraint: while a row is
+            # listening, the app has no hotkeys at all, so what this row says
+            # is the ONLY thing on screen explaining the state and the way out
+            # of it. A help string here would be actively misleading.
+            capture = self._capture
+            if capture.refused:
+                # A refusal, in the DANGER ink, because it is a report that the
+                # press did not land — the one thing that must not read as
+                # ordinary guidance. The row stays in capture, so the next
+                # press is still heard.
+                text.append(capture.refused, style=error)
+                text.append("  ·  press another key · esc cancels", style=faint)
+            elif capture.key:
+                bold_faint = faint + Style(bold=True)
+                text.append(keymap_mod.format_key_display(capture.key), style=bold_faint)
+                conflict = self._capture_conflict()
+                if conflict:
+                    # The cost of the choice, at the moment of the choice.
+                    # Warn-and-ALLOW: the reserved set is enormous and mostly
+                    # context-scoped, so refusing every overlap would make the
+                    # feature feel arbitrary — but stealing silently leaves the
+                    # victim invisible until the user notices weeks later that
+                    # something stopped working. So it is named, and the user
+                    # presses enter having read it.
+                    text.append(f"  ·  {conflict}", style=error)
+                text.append("  ·  enter confirms · esc cancels", style=faint)
+            else:
+                text.append("press the key you want\u2026", style=faint + Style(bold=True))
+                text.append("  ·  esc cancels", style=faint)
         elif question:
             # Above the error and above the help: an unanswered destructive
             # question is the only thing the user needs the row to say.
@@ -3999,6 +4307,12 @@ class SettingsView(Vertical):
             # the #425 anti-pattern: the hint is not inert, it types `r` into
             # the value (review round 1, U5).
             return False
+        if self._capture is not None:
+            # The same anti-pattern with a longer reach: while a row is
+            # listening, `r` is a key to BIND, so a lit `r default` would not
+            # merely be inert — pressing it would capture `r` and put the user
+            # one `enter` away from binding the page's own reset key.
+            return False
         if self._confirm_delete is not None:
             # An armed delete owns the footer's wording, exactly as
             # `_current_is_readonly` documents. `r` still disarms the ask.
@@ -4079,16 +4393,29 @@ class SettingsView(Vertical):
         # this way; the footer was the half that did not say so), and `enter`
         # picks rather than opens. Advertising `back to conversation` on a key
         # that cancels is the same footer-vs-detail disagreement D7 found.
+        # CAPTURE joins them for exactly the same reason, and more sharply:
+        # while a row is listening the app's own bindings are disarmed, so a
+        # footer reading `esc back to conversation` would advertise a meaning
+        # the key does not have at the one moment the user most needs the way
+        # out to be stated correctly.
         if (
             self._confirm_delete is not None
             or self._expanded is not None
             or self._editing is not None
+            or self._capture is not None
         ):
             exit_label = "cancel"
         else:
             exit_label = "back to conversation"
         if self._expanded is not None:
             enter = (self._enter_hint, " choose", True)
+        if self._capture is not None:
+            # `↑↓` does NOT move while capturing — an arrow is a key to bind
+            # like any other — so advertising `move` would name a key that
+            # does something else entirely. What is true is that any key is
+            # being read, and that `enter` commits once one has been.
+            move = (self._move_hint, " any key", False)
+            enter = (self._enter_hint, " confirm", True)
         if self._editing is not None:
             if dropdown_open:
                 # ↑↓ browses the suggestions and `tab` completes — the real keys
@@ -4120,7 +4447,13 @@ class SettingsView(Vertical):
         # change · r default` on a row that honours neither (UX round 1, U2).
         # The detail line already says WHY the row is retired; the footer's job
         # is only to stop advertising keys that will not act.
-        if dropdown_open:
+        if self._capture is not None:
+            # Two keys, and `←→` is NOT one of them: while capturing, an arrow
+            # is a key to bind rather than the pane switch, so offering it
+            # would name a key that now does something else — the same reason
+            # the dropdown branch below drops it.
+            leads = [move, enter]
+        elif dropdown_open:
             # The dropdown state offers its own three keys and NOT `r`/`←→`:
             # `r default` types `r` into the buffer (the #425 anti-pattern
             # `_reset_applies` already guards) and `←→` moves the caret, not the
@@ -4140,10 +4473,13 @@ class SettingsView(Vertical):
             # a default row as soon as the terminal was narrow enough to shed
             # the pane hint, which is the regression invariant 3 warns about.
             leads = [move, enter]
-        if self._pane_fits() and not dropdown_open:
+        if self._pane_fits() and not dropdown_open and self._capture is None:
             # `←→` moves the caret while an editor is open, so the pane hint is
             # withheld in the dropdown state where the footer names the caret's
-            # real keys instead (it was already meaningless there).
+            # real keys instead (it was already meaningless there). While
+            # CAPTURING it is withheld for the stronger reason: the arrows are
+            # keys to bind there, so the hint would name a key that no longer
+            # switches the pane.
             leads.append(pane)
         # The narrow rungs shed to a one-word `esc` label, except in the
         # confirm and choosing states where `cancel` IS the one word and
@@ -4154,6 +4490,7 @@ class SettingsView(Vertical):
             if self._confirm_delete is not None
             or self._expanded is not None
             or self._editing is not None
+            or self._capture is not None
             else "back"
         )
         # The narrower rungs are DERIVED from what this row actually offers,
@@ -4329,7 +4666,25 @@ class SettingsView(Vertical):
     def action_leave(self) -> None:
         self._leave()
 
+    def on_unmount(self) -> None:
+        """The last-resort disarm.
+
+        The page is torn down by paths it never hears about — a session swap, a
+        `/clear`, an app shutdown — and a capture leaked through one of those
+        would leave the app with no hotkeys and no surface left to clear the
+        flag from. ``_close_settings_view`` clears it directly for the same
+        reason (a message from a removed widget is never delivered); this is
+        the backstop for any route that does not go through it.
+        """
+        self._capture = None
+
     def _leave(self) -> None:
+        # Leaving the page cancels a live capture. Ordered before the preview
+        # revert because it is the one piece of teardown whose omission costs
+        # the user something outside this page: every app hotkey, until the
+        # next relaunch.
+        if self._capture is not None:
+            self._end_capture()
         # Leaving the PAGE is an exit route like any other, and it is the one
         # where a leaked preview would be least recoverable: the expansion is
         # gone, so nothing on screen would ever offer to put the theme back and

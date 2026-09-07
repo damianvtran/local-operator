@@ -84,6 +84,7 @@ from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator import keymap as keymap_mod
 from local_operator import terminals
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
@@ -295,7 +296,20 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: the prefix glyph and a second join inside the sentence reads as two tips
 #: crammed into one row.
 #:
-#: Twelve, and deliberately not more: the pool is what a user meets a couple of
+#: FIFTEEN, and the bound moved from twelve for one reason worth stating: the
+#: three keyed entries at the end teach the ONLY affordances in this app that a
+#: user cannot otherwise discover by experiment. Every other entry names a
+#: slash command, which `/` and `/help` both list — a tip there is a shortcut
+#: to something already reachable. A remappable hotkey has no picker, and the
+#: remapping route itself (`/settings → Hotkeys`) is three keystrokes deep in a
+#: page of sixty rows. The dilution argument below is real and still governs
+#: everything else: it is an argument about the ODDS of meeting a given entry,
+#: and it is worth paying 3/15 of those odds precisely for the entries that
+#: have no second route. Do not read this as the bound being soft — a
+#: fourteenth slash-command tip should still take a slot rather than add one.
+#:
+#: The original argument, which continues to hold: the pool is what a user
+#: meets a couple of
 #: entries at a time across many launches, so every addition dilutes the odds of
 #: seeing the ones that change how the app is used. The copy entry took the slot
 #: held by "Type as the agent works" rather than growing the ring past that
@@ -346,6 +360,42 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: a random point in the ring (see :meth:`WelcomeView._sync_tip_timer`) — which
 #: is why it is resumption, the single question a returning user arrives with.
 
+#: Widest key rendering a KEYED tip is allowed to reserve when the threshold
+#: below is computed.
+#:
+#: A longer key is still bound and still works — this is a budget for the
+#: WIDTH DECISION, not a limit on what may be configured. It exists because
+#: :data:`TIP_MIN_WIDTH` is a constant that no configuration may move: measure
+#: the pool with the user's ACTUAL key in it and a user who remapped to
+#: `ctrl+shift+pagedown` would push the threshold up, and at some widths the
+#: tip row would appear and disappear as the reel rotated — shoving the whole
+#: splash up and down the screen, which is precisely what the row-count
+#: contract in :func:`_tip_lines` forbids.
+#:
+#: 25 = ``cell_len("ctrl+right_square_bracket")``, the longest member of
+#: ``textual.keys.Keys`` (measured, textual 8.2.8). Deliberately the TRUE
+#: maximum rather than a plausible one: the point of the constant is that no
+#: configuration can move it.
+KEY_BUDGET_CELLS = 25
+
+#: Tips that name a REMAPPABLE key, as ``(template, binding id)``.
+#:
+#: Templated rather than literal because the key is the user's to change: a
+#: hardcoded "ctrl+n starts a new conversation" becomes a lie the moment they
+#: remap it, on the one screen a first-run user reads word for word. Resolved
+#: at render from the PERSISTED config value, never from ``Binding.key`` —
+#: measured, the class binding map still reports the OLD key after a remap.
+#:
+#: The last entry names the ROUTE rather than a key, which is what teaches
+#: remapping without being able to go stale.
+#:
+#: Keep each template at or under 32 cells excluding ``{key}``: the threshold
+#: below budgets a worst-case key against them, and a longer sentence would
+#: raise it and drop the tip row on narrow terminals.
+KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
+    (action.tip, action.id) for action in keymap_mod.KEY_ACTIONS
+) + (("/settings → Hotkeys remaps these keys", None),)
+
 #: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can
 #: reuse it rather than carrying a second copy that would drift. See the pin
 #: comment on :data:`TIP_SETUP` for why a Terminal.app launch opens on this.
@@ -364,6 +414,13 @@ TIPS: tuple[str, ...] = (
     "/settings → Fork → Where a fork opens sets placement",
     "Under cmux, Where it opens sets workspace or surface",
     "lop detects terminal or multiplexer, then picks placement",
+    # The KEYED entries. Held as templates in the pool and substituted at
+    # render (`_resolve_tip`), which is what keeps them true after a remap —
+    # a literal chord here would become a lie the moment the user changed it,
+    # on the one screen a first-run user reads word for word. The `{key}`
+    # spelling is deliberate: an entry with no field is an ordinary tip and
+    # passes through untouched, so the pool stays one list rather than two.
+    *(template for template, _ in KEYED_TIPS),
 )
 
 #: The tip the SETUP state opens on, in place of the pinned ``TIPS[0]``. The
@@ -428,7 +485,16 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: exists to refuse, and a number that silently went stale the first time a tip
 #: was reworded. Measured against the LONGEST entry, so the widest tip in the
 #: pool is the one that decides, and the invariant holds by construction.
-TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE))
+#: Narrowest width that gets a tip at all — see the block comment above the
+#: original definition; the keyed entries are measured at their WORST-CASE key
+#: so the answer stays a function of terminal width alone.
+TIP_MIN_WIDTH = max(
+    *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
+    *(
+        cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
+        for template, _ in KEYED_TIPS
+    ),
+)
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
@@ -804,6 +870,42 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     return lines
 
 
+#: ``template -> binding id`` for the keyed pool entries, so the renderer can
+#: recognise one without re-scanning :data:`KEYED_TIPS` per frame.
+_KEYED_BY_TEMPLATE: dict[str, str] = {
+    template: binding_id for template, binding_id in KEYED_TIPS if binding_id is not None
+}
+
+
+def _resolve_tip(body: str) -> str:
+    """Substitute the CURRENT key into a keyed tip; pass anything else through.
+
+    Read from the PERSISTED config rather than from the app's binding map,
+    which is not merely a convenience: measured against textual 8.2.8, the
+    class ``Binding.key`` still reports the OLD key after a remap, so a tip
+    built on it would confidently advertise a chord that no longer works.
+
+    Never raises and never renders a placeholder. A config that cannot be read
+    falls back to the shipped default, which is the same rule
+    ``tui/settings.py`` states for every display flag — the splash is the first
+    thing a user sees and must not be the thing that breaks on a bad config.
+    """
+    binding_id = _KEYED_BY_TEMPLATE.get(body)
+    if binding_id is None:
+        return body
+    action = keymap_mod.BY_ID.get(binding_id)
+    if action is None:
+        return body
+    try:
+        from local_operator.config_watch import process_watcher
+
+        values = process_watcher().values
+    except Exception:  # noqa: BLE001 — no watcher: the shipped key is the truth
+        values = {}
+    key = keymap_mod.effective_key(action, values)
+    return body.format(key=keymap_mod.format_key_display(key))
+
+
 def _tip_lines(
     width: int, index: int, *, setup: bool = False, pin_paste: bool = False
 ) -> list[Text]:
@@ -843,7 +945,7 @@ def _tip_lines(
     elif opening and pin_paste:
         body = TIP_PASTE
     else:
-        body = TIPS[index % len(TIPS)]
+        body = _resolve_tip(TIPS[index % len(TIPS)])
     line = Text(no_wrap=True)
     line.append(f"{TIP_GLYPH} ", style=glyph_style)
     line.append(body, style=body_style)

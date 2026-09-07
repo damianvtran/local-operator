@@ -74,6 +74,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
+from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
@@ -249,6 +250,7 @@ from local_operator.tui.widgets.session_sidebar import (
     sidebar_content_width,
 )
 from local_operator.tui.widgets.settings_view import (
+    SettingsCapture,
     SettingsChanged,
     SettingsPreview,
     SettingsView,
@@ -1844,6 +1846,35 @@ class OperatorApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
         Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
+        # The two REMAPPABLE bindings. Their `id` is deliberately the same
+        # string as the config key and the tip lookup — see
+        # `local_operator.keymap`, which owns that vocabulary and from which
+        # the defaults below are read so the three cannot drift. The id is
+        # persisted user data (it is the literal key in the user's config.yml),
+        # so renaming it is a migration rather than a refactor.
+        #
+        # Remapping is LIVE through `App.set_keymap`, applied in
+        # `_apply_keymap`. Textual's input guide says bindings cannot be
+        # modified at runtime; that is FALSE for the keymap API in 8.2.8 —
+        # measured in this worktree: after `set_keymap` the new key fires, the
+        # old one does not, repeat remaps replace rather than accumulate, and
+        # `set_keymap({})` restores these class defaults.
+        #
+        # NOT `priority=True`, and that is a hard constraint in both
+        # directions. Priority fires BEFORE the focused widget, which would
+        # break every picker's `ctrl+n` = "move down" (measured: with a picker
+        # focused the picker moves and this binding correctly does not fire),
+        # and — worse — would apply to whatever chord the user remaps ONTO, so
+        # a remap onto a composer key would silently eat the user's text
+        # instead of the composer receiving it. Non-priority costs the reverse:
+        # a remap onto a composer key silently loses while the composer has
+        # focus. That is the better failure — it is visible (nothing happens)
+        # rather than destructive — and the settings page warns about that
+        # class of key at the moment of the decision.
+        *(
+            Binding(action.default, action.action, action.label, show=False, id=action.id)
+            for action in _keymap.KEY_ACTIONS
+        ),
         # Open the aside WITHOUT spending the composer's contents, which is the
         # gesture `/btw <question>` cannot offer: submitting a slash command
         # consumes the whole line, so a user who is half way through a prompt
@@ -2887,6 +2918,19 @@ class OperatorApp(App[None]):
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
         self._settings_focus_restore: Any | None = None
+        #: True while a ``/settings`` hotkey row is LISTENING for a key to
+        #: bind. :meth:`check_action` reads it and disarms every app binding,
+        #: so the key being pressed reaches the capture widget instead of
+        #: firing its action.
+        #:
+        #: The risk this carries is total and worth stating: a flag stuck True
+        #: removes every hotkey in the app, INCLUDING the ctrl+c interrupt. So
+        #: it is cleared on every exit route from capture rather than only on
+        #: the expected one — the page's own esc/commit/click paths, plus
+        #: `_close_settings_view`, which is the route a session swap or
+        #: `/clear` tears the page down through without the page ever hearing
+        #: about it.
+        self._keymap_capture = False
         # What the aside borrowed and owes back. The card has no input of its
         # own — the ONE composer is pointed at it — so opening the aside has to
         # stash whatever the user had half typed for the main chat, and Esc has
@@ -18197,6 +18241,13 @@ class OperatorApp(App[None]):
             view.revert_preview_for_teardown()
         except Exception:  # noqa: BLE001 — the mode must close either way
             logger.debug("settings: preview revert on close failed", exc_info=True)
+        # Disarm capture SYNCHRONOUSLY, for the reason the preview revert above
+        # is synchronous: `view.remove()` is a few lines below and a message
+        # posted from a removed widget is never delivered. This is the route a
+        # session swap or a `/clear` tears the page down through, so without it
+        # a capture live at that moment would leave the app with every binding
+        # disarmed — ctrl+c included — and no surface left to clear it from.
+        self._set_keymap_capture(False)
         view.remove()
         self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
         self._transcript_view().display = True
@@ -18219,6 +18270,16 @@ class OperatorApp(App[None]):
         """The page's ``esc`` hint was clicked — same exit as the key itself."""
         message.stop()
         self._close_settings_view()
+
+    def on_settings_capture(self, message: SettingsCapture) -> None:
+        """Arm or disarm the binding gate a hotkey row needs to listen.
+
+        The page cannot do this itself: only the app can filter its own
+        bindings, and the app-level PRIORITY ones would otherwise fire before
+        the page's ``on_key`` ever ran.
+        """
+        message.stop()
+        self._set_keymap_capture(message.capturing)
 
     def on_settings_preview(self, message: SettingsPreview) -> None:
         """Paint a setting the user is TRYING ON. Nothing has been stored.
@@ -18768,6 +18829,13 @@ class OperatorApp(App[None]):
             self._unsubscribe_config_watch = watcher.subscribe(self._on_config_change)
         except Exception:  # noqa: BLE001 — a missing notice must not break adoption
             logger.debug("config watcher unavailable to the TUI", exc_info=True)
+        # The hotkeys the user configured, applied to the bindings this app
+        # booted with. Here rather than in `on_mount` so it shares the
+        # watcher's snapshot — the same parse, so the boot state and the first
+        # change event cannot disagree about what is on disk — and after the
+        # subscribe so a watcher that failed to start still leaves the shipped
+        # defaults live rather than no bindings at all.
+        self._apply_keymap(announce=True)
 
     def _on_config_change(self, change: Any) -> None:
         """React to a ``config.yml`` change, on the app loop.
@@ -18820,13 +18888,26 @@ class OperatorApp(App[None]):
             return
         local = getattr(change, "source", "disk") == "local"
         if local:
-            # Apply, do not announce. The only group whose apply this process
-            # owns and has not already performed is the approval gate: the
-            # theme and display caches are written by the same handlers that
-            # repainted, while `tool_approval_mode` reaches the gate through
-            # nothing but this listener.
+            # Apply, do not announce. The only groups whose apply this process
+            # owns and has not already performed are the approval gate and the
+            # keymap: the theme and display caches are written by the same
+            # handlers that repainted, while `tool_approval_mode` reaches the
+            # gate through nothing but this listener.
             if "tool_approval_mode" in changed:
                 self._follow_configured_approvals(change, announce=False)
+            if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
+                # THE trap this listener has already been caught by once, in
+                # exactly this shape. `SettingsView._write` goes through
+                # `settings_io.write_setting`, which notifies the watcher
+                # LOCALLY — and nothing else in this process holds the
+                # `BindingsMap`. So a hotkey written on the /settings page
+                # arrives here as the one delivery that would move nothing:
+                # the section is labelled LIVE, the page would paint that
+                # claim, and this pane would go on answering the old key. It
+                # is verbatim the `tool_approval_mode` bug the docstring above
+                # documents at length, which is why the apply is on BOTH
+                # branches rather than only on the disk one.
+                self._apply_keymap(getattr(change, "values", {}), announce=False)
             return
         from local_operator import settings_io
 
@@ -18982,6 +19063,14 @@ class OperatorApp(App[None]):
             self._apply_sidebar_settings()
         if "display.dock" in changed:
             self._apply_dock_density()
+        if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
+            # The other half of the pair above: a write from ANOTHER pane or
+            # from `lop config edit`. Announces, because this user did not act
+            # in this pane and a key that silently changed under them is the
+            # thing a notice is for — the `applied: keymap.*` line above has
+            # already told them, so this call only speaks up about values it
+            # had to reject.
+            self._apply_keymap(getattr(change, "values", {}), announce=True)
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -22167,6 +22256,112 @@ class OperatorApp(App[None]):
             logger.debug("display.dock live apply failed", exc_info=True)
             return
         self._refresh_band()
+
+    def action_keymap_new_session(self) -> None:
+        """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.
+
+        Calls ``_cmd_new`` DIRECTLY rather than routing through
+        ``_run_slash_command``. That path does remote-capability routing, paste
+        expansion and echo policy for TYPED text, none of which means anything
+        for a keypress, and ``/new`` reaches this same handler through it
+        anyway. The handler's own guard (no resume-capable launcher) prints the
+        notice, so the hotkey degrades exactly as the slash command does rather
+        than dying differently.
+        """
+        self._cmd_new(self._notice)
+
+    def action_keymap_resume(self) -> None:
+        """The remappable "resume" hotkey — ``ctrl+s`` unless remapped.
+
+        The empty ``arg`` is what opens the picker rather than resuming a named
+        session; see :meth:`_cmd_resume`. Direct call, for the reason above.
+        """
+        self._cmd_resume("", self._notice)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disarm every app binding while the settings page is CAPTURING a key.
+
+        This is what makes capture possible at all, and it was the only route
+        available. App-level PRIORITY bindings are dispatched before the
+        focused widget, so `shift+tab` and `ctrl+shift+up` would be swallowed
+        by their actions before the capture widget ever saw them — and a
+        widget-level priority binding does NOT out-rank an app-level one
+        (measured). Returning ``False`` here removes the binding from the
+        active map entirely, so the key reaches the focused widget's
+        ``on_key``; measured working for `shift+tab`, `ctrl+shift+up`,
+        `ctrl+t`, `escape` and `ctrl+c`.
+
+        It is a BLUNT instrument, and deliberately so: a user pressing a key to
+        bind it must not have it interpreted, whatever it is. The cost is that
+        a stuck flag would disarm every hotkey in the app including the ctrl+c
+        interrupt, which is why :meth:`_set_keymap_capture` is called on every
+        exit route from capture — esc, commit, click-away, leaving the page and
+        unmount — and why a pilot test asserts each of those routes restores it.
+
+        ``None`` rather than ``True`` for the enabled case is Textual's own
+        convention for "enabled, and do not show it in the footer"; the base
+        implementation returns ``True``, so this defers to it.
+        """
+        if self._keymap_capture:
+            return False
+        return super().check_action(action, parameters)
+
+    def _set_keymap_capture(self, capturing: bool) -> None:
+        """Arm or disarm capture mode. Idempotent, and never raises.
+
+        ``refresh_bindings`` is required after the flag moves: the active
+        binding map is what ``check_action`` filters, and it is cached until a
+        refresh recomputes it (measured — without it the first key after arming
+        still fired its action).
+        """
+        if self._keymap_capture == capturing:
+            return
+        self._keymap_capture = capturing
+        try:
+            self.refresh_bindings()
+        except Exception:  # noqa: BLE001 — a failed refresh must not trap the flag
+            logger.debug("keymap: refresh_bindings failed", exc_info=True)
+
+    def _apply_keymap(self, values: Mapping[str, Any] | None = None, *, announce: bool) -> None:
+        """Re-key the remappable bindings from ``values``. THE one apply path.
+
+        ``set_keymap`` rather than ``update_keymap``, and it is sent the FULL
+        desired mapping every time: Textual applies a keymap against the
+        pristine class ``BINDINGS`` rather than cumulatively (measured —
+        ``set_keymap({})`` restores the shipped keys), so omitting an entry is
+        the correct encoding of "this action is at its default" and the caller
+        never has to compute a diff or an unset instruction.
+
+        An unparseable value on disk is DROPPED by the resolver and named here
+        in one notice, leaving the shipped default live. Never leaving the
+        action unreachable is ``tui/settings.py``'s rule — "a missing or
+        unreadable config never breaks the TUI" — and it matters more for this
+        key than most: a hotkey config that disarmed itself would take away one
+        of the routes the user has for fixing it.
+
+        ``announce`` is False for a write made in THIS process, where the
+        settings page is its own receipt.
+        """
+        if values is None:
+            try:
+                from local_operator.config_watch import process_watcher
+
+                values = process_watcher().values
+            except Exception:  # noqa: BLE001 — fall back to the shipped defaults
+                logger.debug("keymap: no watcher snapshot at apply", exc_info=True)
+                values = {}
+        try:
+            resolved, rejected = _keymap.resolved_keymap(values)
+            self.set_keymap(resolved)
+        except Exception:  # noqa: BLE001 — a bad keymap must not take down the app
+            logger.debug("keymap: apply failed", exc_info=True)
+            return
+        if rejected and announce:
+            self._system_notice(
+                f"keymap: ignoring unusable {', '.join(sorted(rejected))} — "
+                "using the default key",
+                "warning",
+            )
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.

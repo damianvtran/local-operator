@@ -385,7 +385,17 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: moment a question parks — a different process from the ``Session`` this
 #: file drives. Both are covered where they live: the resume behaviour in the
 #: TUI suite, the gate policy in ``tests/unit/session/runtime/test_parked_gates.py``.
-HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals"}
+#:
+#: ``keymap`` is host-owned in the same sense as ``appearance``, and more
+#: strictly: a hotkey is a ``BindingsMap`` entry on the ``OperatorApp``, and a
+#: ``Session`` has no bindings at all, so there is no session attribute for a
+#: probe here to watch move. Its live apply is
+#: ``OperatorApp._apply_keymap``, driven from BOTH branches of
+#: ``_on_config_change`` and covered in the TUI suite
+#: (``tests/unit/tui/test_keymap_pilot.py``), which asserts the same two
+#: directions this file does: a write from another process reaches a running
+#: app, and a write from the /settings page in THIS process moves this pane.
+HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap"}
 
 
 def _live_sections() -> set[str]:

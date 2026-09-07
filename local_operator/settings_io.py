@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
+from local_operator import keymap as _keymap
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -101,6 +102,15 @@ class Kind(enum.Enum):
     #: The failover cascade. Not editable as a scalar at all; the page routes
     #: this row to the two-level chain editor.
     CASCADE = "cascade"
+    #: A remappable hotkey (``keymap.*``). Its own kind because the
+    #: interaction is the OPPOSITE of ``TEXT``: a text editor buffers every
+    #: printable key, and ``ctrl+n`` is not printable, so typing a chord into
+    #: one is impossible — it falls through to the page's own bindings and
+    #: moves the cursor. A hotkey row has to LISTEN instead, so the page runs
+    #: a capture mode on it. Stored as a Textual key string; validated by
+    #: :mod:`local_operator.keymap`, never by Textual, which accepts anything
+    #: and silently makes the action unreachable.
+    HOTKEY = "hotkey"
     #: Shown, never written. Retired keys stay visible so a user who set one
     #: years ago can see that it is inert rather than wondering why it does
     #: nothing.
@@ -312,6 +322,20 @@ SECTIONS: tuple[Section, ...] = (
         "Appearance",
         Scope.LIVE,
         "Theme and the terminal features the TUI is allowed to use.",
+    ),
+    # Its own section rather than a pair of rows under ``appearance``. Scope
+    # does not force the split — ``appearance`` is LIVE too — but the section
+    # DESCRIPTION is where this page teaches the capture gesture, and
+    # ``appearance``'s is about theme and terminal features. "How do I even
+    # use this row?" is worth a header, the same reason ``runtime`` and
+    # ``fork`` split out rather than accept a description that would be a
+    # distraction on half their rows.
+    Section(
+        "keymap",
+        "Hotkeys",
+        Scope.LIVE,
+        "Keys for starting and resuming conversations. Press enter on a row, "
+        "then press the key you want.",
     ),
     # LIVE — a reversal of the original design, which kept the approval mode
     # build-time on the theory that a gate flipping under a running turn is a
@@ -885,6 +909,31 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("left", "left", "sessions to the left of the conversation"),
             Choice("right", "right", "sessions to the right of the conversation"),
         ),
+    ),
+    # -- hotkeys ------------------------------------------------------------
+    # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the
+    # id is simultaneously this key, the `Binding` id in `OperatorApp.BINDINGS`
+    # and the tip lookup in `welcome.py`. Writing it here a second time is the
+    # drift `test_keymap.py`'s three-way anti-drift test exists to catch, and
+    # the id is PERSISTED USER DATA (it is the literal key in the user's
+    # config.yml), so drift orphans overrides silently rather than failing.
+    #
+    # FLAT-DOTTED, like `display.*` and unlike `tui.*`: `_changed_registry_keys`
+    # only diffs keys the registry knows, so a nested `keymap:` block would
+    # invite hand-written sub-keys that propagation could never see. A flat key
+    # per registered action makes "registered" and "propagated" the same set by
+    # construction.
+    *(
+        Setting(
+            key=action.id,
+            path=(action.id,),
+            section="keymap",
+            label=action.label,
+            kind=Kind.HOTKEY,
+            default=action.default,
+            help=action.help,
+        )
+        for action in _keymap.KEY_ACTIONS
     ),
     # -- approvals ----------------------------------------------------------
     Setting(
@@ -1596,6 +1645,15 @@ def coerce(setting: Setting, text: str) -> Any:
         if lowered in ("false", "off", "no", "0"):
             return False
         raise ValueError("expected on or off")
+    if setting.kind is Kind.HOTKEY:
+        # Normalized at the WRITE boundary, not only at apply. The capture UI
+        # already receives a normalized `event.key`, so this is for the other
+        # two writers — `lop config edit` and a hand edit — which otherwise
+        # store `ctrl+N`: the page then DISPLAYS `ctrl+N` while the runtime
+        # binds a key nobody can press (measured — Textual accepts it
+        # verbatim). Rejection happens in `validate`, so the message is the
+        # same whichever writer arrives.
+        return _keymap.normalize_key(text)
     return text
 
 
@@ -1663,6 +1721,15 @@ def validate(setting: Setting, value: Any) -> str | None:
         return None
     if setting.kind is Kind.TEXT:
         return None if isinstance(value, str) else "expected text"
+    if setting.kind is Kind.HOTKEY:
+        # THE guard, and it has to be here rather than in the capture widget:
+        # `lop config edit` and a hand-edited config.yml reach the same value
+        # and bypass the page entirely, and Textual validates NOTHING — a
+        # garbage key string silently moves the binding somewhere unreachable
+        # AND takes the shipped default with it (measured; the Claude Code
+        # pre-2.1.246 silent-disable bug, live in Textual today). The capture
+        # widget calls the same predicate, so the two cannot disagree.
+        return _keymap.validate_key(value)
     return None
 
 
@@ -1694,6 +1761,15 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
     Raises ``ValueError`` when :func:`validate` rejects the value, so no caller
     can write past the schema.
     """
+    if setting.kind is Kind.HOTKEY and isinstance(value, str):
+        # Normalized HERE as well as in `coerce`, because the writers do not
+        # all pass through `coerce`: the server's `PATCH /v1/settings/{key}`
+        # hands a raw JSON value straight to this function. `validate_key`
+        # normalizes internally before checking, so an un-normalized `ctrl+N`
+        # would PASS validation and then be stored verbatim — the page would
+        # display `ctrl+N` while the runtime bound a key nobody can press.
+        # One normalization at the single point every write funnels through.
+        value = _keymap.normalize_key(value)
     problem = validate(setting, value)
     if problem is not None:
         raise ValueError(problem)

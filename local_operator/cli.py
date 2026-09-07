@@ -1206,7 +1206,13 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # silently clamped by whichever consumer reads it.
         settings_io.write_setting(config_manager, setting, value)
 
-        print(f"Successfully updated {args.key} to {value}")
+        # Report what was STORED, not what was typed. `write_setting` may
+        # normalize (a hotkey's `CTRL+G` is stored as `ctrl+g`), and echoing
+        # the raw input would tell the user their config holds a spelling it
+        # does not — the same class of lie as a page displaying a key the
+        # runtime never bound.
+        stored = settings_io.read_setting(config_manager, setting)
+        print(f"Successfully updated {args.key} to {stored}")
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are
