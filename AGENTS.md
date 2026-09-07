@@ -292,6 +292,25 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
+**`lop browser install` is not isolated by `HOME` at all — never run it from a
+test.** Same shape as the two hazards above: an isolated run reaching outside
+its sandbox, but here `HOME` does not even slow it down. `browser_bridge/
+install.py` hardcodes `LABEL = "com.local-operator.browser"` and derives only
+the plist *path* from `Path.home()`, while the launchd domain is `gui/<uid>`
+from `os.getuid()`. So a redirected `HOME` writes the plist somewhere harmless
+and then `bootstrap`s the *same global label* into the *same* domain — and the
+`bootout` that precedes it evicts whatever holds that label, which is the
+operator's live bridge daemon. It happened today: a sibling agent's test took
+the operator's daemon down on 4099 for ~90s, and the only symptom he saw was
+his browser tool going dead. Linux has the identical exposure through the fixed
+systemd unit name.
+
+So a bridge test runs the daemon as a **plain subprocess on a non-default
+port** (`python -m local_operator.browser_bridge.daemon --port <port>`, as
+`docs/design/browser-extension-evidence.md` does) and never calls `install`.
+A per-root label is in flight in a separate PR; until it lands, `HOME`
+redirection is no protection here.
+
 ### Read the committed ref, not the working tree
 
 "Never `git stash` to get a before-frame" (in the visual-validation section
@@ -1175,11 +1194,19 @@ name was absent; `Extensions.loadUnpacked` over CDP returned our id and the
 popup drove normally. `docs/design/browser-extension-e2e.md` records the same
 finding on Chrome 151.
 
-**Size the viewport explicitly.** Headless inherits no real window, so it
-defaults to whatever the platform picks — measured 756x469 at `dpr=1` on this
-host with no flag. Pass `--window-size=300,600` (the extension popup's true
-metrics) or `Emulation.setDeviceMetricsOverride`. A frame whose dimensions were
-assumed rather than set is not evidence of anything.
+**Size the viewport with `Emulation.setDeviceMetricsOverride`, not
+`--window-size`.** Headless inherits no real window, so it defaults to whatever
+the platform picks — measured 756x469 at `dpr=1` on this host with no flag —
+and a frame whose dimensions were assumed rather than set is not evidence of
+anything. `--window-size` reads like the remedy and quietly is not: on Chrome
+152 the width clamps at a 500px floor and the height loses 87px to chrome, so
+`--window-size=300,600` produces **500x513** with no error. Measured, fresh
+profile per run: `300,600` → `500x513`, `400,600` → `500x513`, `500,600` →
+`500x513`, `1000,800` → `1000x713`, all at `dpr=1`. The CDP override returned a
+true `300x600 dpr=2`, controls `deviceScaleFactor` (which the flag cannot), and
+applies even to a browser started with the clamped flag — so it is the single
+way to set a capture viewport here. Following the flag instead is exactly the
+assumed dimension this paragraph forbids.
 
 **Never pair a headful before-frame with a headless after-frame.** Device pixel
 ratio and scrollbar presence differ between the modes, so a cross-mode pair
@@ -1191,18 +1218,32 @@ The hygiene flags below are not decoration; each one is an incident:
 - **A unique `--user-data-dir` per launch**, under `/tmp`. Never the operator's
   profile, and never a shared path: a second Chrome on a live profile dir is
   how a run corrupts the one the extension is paired to.
+- **A port Chrome picks, not one you choose: `--remote-debugging-port=0`, then
+  read the real port from `"$profile/DevToolsActivePort"`.** A fixed port is a
+  shared path in the same sense as a shared profile dir, and this machine runs
+  many agent sessions concurrently. Measured with two harnesses on distinct
+  profiles both requesting 39222: the second started fine, wrote **no**
+  `DevToolsActivePort` and reported **no** error, while the port answered as
+  the *first* harness's browser — so the second agent would drive another
+  session's Chrome, capturing its pages and closing its targets. With port `0`
+  the same pair bound 57827 and 57829 and each drove its own. Chrome writes
+  that file only when it chose the port itself (under an explicit port it is
+  absent), so reading it is both the fix and the check that you applied it.
 - **`--use-mock-keychain --password-store=basic`.** Real Chrome on macOS
   otherwise reaches for the login keychain and raises modal "Keychain not
-  found" dialogs on the operator's screen — which happened, from 37 concurrent
-  instances. These are on-screen dialogs, so they defeat headless on their own.
+  found" dialogs on the operator's screen — reported from a run of ~37
+  concurrent instances. These are on-screen dialogs, so they defeat headless on
+  their own.
 - **`start_new_session=True` plus process-group teardown** (SIGTERM to the
   pgid, SIGKILL if it does not settle) **and an `atexit` handler**. The reason
-  is not that `terminate()` fails when it runs — on Chrome 152 it reaped a
-  13-process tree cleanly — it is that the harness does not always get to run
-  it. A harness killed mid-run leaves the browser reparented to PPID 1 holding
-  its profile dir: measured here, `SIGKILL` to the harness left **10** Chrome
-  processes alive with the browser at `PPID 1`. A previous session leaked 47
-  that way. Own the process group so the survivors are addressable, and assert
+  is not that `terminate()` fails when it runs — on Chrome 152 it reaped the
+  whole tree cleanly — it is that the harness does not always get to run it. A
+  harness killed mid-run leaves the browser reparented to PPID 1 holding its
+  profile dir: measured here, `SIGKILL` to the harness left the entire Chrome
+  tree alive with the browser at `PPID 1` (helper counts vary per run, so
+  compare against zero, never against a remembered number). A previous session
+  reportedly leaked 47 that way. Own the process group so the survivors are
+  addressable, and assert
   zero afterwards (`pgrep -f <your unique profile prefix>`) rather than assuming.
 - **Never touch the operator's own running Chrome.** Match on your own profile
   prefix, never `pkill -f "Google Chrome"`.
