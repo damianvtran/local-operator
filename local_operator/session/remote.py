@@ -1117,6 +1117,294 @@ class RemoteSession:
             return await client.ask_answer(request_id, value, question_index=question_index)
         raise ValueError("the answer does not match the current question")
 
+    def move_will_wait(self) -> bool:
+        """Whether :meth:`set_working_directory` is about to make the user wait.
+
+        The frontend needs this to decide whether to narrate before the move,
+        and it must NOT reconstruct the answer from ``is_cold``. That predicate
+        means "no synchronised runtime is attached", which this class already
+        establishes is a different question — and a viewer with an engage in
+        flight reads cold while the move joins that engage and then retires the
+        runtime it produces, taking seconds. Gating narration on ``is_cold``
+        therefore stayed silent for exactly the case the narration exists for:
+        `/move` as the first action of a session (review MAJOR-1, design U6).
+
+        The two waiting shapes are the two this method reports, and they are
+        the same two ``set_working_directory`` branches on:
+
+        * a live client — the runtime has to be asked to retire; and
+        * an engage already in flight — the move joins it first.
+
+        A genuinely cold viewer with nothing running returns False, because
+        that move is a field assignment that settles within the frame and an
+        in-flight line would be contradicted by its own receipt a moment later.
+
+        A RECOVERING viewer also returns False, because its move does not wait
+        either — ``set_working_directory`` refuses it outright, and promising a
+        restart one line before refusing to move at all is worse than silence.
+        """
+        if self._recovering:
+            return False
+        client = self._client
+        if client is not None and client.connected:
+            return True
+        return self._engage_in_flight()
+
+    def _engage_in_flight(self) -> bool:
+        """Whether an engage is running that a move would have to join.
+
+        ONE definition, read by both the decision to join and the decision to
+        narrate it. Two copies would let the frontend promise a wait the move
+        does not take, or stay silent through one it does — which is the
+        divergence this whole feature exists to prevent, in miniature.
+        """
+        return self._can_go_cold and self._bind_lock.locked() and not self._recovering
+
+    async def set_working_directory(self, cwd: str) -> str:
+        """Point this session at ``cwd``; returns what happened, for the receipt.
+
+        TRUSTS ITS CALLER on the target. ``cwd`` is not checked for existence
+        or permission here: the frontend validates through ``validate_target``
+        BEFORE calling, so a bad path costs the user one line and never a
+        half-applied state. Validating again here would put the user-facing
+        sentences in two places, which is how they drift (QA Q6).
+
+        THE CWD IS BAKED IN AT SPAWN. ``_spawn_runtime`` passes it as
+        ``LOP_MOBILE_CHILD_CWD`` and the child reads it once in ``amain``,
+        which is then the session's ``_cwd`` for the rest of that runtime's
+        life — it reaches the system prompt's environment block, every tool
+        call's ``ToolContext.cwd``, skill discovery and MCP config resolution.
+        There is no live setter to call and adding one would be wrong: those
+        consumers read the value at different moments, so a mid-flight change
+        would leave one turn's prompt disagreeing with the tools that turn
+        actually ran.
+
+        So the honest implementations are exactly two, and which one applies is
+        a property of the viewer rather than a choice:
+
+        * COLD — no runtime yet. The directory is simply the one the next
+          engage will spawn with, so this is a field assignment and costs
+          nothing. This is the "at the start of a session" case, and it is the
+          common one: ``lop`` opens cold.
+        * BOUND — a runtime is already serving. It is retired and a fresh one
+          is engaged at the new directory. That is a REBIND, not a new
+          conversation: the session id, the transcript and everything on screen
+          are untouched, and the successor replays the same durable history the
+          predecessor wrote. It is the same shape as the build-refresh path
+          (``_go_cold(refresh=True)`` → re-engage), which exists precisely
+          because retiring an idle runtime and starting its successor is a
+          housekeeping event rather than an ending.
+
+        A BUSY runtime is REFUSED rather than rebuilt. Retiring mid-turn would
+        abort a model call the user is paying for and did not ask to lose, and
+        "apply it to the next turn" is the option that produces exactly the
+        divergence AGENTS.md calls out for ``/reload``: the band would show the
+        new directory while the running turn's tools still resolve against the
+        old one. Refusing states the situation and leaves both surfaces
+        agreeing.
+
+        It leaves by the RETIRING route (``retire_now``), never the stopping
+        one, and that distinction is the whole correctness argument for the
+        bound path. ``stop`` announces ``stopping``, which latches
+        ``_deliberate_stop`` in ``_on_disconnected`` and parks this viewer in
+        the stopped state — the right answer for a session the user ENDED and
+        the wrong one for a move, which ends a runtime while the conversation
+        continues. ``retiring`` already means "a successor is owed; engage
+        one": it goes cold with ``refresh=True`` and fires the refresh callback
+        the app re-engages on. So a move reuses the mechanism the build refresh
+        established rather than issuing a stop and then trying to un-latch it —
+        which cannot work anyway, since the disconnect that sets the flag
+        arrives AFTER this method's ack has returned.
+
+        The move is applied to ``_cwd`` FIRST and only then is the runtime
+        asked to go, so the successor cannot be engaged before the field it
+        reads is set. If the retire is refused the field is put back: a viewer
+        whose ``_cwd`` says one thing while its runtime works in another is
+        precisely the divergence this method exists to avoid.
+
+        DURING OWNER RECOVERY it refuses, in the same words and for the same
+        reason as ``route_shared_slash`` one seam over. A recovering viewer is
+        chasing a successor that ``_recover_owner`` will bind at whatever cwd
+        the owner's record names, so a "cold move" reported here is silently
+        undone the moment that bind lands — the viewer would say it moved and
+        then work somewhere else, which is the one divergence this method
+        exists to prevent. Refusing keeps the whole seam consistent: every
+        request/response operation on this class (routed slash, compaction,
+        the answer gates) declines while ``_recovering`` rather than reporting
+        an outcome the replacement owner has not agreed to (review MINOR-1).
+        """
+        if self._recovering:
+            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command="move"))
+        previous = self._cwd
+        # UNDER ``_bind_lock``, and that is the correctness fix rather than a
+        # precaution. ``_ensure_bound`` reads ``self._cwd`` INSIDE this lock and
+        # hands it to ``engage_runtime``, whose spawn is a 1-3 s await; the TUI
+        # starts that engage eagerly at mount. A move that only assigned the
+        # field would therefore land AFTER the value had been read, and the
+        # runtime would be spawned at the old path while the user was told it
+        # moved — silently, permanently, and in the feature's PRIMARY case
+        # ("change directory at the start of a session"), because that is
+        # exactly when the mount engage is in flight. Measured at a median
+        # 1.26 s window, losing 5/5 first-action moves (review BLOCKER-1 / QA
+        # Q1). Joining that engage makes the two orderings the only two
+        # possible: the move lands before the engage reads the field, or it
+        # waits for the engage and then finds a bound runtime and retires it.
+        #
+        # The field is set FIRST, before joining, and that ordering is what
+        # makes the in-flight engage harmless. A spawn already under way has
+        # read the OLD value and cannot be recalled, so the move cannot be
+        # honoured by waiting alone — the runtime that arrives is at the old
+        # path, which is the bug in its second form. Setting ``_cwd`` up front
+        # means every LATER read (this engage's retry, the successor's spawn,
+        # the wake index) sees the new value, and the stale runtime is then
+        # retired by the normal bound path below.
+        self._cwd = cwd
+        # JOINED by awaiting ``_ensure_bound`` rather than by blocking on the
+        # lock directly — the same construction ``run_slash_authoritative``
+        # uses for the same reason (remote.py, "Join its lock before mutating").
+        # Waiting on the raw lock would park this coroutine for as long as the
+        # engage takes with no bound on failure, so a spawn that never
+        # completes would hang the command instead of refusing it; awaiting the
+        # bind inherits its timeouts, its ``ConnectionError`` and its vetted
+        # startup sentences, and returns a viewer that is either bound or
+        # honestly cold.
+        try:
+            if self._engage_in_flight():
+                try:
+                    await self._ensure_bound()
+                except Exception:  # noqa: BLE001 — a failed engage still leaves a movable viewer
+                    # The engage failed, which is its own reported problem. The
+                    # session is then genuinely cold, and the assignment above
+                    # is already the whole move: the NEXT engage uses the new
+                    # path. Deliberately narrower than the rollback below —
+                    # ``Exception`` here so a cancellation still unwinds.
+                    logger.debug("joining the in-flight engage before a move failed", exc_info=True)
+            async with self._bind_lock:
+                return await self._apply_working_directory(cwd, previous=previous)
+        except BaseException:
+            # ONE rollback for every non-return exit, here rather than at each
+            # raise: the optimistic assignment above must not outlive a move
+            # that did not happen, and a viewer whose ``_cwd`` says one thing
+            # while its runtime works in another is exactly the divergence this
+            # method exists to prevent. Restoring in the caller means a refusal
+            # added later cannot forget to.
+            #
+            # ``BaseException``, not ``Exception``: ``asyncio.CancelledError``
+            # does not derive from ``Exception``, so an ``Exception`` clause
+            # let a cancelled move — the session worker being torn down, a
+            # transition superseded — escape with ``_cwd`` at the new value and
+            # no move performed, which is the divergence in its quietest form
+            # (review MINOR-2). The join is inside the guarded region for the
+            # same reason: a cancel while joining the engage is the wider of
+            # the two windows, not the narrower one.
+            self._cwd = previous
+            raise
+
+    async def _apply_working_directory(self, cwd: str, *, previous: str) -> str:
+        """The move itself, with ``_bind_lock`` already held by the caller.
+
+        ``previous`` is the directory to restore on a refusal. It is passed in
+        rather than re-read because the caller has already applied ``cwd``
+        optimistically, so ``self._cwd`` is no longer the value to roll back to.
+        """
+        # NOT ``is_cold``. That predicate means "no SYNCHRONISED runtime is
+        # attached right now", which is a different question from "does a
+        # runtime exist to retire". ``_refresh_display_history`` clears
+        # ``_ready_for_events`` while the client stays connected and the
+        # runtime keeps serving, so an ``is_cold`` test routes a live runtime
+        # into the free-field-assignment branch and silently skips the retire
+        # (review MAJOR-1), and a second move during a rebind does the same
+        # (QA Q2). Liveness of the socket is the honest term: if a client is
+        # connected there is a runtime that must be asked to go, and the
+        # runtime's own ``may_refresh`` re-check stays the authority on
+        # whether it may.
+        client = self._client
+        if client is None or not client.connected:
+            self._cwd = cwd
+            self._repoint_armed_wakes(cwd)
+            return "cold"
+        # ``owner_idle`` is the SAME reading the build-refresh seam uses, and
+        # it already covers every term that matters here — streaming, a parked
+        # approval/ask gate, and a running background job — so this asks one
+        # question rather than reassembling the predicate and drifting from it.
+        # The runtime re-checks on its own side anyway (``may_refresh``): a
+        # retire that races work arriving is refused there and surfaces below.
+        if not self.owner_idle():
+            raise RuntimeError(
+                "this session is working right now — /move again when the turn finishes"
+            )
+        ask = getattr(client, "retire_now", None)
+        if not callable(ask):
+            raise RuntimeError("this session's runtime is too old to be moved; /reload first")
+        self._cwd = cwd
+        try:
+            detail = str(await cast(Callable[[], Awaitable[str]], ask)())
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            self._cwd = previous
+            # A runtime older than this build answers the wire's own
+            # ``unknown op`` error. The vetted sentence above cannot fire for
+            # it — the viewer always carries THIS build's ``AttachClient``, so
+            # the method is always present — which left the reachable path
+            # showing a user an internal op name (review MINOR-1 / QA Q4).
+            # Mapped here, where the skew actually surfaces.
+            if "unknown op" in str(error) and "retire_now" in str(error):
+                raise RuntimeError(
+                    "this session's runtime is too old to be moved; /reload first"
+                ) from error
+            raise RuntimeError(f"could not move: {error}") from error
+        if detail != "retiring":
+            # The runtime kept itself — work arrived between this viewer's idle
+            # read and the runtime's own re-check, which is the race the
+            # re-check exists to catch. Its reason is the honest receipt, and
+            # the directory goes back because nothing moved.
+            self._cwd = previous
+            raise RuntimeError(f"could not move: {detail.removeprefix('kept: ')}")
+        self._repoint_armed_wakes(cwd)
+        return "rebound"
+
+    def _repoint_armed_wakes(self, cwd: str) -> None:
+        """Rewrite this session's wake-index ``cwd`` after a successful move.
+
+        The index carries a per-session ``cwd`` that the SUPERVISOR spawns an
+        unattended runtime with, so a wake armed before the move fires in the
+        old directory (review MAJOR-2). The bound path self-heals — the
+        successor rewrites the entry when it opens — but the cold path spawns
+        nothing to heal it, and a wake is the one mechanism designed to run
+        without the user present to notice, so the divergence survives until
+        the next manual prompt.
+
+        Rewritten for BOTH paths rather than only the cold one: the bound
+        path's self-heal happens whenever its successor opens, which is after
+        an arbitrary delay, and a wake due inside that gap would still fire at
+        the old path. Writing here makes the index correct at the moment the
+        move is reported.
+
+        Best-effort by construction. Every failure is logged and swallowed:
+        the move itself has already succeeded and is what the user was told
+        about, so a wake index that could not be rewritten must not turn a
+        completed move into an error.
+        """
+        try:
+            from local_operator.wakes.store import read_index, write_entry
+
+            entry = (read_index(self._config_dir) or {}).get(self._session_id)
+            if not isinstance(entry, dict):
+                return  # no wakes armed: nothing to repoint
+            schedules = entry.get("schedules") or []
+            if not schedules:
+                return
+            write_entry(
+                self._config_dir,
+                self._session_id,
+                cwd=cwd,
+                schedules=schedules,
+                # The existing entry rides along so a key this code does not
+                # know about (``stopped_at`` today) is not dropped by a move.
+                preserve=entry,
+            )
+        except Exception:  # noqa: BLE001 — a completed move must not fail on its index
+            logger.debug("could not repoint armed wakes after a move", exc_info=True)
+
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 

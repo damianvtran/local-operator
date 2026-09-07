@@ -60,6 +60,11 @@ ECHO_POLICY = {
     # without the echo the only record of what the branch was asked to do is in
     # another window entirely.
     "fork": True,
+    # A setting (WHERE the session works), not words the model is told. The
+    # receipt names the directory that ended up in force, which is strictly
+    # more than the typed words: `~/x`, a relative path, or nothing typed at
+    # all when the picker was used.
+    "move": False,
     # The label of the conversation, not words the model is told: the receipt
     # quotes the title that ended up in force, which is more than what was typed.
     "rename": False,
@@ -140,6 +145,10 @@ PROMPT_POLICY = {
     # Free text destined for a model, so an inline `/fork` reassembles to the
     # front of the composer rather than splicing into the middle of a sentence.
     "fork": True,
+    # A DIRECTORY, not a prompt: `/move ~/x` names where the session works, so
+    # an inline engage splices-and-runs like `/rename` rather than reassembling
+    # to the front and handing the model the rest of the draft.
+    "move": False,
     "rename": False,
     "model": False,
     "effort": False,

@@ -459,7 +459,7 @@ async def test_typing_filters_to_the_matches() -> None:
         await pilot.pause()
         picker = app.editor.picker
         assert picker.is_open()
-        assert [name for name, _ in picker.suggestions()] == ["model", "mobile"]
+        assert [name for name, _ in picker.suggestions()] == ["move", "model", "mobile"]
 
 
 @pytest.mark.asyncio
@@ -851,7 +851,10 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # a registry move.
         ("c", ["clear", "copy", "config", "context", "compact", "credential"]),
         ("lo", ["loop", "login", "logout"]),
-        ("mo", ["model", "mobile"]),
+        # `move` leads on registry order, not on length: all three are flat 900
+        # prefix matches and `match_commands` breaks the tie on registry index,
+        # where `/move` sits beside `/resume` in the session-transition family.
+        ("mo", ["move", "model", "mobile"]),
     ],
 )
 def test_short_queries_keep_only_prefix_matches(query: str, expected: list[str]) -> None:

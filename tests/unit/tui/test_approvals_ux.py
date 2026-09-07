@@ -548,6 +548,12 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/approvals`: bare `/stop` stops THIS session; the
         # list offers the other sessions and `all`.
         "stop": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/stop`: bare `/move` opens the directory picker, which
+        # is the discoverable route, and the space offers the same suggestions
+        # inline for a user who would rather type. Deliberately not REQUIRED —
+        # Enter on the bare command does something useful, which is the line
+        # `/login` sits on the other side of.
+        "move": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/team` lists the teams, and the space
         # opens the team-name argument list with roster details.
         "team": ArgumentMode.OPTIONAL,

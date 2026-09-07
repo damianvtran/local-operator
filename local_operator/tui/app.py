@@ -231,6 +231,7 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
@@ -2272,6 +2273,25 @@ class OperatorApp(App[None]):
         # Keep the existing composer visually unchanged, but make its submit
         # boundary atomic so text cannot land in the conversation being left.
         self._session_transition_pending = False
+        #: Session ids that have run `eval`, so a `/move` restarting the
+        #: runtime destroys the namespace they built up. Recorded when the call
+        #: is drawn rather than re-derived from the transcript, because
+        #: `/clear` and a bounded resume both edit the VIEW while the kernel
+        #: lives on (see `_session_used_eval`).
+        #:
+        #: A SET, not a flag plus a key. Two rounds of review were spent on the
+        #: flag form because a single boolean cannot describe more than one
+        #: conversation, and this app holds several: clearing it on adoption
+        #: told a RETURNING session its live kernel was gone (MAJOR-5.1, the
+        #: sidebar re-adopts the same session), while not clearing it told an
+        #: INCOMING one its namespace had been destroyed (MAJOR-4.1). Stamping
+        #: an owner onto the flag cannot fix that — it only re-labels the last
+        #: writer, so whichever direction is closed opens the other.
+        #:
+        #: Keyed by identity, the question answers itself: a session finds its
+        #: own id or it does not, no swap site has to remember to clear, and a
+        #: path added later cannot reintroduce either direction by forgetting.
+        self._sessions_that_used_eval: set[str] = set()
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -5274,6 +5294,16 @@ class OperatorApp(App[None]):
         # cold session that never started a runtime, leaving exactly the
         # half-empty band this change exists to remove.
         self._warm_engage_started = False
+        # NOTHING HERE FOR THE EVAL RECORD, deliberately. It is keyed by
+        # session id (`_sessions_that_used_eval`), so adoption has no work to
+        # do: the arriving conversation is either in the set or it is not.
+        # Earlier rounds cleared a shared flag here, which is what told a
+        # RETURNING session its live kernel was gone — this method is
+        # re-entered for the SAME conversation by the sidebar return path
+        # (review MAJOR-5.1) — while removing the clear and keeping a stamp
+        # told an INCOMING one its namespace had been destroyed (MAJOR-4.1).
+        # Both were the single flag failing to hold per-session state; do not
+        # reintroduce a reset here.
         # The user can type `/team lop` while the boot worker is still building
         # the session. Its one opening fill then sees no registry, so adoption is
         # the second authoritative edge that must refill the CURRENT query and
@@ -16803,6 +16833,342 @@ class OperatorApp(App[None]):
             self._notify_mobile_title(stored)
         return stored
 
+    def _cmd_move(self, arg: str, notice: NoticeFn) -> None:
+        """``/move`` — pick a working directory; ``/move <path>`` — go straight there.
+
+        A bare ``/move`` opens :class:`MovePickerScreen`, because choosing a
+        directory is the same two-way question `/resume` answers with a card:
+        the app offers what it knows, the user picks one. An explicit path
+        skips it — a user who already knows where they are going should not be
+        made to answer a prompt — and is expanded (``~``, relative) against the
+        SESSION's directory rather than the process's, since a resumed session
+        routinely differs from the terminal's own cwd.
+
+        FRONTEND-LOCAL, and it must stay that way: the picker draws on this
+        terminal, the suggestions are read from THIS machine's session records,
+        and the directory a user means is one on the machine they are sitting
+        at. Routing it to the owner would offer a remote host's directories to
+        someone who cannot see them — the same argument ``/settings`` and
+        ``/theme`` make about config.yml.
+        """
+        session = self._session
+        if session is None:
+            # A rejected command changed nothing, so the boot composition must
+            # survive it: `_system_notice`, the rule every rejecting branch
+            # here follows.
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+
+        if arg.strip():
+            self._apply_move(arg.strip(), notice)
+            return
+
+        from local_operator.paths import config_dir
+        from local_operator.tui.move_targets import (
+            complete_path,
+            resolve_self,
+            suggest_targets,
+        )
+
+        cwd = self._session_cwd()
+        try:
+            targets = suggest_targets(cwd, config_dir=config_dir())
+        except Exception:  # noqa: BLE001 — a picker that cannot suggest still opens
+            logger.debug("could not assemble move suggestions", exc_info=True)
+            targets = []
+
+        def _complete(query: str):
+            # Bound to the SESSION's cwd, not the process's, so a typed
+            # relative path completes from where the band says the session is.
+            return complete_path(query, cwd=cwd)
+
+        def _self_target(query: str):
+            # Lets a directory with no subdirectories still be chosen, instead
+            # of completing to nothing and reporting "no directory matches"
+            # for a path the user just walked to (D1/U1). Same cwd binding.
+            return resolve_self(query, cwd=cwd)
+
+        def _move_choice(path: str | None) -> None:
+            # Dismissed with Esc — the session is left exactly where it was,
+            # with nothing said: a cancelled picker is not an event worth a
+            # transcript line (the rule `_cmd_resume` states).
+            if path:
+                # The no-op receipt reaches the picker too, so choosing the
+                # row labelled `current` says `already in ~/x` instead of
+                # closing in silence — which was byte-identical to Esc on the
+                # one row whose whole purpose is to answer "where am I?" (U4).
+                self._apply_move(path, notice)
+
+        self.push_screen(
+            MovePickerScreen(targets, current=cwd, complete=_complete, self_target=_self_target),
+            _move_choice,
+        )
+
+    def _apply_move(self, raw: str, notice: NoticeFn) -> None:
+        """Validate ``raw`` and move the session to it, or say why not.
+
+        Validation happens HERE, before anything is changed, so a bad target
+        costs the user one line and never a half-applied state: the three
+        rejections (absent, not a directory, unenterable) are told apart
+        because they call for three different next moves.
+
+        The no-op is reported for EVERY caller. This used to take a ``typed``
+        flag so that only a composer path said "already in …", on the argument
+        that choosing the row you are on is a deliberate "stay here" — but a
+        silent close there is byte-identical to Esc on the one row whose job is
+        to answer "where am I?" (UX U4), so the picker now reports it too.
+        With both callers passing the same value the flag was a distinction the
+        code no longer drew, and a flag with one value gets misread as still
+        meaning something (design D8).
+        """
+        from local_operator.tui.move_targets import (
+            MoveError,
+            expand_path,
+            format_label,
+            validate_target,
+        )
+
+        session = self._session
+        if session is None:
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+        try:
+            target = validate_target(expand_path(raw, cwd=self._session_cwd()))
+        except MoveError as error:
+            notice(str(error), "warning")
+            return
+        except OSError as error:
+            # A path on an unmounted volume, or a symlink loop: the same class
+            # of answer as a MoveError, and equally not a traceback's business.
+            notice(f"cannot move to {raw}: {error}", "warning")
+            return
+
+        destination = str(target)
+        if destination == self._session_cwd():
+            notice(f"already in {format_label(destination)}")
+            return
+        # NARRATED BEFORE the transition, exactly as `/resume` does one method
+        # above, and only when the move actually makes the user wait. That wait
+        # is an RPC to a child process that must finish draining, or a spawn
+        # already in flight that has to be joined first — during which the
+        # picker has closed, the band still reads the old directory, and
+        # `_session_transition_pending` swallows a typed Enter without
+        # replaying it. With no line printed the app simply looked like it had
+        # ignored the user (UX U2). A genuinely cold viewer needs no such line:
+        # it settles within the frame, so an in-flight notice would be
+        # contradicted by its own receipt a moment later.
+        #
+        # ASKED OF THE SESSION, never reconstructed here. Gating this on
+        # `is_cold` is what shipped in round 1 and it was silent for exactly
+        # the case the line exists for: a viewer with a mount engage in flight
+        # reads cold, while the move joins that engage and then retires the
+        # runtime — measured at 1.94 s of untouched boot splash on a move that
+        # printed "runtime restarted there". The predicate this PR's own
+        # blocker established as unsound must not decide a user-visible line
+        # one layer up (review MAJOR-1, design U6).
+        session = self._session
+        will_wait = getattr(session, "move_will_wait", None) if session else None
+        if callable(will_wait) and will_wait():
+            notice(f"moving to {format_label(destination)}… restarting the runtime there")
+        self._run_session_transition(self._move_session(destination, notice))
+
+    async def _move_session(self, destination: str, notice: NoticeFn) -> None:
+        """Point the session at ``destination``, rebuilding its runtime if bound.
+
+        The two outcomes are the session's to decide, not this app's — see
+        ``RemoteSession.set_working_directory``, which owns the reasoning about
+        why a cold viewer is a field assignment and a bound one is a runtime
+        rebind. This method is the UI half: it reports what happened, keeps the
+        band in step, and re-engages the successor.
+
+        Run behind ``_run_session_transition`` because the bound path DOES
+        replace the runtime under the conversation, and Enter must not address
+        the outgoing one while that is in flight — the same boundary `/new` and
+        `/resume` use for the same reason.
+
+        THE BAND IS THE INVARIANT. It is repainted from the value the session
+        now holds, immediately and on both paths, because the failure this
+        feature must not have is the one AGENTS.md names for `/reload`: a
+        screen showing one directory while the agent works in another. On the
+        cold path nothing else would repaint it (there is no runtime to push a
+        snapshot), and on the bound path the successor's snapshot arrives
+        seconds later — so the push here is what makes the two agree at the
+        moment the receipt is printed rather than eventually.
+        """
+        session = self._session
+        move = getattr(session, "set_working_directory", None)
+        if not callable(move):
+            # A reduced facade (a test double, an embedder's host) that never
+            # grew the method. Refusing names the situation rather than
+            # silently doing nothing.
+            self._system_notice("this session cannot be moved", "warning")
+            return
+        from local_operator.tui.move_targets import format_label, remember_recent
+
+        label = format_label(destination)
+        try:
+            outcome = await cast(Callable[[str], Awaitable[str]], move)(destination)
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            notice(str(error), "warning")
+            return
+
+        # The band FIRST, before any await: it is the surface the user is
+        # looking at when the receipt lands, and the whole point is that it
+        # never disagrees with where the session works.
+        self._push_cwd_to_band(destination)
+
+        from local_operator.paths import config_dir
+
+        remember_recent(config_dir(), destination)
+
+        if outcome == "rebound":
+            # NOTHING to re-engage here. The runtime leaves by the `retiring`
+            # route (see `RemoteSession.set_working_directory`), which the
+            # facade turns into `_go_cold(refresh=True)` and the refresh
+            # callback this app already installs — `_on_runtime_refreshed` —
+            # engages the successor eagerly. Starting a second engage from here
+            # would race that one for the same session's lease.
+            #
+            # THE EVAL KERNEL DOES NOT SURVIVE THE REBIND, and the user is told
+            # so rather than discovering it from a `NameError` two turns later.
+            # `tools/eval.py` caches one interpreter per session in `_KERNELS`
+            # and `Session` registers `close_session_kernel` as a dispose hook,
+            # so retiring the runtime disposes the session and takes every
+            # variable, import and function the user built up with it — while
+            # the conversation, the transcript and the session id all survive,
+            # which is exactly what makes the loss surprising. Narrated, not
+            # refused: losing it is a real consequence of a move the user asked
+            # for, not a reason to decline the move.
+            if self._session_used_eval():
+                # "everything you set up in eval", not "the eval kernel's
+                # variables": `kernel` is an implementation noun this surface
+                # never teaches, and it led the clause. `eval` is the one term
+                # the user has provably seen — it is the tool name on the card
+                # above — and the shorter phrasing also shortens the wrapped
+                # tail, which is where this warning always lands (design D11,
+                # D12).
+                notice(
+                    f"moved to {label} — this session's runtime restarted there,"
+                    " so everything you set up in eval was lost"
+                )
+                return
+            notice(f"moved to {label} — this session's runtime restarted there")
+            return
+        notice(f"moved to {label}")
+
+    #: Ceiling on `_sessions_that_used_eval`. A viewer can walk through many
+    #: conversations in one process, and an unbounded set of ids is a slow leak
+    #: for a signal that only decorates one receipt. Sized well above any
+    #: plausible sidebar session count so eviction is unreachable in practice;
+    #: it exists so the growth is bounded at all, not as a working limit.
+    _EVAL_MEMORY_MAX = 512
+
+    def _remember_session_used_eval(self, session_id: str) -> None:
+        """Record that ``session_id`` has run `eval`, bounded.
+
+        Empty ids are dropped rather than stored: an unidentified session
+        cannot be matched back on read, so keeping one would grow the set
+        without ever answering a question. The transcript fallback still covers
+        that case, which is the honest place for it.
+        """
+        if not session_id:
+            return
+        if len(self._sessions_that_used_eval) >= self._EVAL_MEMORY_MAX:
+            # Evicting an arbitrary member only costs a warning the user would
+            # otherwise have seen, and the transcript fallback often still
+            # catches it. Growing without limit costs the process.
+            self._sessions_that_used_eval.pop()
+        self._sessions_that_used_eval.add(session_id)
+
+    def _session_used_eval(self) -> bool:
+        """Whether this conversation has run `eval`, so a rebind loses state.
+
+        READ FROM THE TRANSCRIPT, which is the only honest source available in
+        THIS process. The registry that actually holds the interpreters
+        (`tools/eval.py:_KERNELS`) is a module global in the runtime CHILD —
+        `Session` is built by `process.amain` over the socket, never here — so
+        the viewer cannot ask "is a kernel resident" without inventing a wire
+        op, which is a great deal of machinery for one clause of one receipt.
+
+        The transcript answers a slightly different question — "did a call to
+        `eval` happen in this conversation" rather than "is an interpreter
+        resident right now" — and the difference is deliberately in the
+        direction that cannot mislead. An idle kernel can have been reaped
+        (`_reap_idle`) or evicted (`_remember`) before the move, in which case
+        this warns about state that was already gone; the eval tool's own
+        stale-namespace receipt covers that case and the user has still lost
+        nothing they had.
+
+        LATCHED, because `blocks()` is a DISPLAY PROJECTION and not a ledger.
+        This method used to re-derive the answer from what was on screen and
+        its docstring claimed the silent direction could not happen. It can,
+        by two reachable routes, and both leave the kernel alive:
+
+        * `/clear` (`clear_blocks`) empties the view while the session, the
+          runtime and the kernel all survive — and `/clear`'s own receipt
+          promises "history is untouched", so that user has every reason to
+          believe their `eval` state is intact; and
+        * `_project_settled_rows` renders only the last `RESUME_RENDER_MESSAGES`
+          messages, so an `eval` call older than that is simply not in
+          `blocks()` after a resume.
+
+        The set records the fact when it happens, so nothing that edits the
+        VIEW can retract it. Erring toward warning was always this signal's
+        stated policy; deriving it from the screen quietly broke that policy in
+        the one direction that costs the user work (review round 3, MAJOR-1).
+
+        RECORDED PER SESSION, and that shape is load-bearing. It was first
+        written as one boolean plus the id of whoever last wrote it, which
+        cannot describe a viewer holding several conversations: clearing on
+        adoption told a RETURNING session its live kernel was gone (MAJOR-5.1
+        — the sidebar re-adopts the same session), and not clearing told an
+        INCOMING one its namespace had been destroyed (MAJOR-4.1). Those are
+        not two bugs but one impossible constraint on a single flag, which is
+        why three rounds of closing one direction reopened the other. A set of
+        ids makes the storage match the state, and no swap site has to remember
+        to clear anything.
+        """
+        # MEMBERSHIP, not a flag: this app holds several conversations and the
+        # answer differs per conversation, so the storage has to as well. A
+        # session finds its own id or it does not — a returning one still does
+        # (its kernel never died), an incoming one never did.
+        current_id = getattr(self._session, "session_id", "") or ""
+        if current_id and current_id in self._sessions_that_used_eval:
+            return True
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        # Still consulted as well as the latch: a session RESUMED into this
+        # app never saw the call happen, so its only evidence is what the
+        # replay put on screen. The latch covers the live session, the
+        # transcript covers the resumed one, and either being true is enough.
+        if any(
+            isinstance(block, ToolCard) and block.tool_name == "eval"
+            for block in transcript.blocks()
+        ):
+            # Memoised against the CURRENT session, so a later `/clear` cannot
+            # take the answer away from the conversation the evidence was read
+            # for.
+            self._remember_session_used_eval(current_id)
+            return True
+        return False
+
+    def _push_cwd_to_band(self, cwd: str) -> None:
+        """Repaint the band's directory segment for ``cwd``.
+
+        One call paints the band AND pushes the terminal title (see
+        ``StatusLine._sync_terminal_title``), so neither surface can lag the
+        other by a frame — the discipline `_cmd_rename` follows for the name.
+        The title matters here specifically: an unnamed conversation is
+        LABELLED by its directory (``terminal_title.cwd_label``), so a move
+        that did not push would leave the tab naming the old folder.
+        """
+        if self._status is None:
+            return
+        self._status.update(cwd=cwd)
+
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
         """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
 
@@ -18323,6 +18689,15 @@ class OperatorApp(App[None]):
         resume already retired it when it painted the tail, and a page mounted
         into the scrollback is not the edge that starts a conversation.
         """
+        # RECORDED HERE, at the moment the call is drawn, because this is the
+        # last point where the fact is certain. Everything downstream is a
+        # view: `/clear` empties it and a bounded resume renders only the tail,
+        # so re-deriving "did this session use eval" from the screen loses the
+        # answer while the kernel is still alive (`_session_used_eval`).
+        # Recorded against the session that ran it, so the fact travels with
+        # that conversation across every swap instead of with the viewer.
+        if isinstance(block, ToolCard) and block.tool_name == "eval":
+            self._remember_session_used_eval(getattr(self._session, "session_id", "") or "")
         if self._projection_message_id:
             if not block.navigation_anchor_id:
                 block.navigation_anchor_id = self._projection_message_id
@@ -19559,6 +19934,8 @@ class OperatorApp(App[None]):
             self._cmd_resume(arg, notice)
         elif command == "/fork":
             self._cmd_fork(prompt_arg, notice)
+        elif command == "/move":
+            self._cmd_move(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
         elif command == "/model":
@@ -24533,6 +24910,33 @@ class OperatorApp(App[None]):
             return
         if message.command == "analytics":
             picker.set_choices(self._analytics_choices())
+            picker.set_notice("")
+            return
+        if message.command == "move":
+            # The same suggestions the picker opens with, offered inline for a
+            # user who typed the space rather than pressing Enter — one
+            # vocabulary, two routes to it, so the list cannot propose a
+            # directory the picker would not. Free typing is unaffected: the
+            # editor's list RANKS what is typed and never filters what may be
+            # submitted, so an arbitrary path still reaches `_cmd_move`.
+            from local_operator.paths import config_dir
+            from local_operator.tui.move_targets import suggest_targets
+
+            try:
+                targets = suggest_targets(self._session_cwd(), config_dir=config_dir())
+            except Exception:  # noqa: BLE001 — an unreadable store is an empty list
+                logger.debug("could not assemble move argument rows", exc_info=True)
+                targets = []
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name=target.label,
+                        description=target.path,
+                        detail=target.detail,
+                    )
+                    for target in targets
+                ]
+            )
             picker.set_notice("")
             return
         if message.command == "mcp":
