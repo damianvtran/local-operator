@@ -476,6 +476,20 @@ def build_subagent_tree(
     return tuple(rows), deepest, below_cap
 
 
+def _require_root(root: Path) -> Path:
+    """``root``, or RAISE when it is the unreadable sentinel.
+
+    Some registries walk a missing directory and return an empty list instead of
+    raising, which turns "we could not resolve the config dir" into an
+    authoritative-looking ``0``. Forcing the failure here routes those probes
+    through :func:`_safe` like every other one, so the field renders as unknown
+    and is named in the degraded block (QA round 2, Q8).
+    """
+    if root == _UNREADABLE_ROOT:
+        raise OSError("config dir could not be resolved")
+    return root
+
+
 def collect_agents(live: "LiveState", errors: list[tuple[str, str]]) -> AgentsInfo:
     """Profile and team counts (filesystem walks) over the live tree.
 
@@ -496,9 +510,21 @@ def collect_agents(live: "LiveState", errors: list[tuple[str, str]]) -> AgentsIn
         # 12.1 ms and 2.3 ms respectively on this host: filesystem walks, hence
         # the worker thread rather than the paint path.
         profiles=_safe(
-            "agents.profiles", lambda: len(AgentRegistry(root).list_agents()), 0, errors
+            "agents.profiles",
+            lambda: len(AgentRegistry(_require_root(root)).list_agents()),
+            0,
+            errors,
         ),
-        teams=_safe("agents.teams", lambda: len(TeamRegistry(root).list_teams()), 0, errors),
+        # `_require_root` rather than a bare call: `TeamRegistry.list_teams()`
+        # does NOT raise on a directory that does not exist, it returns 0. So on
+        # an unresolvable home `teams` was a plausible zero with NO degraded
+        # entry naming it anywhere — the one field on the screen with no honest
+        # marker at all, where `profiles` and `credentials` at least raised and
+        # were caught (QA round 2, Q8). A count read out of a config root we
+        # could not resolve is not a measurement, whatever the walk returns.
+        teams=_safe(
+            "agents.teams", lambda: len(TeamRegistry(_require_root(root)).list_teams()), 0, errors
+        ),
         tree=live.tree,
         running=live.running,
         queued=live.queued,

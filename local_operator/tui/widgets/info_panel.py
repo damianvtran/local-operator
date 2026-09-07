@@ -41,6 +41,7 @@ from textual.widgets import Static
 
 from local_operator.info.collect import LiveState
 from local_operator.info.model import (
+    UNKNOWN,
     InfoSnapshot,
     format_bytes,
     format_duration,
@@ -48,7 +49,6 @@ from local_operator.info.model import (
 )
 from local_operator.info.render import build_export
 from local_operator.tui.widgets.analytics_panel import (
-    _NEST_INDENT,
     _row_prefix,
     section_header,
     semantic_style,
@@ -139,6 +139,22 @@ _SUBAGENT_MARKS: dict[str, tuple[str, str]] = {
     "cancelled": ("⊘", "dim"),
     "gone": ("⊘", "dim"),
 }
+
+
+def _fit_pair(label: str, metas: Sequence[str], width: int, lead: int) -> str | None:
+    """The widest meta rung that fits BESIDE ``label``, or ``""`` if none does.
+
+    ``None`` means the label itself does not fit even with the meta shed, which
+    is the caller's signal to try a shorter label rung (or drop the row). The
+    empty string means the label fits but no meta does — a warning without its
+    qualifier still carries the fact, which is the whole point of shedding.
+    """
+    if lead + cell_len(label) > width:
+        return None
+    for meta in metas:
+        if lead + cell_len(label) + 2 + cell_len(meta) <= width:
+            return meta
+    return ""
 
 
 def _first_that_fits(rungs: Sequence[str], width: int) -> str:
@@ -282,36 +298,46 @@ class _Body:
         row.append("  " + " " * indent, style=semantic_style("dim"))
         row.append(f"{glyph} ", style=semantic_style(ink))
         candidates = list(metas) or ([meta] if meta else [])
-        widest = max((len(candidate) for candidate in candidates), default=0)
-        label_budget = max(8, self.width - row.cell_len - (widest + 2 if widest else 0))
-        # A LABEL ladder, measured against the budget this method computes.
-        # Callers cannot size one themselves without duplicating the glyph,
-        # indent and meta arithmetic above — and when the caller tried, the
-        # rungs never fired and the label was still cropped to `! not und…`,
-        # which communicates nothing (UX round 1, U5).
+        lead = row.cell_len
+
+        # The label and the meta are negotiated TOGETHER, not one after the
+        # other. Sizing the label against the WIDEST meta rung charged it for a
+        # string it would never be shown beside: at card 65 the widest meta (42
+        # cells) left the label 17, which defeated all three label rungs — the
+        # shortest is 22 — so the whole warning row was dropped at exactly the
+        # width the ladder was built to survive (design round 1, D1). Every step
+        # was individually right and the budget was wrong.
+        #
+        # STRUCTURAL, per the manager's ruling, and not another per-row special
+        # case: this is the same class as U5, which was already patched once at
+        # a call site. Label rungs walk OUTER because the label carries the
+        # fact; meta rungs walk inner and end with `""`, which sheds the meta
+        # entirely rather than losing the row. A row is dropped only when no
+        # label rung fits even with no meta at all — the U5 guarantee that a
+        # fragment like `! not und…` is never painted, preserved exactly.
+        shown, meta_shown = "", ""
         if labels:
-            chosen = _first_that_fits(list(labels), label_budget)
-            if not chosen:
-                # Even the shortest rung does not fit. Drop the row ENTIRELY
-                # rather than paint a fragment: `! not the…` is not a shorter
-                # way of saying the thing, it is a way of saying nothing, and
-                # the explanatory paragraph below carries the whole consequence
-                # at every width (UX round 1, U5).
+            for label_rung in labels:
+                fitted = _fit_pair(label_rung, candidates, self.width, lead)
+                if fitted is not None:
+                    shown, meta_shown = label_rung, fitted
+                    break
+            if not shown:
                 return
-            shown = chosen
         else:
-            shown = truncate_cells(label, label_budget)
+            widest = max((cell_len(c) for c in candidates), default=0)
+            shown = truncate_cells(label, max(8, self.width - lead - (widest + 2 if widest else 0)))
+            meta_shown = _fit_pair(shown, candidates, self.width, lead) or ""
+
         row.append(shown, style=semantic_style("fg"))
-        if candidates and self.width >= _NOTE_MIN:
+        if meta_shown and self.width >= _NOTE_MIN:
             # Pad to the meta COLUMN, never to the card's right edge — see
             # ``_MARK_LABEL_CELL``. One space minimum, so an over-long label
             # still separates from its meta rather than running into it.
             pad = max(1, _MARK_LABEL_CELL - cell_len(shown))
-            budget = self.width - row.cell_len - pad
-            for candidate in candidates:
-                if len(candidate) <= budget:
-                    row.append(" " * pad + candidate, style=semantic_style("dim"))
-                    break
+            if lead + cell_len(shown) + pad + cell_len(meta_shown) > self.width:
+                pad = 1  # the column would push it off; sit it right beside.
+            row.append(" " * pad + meta_shown, style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
@@ -682,6 +708,24 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         body.note("Memory could not be measured on this host.")
 
 
+def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
+    """A count, or :data:`UNKNOWN` when the probe that produced it FAILED.
+
+    The screen's own rule — stated for ``mobile_port`` and for memory — is that
+    absent is not a measured value. These counts broke it: on an unresolvable
+    home the render read ``Agent profiles 0`` / ``Teams 0``, a plausible figure
+    the snapshot cannot support, with the failure disclosed only in a separate
+    block the reader has to cross-reference (QA round 2, Q8).
+
+    Keyed on the probe NAME appearing in ``degraded`` rather than on the value,
+    because 0 is a legitimate answer on a machine that genuinely has no teams —
+    suppressing every zero would trade one lie for another.
+    """
+    if snapshot is not None and any(name == probe for name, _ in snapshot.degraded):
+        return UNKNOWN
+    return str(value)
+
+
 def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) -> None:
     """Profiles, teams, and this session's subagent tree.
 
@@ -699,8 +743,8 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     meta = f"{running} running · depth {depth}" if running else "none running"
     body.header("Agents and subagents", meta, f"{running} running" if running else "none running")
     if agents is not None:
-        body.kv("Agent profiles", str(agents.profiles))
-        body.kv("Teams", str(agents.teams))
+        body.kv("Agent profiles", _counted(agents.profiles, "agents.profiles", snapshot))
+        body.kv("Teams", _counted(agents.teams, "agents.teams", snapshot))
     queued = agents.queued if agents else live.queued
     settled = agents.settled if agents else live.settled
     if running or queued or settled:
@@ -764,9 +808,17 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         row.truncate(body.width, overflow="crop")
         body.lines.append(row)
     if deeper:
+        # BASE indent and NO `└`. The fold was emitted at the cap's child indent
+        # (6 cells) and appended after the whole tree, so it rendered under
+        # whatever the last row happened to be — in the captured frame a DEPTH-0
+        # node — three levels to its right, claiming hidden children that node
+        # does not have (design round 1, D2). `+N deeper` counts nodes below the
+        # cap ANYWHERE in the tree, so it is a section summary, not a child of
+        # any row. A `└` that connects to nothing is worse than no glyph, and
+        # the depth it summarises is named instead of mimed.
         row = Text()
         row.append(
-            "  " + " " * (_MAX_TREE_DEPTH - 1) * _NEST_INDENT + f"└ +{deeper} deeper",
+            f"  +{deeper} deeper (below depth {_MAX_TREE_DEPTH})",
             style=semantic_style("dim"),
         )
         body.lines.append(row)
@@ -858,12 +910,33 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
         body.kv("Skills", str(env.skills))
     # NAMES, never values, lengths, prefixes or hashes. The diagnostic question
     # is "is the key even set?", which a name answers completely.
-    keys = ", ".join(env.credential_keys)
-    body.kv(
-        "Credentials",
-        f"{len(env.credential_keys)} keys",
-        notes=(keys, truncate_cells(keys, 30)) if keys else ("none stored",),
+    names = list(env.credential_keys)
+    keys = ", ".join(names)
+    credentials_failed = snapshot is not None and any(
+        name == "env.credentials" for name, _ in snapshot.degraded
     )
+    if credentials_failed:
+        # `0 keys · none stored` is an AFFIRMATIVE claim the snapshot cannot
+        # support when the probe raised — the reader is told something false and
+        # must cross-reference the degraded block to discover it (QA round 2,
+        # Q8).
+        body.kv("Credentials", UNKNOWN, notes=("could not read",))
+    else:
+        body.kv(
+            "Credentials",
+            f"{len(names)} keys",
+            # COUNT the overflow, never crop it. The middle rung used to be
+            # `truncate_cells(keys, 30)`, which produced `OPENAI_API…` — a crop
+            # wearing a ladder's clothing, and precisely the `8.8k thin`
+            # mid-token defect the spec forbids inheriting (design round 1, D3).
+            # A half-printed key cannot be told from `OPENAI_API_KEY_2` or a
+            # typo, which is the exact ambiguity this row exists to resolve.
+            notes=(
+                (keys, f"{names[0]} +{len(names) - 1} more", f"{len(names)} set")
+                if len(names) > 1
+                else (keys,) if names else ("none stored",)
+            ),
+        )
 
 
 def build_info_report(

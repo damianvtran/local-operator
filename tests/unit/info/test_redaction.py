@@ -323,3 +323,46 @@ def test_both_surfaces_render_one_duration_and_one_memory_spelling() -> None:
     for surface, name in ((screen, "screen"), (export, "export")):
         assert "1h 30m" in surface, name
     assert "181 MB" in screen
+
+
+def test_the_export_survives_a_home_that_cannot_be_resolved() -> None:
+    """F1: `ctrl+r` must not take the app down on the host B1 exists to survive.
+
+    `Path.home()` RAISES `RuntimeError` when the home cannot be resolved — the
+    exact failure class B1's collect-side remediation was built around. The
+    export side never got the same treatment, and `action_copy_report` calls
+    `build_export` SYNCHRONOUSLY from a key action, outside any worker, so
+    `exit_on_error=False` cannot catch it.
+
+    Sharper still: B1's fix is what made this reachable. Before it, the app died
+    at probe time and the user never got a screen to press `ctrl+r` on; after
+    it, the screen opens and re-probes cleanly and then the copy gesture — the
+    one the whole feature is advertised for — kills the session.
+
+    Redaction must still hold: with no home to compare against there is nothing
+    to relativise, and the correct behaviour is to emit the path unchanged
+    rather than to guess. Absolute paths in that state are not a home leak,
+    because the concept of "this user's home" is precisely what is unavailable.
+    """
+    import pathlib
+
+    original = pathlib.Path.home
+
+    def boom() -> Path:
+        raise RuntimeError("no home")
+
+    # Built BEFORE home is broken: the fixture itself composes `$HOME` paths, so
+    # constructing it under the fault would fail in the fixture rather than in
+    # the code under test. The snapshot a real user copies was likewise captured
+    # by a collector that ran earlier, so this is also the honest ordering.
+    snapshot = _snapshot()
+
+    pathlib.Path.home = staticmethod(boom)  # type: ignore[method-assign]
+    try:
+        text = build_export(snapshot)
+    finally:
+        pathlib.Path.home = original  # type: ignore[method-assign]
+
+    # It RETURNED rather than raising, and the document is still a document.
+    assert "## Install" in text
+    assert "local-operator" in text

@@ -871,22 +871,20 @@ def test_the_shadow_label_sheds_whole_phrases_at_narrow_widths() -> None:
             import_path_foreign=True,
         )
     )
-    for width in (45, 55, 65, 83, 120):
+    for width in (38, 45, 55, 65, 70, 83, 120):
         lines = _lines(shadowed, width=width)
         row = next((line for line in lines if line.lstrip().startswith("!")), "")
-        if row:
-            # Whatever survives must be a WHOLE phrase, never a fragment.
-            assert "…" not in row, f"cropped mid-phrase at {width}: {row!r}"
-            assert "not" in row and ("install path" in row or "installed tree" in row), row
-        else:
-            # Below the shortest rung the row is dropped rather than cropped —
-            # `! not the…` says nothing. The consequence must still be on the
-            # screen, which is what makes dropping it acceptable rather than a
-            # silent loss of the warning.
-            # Measured threshold: the row survives at 70 (shorter rung) and 83
-            # (full phrase) and is dropped below 70, where the widest meta's
-            # reservation leaves the label under its shortest rung.
-            assert width < 70, f"the row should still fit at {width}"
+        # D1: the row must be PRESENT at every width down to the narrow floor.
+        # It previously vanished at card 65 — the width this screen is specified
+        # against — because the label was sized against the widest meta rung it
+        # would never be shown beside, leaving amber ink as the only carrier for
+        # the most consequential thing /info reports. `colour is never the only
+        # carrier` is the design rule; under NO_COLOR or a monochrome paste into
+        # an issue, the warning was simply invisible.
+        assert row, f"the warning row vanished at card {width}"
+        # And whatever survives is a WHOLE phrase, never a fragment (U5).
+        assert "…" not in row, f"cropped mid-phrase at {width}: {row!r}"
+        assert "not" in row and ("install path" in row or "installed tree" in row), row
         body = "\n".join(lines)
         assert "Nothing will error" in body, f"the consequence vanished at {width}"
 

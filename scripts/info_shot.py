@@ -1,7 +1,7 @@
 """Capture the real ``/info`` slash path against a SYNTHETIC snapshot.
 
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
-  scenarios: populated | empty | degraded | nested | loading
+  scenarios: populated | empty | degraded | nested | shadowed | loading
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the

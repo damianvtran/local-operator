@@ -52,6 +52,32 @@ from local_operator.info.model import (
 NEVER_EXPORTED = ("control_key", "session_key", "credential values")
 
 
+def _home() -> str:
+    """The home directory, or ``""`` when it cannot be resolved. NEVER raises.
+
+    ``Path.home()`` raises ``RuntimeError`` when the home cannot be resolved,
+    which is the same failure class ``collect.py`` is wrapped against — and the
+    export is reached from ``action_copy_report``, a SYNCHRONOUS key action on
+    the message pump. No worker sits under it, so ``exit_on_error=False``
+    cannot help: an escape here takes the application down.
+
+    That path only became reachable once the collect-side guards landed. Before
+    them the app died at probe time and the user never got a screen to press
+    ``ctrl+r`` on; after them the screen opens and re-probes cleanly, and the
+    copy gesture — the one gesture this feature is advertised for — was the
+    remaining way to kill the session (review round 2, F1).
+
+    An empty string means "there is no home to relativise against", and both
+    callers then return their input unchanged. That is the honest outcome
+    rather than a redaction failure: what would be stripped is *this user's
+    home prefix*, and on this host that concept is exactly what is unavailable.
+    """
+    try:
+        return str(Path.home())
+    except (RuntimeError, OSError):
+        return ""
+
+
 def relativise_home(path: str) -> str:
     """``/Users/x/repos/y`` → ``~/repos/y``. Everything below ``~`` is kept.
 
@@ -61,7 +87,9 @@ def relativise_home(path: str) -> str:
     """
     if not path:
         return path
-    home = str(Path.home())
+    home = _home()
+    if not home:
+        return path
     if path == home:
         return "~"
     prefix = home + os.sep
@@ -70,35 +98,33 @@ def relativise_home(path: str) -> str:
     return path
 
 
-def _scrub(text: str) -> str:
-    """Home-relativise FREE TEXT before it reaches the export.
+def relativise_home_everywhere(text: str) -> str:
+    """Replace every occurrence of the home directory anywhere in ``text``.
 
-    The explicit path fields were always relativised; two channels carrying
-    text this module does not compose were not. MCP failure messages are
-    ``str(exc)`` from a failed connect (typically ``command not found:
-    <absolute path>``) and a ``degraded`` reason is
+    Unlike :func:`relativise_home`, which anchors at the START of a path, this
+    rewrites a home path embedded mid-sentence — which is the shape a failure
+    message has. That is why FREE TEXT is routed through here: MCP failure
+    messages are ``str(exc)`` from a failed connect (typically ``command not
+    found: <absolute path>``) and a ``degraded`` reason is
     ``f"{type(exc).__name__}: {exc}"``, where an ``OSError`` message contains
     the filename it failed on. Both routinely carry ``$HOME`` — exactly the
     disclosure this module's docstring says must never happen, in the artifact
     built to be pasted publicly (review round 1, B2).
 
     Applied per free-text channel AND again over the whole document by
-    :func:`build_export`, so a future field that forgets to call it is still
-    covered.
-    """
-    return relativise_home_everywhere(text)
-
-
-def relativise_home_everywhere(text: str) -> str:
-    """Replace every occurrence of the home directory anywhere in ``text``.
-
-    Unlike :func:`relativise_home`, which anchors at the START of a path, this
-    rewrites a home path embedded mid-sentence — which is the shape a failure
-    message has.
+    :func:`build_export`. That backstop covers the HOME DIRECTORY only — it is
+    a literal replacement of one string. It does NOT cover the other
+    identifying shapes: an absolute socket path outside ``$HOME``
+    (``CMUX_SOCKET_PATH``) or a ``/var/folders/...`` temp path pass through it
+    untouched. A new free-text field therefore still needs its own scrub at
+    source; the document pass is a safety net for the one shape, not a general
+    redaction pass (review round 2, F2).
     """
     if not text:
         return text
-    home = str(Path.home())
+    home = _home()
+    if not home:
+        return text
     return text.replace(home + os.sep, "~" + os.sep).replace(home, "~")
 
 
@@ -293,7 +319,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
     # servers that came up a second later.
     if env.mcp_failures and not env.mcp_settling:
         for name, message in env.mcp_failures:
-            lines.append(f"      {name}: {_scrub(message)}")
+            lines.append(f"      {name}: {relativise_home_everywhere(message)}")
     lines.append(f"  guides            {env.guides}")
     lines.append(f"  skills            {env.skills}")
     # NAMES ONLY, and this is the line the redaction test reads.
@@ -305,7 +331,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if snapshot.degraded:
         lines += ["", "## Could not read"]
         for name, reason in snapshot.degraded:
-            lines.append(f"  {name}: {_scrub(reason)}")
+            lines.append(f"  {name}: {relativise_home_everywhere(reason)}")
 
     body = "\n".join(lines)
     # A FINAL whole-document pass, on top of the per-channel `_scrub` above.

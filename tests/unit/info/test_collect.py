@@ -25,6 +25,7 @@ from local_operator.info import collect as collect_mod
 from local_operator.info.collect import (
     LiveState,
     build_subagent_tree,
+    collect_agents,
     collect_env,
     collect_install,
     collect_live,
@@ -638,3 +639,38 @@ def test_a_degraded_collect_writes_nothing_into_the_current_directory(tmp_path: 
 
     assert snapshot.degraded, "the failure is reported"
     assert list(tmp_path.iterdir()) == [], f"wrote {[p.name for p in tmp_path.iterdir()]}"
+
+
+def test_a_registry_that_returns_zero_on_a_missing_root_is_still_degraded() -> None:
+    """Q8: a count read from an unresolvable config root is not a measurement.
+
+    `AgentRegistry.list_agents` and `CredentialManager.list_credential_keys`
+    both RAISE on the unreadable sentinel and were correctly caught. But
+    `TeamRegistry.list_teams` walks a missing directory and returns 0, so on an
+    unresolvable home `teams` rendered a plausible `0` with NO degraded entry
+    naming it anywhere — the one field on the screen with no honest marker.
+
+    Keyed on the sentinel rather than on the value, because 0 is a legitimate
+    answer on a machine that genuinely has no teams; suppressing every zero
+    would trade one lie for another.
+    """
+    import local_operator.paths as paths
+
+    original = paths.config_dir
+
+    def boom() -> Path:
+        raise RuntimeError("no home")
+
+    paths.config_dir = boom  # type: ignore[assignment]
+    try:
+        errors: list[tuple[str, str]] = []
+        agents = collect_agents(LiveState(), errors)
+    finally:
+        paths.config_dir = original  # type: ignore[assignment]
+
+    named = {name for name, _ in errors}
+    assert "agents.teams" in named, f"teams must be named as unreadable, got {named}"
+    assert "agents.profiles" in named
+    # The value is still the dataclass default; it is the DEGRADED entry that
+    # makes the screen render `—` instead of that default.
+    assert agents.teams == 0
