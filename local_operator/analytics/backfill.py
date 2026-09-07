@@ -64,6 +64,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Callable
 
 from local_operator.analytics.model import condense_label
 from local_operator.analytics.store import SESSION_NAME_RANK_BACKFILL, AnalyticsStore
@@ -131,11 +132,59 @@ def backfill_analytics_session_names(
     # store-maintenance pass — passes the real config dir, where the two roots
     # happen to agree. It fires only when ``config_dir`` is NOT the default,
     # which is exactly what every isolated test, QA run and agent sandbox does,
-    # defeating the isolation those runs exist to guarantee. Deriving the path
-    # here keeps the production resolution byte-identical (``default_db_path``
-    # is itself ``config_dir() / "analytics.db"``) while making an isolated
-    # call actually isolated. Do not "simplify" this back to ``AnalyticsStore()``.
-    store = store if store is not None else AnalyticsStore(config_dir / "analytics.db")
+    # defeating the isolation those runs exist to guarantee.
+    #
+    # THE GUARANTEE THIS BUYS IS THE NARROW ONE: whatever root the caller hands
+    # us is the root we write to. It is NOT "production still lands on
+    # ``default_db_path()``" — that is a property of the CALLER passing
+    # ``paths.config_dir()``, not of this function, and it was briefly false:
+    # two registry construction sites hardcoded ``Path.home() / ".local-operator"``
+    # instead of the resolver, so with ``LOCAL_OPERATOR_CONFIG_DIR`` set an exec
+    # run arrived here with the home root while ``default_db_path()`` resolved
+    # to the override. Those two are fixed in this same commit
+    # (``exec_worker._default_session_factory``,
+    # ``exec_mode.resolve_hosting_model_dry``), but state the narrow invariant
+    # anyway: it is the one that stays true whatever a future caller passes.
+    #
+    # Do not "simplify" this back to ``AnalyticsStore()``.
+    db_path = config_dir / "analytics.db"
+    if store is None and not db_path.exists():
+        # No ledger, nothing to name. Returning before constructing the store
+        # keeps the sweep free of side effects on a root that has none: opening
+        # one CREATES ``analytics.db`` plus its -wal/-shm siblings, and this
+        # pass runs against whatever config dir a caller hands it. A read-only
+        # maintenance sweep must not be the thing that materialises a ledger.
+        return 0
+    owned = store is None
+    store = store if store is not None else AnalyticsStore(db_path)
+    try:
+        return _name_pending_sessions(store, config_dir, limit=limit, session_name=session_name)
+    finally:
+        # Only a store this call opened. A caller-supplied store outlives the
+        # call by construction (tests reuse theirs to assert on the result), and
+        # SQLite forbids closing a connection from another thread — so closing
+        # someone else's handle is a bug, not hygiene.
+        if owned:
+            store.close()
+
+
+def _name_pending_sessions(
+    store: AnalyticsStore,
+    config_dir: Path,
+    *,
+    limit: int,
+    session_name: Callable[[Path], str],
+) -> int:
+    """The sweep itself, against an already-resolved store.
+
+    Split from the public entry point so that one can own the store's lifetime
+    in a single ``finally``: the body below returns early from four places, and
+    wrapping all of it inline would bury the pass inside a ``try`` whose reader
+    has to check every branch to see what the cleanup covers.
+
+    ``session_name`` is threaded in rather than imported here for the reason
+    given at the call site — the ``resume`` import must stay inside the call.
+    """
     try:
         pending = store.sessions_missing_names()
     except Exception:  # noqa: BLE001 — an unreadable ledger is a no-op sweep
