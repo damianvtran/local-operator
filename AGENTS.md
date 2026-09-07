@@ -1223,8 +1223,25 @@ a bound because it went red is how a guard stops guarding.
 
 ### Prove the test can still fail
 
-A guard that cannot go red is worse than no guard, because it is believed. When
-you change how a test detects a regression, reintroduce the regression and
+A guard that cannot go red is worse than no guard, because it is believed. That
+holds for every kind of test, not just the timing ones this section is about,
+and it fails in more ways than a widened threshold. Four instances landed in a
+single session: a test that asserted an assumption instead of behaviour; a test
+named for a mechanism that still passed with the mechanism stubbed out; a QA
+cell that passed *vacuously* because the thing it checked was absent rather
+than correct (`cards.get(...) != "interrupted"` is true when there is no card);
+and an entire suite of 36 that stayed green when the fix under it was reverted,
+because the one test reaching that code stubbed its collaborators with
+`lambda *a: object()` and discarded the value the fix changed. Each looked like
+coverage on the checks list.
+
+So whenever a test is the evidence for a claim — a review round, a QA cell, a
+PR's "this is fixed" — **make it fail on purpose before you rely on it**: run
+it against the unfixed tree, or revert the fix in place, or mutate the
+mechanism it names. If it passes either way it is decoration, and the honest
+next step is to fix the test or drop the claim.
+
+When you change how a test detects a regression, reintroduce the regression and
 watch it fail:
 
 ```sh
