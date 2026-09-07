@@ -796,6 +796,48 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("notify when unfocused", "never notify"),
     ),
     Setting(
+        # The observer path (a background session finishing while you are
+        # looking at a DIFFERENT one) widens where a session name appears: the
+        # toast is about a conversation the terminal is not showing, so its
+        # name is the only thing that identifies it, and macOS repeats banner
+        # titles on the lock screen. Session names are model-written and can
+        # quote the work, so this is the opt-out for anyone who does not want
+        # that on a screen other people can see. Default TRUE because it
+        # matches what every existing notification already does; off falls back
+        # to the brand name, which still says a session finished.
+        key="display.notification_session_name",
+        path=("display.notification_session_name",),
+        section="appearance",
+        # Fits the row's label column at 100 columns. "Name sessions in
+        # notifications" elided to "…notificatio…", losing the one word that
+        # says what the row governs.
+        label="Notification session names",
+        kind=Kind.BOOL,
+        default=True,
+        # Leads with the CONSEQUENCE, not the mechanism: the decision being
+        # asked for is whether a model-written session name appears on a lock
+        # screen, which is the one fact that changes someone's answer. The
+        # neighbours ("Fires only while the terminal is unfocused.") are worded
+        # the same way (design round 1, D6).
+        help="A session's name appears on banners, including the lock screen.",
+        # `off` no longer means "app name only" on every route — a background
+        # session with no stored title is titled "A session finished" — so the
+        # label names what the user gets rather than a fallback that is now one
+        # of two (design round 1, D7, folded into D2).
+        choices=_bool_choices("name the session", "keep names off banners"),
+        # Without this the row renders `on` while `display.notifications` is
+        # off, describing a banner that cannot fire — the "page states
+        # something untrue about its own effect" class (#431). The detail line
+        # now reads `inert: Desktop notifications is off` through the mechanism
+        # four `session.cleanup.*` rows already use (design round 1, D4).
+        gated_by="display.notifications",
+        # Without this the row renders `on` while `display.notifications` is
+        # off, describing a banner that cannot fire — the "page states
+        # something untrue about its own effect" class (#431). The detail line
+        # now reads `inert: Desktop notifications is off` through the mechanism
+        # four `session.cleanup.*` rows already use (design round 1, D4).
+    ),
+    Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`
         # cycles freely from it and never writes it back (the same split as
         # `tool_approval_mode` vs `/approvals`). A hard override would make
