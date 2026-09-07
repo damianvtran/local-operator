@@ -1967,45 +1967,20 @@ def sessions_command(args: argparse.Namespace) -> int:
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
 
-    from local_operator.mobile.resources import session_resource_usage
-    from local_operator.session.runtime import registry
+    # The row shape lives in ``info.collect`` and is shared with ``/info``,
+    # which needs the same "which sessions exist and what do they cost" answer
+    # plus an ``is_self`` mark and roll-up counters. It was EXTRACTED rather
+    # than copied because two of the details here are subtle enough that a
+    # second implementation would have drifted on them: the ``getattr``
+    # defaulting that keeps a record written by an OLDER runtime listing rather
+    # than raising mid-table, and ``state``'s meaning (``stale`` is a record the
+    # scan just deleted, not an idle session). The ``--json`` key order is part
+    # of the CLI's published contract, so ``session_rows`` pins it explicitly
+    # rather than deriving it from the dataclass — which would also have leaked
+    # ``is_self``, a field this command never had.
+    from local_operator.info.collect import session_rows
 
-    scanned = registry.scan(config_dir())
-    now = time.time()
-    live_pids = [rec.pid for rec, state in scanned if state == "live"]
-    usage = session_resource_usage(live_pids)
-
-    rows = []
-    for rec, state in scanned:
-        use = usage.get(rec.pid)
-        rows.append(
-            {
-                "state": state,
-                "pid": rec.pid,
-                "kind": rec.kind,
-                "conversation_name": rec.conversation_name,
-                "session_id": rec.session_id,
-                "model_label": rec.model_label,
-                "cwd": rec.cwd,
-                "rss_bytes": use.rss_bytes if use else None,
-                "footprint_bytes": use.footprint_bytes if use else None,
-                "uptime_s": max(0.0, now - rec.started_at),
-                "heartbeat_age_s": max(0.0, now - rec.heartbeat_at),
-                # Live state from the record. Defaulted through getattr so a
-                # record written by an OLDER runtime (which has no such fields)
-                # lists cleanly rather than raising mid-table.
-                "pending": getattr(rec, "pending", None),
-                "busy": bool(getattr(rec, "busy", False)),
-                "detached": bool(getattr(rec, "detached", False)),
-                # Which build each runtime is running, for diagnosing skew
-                # across a host that replaces its install several times a day.
-                # Same getattr defaulting as the live-state fields above, and
-                # deliberately JSON-only: the fixed-width table is already
-                # eight columns wide.
-                "version": getattr(rec, "version", "") or "",
-                "source_ref": getattr(rec, "source_ref", "") or "",
-            }
-        )
+    rows = session_rows(config_dir())
 
     if args.json:
         print(_json.dumps(rows, indent=2))

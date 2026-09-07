@@ -308,10 +308,12 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
     from local_operator.herdr import HerdrReporter
+    from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.skills.discovery import Skill
+    from local_operator.tui.widgets.info_panel import InfoScreen
     from local_operator.tui.widgets.session_panel import (
         SessionDiagnostics,
         SessionScreen,
@@ -18946,6 +18948,8 @@ class OperatorApp(App[None]):
             self._cmd_analytics(arg, notice)
         elif command == "/session":
             self._cmd_session(arg, notice)
+        elif command == "/info":
+            self._cmd_info(arg, notice)
         elif command == "/context":
             block = self._context_block()
             if block is not None:
@@ -22977,6 +22981,97 @@ class OperatorApp(App[None]):
             screen.invalidate()
             return
         screen.set_report(report)
+
+    def _cmd_info(self, arg: str, notice: NoticeFn) -> None:
+        """``/info`` — this install, this machine's sessions, and the subagent tree.
+
+        Two-phase, and the split is the whole design. The LIVE state (the
+        subagent graph, job capacity, MCP startup, approval mode, theme,
+        terminal size) is captured HERE, synchronously, before anything yields:
+        it is all in-memory reads, and a ``/new`` or ``/resume`` arriving during
+        the disk probe must not put a brand-new subagent tree under a header
+        describing the old session — the rule ``SessionDiagnostics.capture``
+        states at ``session_panel.py``. Everything blocking then runs in a
+        worker, because the sessions block alone measured **879.5 ms** on this
+        host (``session_resource_usage`` shells ``top -l1`` for the whole system
+        on macOS), which is ~26 dropped frames at 30 fps.
+
+        The screen is pushed BEFORE the probe starts, like ``/session`` and
+        unlike ``/analytics``: it is useful from frame one (version, session id,
+        model and the tree are all in the live capture) and it owns a visible,
+        cancellable surface so a late result updates it rather than pushing over
+        whatever the user did next.
+        """
+        from local_operator.tui.widgets.info_panel import InfoScreen
+
+        if arg.strip():
+            # Nothing ran, so the boot composition must survive it — the same
+            # rejection rule ``_cmd_analytics`` and ``_cmd_session`` follow.
+            self._system_notice("/info takes no arguments; it reports this install", "warning")
+            return
+        live = self._capture_info_live()
+        screen = InfoScreen(live)
+        self.push_screen(screen)
+        self.run_worker(
+            self._open_info_worker(screen, live),
+            thread=False,
+            group="info",
+            exclusive=True,
+        )
+
+    def _capture_info_live(self) -> "LiveState":
+        """Snapshot in-memory state for ``/info``. Safe on the paint path.
+
+        App state (approval mode, theme, terminal size, the discovered-skill
+        count) is attached at the call site rather than read inside the
+        collector, exactly as ``spend_is_floor`` is for ``/session``: the
+        collector describes the SESSION, and these belong to the app around it.
+        """
+        from local_operator.info.collect import collect_live
+        from local_operator.tui import theme as theme_mod
+
+        try:
+            skills = len(self._discovered_skills())
+        except Exception:  # noqa: BLE001 — a diagnostic never fails on a count
+            skills = 0
+        return collect_live(
+            self._session,
+            approve_all=self._approve_all,
+            theme=theme_mod.current_theme(),
+            size=(self.size.width, self.size.height),
+            skills=skills,
+        )
+
+    async def _open_info_worker(self, screen: "InfoScreen", live: "LiveState") -> None:
+        """Run every blocking probe off the loop, then publish onto the screen."""
+        from local_operator.info.collect import collect_snapshot
+
+        snapshot = await asyncio.to_thread(collect_snapshot, live)
+        # ``_open_session_report_worker``'s guard verbatim: a result that
+        # arrives after the user dismissed the screen, or after another modal
+        # replaced it, must be dropped rather than painted somewhere new.
+        if screen.presentation_cancelled or screen not in self.screen_stack:
+            return
+        screen.set_snapshot(snapshot)
+
+    def refresh_info_screen(self, screen: "InfoScreen") -> None:
+        """Re-run the probes for an open ``/info`` (its ``r`` binding).
+
+        Manual only, never a timer: a ``top -l1`` fork per second is a real cost
+        on the machine being diagnosed, and this screen is a snapshot rather
+        than a monitor. The live half is re-captured too, so ``r`` after
+        launching a subagent shows it.
+        """
+        if screen.presentation_cancelled or screen not in self.screen_stack:
+            return
+        live = self._capture_info_live()
+        screen.live = live
+        self.run_worker(
+            self._open_info_worker(screen, live),
+            thread=False,
+            group="info",
+            exclusive=True,
+        )
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:
         """``/usage [provider]`` — fetch live quota for a provider (or all)."""

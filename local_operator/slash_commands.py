@@ -296,6 +296,22 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Current-session usage, cost and request diagnostics",
         desktop_destination="session.diagnostics",
     ),
+    # Beside `/session` because it is the same family — a read-only diagnostic
+    # screen with no owner execution — but a WIDER scope: `/session` describes
+    # one conversation's spend, `/info` describes the INSTALL and every runtime
+    # on the machine. It is the screen a user is asked to paste into an issue,
+    # which is why it takes no argument at all: there is one answer, and making
+    # someone name it would be a gate in front of a command that has one.
+    #
+    # No `desktop_destination`: every field it renders is a fact about THIS
+    # process and THIS host (install prefix, pids, RSS, the in-memory subagent
+    # graph), so a desktop surface pointed at it would describe the machine the
+    # host runs on rather than the one the user is asking about. Like `/context`
+    # it needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    SlashCommand(
+        "info",
+        "Install, version, sessions and subagents on this machine",
+    ),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
     # OFFER — a bare `/analytics` opens the usage view rather than doing
