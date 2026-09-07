@@ -445,6 +445,8 @@ async def engage_runtime(
     *,
     config_dir: Path,
     deadline_s: float = DEFAULT_DEADLINE_S,
+    preempt: asyncio.Event | None = None,
+    preempt_budget_s: float = 0.0,
 ) -> EngageOutcome:
     """Ensure a runtime exists for ``session_id`` and give it ``work``.
 
@@ -456,6 +458,28 @@ async def engage_runtime(
     as every candidate it is allowed to start has died. Every other failure (a
     refused op, a dead socket) surfaces as the underlying error from the
     delivery attempt, since those are the caller's to report.
+
+    PREEMPTION (``preempt`` + ``preempt_budget_s``, set together or not at
+    all). An engage started on behalf of nobody — ``RemoteSession``'s
+    background bind — runs while holding a lock that a *foreground* caller
+    must queue on, so its generous ``deadline_s`` is only defensible while
+    nobody is waiting. When the caller passes an event, this loop treats it
+    the way ``RemoteSession._await_frontend_preemptible`` treats the same
+    signal: on the first pass that observes it set, the deadline is cut to
+    ``now + preempt_budget_s``.
+
+    ``min`` on ABSOLUTE deadlines, so a preemption arriving near the end can
+    only shorten the wait and never extend it. The cut is latched on first
+    observation rather than recomputed per pass, so repeated passes cannot
+    keep pushing the shortened deadline forward while the event stays set.
+
+    Giving up this way is not the same as discarding the work. A candidate
+    this engage spawned keeps constructing and publishes its record as usual;
+    the foreground caller's own engage finds it. What is surrendered is the
+    *waiting*, not the runtime — the same trade the sync-wait yield makes, and
+    the reason this is a shortened deadline rather than a cancellation: the
+    existing expiry path unlinks the capture file and reports the child's own
+    reason, where a cancelled task would leak that tempfile and lose it.
     """
     from local_operator.mobile.attach_client import find_owner_record
 
@@ -465,6 +489,20 @@ async def engage_runtime(
         work = type(work)(**{**_fields(work), "command_id": new_command_id()})
 
     deadline = time.monotonic() + deadline_s
+    # Latched on the first pass that OBSERVES the preemption, not recomputed
+    # per pass: re-deriving `now + budget` on every iteration while the event
+    # stays set would walk the shortened deadline forward indefinitely, which
+    # is the monotonicity bug `min` on absolute deadlines exists to prevent.
+    preempted = False
+
+    def _deadline() -> float:
+        """``deadline``, cut once to the yield budget when preemption fires."""
+        nonlocal deadline, preempted
+        if not preempted and preempt is not None and preempt.is_set():
+            preempted = True
+            deadline = min(deadline, time.monotonic() + preempt_budget_s)
+        return deadline
+
     # The open-ended wait's exponential state. ``delay`` is what we actually
     # sleep on a given pass, which the dense regime overrides without
     # disturbing ``backoff``.
@@ -496,7 +534,7 @@ async def engage_runtime(
     # A wake engage is NOT speculative — the session already exists on disk.
     defer = isinstance(work, WarmErrand)
 
-    while time.monotonic() < deadline:
+    while time.monotonic() < _deadline():
         record, _owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
         if record is not None:
             try:
@@ -636,7 +674,10 @@ async def engage_runtime(
         delay, backoff = _poll_delay(
             backoff, None if constructing_since is None else now - constructing_since
         )
-        await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+        # Re-read through `_deadline()` so a preemption that arrives while
+        # this loop is between polls shortens the very next sleep, rather than
+        # only being noticed at the top of the following pass.
+        await asyncio.sleep(min(delay, max(0.0, _deadline() - time.monotonic())))
 
     if capture is not None:
         capture.unlink(missing_ok=True)

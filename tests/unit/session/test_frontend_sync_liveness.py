@@ -920,6 +920,249 @@ def _live_client() -> AttachClient:
     return client
 
 
-async def _no_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):
+async def _no_engage(
+    session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+):
     """A record already exists; engaging must not spawn a second runtime."""
     return None
+
+
+# --------------------------------------------------------------------------
+# 6. The yield covers BOTH places a background bind spends time
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_foreground_bind_preempts_a_background_engage(tmp_path: Path, monkeypatch) -> None:
+    """The ENGAGE yields to a foreground arrival, not just the sync wait.
+
+    THE DEFECT. ``preempt`` used to be derived AFTER ``engage_runtime``
+    returned, so the entire spawn/discovery phase ran inside ``_bind_lock``
+    with nothing reading ``_foreground_waiting``. A foreground caller arriving
+    during that phase published on a counter nobody was watching and inherited
+    ``launch.DEFAULT_DEADLINE_S`` (30 s) instead of the advertised
+    ``_BACKGROUND_YIELD_BUDGET_S`` — measured at 15.83 s in review round 2
+    (MAJOR-1) against an 8 s stalled engage.
+
+    Structural, and red BY HANGING rather than by a number: the stub engage
+    below returns ONLY when it observes its own preemption, so under the defect
+    (no event passed, or the event passed too late to be read) it never returns
+    and the foreground caller never acquires the lock. Nothing here asserts an
+    elapsed time, and the budget is deliberately absurd so a regression cannot
+    pass by the clock running out on a fast box.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        await _record(tmp_path)
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        # An absurd background envelope: nothing here may pass because a clock
+        # expired. Only the preemption can end the engage.
+        monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BACKSTOP_S", 3600.0)
+        monkeypatch.setattr(remote_module, "_BACKGROUND_BIND_BUDGET_S", 3600.0)
+        monkeypatch.setattr(remote_module, "_BACKGROUND_YIELD_BUDGET_S", 30.0)
+
+        order: list[str] = []
+        engage_running = asyncio.Event()
+
+        async def stalling_engage(
+            session_id,
+            cwd,
+            work,
+            *,
+            config_dir,
+            deadline_s=30.0,
+            preempt=None,
+            preempt_budget_s=0.0,
+        ):
+            if preempt is None:
+                # The FOREGROUND caller's own engage, once it holds the lock.
+                return None
+            # The BACKGROUND engage: a spawn/discovery phase that only ends
+            # when it learns someone is waiting. Waiting on the event rather
+            # than on a clock is what makes this independent of box speed.
+            order.append("engage-start")
+            engage_running.set()
+            await preempt.wait()
+            order.append("engage-yielded")
+            raise TimeoutError("engage preempted")
+
+        monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", stalling_engage)
+
+        async def bind(record, *, sync_timeout, preempt=None):
+            order.append("foreground-bound")
+            viewer._ready_for_events = True
+            viewer._client = _live_client()
+
+        monkeypatch.setattr(viewer, "_bind_to", bind)
+
+        background = asyncio.ensure_future(viewer._ensure_bound(foreground=False))
+        await asyncio.wait_for(engage_running.wait(), timeout=10.0)
+        assert viewer._bind_lock.locked(), "the background engage must hold the lock"
+
+        # THE ASSERTION: this completes. Under the defect the background engage
+        # is parked on an event nothing reads, so the lock is never released.
+        await asyncio.wait_for(viewer._ensure_bound(), timeout=30.0)
+
+        # A preempted engage still REPORTS, and as a ConnectionError: a bare
+        # TimeoutError escaping _ensure_bound would bypass every surface that
+        # catches ConnectionError to render a sentence.
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(background, timeout=10.0)
+
+        assert order == ["engage-start", "engage-yielded", "foreground-bound"], (
+            f"observed {order}: the foreground arrival must cut the background "
+            "engage short and then bind itself"
+        )
+        assert not viewer.is_cold, "the foreground caller must end up bound"
+        assert viewer._foreground_waiting == 0, "the waiter count must not leak"
+        assert not viewer._foreground_arrived.is_set(), "the preemption edge must reset"
+        viewer._client = None
+        await viewer.dispose()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_engage_preemption_deadline_can_only_shorten_the_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A preemption that fires late must not EXTEND the engage's deadline.
+
+    The same monotonicity property ``_effective_deadline`` has, at the engage.
+    ``min`` on two ABSOLUTE deadlines, latched on first observation: recomputing
+    ``now + budget`` on every pass while the event stays set would walk the
+    shortened deadline forward for as long as the caller kept waiting, which
+    turns a yield into an extension.
+
+    Structural: the original deadline is already shorter than the yield budget,
+    so a correct implementation ignores the preemption entirely and expires on
+    its own clock. No ceiling is asserted.
+    """
+    from local_operator.session.runtime import launch as launch_mod
+    from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+    class _AliveCandidate:
+        """A candidate that never dies and never publishes a record.
+
+        So the loop can only ever leave through its DEADLINE. Spawning a real
+        runtime here would leave a process behind for as long as the mutation
+        under test keeps the loop alive, which is precisely the case this test
+        is about.
+        """
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(launch_mod, "_spawn_runtime", lambda *a, **k: _AliveCandidate())
+
+    preempt = asyncio.Event()
+    preempt.set()
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            "does-not-exist",
+            "/tmp",
+            WarmErrand(),
+            config_dir=tmp_path,
+            deadline_s=0.1,
+            preempt=preempt,
+            # An absurd budget: if the preemption REPLACED the deadline instead
+            # of taking `min` with it, this would wait 600 s and the test would
+            # hang rather than report a tuned number.
+            preempt_budget_s=600.0,
+        )
+    elapsed = time.monotonic() - started
+    # Not a calibrated ceiling. The original deadline is 0.1 s and the budget
+    # is 600 s; anything under a second proves `min` was taken rather than the
+    # budget adopted, with four orders of magnitude of headroom.
+    assert elapsed < 60.0, (
+        f"the engage took {elapsed:.2f}s against a 0.1s deadline: a late "
+        "preemption extended the wait instead of shortening it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_raw_bind_lock_acquisition_announces_itself(tmp_path: Path, monkeypatch) -> None:
+    """Every FOREGROUND acquisition of ``_bind_lock`` publishes a waiter.
+
+    THE DEFECT (review round 2, MAJOR-2). ``set_working_directory`` and
+    ``attach_existing`` took ``_bind_lock`` raw. ``set_working_directory``
+    samples ``_engage_in_flight()`` first and joins through ``_ensure_bound``
+    when it is True — but that sample is a HINT: a background bind taking the
+    lock in the window between the sample and the acquisition skips the join,
+    as does ``_can_go_cold`` being False. ``attach_existing`` never sampled at
+    all and is reached from a waiting HTTP request. Both then inherited the
+    full background envelope; the reviewer measured 120.03 s.
+
+    Structural and red BY HANGING: the background holder below releases only
+    when it observes ``_foreground_arrived``, so an acquisition that publishes
+    nothing waits forever. Both entry points are driven as themselves, through
+    the REAL methods rather than a stub, so the guard fails if either one is
+    changed back to a raw ``async with self._bind_lock``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        record = await _record(tmp_path)
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _no_engage)
+
+        async def hold_until_someone_waits() -> None:
+            """Stand in for a background bind holding the lock.
+
+            Taken RAW on purpose: this is the holder, not a caller, and it
+            must not itself publish a waiter.
+            """
+            async with viewer._bind_lock:
+                held.set()
+                await viewer._foreground_arrived.wait()
+
+        for entry_point in ("attach_existing", "set_working_directory"):
+            held = asyncio.Event()
+            viewer._foreground_arrived.clear()
+            viewer._foreground_waiting = 0
+            holder = asyncio.ensure_future(hold_until_someone_waits())
+            await asyncio.wait_for(held.wait(), timeout=10.0)
+            assert viewer._bind_lock.locked()
+
+            if entry_point == "attach_existing":
+
+                async def bind(record_, *, sync_timeout, preempt=None):
+                    viewer._ready_for_events = True
+                    viewer._client = _live_client()
+
+                monkeypatch.setattr(viewer, "_bind_to", bind)
+                # THE ASSERTION: this completes. Under a raw acquire the
+                # holder above never learns anyone is waiting and this hangs.
+                assert await asyncio.wait_for(viewer.attach_existing(), timeout=30.0)
+                viewer._client = None
+                viewer._ready_for_events = False
+            else:
+                # `_can_go_cold` False is one of the two orderings that skip
+                # the `_engage_in_flight()` join entirely, so it exercises the
+                # window rather than the happy path that joins.
+                monkeypatch.setattr(viewer, "_can_go_cold", False)
+                target = tmp_path / "moved"
+                target.mkdir(exist_ok=True)
+                await asyncio.wait_for(viewer.set_working_directory(str(target)), timeout=30.0)
+                assert viewer._cwd == str(target)
+
+            await asyncio.wait_for(holder, timeout=10.0)
+            assert viewer._foreground_waiting == 0, "the waiter count must not leak"
+            assert not viewer._foreground_arrived.is_set(), "the edge must reset"
+
+        assert record is not None
+        await viewer.dispose()
+    finally:
+        server.close()

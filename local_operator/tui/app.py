@@ -3731,7 +3731,18 @@ class OperatorApp(App[None]):
             if session.is_cold:
                 if speculative:
                     raise RuntimeError("The prepared owner is no longer ready")
-                await asyncio.wait_for(session._ensure_bound(), 15)
+                # NO outer wall clock. `_ensure_bound` is already bounded by
+                # its own foreground envelope (`_FOREGROUND_BIND_BUDGET_S`,
+                # 15 s) and reports failure as a `ConnectionError` carrying a
+                # sentence worth showing. An outer `wait_for(..., 15)` on the
+                # same number could only fire on the same tick the inner
+                # envelope would have — replacing that sentence with a bare
+                # `TimeoutError` whose `str()` is the empty string, so the
+                # sidebar's "Could not open conversation: {error}" rendered
+                # with nothing after the colon. It was also the last bare wall
+                # clock left on this seam, which is the shape this change
+                # exists to replace (review round 2, MINOR-1).
+                await session._ensure_bound()
             if session.is_cold:
                 raise RuntimeError("The conversation has not finished connecting")
             await session.ensure_display_current()

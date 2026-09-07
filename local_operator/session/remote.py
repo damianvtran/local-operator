@@ -22,7 +22,8 @@ import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
 
@@ -218,9 +219,25 @@ _BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
 #:
 #: The mechanism is PREEMPTION, not a second timeout. A foreground arrival
 #: publishes itself on ``_foreground_waiting`` and the in-flight background
-#: bind, which polls it at every point it is about to spend more time, cuts
-#: its remaining budget to this value and finishes or fails inside it. Two
-#: reasons it is preemption rather than ``wait_for(lock.acquire())``:
+#: bind cuts its remaining budget to this value and finishes or fails inside
+#: it.
+#:
+#: WHAT THE YIELD COVERS. Both places a background bind can spend real time
+#: while holding the lock, which is the whole of it:
+#:
+#: * the ENGAGE (``engage_runtime``, bounded by its own
+#:   ``DEFAULT_DEADLINE_S = 30 s``), which takes this event and
+#:   ``_BACKGROUND_YIELD_BUDGET_S`` as its own preemption pair; and
+#: * the SYNC WAIT and its retry backoff, through ``_effective_deadline``.
+#:
+#: The engage half was added in review round 2 (MAJOR-1): before it, ``preempt``
+#: was not computed until after the engage had returned, so a foreground caller
+#: arriving during the spawn/discovery phase published on a counter nothing was
+#: reading yet and inherited ``DEFAULT_DEADLINE_S`` — measured at 15.83 s
+#: against an 8 s stalled engage. The advertised bound and the real one now
+#: agree; do not narrow one without narrowing the other.
+#:
+#: Two reasons it is preemption rather than ``wait_for(lock.acquire())``:
 #:
 #: * Bounding acquisition alone leaves the foreground caller giving up on the
 #:   lock and then having nothing to do — it cannot dial itself without
@@ -1243,7 +1260,13 @@ class RemoteSession:
         """
         from local_operator.mobile.attach_client import find_owner_record
 
-        async with self._bind_lock:
+        # FOREGROUND: an HTTP request is waiting on this acquisition, so it
+        # announces itself rather than silently inheriting whatever envelope a
+        # background bind is spending. Taking the lock raw made this path wait
+        # the full background envelope — 120.03 s measured in review round 2
+        # (MAJOR-2) — which is the same wait the sync_timeout below already
+        # refuses to take.
+        async with self._bind_lock_for(foreground=True):
             if self._disposed or not self.is_cold:
                 return not self.is_cold
             record, _ = await asyncio.to_thread(
@@ -1479,7 +1502,16 @@ class RemoteSession:
                     # path. Deliberately narrower than the rollback below —
                     # ``Exception`` here so a cancellation still unwinds.
                     logger.debug("joining the in-flight engage before a move failed", exc_info=True)
-            async with self._bind_lock:
+            # FOREGROUND, and not merely because a user typed `/move`: the
+            # `_engage_in_flight()` join above is a HINT, not a guarantee. It
+            # samples the lock at one instant, so a background bind taking it
+            # in the window between that sample and this acquisition skips the
+            # join entirely — as does `_can_go_cold` being False, which makes
+            # `_engage_in_flight()` return False by definition. Both left this
+            # acquisition unannounced and waiting out the background envelope
+            # (120.03 s, review round 2 MAJOR-2). Publishing here closes the
+            # race by construction rather than narrowing the window.
+            async with self._bind_lock_for(foreground=True):
                 return await self._apply_working_directory(cwd, previous=previous)
         except BaseException:
             # ONE rollback for every non-return exit, here rather than at each
@@ -1650,16 +1682,40 @@ class RemoteSession:
         # initial attachment merely because its connected socket is not ready.
         if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
             return
-        # Published before the acquire and cleared in `finally`, so the counter
-        # covers exactly the window in which this caller can be blocked by
-        # someone else's bind. Incrementing after acquiring would signal only
-        # once there is nothing left to preempt.
+        async with self._bind_lock_for(foreground=foreground):
+            await self._bind_under_lock(foreground=foreground)
+
+    @asynccontextmanager
+    async def _bind_lock_for(self, *, foreground: bool) -> AsyncIterator[None]:
+        """Hold ``_bind_lock``, announcing a FOREGROUND caller before acquiring.
+
+        THE ONLY sanctioned way to take ``_bind_lock``. A raw ``async with
+        self._bind_lock`` opts out of the preemption mechanism entirely: the
+        holder never learns that anyone is waiting, so the waiter inherits the
+        holder's full envelope. Review round 2 (MAJOR-2) measured 120.03 s that
+        way on ``set_working_directory``, whose ``_engage_in_flight()`` sample
+        is a *hint* — it can be False because the background bind has not taken
+        the lock yet, or because ``_can_go_cold`` is False — and on
+        ``attach_existing``, which is reached from a waiting HTTP request.
+        Publishing inside the manager removes that sample-then-acquire race by
+        construction rather than narrowing it.
+
+        The claim is published BEFORE the acquire and cleared in a ``finally``,
+        so the counter covers exactly the window in which this caller can be
+        blocked by someone else's bind. Incrementing after acquiring would
+        signal only once there is nothing left to preempt.
+
+        ``foreground=False`` takes the lock and publishes nothing — a
+        background caller is the thing being preempted, not a thing to preempt
+        for. It goes through the same manager so there is one acquisition site
+        to reason about, not two shapes.
+        """
         if foreground:
             self._foreground_waiting += 1
             self._foreground_arrived.set()
         try:
             async with self._bind_lock:
-                await self._bind_under_lock(foreground=foreground)
+                yield
         finally:
             if foreground:
                 self._foreground_waiting -= 1
@@ -1686,13 +1742,38 @@ class RemoteSession:
             engage_runtime,
         )
 
+        # Computed BEFORE the engage, not after it. A background bind holds
+        # the lock every foreground caller must queue on, so its generous
+        # budget is only defensible while nobody is waiting — and the engage is
+        # the single largest thing it spends that budget on. Deriving `preempt`
+        # after the engage returned left the whole spawn/discovery phase
+        # structurally un-preemptible (review round 2, MAJOR-1). A foreground
+        # bind is never preempted (it IS the thing being protected) and passes
+        # None.
+        preempt = None if foreground else self._foreground_arrived
+
         try:
             await engage_runtime(
                 self._session_id,
                 self._cwd,
                 WarmErrand(),
                 config_dir=self._config_dir,
+                # The engage yields TIME, not the runtime: a candidate it
+                # spawned keeps constructing and the foreground caller's own
+                # engage finds it. See `engage_runtime`'s docstring for why a
+                # shortened deadline rather than a cancellation.
+                preempt=preempt,
+                preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
             )
+        except TimeoutError as error:
+            # The engage ran out of deadline — either its own 30 s or, when a
+            # foreground caller arrived, the yield budget above. Both mean the
+            # same thing to this caller (no runtime was reached in the time
+            # available), and `_ensure_bound` is documented to fail with
+            # `ConnectionError`, so a bare `TimeoutError` escaping here would
+            # reach surfaces that only catch the latter.
+            logger.debug("engage timed out for %s: %s", self._session_id, error)
+            raise ConnectionError(self._unavailable_reason()) from error
         except RuntimeStartupError as error:
             # engage_runtime now fails FAST once no candidate can start,
             # carrying the child's own cause. Re-raised as ConnectionError
@@ -1721,11 +1802,6 @@ class RemoteSession:
         sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
         budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
         deadline = time.monotonic() + budget
-        # A BACKGROUND bind holds the lock every foreground caller must queue
-        # on, so its generous budget is only defensible while nobody is
-        # waiting. This event is how it learns otherwise; a foreground bind is
-        # never preempted (it IS the thing being protected) and passes None.
-        preempt = None if foreground else self._foreground_arrived
 
         def _effective_deadline() -> float:
             """``deadline``, cut to the yield budget once someone is waiting.

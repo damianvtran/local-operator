@@ -110,7 +110,9 @@ def _stub_engage(monkeypatch: pytest.MonkeyPatch, server: RuntimeServer) -> list
     """Stand in for the runtime spawn: publish a live record for the session."""
     engagements: list[int] = []
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         engagements.append(1)
         # The measured engage takes 1.1–2.8 s. The race IS the test: at 0.2 s
         # the mount engage (#622) usually won against the paste+Enter, and
