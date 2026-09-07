@@ -860,8 +860,9 @@ about it announces the mismatch.** A remediation is where adjacency is created,
 and the delta is the only view in which the new adjacency is visible at all.
 
 Two practical corollaries. Do not re-open dimensions the delta cannot have
-touched — a backend-only remediation keeps a design round valid, and re-running
-it spends a reviewer on unchanged pixels. And when a rebase moves the base,
+touched — a backend-only remediation keeps a design round valid, and
+re-running it spends a reviewer on unchanged pixels. And when a rebase moves
+the base,
 prove the content is unchanged (`git range-diff` plus byte-identical `+`/`-`
 line sets) and then run **one** convergence round over `<old-head>..<new-head>`,
 checking semantic conflicts only in files the upstream also touched.
