@@ -360,3 +360,115 @@ def test_price_snapshot_reported_zero_is_known_free():
     cost_micro, known = price_snapshot(snap)
     assert known is True
     assert cost_micro == 0
+
+
+def _cost(micro: int, *, calls: int = 1, known: int | None = None) -> UsageAggregate:
+    """A minimal priced scope: cost is what these tests are about."""
+    return UsageAggregate(
+        calls=calls,
+        ok_calls=calls,
+        context_tokens=micro,
+        cost_micro=micro,
+        cost_known_calls=calls if known is None else known,
+    )
+
+
+def test_sum_aggregates_sums_counters_so_the_marks_stay_right():
+    """The lower-bound and unknown marks are DERIVED from counters. Summing the
+    counters composes them correctly for a mixed subtree; OR-ing the booleans
+    would render a real spend as ``$—``."""
+    from local_operator.analytics.model import sum_aggregates
+
+    priced = _cost(1_000_000, calls=2, known=2)
+    partly = _cost(500_000, calls=4, known=1)
+    unpriced = _cost(0, calls=3, known=0)
+
+    # Priced parent + partly-unpriced child: the tree total IS a lower bound.
+    mixed = sum_aggregates([priced, partly])
+    assert mixed.cost_micro == 1_500_000
+    assert mixed.cost_is_known is True
+    assert mixed.cost_is_partial is True
+
+    # Unpriced parent + priced child: a real figure with a ``+``, NOT ``$—``.
+    # This is the case boolean-OR gets wrong.
+    rescued = sum_aggregates([unpriced, priced])
+    assert rescued.cost_is_known is True
+    assert rescued.cost_micro == 1_000_000
+
+    # Nothing priceable anywhere stays unknown.
+    nothing = sum_aggregates([unpriced, _cost(0, calls=1, known=0)])
+    assert nothing.cost_is_known is False
+
+
+def test_forest_roots_sum_to_the_table_total():
+    """THE invariant. A per-session table whose rows do not add to the total
+    printed above them is a worse defect than the one being fixed, so rolling
+    children up REQUIRES removing them from the top level."""
+    from local_operator.analytics.model import build_session_forest
+
+    by_session = {
+        "root": _cost(1_000_000),
+        "kid1": _cost(2_000_000),
+        "kid2": _cost(3_000_000),
+        "grandkid": _cost(4_000_000),
+        "solo": _cost(5_000_000),
+    }
+    parents = {"kid1": "root", "kid2": "root", "grandkid": "kid1"}
+    forest = build_session_forest(by_session, parents)
+
+    grand_total = sum(a.cost_micro for a in by_session.values())
+    assert sum(node.total.cost_micro for node in forest) == grand_total == 15_000_000
+
+    # The naive fix — roll up AND keep listing children — double-counts.
+    def every(nodes):
+        for node in nodes:
+            yield node
+            yield from every(node.children)
+
+    assert sum(n.total.cost_micro for n in every(forest)) > grand_total
+
+    roots = {node.session_id for node in forest}
+    assert roots == {"root", "solo"}
+    root = next(n for n in forest if n.session_id == "root")
+    assert root.own.cost_micro == 1_000_000
+    assert root.total.cost_micro == 10_000_000  # own + both kids + the grandkid
+    # And every session is placed exactly once, which is what the sum rests on.
+    assert sorted(n.session_id for n in every(forest)) == sorted(by_session)
+
+
+def test_forest_keeps_an_orphaned_child_as_a_root():
+    """A parent pruned by retention must not take its child's dollars off the
+    table: an edge to a session with no row in scope is not an edge here."""
+    from local_operator.analytics.model import build_session_forest
+
+    by_session = {"kid": _cost(2_000_000)}
+    forest = build_session_forest(by_session, {"kid": "pruned-parent"})
+    assert [n.session_id for n in forest] == ["kid"]
+    assert forest[0].total.cost_micro == 2_000_000
+
+
+def test_forest_breaks_a_cycle_without_losing_a_session():
+    """A cyclic edge set claims every member has a parent, so nothing looks like
+    a root. Dropping them would be money missing from the column."""
+    from local_operator.analytics.model import build_session_forest
+
+    by_session = {"a": _cost(1_000_000), "b": _cost(2_000_000)}
+    forest = build_session_forest(by_session, {"a": "b", "b": "a"})
+
+    def every(nodes):
+        for node in nodes:
+            yield node
+            yield from every(node.children)
+
+    placed = sorted(n.session_id for n in every(forest))
+    assert placed == ["a", "b"]
+    assert sum(n.total.cost_micro for n in forest) == 3_000_000
+
+
+def test_forest_ignores_a_self_parent_edge():
+    """The real ledger carries 224 self-parent rows."""
+    from local_operator.analytics.model import build_session_forest
+
+    forest = build_session_forest({"s": _cost(7)}, {"s": "s"})
+    assert [n.session_id for n in forest] == ["s"]
+    assert forest[0].total.cost_micro == 7

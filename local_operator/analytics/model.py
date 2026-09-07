@@ -30,7 +30,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 # ---------------------------------------------------------------------------
 # Component taxonomy
@@ -496,6 +496,149 @@ class UsageAggregate:
         return min(1.0, self.cache_read_tokens / self.context_tokens)
 
 
+def sum_aggregates(parts: Iterable[UsageAggregate]) -> UsageAggregate:
+    """Add several scopes into one, for a session tree or any other union.
+
+    SUM THE COUNTERS, NEVER THE BOOLEANS. ``cost_is_partial`` and
+    ``cost_is_known`` are derived from ``cost_known_calls`` against ``calls``,
+    so adding the two counters makes both properties come out right for a MIXED
+    subtree with no special cases:
+
+    - parent fully priced + child partly unpriced -> ``cost_known_calls <
+      calls`` -> ``$102.34+``. Correct: the tree total IS a lower bound.
+    - parent fully unpriced + child priced -> ``cost_known_calls > 0`` -> a real
+      figure with a ``+``, not ``$\u2014``. Correct: the tree really did spend
+      priceable money.
+    - both fully unpriced -> ``$\u2014``. Correct.
+
+    OR-ing the booleans instead would give the second case ``$\u2014`` over a real
+    spend. The nested ``by_provider``/``by_session`` maps are deliberately NOT
+    merged: this returns a flat scope, and every caller wants one.
+    """
+    total = UsageAggregate()
+    for part in parts:
+        total.calls += part.calls
+        total.ok_calls += part.ok_calls
+        total.input_tokens += part.input_tokens
+        total.output_tokens += part.output_tokens
+        total.cache_read_tokens += part.cache_read_tokens
+        total.cache_write_tokens += part.cache_write_tokens
+        total.reasoning_tokens += part.reasoning_tokens
+        total.context_tokens += part.context_tokens
+        total.cost_micro += part.cost_micro
+        total.cost_known_calls += part.cost_known_calls
+        for key, value in part.components.items():
+            total.components[key] = total.components.get(key, 0) + value
+    return total
+
+
+#: Depth cap for the per-session forest walk, mirroring the store's own cap on
+#: the ``/session`` subtree query. Same reasoning: the ledger is one level deep
+#: today, the code can already produce deeper trees, and a bounded walk is what
+#: keeps malformed or cyclic data from turning a report into a hang.
+MAX_SESSION_TREE_DEPTH = 32
+
+
+@dataclass(frozen=True)
+class SessionNode:
+    """One session in the per-session table: its own spend and its subtree's.
+
+    ``total`` is what the row RENDERS (own plus every descendant) and ``own`` is
+    what this session alone spent; a leaf has them equal. ``children`` are the
+    direct subagent sessions, each a node of the same shape, so the table can
+    indent a subtree without a second pass over the edges.
+    """
+
+    session_id: str
+    own: UsageAggregate
+    total: UsageAggregate
+    children: tuple["SessionNode", ...] = ()
+
+    @property
+    def has_children(self) -> bool:
+        return bool(self.children)
+
+
+def build_session_forest(
+    by_session: Mapping[str, UsageAggregate],
+    parents: Mapping[str, str],
+) -> list[SessionNode]:
+    """Re-partition a flat per-session map into roots carrying subtree totals.
+
+    Why re-partition rather than simply add a subtree total to every row: the
+    per-session column must keep summing to the headline total on the same
+    screen. Measured on a real 871-session ledger:
+
+    - sum of OWN over all sessions (today's flat table): $63,640.95 == total OK
+    - sum of TREE totals over ROOTS only (this function): $63,640.95 == total OK
+    - sum of TREE totals over ALL sessions (the naive fix): $71,718.15, +$8,077
+
+    Rolling children up while still listing them at top level inflates the table
+    by 12.7%. A per-session table whose rows do not add to the total printed
+    above them is a worse defect than the one being fixed, so children are
+    reachable only as sub-rows of the root that spawned them.
+
+    Guards, because the ledger contains real malformed edges: an edge to an
+    unknown session (a pruned parent) leaves the child a ROOT rather than
+    dropping it, so its dollars stay in the column; a self-parent edge is
+    ignored; and a cycle is broken by the depth cap plus a visited set, with any
+    session the walk never reached re-promoted to a root. Every input session
+    appears exactly once in the output, which is the property the sum rests on.
+    """
+    children_of: dict[str, list[str]] = {}
+    for child, parent in parents.items():
+        if child == parent or child not in by_session or parent not in by_session:
+            # An edge to a session with no rows in this window/scope is not an
+            # edge here: keeping it would hide the child under a parent that has
+            # no row to be indented beneath.
+            continue
+        children_of.setdefault(parent, []).append(child)
+
+    visited: set[str] = set()
+
+    def build(sid: str, depth: int) -> SessionNode:
+        visited.add(sid)
+        own = by_session[sid]
+        kids: list[SessionNode] = []
+        if depth < MAX_SESSION_TREE_DEPTH:
+            for child in sorted(children_of.get(sid, ())):
+                if child in visited:
+                    continue  # a cycle reaches an already-placed session
+                kids.append(build(child, depth + 1))
+        # Sum the counters (see ``sum_aggregates``) so a subtree mixing priced
+        # and unpriced calls keeps the right lower-bound / unknown marks.
+        total = sum_aggregates([own, *(kid.total for kid in kids)])
+        return SessionNode(
+            session_id=sid,
+            own=own,
+            total=total,
+            children=tuple(sorted(kids, key=_node_order, reverse=True)),
+        )
+
+    # A root is a session no surviving edge points at. ``children_of`` already
+    # dropped the edges whose parent is absent from this scope, so testing
+    # membership there is the same test and needs no second rule.
+    parented = {child for kids in children_of.values() for child in kids}
+    roots = [build(sid, 0) for sid in by_session if sid not in parented]
+    # Anything the descent never reached is part of a cycle whose every member
+    # claims a parent. Promote it to a root rather than dropping it: a hidden
+    # session is money missing from the column.
+    roots.extend(build(sid, 0) for sid in by_session if sid not in visited)
+    return sorted(roots, key=_node_order, reverse=True)
+
+
+def _node_order(node: SessionNode) -> tuple[int, int]:
+    """Sort key for the table: biggest SPEND first, tokens as the tiebreak.
+
+    Keyed on the TREE total, not own spend, because the tree total is the figure
+    the row shows and a table sorted by a number it does not display reads as
+    unsorted. Tokens break the tie so an unpriced group still orders sensibly
+    instead of collapsing into one $0 bucket \u2014 the same rule ``_group_section``
+    already applies to the flat table.
+    """
+    return (node.total.cost_micro, node.total.total_tokens)
+
+
 @dataclass(frozen=True)
 class TimingSummary:
     """Observed logical-request timing; absent samples are never zero latency."""
@@ -528,9 +671,22 @@ class SessionRequest:
 class SessionReport:
     """One consistent exact-ID ledger snapshot, not a transcript-derived bill.
 
-    No child IDs or copied fork history are joined. A resumed ID sees its
-    retained rows; queued recorder writes and pruned history cannot be recovered.
-    ``available=False`` is distinct from an available report with zero calls.
+    Every field EXCEPT ``descendants_aggregate``/``descendant_ids`` is scoped to
+    the exact ID: no copied fork history is joined, a resumed ID sees its
+    retained rows, and queued recorder writes and pruned history cannot be
+    recovered. ``available=False`` is distinct from an available report with
+    zero calls.
+
+    The two descendant fields are the ONE deliberate exception, and the reason
+    the scoping sentence above is per-field rather than blanket: a session that
+    spawned subagents spent money through them, and a report that answers "what
+    has this session cost me" with the own-scope figure alone understates it by
+    whatever the children burned (measured: $31.28 own vs $102.34 tree on a
+    real session). The DIAGNOSTIC sections stay own-scope on purpose — by_model,
+    by_purpose and the timings answer "where did MY context go", and folding a
+    child's model mix into them would corrupt a reading that is currently
+    correct. Only the Totals block reads the subtree, and ``/session`` labels
+    that asymmetry on screen.
     """
 
     session_id: str
@@ -551,6 +707,34 @@ class SessionReport:
     recent: tuple[SessionRequest, ...] = ()
     first_ts_ms: int | None = None
     last_ts_ms: int | None = None
+    #: Everything this session's SUBAGENTS spent, at any depth — own scope
+    #: excluded, so ``aggregate + descendants_aggregate`` is the tree and the
+    #: two never double-count. ``None`` means the walk could not run (an older
+    #: ledger with no ``parent_session_id`` column), which is distinct from a
+    #: zeroed aggregate meaning "walked, and this session has no children":
+    #: the first must not be rendered as "$0.00 subagents".
+    descendants_aggregate: UsageAggregate | None = None
+    #: The descendant session IDs the walk reached, nearest-first. Carried so a
+    #: caller can say "20 subagents" without a second query, and so a test can
+    #: assert the walk's REACH rather than only its sums.
+    descendant_ids: tuple[str, ...] = ()
+
+    @property
+    def subtree_aggregate(self) -> UsageAggregate:
+        """Own spend plus every descendant's: the "what did this cost me" total.
+
+        Falls back to the own aggregate when the descendant walk was
+        unavailable, so a caller always gets a number that is true — just, in
+        that case, a narrower one.
+        """
+        if self.descendants_aggregate is None:
+            return self.aggregate
+        return sum_aggregates((self.aggregate, self.descendants_aggregate))
+
+    @property
+    def has_descendants(self) -> bool:
+        """Whether a subagent breakdown is worth drawing at all."""
+        return bool(self.descendant_ids)
 
 
 @dataclass(frozen=True)

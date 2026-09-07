@@ -278,6 +278,57 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
 )
 
+#: Indexes over OPTIONAL columns, created after ``_migrate`` rather than in
+#: ``_SCHEMA``. They cannot live in the schema script: ``executescript`` runs it
+#: as one unit BEFORE the ALTERs, so on a ledger written by a release that
+#: predates the column, ``CREATE INDEX ... ON calls(parent_session_id)`` raises
+#: "no such column" and aborts the REST of the script — losing the rollup tables
+#: and latching ``_broken`` for the process. Verified against a pre-column DB.
+#:
+#: ``idx_calls_parent`` is load-bearing for the subagent rollup: without it a
+#: recursive subtree walk is a full scan (measured 154 ms on a 475k-row ledger
+#: vs 1.03 ms with it), which is the difference between a viable ``/session``
+#: tree total and an unviable one. It is NOT free: building it over an existing
+#: 475k-row ledger costs a ONE-TIME ~677 ms stall on the first open after
+#: upgrade and ~4.9 MB of file growth (82.2 -> 87.1 MB). That stall lands on
+#: the recorder's background thread in the normal path, and buys every later
+#: report a two-orders-of-magnitude faster walk, so it is paid once and
+#: deliberately.
+_OPTIONAL_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "parent_session_id",
+        "CREATE INDEX IF NOT EXISTS idx_calls_parent ON calls(parent_session_id)",
+    ),
+)
+
+#: THE parent-edge rule, as one SQL expression, used by every surface that
+#: derives session parentage. It exists as a single constant because the two
+#: surfaces previously encoded DIFFERENT rules and could therefore disagree
+#: about the same session — which is the exact defect this whole rollup was
+#: written to eliminate, so letting it back in through two spellings of
+#: "who is the parent" would be self-defeating (review F1).
+#:
+#: Read it inside-out. ``NULLIF(parent_session_id, '')`` discards the "no
+#: parent" sentinel (the column is ``NOT NULL DEFAULT ''``); the outer
+#: ``NULLIF(..., session_id)`` discards a SELF edge, of which the ledger holds
+#: 224 real rows from a degenerate empty id. Both must be discarded BEFORE the
+#: ``MAX``, not after it: a plain ``MAX(parent_session_id)`` over a session that
+#: has both a real parent and a self row returns whichever id sorts larger, so a
+#: real edge is lost whenever the session's own id happens to sort above its
+#: parent's. That is a lexical coin-flip, not a rule.
+#:
+#: ``MAX`` still picks one parent when a session genuinely carries rows under
+#: two different parents. That is a deliberate, DOCUMENTED tie-break rather than
+#: an oversight: the per-session table must keep summing to the headline total
+#: printed above it, and a child credited to two parents is counted twice. The
+#: ledger has zero such sessions today (verified), and both surfaces now resolve
+#: the tie identically, which is the property that matters — they agree.
+#:
+#: Measured on the 475k-row ledger: this expression costs 201 ms against 191 ms
+#: for the bare ``MAX`` in ``aggregate``'s existing GROUP BY (~10 ms, on a
+#: worker thread), and yields the identical 467 edges on today's data.
+_PARENT_EDGE_SQL = "MAX(NULLIF(NULLIF(parent_session_id, ''), session_id))"
+
 #: The names in ``_MIGRATION_COLUMNS`` as a set, for the "is this column optional
 #: (i.e. possibly absent on an old DB)?" test. A column NOT in here — the base
 #: token columns and the original eight ``c_*`` components — is present on every
@@ -661,6 +712,25 @@ class AnalyticsStore:
             name for name, _ in _MIGRATION_COLUMNS if name in existing
         )
         self._rebuild_insert_plan()
+        self._create_optional_indexes(conn, existing)
+
+    @staticmethod
+    def _create_optional_indexes(conn: sqlite3.Connection, existing: set[str]) -> None:
+        """Index the optional columns that this DB actually has.
+
+        Runs AFTER the ALTERs so the column is guaranteed present; see
+        ``_OPTIONAL_INDEXES`` for why this cannot be part of ``_SCHEMA``. Each
+        statement is guarded on its own so one failure (a read-only file, a
+        disk-full during the ~677 ms build) costs its index and nothing else —
+        analytics degrades to the slower scan rather than failing to open.
+        """
+        for column, statement in _OPTIONAL_INDEXES:
+            if column not in existing:
+                continue
+            try:
+                conn.execute(statement)
+            except Exception:  # noqa: BLE001 — a missing index is slow, not broken
+                logger.debug("analytics: could not create index on %s", column, exc_info=True)
 
     def _rebuild_insert_plan(self) -> None:
         """Recompute the insert SQL + value selector from ``_present_optional``.
@@ -967,8 +1037,17 @@ class AnalyticsStore:
                 "GROUP BY provider",
                 params,
             ).fetchall()
+            # The edge rides the GROUP BY the query already computes rather than
+            # costing a second pass. ``_PARENT_EDGE_SQL`` is THE rule, shared
+            # verbatim with the ``/session`` subtree walk
+            # (``_canonical_parents``) so the two surfaces cannot drift into
+            # disagreeing about who a session's parent is (review F1). Measured
+            # +6 ms on 475k rows, against +58 ms for a global recursive CTE and
+            # 610 ms (vs 290) for widening the GROUP BY to two columns, which
+            # forces a temp B-tree for identical output.
+            parent_col = _PARENT_EDGE_SQL if self._has_parent_column() else "''"
             per_session = conn.execute(
-                f"SELECT session_id, {base_cols}, {component_sum} FROM calls{clause} "
+                f"SELECT session_id, {parent_col}, {base_cols}, {component_sum} FROM calls{clause} "
                 "GROUP BY session_id",
                 params,
             ).fetchall()
@@ -988,20 +1067,62 @@ class AnalyticsStore:
         result.by_provider = {
             str(row[0]): _aggregate_from_row(row[1:]) for row in per_provider if row[0]
         }
+        parents: dict[str, str] = {}
         for row in per_session:
             sid = str(row[0])
-            agg = _aggregate_from_row(row[1:])
+            parent = str(row[1] or "")
+            agg = _aggregate_from_row(row[2:])
             # Stash the human name (when known) on the id key's aggregate via a
             # side map the caller reads; kept on the object would widen the
             # dataclass for one table, so the report reads names from here.
             result.by_session[sid] = agg
+            # ``_PARENT_EDGE_SQL`` already discarded the empty and self edges in
+            # SQL, before the MAX. The ``parent != sid`` test is kept as a cheap
+            # belt-and-braces for the ``''`` fallback branch above (an old ledger
+            # with no parent column), NOT as the self-edge rule — doing it here
+            # rather than in SQL is precisely what lost a real edge to a lexical
+            # tie-break before review F1.
+            if parent and parent != sid:
+                parents[sid] = parent
         # Attach names as an attribute the report layer reads without widening
         # the dataclass contract used elsewhere.
         result_session_names: dict[str, str] = {
             sid: names.get(sid, "") for sid in result.by_session
         }
         setattr(result, "session_names", result_session_names)
+        # The parent edges the /analytics table re-partitions itself with. Same
+        # side-map convention as ``session_names`` and for the same reason: one
+        # table's structure is not worth widening a dataclass three other
+        # consumers (including the desktop HTTP route) also read.
+        #
+        # DESKTOP ROUTE, DELIBERATELY FLAT (review F4): because this is a side
+        # attribute, ``dataclasses.asdict`` drops it, so ``/v1/desktop/analytics``
+        # keeps serving OWN per-session figures while the TUI shows tree totals.
+        # That is the intended split, not an oversight — the HTTP route is a raw
+        # per-session data feed whose consumers do their own grouping, and the
+        # rollup is a presentation choice made by the screen that can also draw
+        # the indented children explaining it. Rolling up in the payload would
+        # give clients a column that no longer sums to the total they are also
+        # served, with nothing on the wire to say why. A client wanting the tree
+        # should be given the edges explicitly (a new, versioned field), not a
+        # silently re-scoped existing one.
+        #
+        # WINDOW RULE: ``since_ms``/``until_ms`` filter CALLS, then the rollup
+        # runs over whatever survived. A child's calls can fall outside a window
+        # containing its parent's; any other rule makes the per-session column
+        # stop summing to the headline total, which is the invariant this whole
+        # re-partition exists to protect.
+        setattr(result, "session_parents", parents)
         return result
+
+    def _has_parent_column(self) -> bool:
+        """Whether this DB carries ``parent_session_id`` (absent on old ledgers).
+
+        Reads the migration's own record rather than re-inspecting the schema:
+        an absent column must degrade to "no edges, every session is a root",
+        which renders exactly today's flat table.
+        """
+        return "parent_session_id" in self._present_optional
 
     def session_report(self, session_id: str, *, recent_limit: int = 12) -> SessionReport:
         """Read one exact session ID without creating, migrating or pricing data.
@@ -1125,9 +1246,14 @@ class AnalyticsStore:
                     (*params, max(0, min(int(recent_limit), 50))),
                 )
             )
+            descendants, descendant_ids = self._descendant_usage(
+                conn, session_id, columns, measures
+            )
             return SessionReport(
                 session_id=session_id,
                 aggregate=aggregate,
+                descendants_aggregate=descendants,
+                descendant_ids=descendant_ids,
                 by_model=by_model,
                 by_purpose=by_purpose,
                 by_purpose_outcome=groups,
@@ -1144,6 +1270,156 @@ class AnalyticsStore:
         finally:
             if conn is not None:
                 conn.close()
+
+    #: How deep a session tree is walked before the walk stops. The ledger's
+    #: tree is one level today (33 parents, 467 children, zero sessions that are
+    #: both), but depth is a property of USAGE, not of schema: a subagent that
+    #: launches its own subagent is stamped with the middle session as parent by
+    #: ``SessionStreamFn.fork``, and ``AsyncJobManager`` already carries the
+    #: ``child_jobs``/``descendant_usage`` machinery for it. So the walk is
+    #: recursive, and this is the backstop that keeps a malformed or cyclic
+    #: ledger from turning a report into a hang. 32 is far past any real nesting.
+    #:
+    #: ANCHOR (review F2): this cap counts levels from the QUERIED session, while
+    #: ``model.MAX_SESSION_TREE_DEPTH`` counts them from the forest ROOT. The two
+    #: therefore truncate different chains on a tree deeper than the cap, and a
+    #: mid-tree row can legitimately read differently on the two screens there.
+    #: This is not reconcilable without one of the surfaces walking a tree it has
+    #: no reason to build (``/session`` does not know its own root; ``/analytics``
+    #: does not know which session you are asking about), and it is unreachable
+    #: on real data — the ledger's maximum observed depth is 1, and zero sessions
+    #: are both a parent and a child. Recorded rather than fixed, so the next
+    #: reader does not mistake it for a rollup bug.
+    _MAX_TREE_DEPTH = 32
+
+    def _canonical_parents(
+        self, conn: sqlite3.Connection, session_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """The canonical parent of each given session, by the ONE shared rule.
+
+        Resolves ``_PARENT_EDGE_SQL`` — the same expression ``aggregate`` puts in
+        its per-session GROUP BY — for a bounded set of ids, so the ``/session``
+        subtree walk and the ``/analytics`` table answer "who is this session's
+        parent" identically. Before review F1 the walk filtered per ROW ("any row
+        claims this edge") while the aggregate took a lexical ``MAX``, and the
+        two disagreed on any session carrying more than one distinct parent
+        value.
+
+        Chunked at 500 ids: SQLite's default host-parameter limit is 999, and a
+        subtree level can be arbitrarily wide (the widest real fan-out is 46).
+        """
+        parents: dict[str, str] = {}
+        ids = [sid for sid in session_ids if sid]
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT session_id, {_PARENT_EDGE_SQL} FROM calls "
+                f"WHERE session_id IN ({placeholders}) GROUP BY session_id",
+                chunk,
+            ).fetchall()
+            for sid, parent in rows:
+                if parent:
+                    parents[str(sid)] = str(parent)
+        return parents
+
+    def _descendant_usage(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        columns: set[str],
+        measures: str,
+    ) -> tuple[UsageAggregate | None, tuple[str, ...]]:
+        """Sum every DESCENDANT session's usage, own scope excluded.
+
+        Returns ``(None, ())`` when the walk cannot run — an older ledger with
+        no ``parent_session_id`` column — which the report renders as "unknown"
+        rather than as "$0.00 of subagent spend". Runs on the caller's pinned
+        read transaction so the subtree and the own scope describe the same WAL
+        snapshot.
+
+        A level-by-level descent on the caller's pinned transaction, NOT the
+        recursive CTE this originally used. The CTE could only apply the shared
+        edge rule as a correlated scalar subquery re-evaluated per candidate row,
+        which measured 620 ms on the widest real fan-out (46 children) against
+        6.7 ms for this descent — and expressing the rule as an ``edges``
+        CTE instead costs a full 196 ms scan of ``calls``. Each level is two
+        indexed statements on the SAME pinned transaction, so the single-snapshot
+        property the CTE was chosen for is preserved. Measured end to end on the
+        475k-row ledger: 0.87 ms for the reported session, 6.7 ms worst case.
+        Without ``idx_calls_parent`` each level is a full scan — see
+        ``_OPTIONAL_INDEXES``.
+
+        Three guards, because the ledger contains a real cycle edge (224 rows
+        carry ``parent_session_id == session_id``, all from a degenerate empty
+        id):
+
+        1. A candidate is kept only when its CANONICAL parent (the one shared
+           rule, ``_canonical_parents``) is the node currently being expanded.
+           This is what makes the walk agree with ``/analytics`` by construction
+           rather than by coincidence: a session whose rows merely mention this
+           node, but whose canonical parent is some other session, is not a child
+           here — and the aggregate would not have drawn that edge
+           either (review F1). It also subsumes the old self-edge predicate,
+           since the rule discards a self parent in SQL, before the MAX.
+        2. ``visited`` means a cycle that re-reaches an already-counted session
+           stops there, so no session contributes its calls twice.
+        3. ``depth < _MAX_TREE_DEPTH`` bounds the walk whatever the data does.
+           See that constant for why its anchor differs from the forest's.
+
+        Note on retention: ``prune`` deletes by ``ts_ms``, so a root whose
+        children aged out first reports a smaller subtree than it really spent.
+        Parent and child age out together in practice; a shrinking figure here
+        is retention, not a rollup bug.
+        """
+        if "parent_session_id" not in columns or not session_id:
+            return None, ()
+        try:
+            found: list[str] = []
+            visited: set[str] = {session_id}
+            frontier: set[str] = {session_id}
+            depth = 0
+            while frontier and depth < self._MAX_TREE_DEPTH:
+                placeholders = ", ".join("?" for _ in frontier)
+                # Every session carrying a row that POINTS AT this level: an
+                # index seek on idx_calls_parent. Which of those mentions is
+                # actually an edge is decided by the canonical rule below.
+                candidates = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT session_id FROM calls "
+                        f"WHERE parent_session_id IN ({placeholders})",
+                        sorted(frontier),
+                    )
+                    if row[0]
+                } - visited
+                if not candidates:
+                    break
+                edges = self._canonical_parents(conn, sorted(candidates))
+                nxt = {sid for sid in candidates if edges.get(sid) in frontier}
+                if not nxt:
+                    break
+                visited |= nxt
+                found.extend(sorted(nxt))
+                frontier = nxt
+                depth += 1
+        except Exception:  # noqa: BLE001 — a failed walk is unknown, not zero
+            logger.debug("analytics: descendant walk failed", exc_info=True)
+            return None, ()
+        ids = tuple(found)
+        if not ids:
+            return UsageAggregate(), ()
+        # Bind the ids rather than interpolating: they are ledger-sourced, and a
+        # bounded IN list keeps this one statement on the same snapshot.
+        placeholders = ", ".join("?" for _ in ids)
+        try:
+            row = conn.execute(
+                f"SELECT {measures} FROM calls WHERE session_id IN ({placeholders})", ids
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("analytics: descendant aggregate failed", exc_info=True)
+            return None, ()
+        return _aggregate_from_row(row), ids
 
     # -- rollup reads (calendar time series) ---------------------------------
     def _series(self, table: str, key: str, buckets: int, *, by_model: bool) -> list[UsagePeriod]:
