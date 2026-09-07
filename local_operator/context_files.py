@@ -505,10 +505,18 @@ def _render_index_rows(
     """Format listable sections as the index block.
 
     Split from :func:`_render_index` so the disclosure branches below can be
-    driven directly. The unlisted-tail guard in particular is unreachable
-    through a file fixture -- the last section always spans to EOF -- so
-    testing it through discovery would leave it unexecuted and therefore a
-    decoration rather than a guard.
+    driven directly with synthetic sections, without having to construct a file
+    that produces each shape.
+
+    The unlisted-tail guard below IS reachable from real input, and the way it
+    is reached is worth naming because it is not obvious. A section's span ends
+    at the next same-or-higher heading or at EOF, so the last *scanned* section
+    always reaches EOF -- but the last *listed* one need not, because the H1
+    filter in :func:`_render_index` can drop it. A file with exactly ONE H1
+    that is not its first heading (H2 sections, then a trailing ``# ...``) has
+    ``titles_only`` true, so ``floor`` is 2 and that trailing H1 is excluded
+    from the listing while still owning every line to EOF. The rows then stop
+    short with no scan ceiling and no fence slip involved.
     """
     rows = []
     for section in sections:

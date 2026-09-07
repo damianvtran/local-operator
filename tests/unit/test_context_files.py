@@ -478,12 +478,10 @@ def test_tail_beyond_the_last_listed_section_is_disclosed(tmp_path: Path) -> Non
     """Rows can be non-empty and still not reach EOF; that remainder is offered
     explicitly rather than left implied.
 
-    On real input the last listed section always spans to EOF (a section ends
-    at the next same-or-higher heading, else at the last line), so this is a
-    DEFENSIVE guard rather than a live path -- which is exactly why it is
-    asserted directly on the renderer instead of through a file fixture that
-    cannot reach it. Driving it via ``_render_index`` would leave the branch
-    unexecuted and the guard a decoration.
+    Driven directly on the renderer so the boundary itself is pinned with
+    arbitrary spans. The companion test below reaches the same branch through
+    ``load_repo_guidance`` on a real file, which is what proves the guard
+    protects a live path rather than a hypothetical one.
     """
     from local_operator.context_files import _render_index_rows, _Section
 
@@ -503,6 +501,36 @@ def test_tail_beyond_the_last_listed_section_is_disclosed(tmp_path: Path) -> Non
     assert re.search(r"- L\d+-\d+: Seen", rendered), "expected a listed section"
     assert "not under any listed heading" in rendered, "unlisted tail was not disclosed"
     assert "L401-900" in rendered, "the unlisted range itself must be offered"
+
+
+def test_a_single_late_h1_leaves_a_tail_that_must_be_disclosed(tmp_path: Path) -> None:
+    """The unlisted-tail guard on a REAL file, with no ceiling and no fence.
+
+    Exactly one H1 that is not the first heading makes ``titles_only`` true, so
+    ``floor`` is 2 and that trailing H1 is dropped from the listing -- while it
+    still owns every line to EOF. The listed rows therefore stop short, and the
+    lines the H1 covers would be unreachable if the guard did not fire.
+
+    This pins the reachability claim by execution: the guard was previously
+    documented as unreachable from a file fixture, which was wrong, because
+    that reasoning predated the H1 filter it interacts with.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "## Alpha\n\n" + "pad line here\n" * 800 + "\n# Late title\n\n" + "tail line\n" * 400
+    )
+    rendered = load_repo_guidance(repo)
+
+    match = re.search(r"\(L(\d+)-(\d+) is not under any listed heading", rendered)
+    assert match, "a tail outside every listed row was not disclosed"
+    # The disclosed range must start right after the last listed row and run to
+    # the end of the file, or the lines in between stay unreachable.
+    last_listed = max(int(end) for _, end in re.findall(r"- L(\d+)-(\d+):", rendered))
+    assert int(match.group(1)) == last_listed + 1
+    from local_operator.tools.builtin import _decode_text_lines
+
+    _, lines = _decode_text_lines((repo / "AGENTS.md").read_bytes())
+    assert int(match.group(2)) == len(lines)
 
 
 def test_files_sharing_a_digest_prefix_but_differing_in_length_are_kept_apart(
