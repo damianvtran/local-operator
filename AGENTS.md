@@ -837,35 +837,20 @@ is what says the PR is waiting on that person.
 ### Scope round N+1 to the remediation delta
 
 **A remediation is the most likely place in a PR for a new defect**, so the
-round that follows one is scoped to `<previous-head>..<new-head>` — not to the
-whole diff again. This is not merely a saving of effort. The whole-diff re-read
-is exactly what lets a small new defect hide behind a large surface that was
-already approved: attention spreads over hundreds of familiar lines, and the
-twenty that changed get the same share as the rest.
+round that follows one is scoped to `<previous-head>..<new-head>` rather than
+re-reading the whole diff. Read that as a *detection* measure, not an
+efficiency one: a whole-diff re-read spreads attention over hundreds of
+already-approved lines, so the twenty that changed get the same share as the
+rest. A remediation also arrives with social proof — a reviewer asked for it,
+it is small, it is framed as closing something rather than opening anything —
+and each of those lowers scrutiny at exactly the moment it should not.
 
-**Read that as a detection measure, not an efficiency measure.** This is the
-part people drop, and dropping it turns the rule into a shortcut it was never
-meant to be. A remediation also arrives with social proof attached — a
-reviewer asked for it, it is small, and it is framed as *closing* something
-rather than opening anything — and each of those makes it less scrutinised at
-exactly the moment it deserves the same scrutiny as the original.
-
-The evidence is unusually strong. In one day, eight sessions independently
-reported **eleven** instances of the same shape on different PRs: three of four
-rounds where the remediation introduced the next defect; a mislabelled-banner
-fix that
-reproduced the same mislabelling at larger scale in the digest; a fix whose two
-halves then drifted into a title and a subtitle describing different scopes; a
-remediation that reinstated the exact failure mode its own PR existed to fix; a
-round-2 fill-loop fix that left a resumed conversation ~120 messages behind.
-None was caught by re-reading the whole diff; every one was caught by a round
-that looked only at what had just changed.
-
-The reason a delta-scoped round works is worth stating, because it generalises
-past review: **a number — or a behaviour — that is right about an *adjacent*
-quantity is more dangerous than one that is obviously wrong, because nothing
-about it announces the mismatch.** A remediation is where adjacency is created,
-and the delta is the only view in which the new adjacency is visible at all.
+This is not a hunch. Over one day, eight sessions reported this shape on
+unrelated PRs — a fix reproducing its own defect at larger scale in a second
+surface, a fix whose two halves drifted into describing different scopes, a
+round-2 fix leaving a resumed conversation ~120 messages behind. The reports
+are on the PR threads; what matters here is that the shape recurs often enough
+to plan for.
 
 Scoping to the delta is necessary but not sufficient. Three things make the
 round conclusive rather than merely narrow:
@@ -873,18 +858,14 @@ round conclusive rather than merely narrow:
 - **Run the same probe against the previous head.** "Is this new?" is only
   answerable by comparison — otherwise a reviewer finds a defect in the delta
   and cannot tell whether the remediation introduced it or whether they missed
-  it twice. The delta says *where* to look; the prior head says *whether it is
-  yours*.
-- **Check that the guard the remediation added can observe the defect it is
-  named for.** One round-1 fix closed a bottom-end contradiction (43,704 → 0)
-  while opening its mirror at the top (23,962 → 56,955), and the regression
-  test asserted only `at_bottom == nothing_below` — structurally incapable of
-  seeing what its own fix had introduced. The fix was right and the guard was
-  blind; those are different failures and need separate checks.
+  it twice.
+- **Check the guard the remediation added can observe the defect it names.**
+  A fix can be right while its regression test is structurally incapable of
+  seeing what that same fix broke elsewhere — a real case closed one end of a
+  contradiction, opened its mirror at the other, and asserted only on the end
+  it had fixed.
 - **Assert on what is painted, not only on the contract.** A round can verify
-  a contract is honoured and still miss that the resulting frame is wrong —
-  "a splash mounted while the user saw nothing is invisible to any assertion
-  on `_welcome_visible`."
+  a contract is honoured and still miss that the resulting frame is wrong.
 
 Two further corollaries. Do not re-open dimensions the delta cannot have
 touched — a backend-only remediation keeps a design round valid, and
@@ -894,11 +875,13 @@ the base, prove the content is unchanged (`git range-diff` plus byte-identical
 `<old-head>..<new-head>`, checking semantic conflicts only in files the
 upstream also touched.
 
-**Finally, a terminal approval is a property of a SHA, not of a PR.** If a
-round went terminal and commits landed afterwards — including commits driven
-by a *different* stream, such as a design fix after a clean code round — the
-approval is stale and the merge gate needs a fresh round on the current head.
-"Everything else is green" is precisely when this lapses.
+**Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
+landing after a clean round — including ones driven by a *different* stream,
+such as a design fix after a terminal code round — make it stale, and
+"everything else is green" is exactly when that lapses. The narrow exception
+is the one the freshness rules already name: changes that are exclusively
+non-conflicting fixes from parallel approved streams.
+
 
 ## Security advisories
 
