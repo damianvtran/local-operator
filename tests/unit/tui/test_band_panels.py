@@ -1953,8 +1953,10 @@ class _RetentionManager:
     one carries the attribute so the OWNER path is exercised.
     """
 
-    def __init__(self, jobs: list[Any], retention_ms: int) -> None:
+    def __init__(self, jobs: list[Any], retention_ms: float) -> None:
         self._jobs = jobs
+        # Typed as ``float`` deliberately: the filter accepts any real window
+        # and a test drives it with ``1000.0`` to pin that (review round 1, m1).
         self.retention_ms = retention_ms
 
     def list(self, *, owner_id: str | None = None) -> list[Any]:
@@ -1975,11 +1977,24 @@ class _GraphComms:
     manager alone did not clear the panel in issue #524.
     """
 
-    def __init__(self, jobs: list[Any]) -> None:
+    def __init__(self, jobs: list[Any], paused: set[str] | None = None) -> None:
         self._jobs = jobs
+        # Job ids the parent paused. Mirrors ``_ChildRecord.paused``, which
+        # surfaces as ``node.status == "paused"`` and outranks the row's own
+        # status — a pause is mechanically a CANCEL, so the job row cannot
+        # carry this fact and the reader must ask the graph for it.
+        self._paused = paused or set()
+
+    def _node(self, job: Any) -> Any:
+        job_id = str(job.id)
+        status = "paused" if job_id in self._paused else str(getattr(job, "status", ""))
+        return SimpleNamespace(job_id=job_id, status=status)
 
     def children(self, job_id: str | None) -> list[Any]:
-        return [SimpleNamespace(job_id=str(job.id)) for job in self._jobs]
+        return [self._node(job) for job in self._jobs]
+
+    def nodes(self) -> list[Any]:
+        return [self._node(job) for job in self._jobs]
 
     def job(self, job_id: str) -> Any:
         return next((job for job in self._jobs if str(getattr(job, "id", "")) == job_id), None)
@@ -2079,3 +2094,196 @@ async def test_a_roster_with_no_live_manager_is_left_alone() -> None:
         panel = await _boot_with_jobs(app, pilot)
         assert [str(job.id) for job in app._subagent_roster()[0]] == ["remote"]
         assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_the_dock_keeps_a_failed_child_past_the_window() -> None:
+    """Design round 1, D1. A failure is the row the user most needs to come
+    back to, and the panel row is the ONLY entry to the child's page — so
+    expiring it on the quiet-success timer deleted the trajectory that explains
+    the failure. The panel already ranks failures above successes
+    (``_EVICTION_RANK``) and re-opens a hidden panel for one failure
+    (``note_child_failed``); this makes retention agree with both."""
+    session = FakeSession()
+    stale = time.time() - 86_400.0
+    failed = _Job("boom", "deploying to staging", status="failed")
+    failed.settled_at = stale
+    quiet = _Job("fine", "audited the tenant list", status="completed")
+    quiet.settled_at = stale
+    jobs = [failed, quiet]
+    session.jobs = _RetentionManager(jobs, retention_ms=1)
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        # The quiet success goes; the failure stays, and keeps the panel up.
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["boom"]
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_the_dock_keeps_a_paused_child_past_the_window() -> None:
+    """Review round 1, M1. ``SubagentComms.pause`` is mechanically a cancel, so
+    the row reads ``cancelled`` with a settle stamp and ``AsyncJob`` has no
+    ``paused`` field — the intent lives only on the comms record. Without
+    consulting it, a child paused precisely to come back to it left the dock
+    five minutes later: the very surface the user would come back through."""
+    session = FakeSession()
+    stale = time.time() - 86_400.0
+    paused = _Job("held", "migrating the tenant index", status="cancelled")
+    paused.settled_at = stale
+    # An ORDINARY cancel of the same age is the control: it must still expire,
+    # because cancelling says "I am not coming back for this".
+    dropped = _Job("dropped", "abandoned work", status="cancelled")
+    dropped.settled_at = stale
+    jobs = [paused, dropped]
+    session.jobs = _RetentionManager(jobs, retention_ms=1)
+    session._subagent_comms = _GraphComms(jobs, paused={"held"})
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["held"]
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_settled_together_leaves_together() -> None:
+    """Design round 1, D2. Rows settling within one bucket cross the window on
+    the SAME repaint, so a fan-out that finished together reads as one event
+    rather than a dock that ratchets down a row at a time.
+
+    Stamps are spread across a whole bucket to prove the coalescing, and the
+    window is long enough that none of them is expired yet at the start."""
+    session = FakeSession()
+    now = time.time()
+    # Settled one second apart, all inside a single 15 s bucket.
+    jobs = [_Job(f"b{index}", f"child {index}", status="completed") for index in range(6)]
+    for index, job in enumerate(jobs):
+        job.settled_at = now - index
+    session.jobs = _RetentionManager(jobs, retention_ms=600_000)
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot_with_jobs(app, pilot)
+        assert len(app._subagent_roster()[0]) == 6
+
+        # Age the whole batch past the window by the same amount. Quantising
+        # means one pass takes all six, not six passes taking one each.
+        for job in jobs:
+            job.settled_at = (job.settled_at or 0.0) - 700_000.0
+        assert app._subagent_roster()[0] == []
+
+
+@pytest.mark.asyncio
+async def test_the_expiry_clock_only_ever_rounds_a_row_a_longer_life() -> None:
+    """The safety property behind the bucket: quantising the reader's ``now``
+    DOWN can only delay an expiry, never hasten one, so no row is dropped
+    before its full window has elapsed. Pinned across a whole bucket of offsets
+    rather than at one convenient instant."""
+    from local_operator.tui.app import (
+        ROSTER_EXPIRY_BUCKET_S,
+        _bucketed_settle_stamp,
+        _expiry_bucket_s,
+    )
+
+    window_ms = 300_000.0
+    # Rounding UP a settle stamp grants a LATER expiry, so a row can only ever
+    # gain visibility, never lose it — and never more than one bucket of it.
+    for offset in range(0, int(ROSTER_EXPIRY_BUCKET_S) + 1):
+        stamp = 1_700_000_000.0 + offset + 0.5
+        bucketed = _bucketed_settle_stamp(stamp, window_ms)
+        assert bucketed >= stamp
+        assert bucketed - stamp < ROSTER_EXPIRY_BUCKET_S
+
+    # Stamps within one bucket collapse to ONE expiry instant, which is what
+    # makes a batch leave together instead of a row at a time.
+    base = 1_700_000_000.0
+    together = {_bucketed_settle_stamp(base + n, window_ms) for n in range(6)}
+    assert len(together) == 1
+
+    # The bucket is capped as a FRACTION of the window, not just in absolute
+    # terms: a fixed 15 s would be twelve times a 1.2 s window and would
+    # silently lengthen it, which a short-window probe caught on real objects.
+    assert _expiry_bucket_s(300_000.0) == ROSTER_EXPIRY_BUCKET_S
+    assert _expiry_bucket_s(1_200.0) < 1.2
+    assert _expiry_bucket_s(0.0) == 0.0
+    # A zero-length bucket must not divide by zero; it simply does not coalesce.
+    assert _bucketed_settle_stamp(base + 0.5, 0.0) == base + 0.5
+
+
+@pytest.mark.asyncio
+async def test_a_float_or_bool_window_is_handled_rather_than_silently_ignored() -> None:
+    """Review round 1, m1. ``AsyncJobManager`` type-hints ``retention_ms: int``
+    but never coerces, so an embedder passing ``1000.0`` used to disable the
+    dock filter entirely and silently reinstate #524; and ``isinstance(True,
+    int)`` would have accepted a stray ``True`` as a 1 ms window."""
+    session = FakeSession()
+    stale = _Job("old", "long finished", status="completed")
+    stale.settled_at = time.time() - 86_400.0
+    live = _Job("live", "still working", status="running")
+    jobs = [stale, live]
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        # A float window is honoured, not ignored.
+        session.jobs = _RetentionManager(jobs, retention_ms=1000.0)
+        await _boot_with_jobs(app, pilot)
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["live"]
+
+        # A bool is NOT a window: refused, so the filter is the identity
+        # rather than a surprise 1 ms window that drops everything settled.
+        session.jobs = _RetentionManager(jobs, retention_ms=True)
+        app._refresh_band()
+        await pilot.pause()
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["old", "live"]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_filter_shows_stale_rows_and_says_so(caplog) -> None:
+    """Review round 1, m2. Failing OPEN is the right direction for a status
+    surface — a stale row beats a blank dock — but a permanent failure that
+    logs nothing is undiagnosable and silently restores #524."""
+
+    class _Exploding:
+        retention_ms = 1
+
+        def list(self, *, owner_id: str | None = None) -> list[Any]:
+            return []
+
+        def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+            return None
+
+    session = FakeSession()
+    row = _Job("kept", "unreadable row", status="completed")
+    row.settled_at = time.time() - 86_400.0
+
+    # A row the FILTER cannot judge: it resolves through comms normally, and
+    # only the stamp retention ages against is unreadable. Scoped that tightly
+    # so the test exercises the filter's own guard rather than the resolver's.
+    class _Hostile:
+        id = "kept"
+        type = "task"
+        status = "completed"
+        restored = False
+        label = "unreadable row"
+
+        @property
+        def settled_at(self) -> float:
+            raise RuntimeError("row shape cannot be read")
+
+    hostile = _Hostile()
+    session.jobs = _Exploding()
+    session._subagent_comms = _GraphComms([hostile])
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        with caplog.at_level("WARNING"):
+            await _boot_with_jobs(app, pilot)
+            rows = app._subagent_roster()[0]
+
+    assert [getattr(job, "id", "") for job in rows] == ["kept"]  # failed open
+    assert any("retention filter" in record.message for record in caplog.records)

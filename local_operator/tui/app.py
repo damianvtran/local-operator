@@ -81,11 +81,11 @@ from local_operator.harness.intent import (
     tool_activity,
 )
 
-# The retention predicate the job ledger sweeps with. Imported here so the dock
-# roster applies the SAME rule to rows the comms graph resolves (which the
-# manager's own sweep cannot reach — see `_subagent_roster`), rather than
-# re-deriving a window that could drift from the ledger's.
-from local_operator.harness.jobs import retention_expired
+# The roster-visibility predicate, a superset of the retention clock the job
+# ledger sweeps with. Imported here so the dock applies the SAME window to rows
+# the comms graph resolves (which the manager's own sweep cannot reach — see
+# `_subagent_roster`), rather than re-deriving one that could drift from it.
+from local_operator.harness.jobs import roster_expired
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -714,6 +714,83 @@ def _gate_timeout_notice(details: dict[str, Any]) -> str:
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: Bucket the dock's expiry clock to this many seconds. Rows whose settle
+#: stamps fall in the same bucket therefore cross the window on the SAME
+#: repaint, so a fan-out that finished together leaves together — one visible
+#: event, matching how the user thinks about a batch ("that batch is done").
+#:
+#: Without it the dock shrinks a row at a time: six children settling a second
+#: apart produced six separate dock repaints, ratcheting down over minutes on
+#: a staggered fan-out (design round 1, D2). The movement was always confined
+#: to the dock — the composer stays pinned and transcript content does not
+#: drift — which is why this is polish rather than a defect.
+#:
+#: Chosen at 15 s as the largest bucket that is still small against the
+#: 5-minute default window (5% of it) — big enough to coalesce a realistic
+#: batch, small enough that "five minutes" stays an honest description.
+#: Quantising DOWN is what makes this safe: it can only ever DELAY an expiry,
+#: never hasten one, so no row is dropped before its full window has elapsed.
+#: Applied at the READER only; the ledger sweeps on the exact clock.
+ROSTER_EXPIRY_BUCKET_S = 15.0
+
+#: The bucket is also capped at this fraction of the window itself, which is
+#: what keeps the coalescing PROPORTIONATE instead of merely small in absolute
+#: terms. A fixed 15 s is 5% of the shipped five minutes and unnoticeable, but
+#: it would be twelve times a 1.2 s window — measured on a short-window probe,
+#: where a settled row that should have gone at 1.2 s was still docked because
+#: the bucket alone outlasted its whole retention. Since quantising can only
+#: delay, an oversized bucket does not break correctness; it silently
+#: lengthens the window, which is exactly the kind of quiet disagreement
+#: between stated and actual behaviour this PR exists to remove.
+ROSTER_EXPIRY_BUCKET_FRACTION = 0.05
+
+
+def _expiry_bucket_s(retention_ms: float) -> float:
+    """The coalescing bucket for one window. See :data:`ROSTER_EXPIRY_BUCKET_S`."""
+    proportional = max(0.0, retention_ms) / 1000.0 * ROSTER_EXPIRY_BUCKET_FRACTION
+    return min(ROSTER_EXPIRY_BUCKET_S, proportional)
+
+
+def _bucketed_settle_stamp(settled_at: float, retention_ms: float) -> float:
+    """Round a settle stamp UP to its bucket boundary, so rows that settled
+    within one bucket share an expiry instant and therefore leave the dock on
+    the SAME pass.
+
+    The quantization is on the STAMP, not on the reader's clock, and that
+    distinction is the whole mechanism — I measured the clock version first and
+    it does not coalesce at all. Flooring ``now`` makes the comparison instant
+    jump in steps, but each row is still compared against its own stamp, so six
+    rows a second apart still cross a stepping boundary one at a time (measured:
+    3 separate shrink events over ten 1 Hz ticks, against 6 unquantized). Giving
+    the rows a shared boundary is what makes one batch one event.
+
+    Rounds UP, never down: a later effective stamp means a LATER expiry, so a
+    row is only ever granted up to one extra bucket of visibility and can never
+    be dropped before its full window has elapsed.
+    """
+    bucket = _expiry_bucket_s(retention_ms)
+    if bucket <= 0:
+        return settled_at
+    remainder = settled_at % bucket
+    return settled_at if remainder == 0 else settled_at + (bucket - remainder)
+
+
+def _bucketed_stamp_of(job: Any, retention_ms: float) -> float | None:
+    """A row's settle stamp, bucketed — ``None`` when it has not settled.
+
+    ``None`` passes straight through so :func:`roster_expired` applies its own
+    "no stamp means retention has not started" rule rather than this function
+    inventing an answer for a running row.
+    """
+    settled_at = getattr(job, "settled_at", None)
+    if settled_at is None:
+        return None
+    try:
+        return _bucketed_settle_stamp(float(settled_at), retention_ms)
+    except (TypeError, ValueError):
+        return None
+
 
 #: How often the background usage warmer checks whether the active provider's
 #: quota row is going stale. The warmer only REFRESHES when the shared cache row
@@ -15382,28 +15459,85 @@ class OperatorApp(App[None]):
         return job
 
     @staticmethod
-    def _within_retention(jobs: list[Any], manager: Any) -> list[Any]:
-        """Drop rows the ledger's retention window has already released.
+    def _within_retention(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
+        """Drop rows the roster window has released — see :func:`roster_expired`.
 
         Split out of :meth:`_subagent_roster` so the rule is testable on its
         own and so the resolver's happy path stays one expression. Total and
         silent by design — this feeds a status surface, so an unreadable
         manager or a row of an unexpected shape returns the input unchanged
         rather than blanking the dock: showing a stale row is a much smaller
-        failure than showing none.
+        failure than showing none. A filter that raises is LOGGED rather than
+        merely swallowed: failing open restores #524 exactly, and a permanent
+        failure that says nothing is undiagnosable (review round 1, m2).
 
-        The window comes from the LIVE manager (``retention_ms``); a follower
-        has no local manager, and its rows arrive already filtered by the
-        owner's own snapshot, so with no manager this is the identity.
+        ``paused_ids`` carries the intent the job row cannot: a paused child is
+        mechanically a cancelled one, so the flag lives on the comms record and
+        the resolver reads it there (see :func:`roster_expired`).
+
+        The window comes from the LIVE manager. ``retention_ms`` is accepted as
+        any real number but NOT as a ``bool`` — ``isinstance(True, int)`` is
+        true, and a stray ``True`` would silently impose a 1 ms window, while
+        the earlier ``int``-only guard silently disabled the filter for the
+        ``1000.0`` a float-passing embedder supplies (review round 1, m1).
+
+        A FOLLOWER has no local manager, so this is the identity there. That is
+        deliberate and NOT because its rows arrive pre-filtered — an earlier
+        version of this comment claimed that and it was false (review round 1,
+        M2): ``frontend_state._jobs`` overwrites the swept list wholesale with
+        ``comms.job_rows()``, the identical bypass this resolver closes on the
+        owner, so a viewer does still see rows the owner has shed. It is left
+        that way ON PURPOSE — the publish is the viewer's ONLY handle on a
+        swept child, and QA measured that filtering it drops the viewer to zero
+        rows and takes ``node()``/``get()`` to 0/3, breaking the transcript
+        page. Fixing it properly needs an identity-vs-membership split (a
+        presentation flag on ``JobState``, or filtering at the follower's own
+        resolver where the owner's window is not known), which is a distinct
+        change. Tracked as deferred on PR #732; see its consumer table.
         """
         retention_ms = getattr(manager, "retention_ms", None)
-        if not isinstance(retention_ms, int):
+        if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
             return jobs
         now = time.time()
+        window = float(retention_ms)
         try:
-            return [job for job in jobs if not retention_expired(job, retention_ms, now=now)]
+            return [
+                job
+                for job in jobs
+                if not roster_expired(
+                    job,
+                    int(retention_ms),
+                    paused=str(getattr(job, "id", "") or "") in paused_ids,
+                    now=now,
+                    settled_at=_bucketed_stamp_of(job, window),
+                )
+            ]
         except Exception:  # noqa: BLE001 — the dock must not fail on a filter
+            logger.warning("subagent roster retention filter failed", exc_info=True)
             return jobs
+
+    @staticmethod
+    def _paused_child_ids(comms: Any) -> set[str]:
+        """Job ids the parent PAUSED, read from the graph that owns the fact.
+
+        A pause is recorded on ``_ChildRecord.paused`` and surfaces as
+        ``node.status == "paused"`` (``SubagentComms._node``, where it outranks
+        every other status for the same reason it matters here). Reading the
+        node keeps this a pure consumer of the comms projection rather than a
+        second interpretation of the record.
+
+        Never raises: a status surface must not be taken down by a graph that
+        cannot answer, and an empty set simply means "no intent known", which
+        degrades to the plain retention rule.
+        """
+        try:
+            nodes = comms.nodes() if callable(getattr(comms, "nodes", None)) else ()
+            return {
+                str(node.job_id) for node in nodes if str(getattr(node, "status", "")) == "paused"
+            }
+        except Exception:  # noqa: BLE001 — the dock must not fail on a lookup
+            logger.warning("reading paused subagents failed", exc_info=True)
+            return set()
 
     def _subagent_roster(self) -> tuple[list[Any], Any]:
         """Resolve one direct-child scope for open, retarget, tick and close.
@@ -15412,7 +15546,7 @@ class OperatorApp(App[None]):
         The comms graph is the common ownership contract, never the current row
         selection or a best-effort label match.
 
-        RETENTION IS APPLIED HERE, and it has to be. This resolver does not
+        THE ROSTER WINDOW IS APPLIED HERE, and it has to be. This resolver does not
         read ``jobs.list()`` on the comms path — it walks the comms graph and
         asks ``comms.job()`` for each node, and that lookup falls back to
         ``_ChildRecord.job_ref``, a live reference the manager's ``del`` cannot
@@ -15425,11 +15559,14 @@ class OperatorApp(App[None]):
         them go. Identity outliving retention is correct; PRESENTING it as a
         current roster row is not, so the presentation layer filters.
 
-        Filtered with the manager's own :func:`retention_expired` against the
-        manager's own window, never a local re-derivation, so the panel and the
-        ledger cannot drift. A running row and a ``restored`` row are exempt by
-        that predicate, so a live child and a resumed session's rehydrated
-        children are untouched.
+        Filtered with :func:`roster_expired` against the manager's OWN window,
+        never a local re-derivation, so the panel and the ledger cannot drift
+        about when the clock runs out. Where they differ is deliberate and
+        stated in that function: the ledger evicts on time alone, while the
+        roster additionally keeps rows the user has unfinished business with
+        (a failure to review, a child they paused to come back to). Running
+        and ``restored`` rows are exempt in both, so a live child and a
+        resumed session's rehydrated children are untouched.
         """
         session = self._session
         comms = getattr(session, "_subagent_comms", None)
@@ -15441,7 +15578,7 @@ class OperatorApp(App[None]):
             if comms is not None and callable(getattr(comms, "children", None)):
                 nodes = comms.children(view.job_id if view is not None else None)
                 jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
-                jobs = self._within_retention(jobs, manager)
+                jobs = self._within_retention(jobs, manager, self._paused_child_ids(comms))
                 return jobs, job_for(view.job_id) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
