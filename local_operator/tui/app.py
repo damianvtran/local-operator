@@ -1947,6 +1947,14 @@ class OperatorApp(App[None]):
         # Keep the existing composer visually unchanged, but make its submit
         # boundary atomic so text cannot land in the conversation being left.
         self._session_transition_pending = False
+        #: Whether THIS session has run `eval`, so a `/move` that restarts the
+        #: runtime destroys the namespace it built up. Latched when the call is
+        #: drawn rather than re-derived from the transcript, because `/clear`
+        #: and a bounded resume both edit the VIEW while the kernel lives on
+        #: (see `_session_used_eval`). Reset when the session is replaced —
+        #: the successor has its own kernel, and inheriting the flag would warn
+        #: about a loss that belongs to a conversation the user has left.
+        self._session_used_eval_latch = False
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -6639,6 +6647,10 @@ class OperatorApp(App[None]):
         async with self._turn_provider_lock:
             pass
         self._session = None
+        # The successor gets its own `eval` kernel, so the latch belongs to the
+        # session being disposed and must not outlive it — carrying it over
+        # would warn a NEW conversation about a namespace it never had.
+        self._session_used_eval_latch = False
         # THE WATCHED ID DELIBERATELY SURVIVES THIS WINDOW. It is the only
         # lever a stranded viewer has, and clearing it here disarmed the kill
         # switch on the exact path this feature exists to serve: if anything
@@ -15349,9 +15361,16 @@ class OperatorApp(App[None]):
             # refused: losing it is a real consequence of a move the user asked
             # for, not a reason to decline the move.
             if self._session_used_eval():
+                # "everything you set up in eval", not "the eval kernel's
+                # variables": `kernel` is an implementation noun this surface
+                # never teaches, and it led the clause. `eval` is the one term
+                # the user has provably seen — it is the tool name on the card
+                # above — and the shorter phrasing also shortens the wrapped
+                # tail, which is where this warning always lands (design D11,
+                # D12).
                 notice(
                     f"moved to {label} — this session's runtime restarted there,"
-                    " so the eval kernel's variables were lost"
+                    " so everything you set up in eval was lost"
                 )
                 return
             notice(f"moved to {label} — this session's runtime restarted there")
@@ -15375,18 +15394,42 @@ class OperatorApp(App[None]):
         (`_reap_idle`) or evicted (`_remember`) before the move, in which case
         this warns about state that was already gone; the eval tool's own
         stale-namespace receipt covers that case and the user has still lost
-        nothing they had. The reverse error — staying silent for a user who
-        does have a live kernel — is the one that costs work, and it cannot
-        happen: no `eval` call in the transcript means no kernel for this
-        session was ever created here.
+        nothing they had.
+
+        LATCHED, because `blocks()` is a DISPLAY PROJECTION and not a ledger.
+        This method used to re-derive the answer from what was on screen and
+        its docstring claimed the silent direction could not happen. It can,
+        by two reachable routes, and both leave the kernel alive:
+
+        * `/clear` (`clear_blocks`) empties the view while the session, the
+          runtime and the kernel all survive — and `/clear`'s own receipt
+          promises "history is untouched", so that user has every reason to
+          believe their `eval` state is intact; and
+        * `_project_settled_rows` renders only the last `RESUME_RENDER_MESSAGES`
+          messages, so an `eval` call older than that is simply not in
+          `blocks()` after a resume.
+
+        The latch records the fact when it happens, so nothing that edits the
+        VIEW can retract it. Erring toward warning was always this signal's
+        stated policy; deriving it from the screen quietly broke that policy in
+        the one direction that costs the user work (review round 3, MAJOR-1).
         """
+        if self._session_used_eval_latch:
+            return True
         transcript = self._transcript
         if transcript is None:
             return False
-        return any(
+        # Still consulted as well as the latch: a session RESUMED into this
+        # app never saw the call happen, so its only evidence is what the
+        # replay put on screen. The latch covers the live session, the
+        # transcript covers the resumed one, and either being true is enough.
+        if any(
             isinstance(block, ToolCard) and block.tool_name == "eval"
             for block in transcript.blocks()
-        )
+        ):
+            self._session_used_eval_latch = True
+            return True
+        return False
 
     def _push_cwd_to_band(self, cwd: str) -> None:
         """Repaint the band's directory segment for ``cwd``.
@@ -16832,6 +16875,13 @@ class OperatorApp(App[None]):
         resume already retired it when it painted the tail, and a page mounted
         into the scrollback is not the edge that starts a conversation.
         """
+        # LATCHED HERE, at the moment the call is drawn, because this is the
+        # last point where the fact is certain. Everything downstream is a
+        # view: `/clear` empties it and a bounded resume renders only the tail,
+        # so re-deriving "did this session use eval" from the screen loses the
+        # answer while the kernel is still alive (`_session_used_eval`).
+        if isinstance(block, ToolCard) and block.tool_name == "eval":
+            self._session_used_eval_latch = True
         if self._projection_message_id:
             if not block.navigation_anchor_id:
                 block.navigation_anchor_id = self._projection_message_id
