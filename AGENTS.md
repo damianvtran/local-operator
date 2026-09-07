@@ -834,6 +834,38 @@ Never tag an owner in a *comment* to ask for review unless their review is
 genuinely required — the auto-request is not a comment tag, and a comment tag
 is what says the PR is waiting on that person.
 
+### Scope round N+1 to the remediation delta
+
+**A remediation is the most likely place in a PR for a new defect**, so the
+round that follows one is scoped to `<previous-head>..<new-head>` — not to the
+whole diff again. This is not merely a saving of effort. The whole-diff re-read
+is exactly what lets a small new defect hide behind a large surface that was
+already approved: attention spreads over hundreds of familiar lines, and the
+twenty that changed get the same share as the rest.
+
+The evidence is unusually strong. In one day, eight sessions independently
+reported the same shape on different PRs: three of four rounds where the
+remediation introduced the next defect; a fix for a mislabelled banner that
+reproduced the same mislabelling at larger scale in the digest; a fix whose two
+halves then drifted into a title and a subtitle describing different scopes; a
+remediation that reinstated the exact failure mode its own PR existed to fix; a
+round-2 fill-loop fix that left a resumed conversation ~120 messages behind.
+None was caught by re-reading the whole diff; every one was caught by a round
+that looked only at what had just changed.
+
+The reason a delta-scoped round works is worth stating, because it generalises
+past review: **a number — or a behaviour — that is right about an *adjacent*
+quantity is more dangerous than one that is obviously wrong, because nothing
+about it announces the mismatch.** A remediation is where adjacency is created,
+and the delta is the only view in which the new adjacency is visible at all.
+
+Two practical corollaries. Do not re-open dimensions the delta cannot have
+touched — a backend-only remediation keeps a design round valid, and re-running
+it spends a reviewer on unchanged pixels. And when a rebase moves the base,
+prove the content is unchanged (`git range-diff` plus byte-identical `+`/`-`
+line sets) and then run **one** convergence round over `<old-head>..<new-head>`,
+checking semantic conflicts only in files the upstream also touched.
+
 ## Security advisories
 
 Any agent handling a reported vulnerability or a GHSA for this repository
