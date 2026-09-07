@@ -52,6 +52,70 @@ _STDLIB_MKDTEMP = tempfile.mkdtemp
 TCSS_PATH = str(Path(theme_mod.__file__).parent / "local_operator.tcss")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _prepay_session_import_warmup() -> None:
+    """Import the factory's heavy dependencies ONCE, before any test is timed.
+
+    WHY THIS EXISTS. ``OperatorApp`` defaults to ``warm_session_imports=True``,
+    so every boot and every ``/new``/``/reload``/``/resume`` transition runs
+    ``_construct_session`` → ``_warm_session_imports`` →
+    ``asyncio.to_thread(warm_session_imports)`` before the factory is awaited.
+    That warm-up imports ``mcp``, ``httpx``, ``httpcore``, ``truststore`` and
+    several ``local_operator`` modules — hundreds of milliseconds in a fresh
+    test process, the same order as the ~700 ms the app's own docstring quotes.
+    The absolute figure is not stable enough to pin (samples on this machine
+    ranged from ~600 ms to ~1.6 s depending on load), and nothing here branches
+    on it. What matters, and what reproduces, is the RATIO in the next
+    paragraph.
+
+    The tests that wait on the far side of a transition budget a fixed COUNT of
+    event-loop turns (``_settle``'s ``tries``, ``MAX_PUMP_TURNS``), which is the
+    right shape per AGENTS.md — a turn count survives contention that a
+    wall-clock budget does not. But NOTHING relates that count to an import
+    running in a worker thread: ``pilot.pause()`` yields to the message pump, it
+    does not sleep, so ~60 turns can drain while the thread is still importing.
+    Under CPU contention the import inflates and the turn budget does not, and
+    the predicate is polled to exhaustion before the factory has been reached.
+    Measured on clean ``origin/main`` under 8 busy-loop processes:
+    ``test_new_starts_a_fresh_conversation`` and
+    ``test_new_replaces_the_visible_ledger`` failed 6/10.
+
+    WHY PRE-PAYING RATHER THAN DISABLING. ``warm_session_imports`` is
+    ``importlib.import_module`` over a fixed tuple, so it is idempotent against
+    ``sys.modules``: the first call in a process costs hundreds of milliseconds
+    and every later call costs ~0.01 ms — a ratio of four to five orders of
+    magnitude, which reproduced across machines and load levels even where the
+    absolute first-call figure did not. The entire race is therefore the FIRST
+    construction in each process, and which test that is depends on collection
+    order and on xdist sharding — a lottery, not a property of the two tests
+    that happen to lose it today. Paying it here, in session setup, collapses
+    every in-test warm-up to a no-op hop while leaving the production path
+    exactly as it ships: the app still calls the warm-up, still hops to a
+    thread, still orders warm-then-factory. Passing ``warm_session_imports=False``
+    at the ~1400 construction sites in this suite would instead delete that
+    ordering from the code under test, and a fixture the test modules had to
+    request would change what pytest resolves — which is the perturbation
+    ``_reclaim_bare_mkdtemp`` above documents as having twice destabilised
+    timing-sensitive pilot tests.
+
+    Tests that assert ON the warm-up install their own fake and are unaffected:
+    ``test_boot_warms_session_imports_before_awaiting_the_factory`` patches
+    ``local_operator.session_factory.warm_session_imports`` and
+    ``tests/unit/test_startup_imports.py`` patches
+    ``OperatorApp._warm_session_imports``, so both still observe their own
+    call ordering rather than this cache.
+    """
+    # Imported here, not at module scope: this conftest loads for every TUI
+    # test, and `session_factory` pulls a non-trivial import cost of its own
+    # (order of a hundred milliseconds, load-dependent) that only this fixture
+    # needs.
+    from local_operator.session_factory import warm_session_imports
+
+    # Never raises by contract — an optional extra that is not installed is the
+    # factory's problem to report, not a collection error for the whole suite.
+    warm_session_imports()
+
+
 @pytest.fixture(autouse=True)
 def _reclaim_bare_mkdtemp() -> Iterator[None]:
     """Remove the ``tempfile.mkdtemp()`` dirs this suite abandons, per test.
