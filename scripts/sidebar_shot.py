@@ -83,7 +83,7 @@ ROWS = [
     #
     #   attached + armed wake -> must draw the ATTACHED mark, not the wake (D2)
     #   cold + dormant wake   -> draws the wake mark, so the words must follow
-    #                            it: "Stopped (N wakes paused)" (D1)
+    #                            it: "Stopped (N wakes dormant)" (D1)
     ("aaaaaaaaaab4", "Review provider onboarding copy", 7, "attached", None, 2, False),
     ("aaaaaaaaaab5", "Stopped nightly catalogue refresh", 120, "", None, 1, True),
     ("aaaaaaaaaaa8", "Add Flavia's Adverse Media Case", 3, "idle", "approval", 0, False),
