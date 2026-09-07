@@ -115,6 +115,106 @@ _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
 
+#: Loop turns granted after a sync wall-clock expiry BEFORE the expiry is
+#: believed. This is the load-bearing half of the fix for the false timeout,
+#: and it is a turn count rather than a duration on purpose.
+#:
+#: ``asyncio.wait_for`` compares against a WALL clock, so if the VIEWER's own
+#: loop is blocked past the deadline — a Textual repaint, a GC pause, or plain
+#: CPU starvation — the timeout fires on the next turn regardless of whether
+#: the frame already arrived on the socket. Reproduced against a deliberately
+#: fast owner: frame written at 0.30 s, deadline 1.0 s, ``TimeoutError`` raised
+#: with ``future.done() is False``, and 0.05 s later ``future.done() is True``.
+#: The viewer blamed the owner for its own stall, discarded a healthy
+#: connection, and the TUI printed a boot failure.
+#:
+#: Resolution after such an expiry costs exactly THREE bare turns (6/6 trials):
+#: the pump task has to be scheduled, read the buffered line, and resolve the
+#: future. 16 is ~5x that headroom. Per ``AGENTS.md`` ("bound by loop turns
+#: rather than seconds — a turn count survives contention that a wall-clock
+#: budget does not") this number does not need calibrating against a machine,
+#: which is precisely why it is expressed in turns.
+FRONTEND_SYNC_SETTLE_TURNS = 16
+
+#: Catastrophe backstop for the canonical sync on a BACKGROUND bind (the TUI's
+#: speculative mount/keystroke engage, owner recovery, the desktop proxy).
+#: NOT a calibrated bound on how long a healthy owner takes — liveness decides
+#: that, and every genuine failure resolves through the pump in milliseconds
+#: (``_dial``'s ``on_disconnected`` fails the future with the socket's own
+#: reason). This exists only so a viewer whose socket is alive but whose owner
+#: will never speak fails instead of hanging forever; ``#401`` is the standing
+#: reminder that a wedged loop is a real failure mode here, and ``AGENTS.md``'s
+#: ``DEADLOCK_GUARD_S`` is the shape.
+#:
+#: Generous because nothing correct depends on its value and nobody is waiting:
+#: it has to clear the 15 s-vs-45 s window in which a record still reads
+#: ``live`` (``HEARTBEAT_TIMEOUT_S``) while the authoritative loop that would
+#: write both the heartbeat and the sync is occupied by a turn. A 16 s stall in
+#: that window reproduced the operator's exact sentence at socket level.
+FRONTEND_SYNC_BACKSTOP_S = 120.0
+
+#: The same backstop for a FOREGROUND bind — a user is watching a specific
+#: command and the budgets COMPOSE, so the generous envelope must not reach
+#: them. Today's worst foreground path is 30 s engage + 15 s welcome ack +
+#: 15 s sync = 60 s; keeping the per-attempt sync envelope at the historical
+#: 15 s and capping the whole retry loop (``_FOREGROUND_BIND_BUDGET_S``) holds
+#: that at or below what it already is. A foreground caller that exhausts it
+#: is not told the session failed — the runtime is alive in the background and
+#: the next keystroke rejoins it.
+FRONTEND_SYNC_FOREGROUND_S = 15.0
+
+#: The envelope for a wait that BLOCKS the facade while it runs. Today that is
+#: ``_recover_owner``, whose ``_recovering`` flag refuses prompts, `/fork`,
+#: `/model` and every other mutation for as long as the wait lasts, and which
+#: is itself bounded by ``COLD_FALLBACK_S`` — going cold is its designed,
+#: non-failing outcome, after which the next prompt re-engages through
+#: ``_ensure_bound`` (with the retry below) against the very same record.
+#:
+#: This DIVERGES from the design note, which grouped recovery with the silent
+#: background binds. Recovery is not silent: a 120 s wait here would hold the
+#: whole TUI in "session is reconnecting" for two minutes AND would starve the
+#: recovery loop's own cold deadline, which is checked once per pass. A short
+#: envelope loses nothing, because the fallback is a cold viewer that rebinds
+#: on the next keystroke rather than a lost session.
+FRONTEND_SYNC_BLOCKED_S = 15.0
+
+#: Total wall-clock a bind may spend across its retry attempts, per envelope.
+#: The foreground figure bounds the whole loop rather than each attempt, so
+#: three attempts cannot silently triple the wait a user sits through; the
+#: background figure is the backstop itself, since a silent engage has nobody
+#: to be hostile to.
+_FOREGROUND_BIND_BUDGET_S = 25.0
+_BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
+
+#: Bounded retry of the INITIAL bind. A first attempt that loses its race with
+#: a retiring runtime, or that hits an owner whose loop is momentarily busy, is
+#: a transient — the owner is typically answering seconds later, and before
+#: this the viewer surrendered on the first ``ConnectionError`` and left the
+#: session cold with a boot-failure notice. Deliberately small: the retry is
+#: for a transient, not a substitute for the backstop above.
+#:
+#: Safe because ``_bind_to``'s failure path already calls
+#: ``_discard_rejected_client`` (see its docstring for the half-bound facade
+#: and the 272-eviction burst that discipline exists to prevent), so every
+#: attempt starts from a clean facade and no attach slot leaks against
+#: ``ATTACH_MAX_CLIENTS``. ``find_owner_record`` is re-run per attempt so a
+#: runtime that retired and respawned between attempts is picked up rather
+#: than redialled at its dead pid. Backoff shape copied from
+#: ``_recover_owner`` (``remote.py`` ``delay = min(delay * 1.7, 0.5)``) so the
+#: two redial loops behave the same way.
+_BIND_RETRY_ATTEMPTS = 3
+_BIND_RETRY_INITIAL_S = 0.1
+_BIND_RETRY_FACTOR = 1.7
+_BIND_RETRY_DELAY_CAP_S = 0.5
+
+#: What a viewer says when its socket is alive, authenticated, and the owner
+#: has still not produced the canonical sync. Deliberately NOT "owner did not
+#: send frontend synchronization": the viewer cannot observe what the owner
+#: did or did not send, and the old sentence asserted a fault on the one path
+#: where the most likely truth is a busy authoritative loop. This says what is
+#: actually known.
+_SYNC_UNRESPONSIVE_REASON = "the runtime is not responding"
+
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
     cls.model_fields["type"].default: cls
     for cls in (
@@ -544,9 +644,16 @@ class RemoteSession:
             surface=surface,
         )
         self._display_window_requested = display_window
-        await self._dial(record)
+        pending_sync = await self._dial(record)
         try:
-            frontend = await self._await_frontend()
+            # FOREGROUND envelope: every caller of ``connect`` has a user
+            # waiting on a specific action (`/resume`, the startup attach,
+            # `lop --resume`), and this budget composes with the welcome ack
+            # ahead of it. The generous backstop belongs to binds nobody is
+            # watching, not to this one.
+            frontend = await self._await_frontend(
+                pending_sync, timeout=FRONTEND_SYNC_FOREGROUND_S
+            )
             self._install_frontend(frontend.snapshot)
             await self._load_frontend_history(frontend)
         except BaseException:
@@ -1054,7 +1161,10 @@ class RemoteSession:
             )
             if record is None or self._disposed:
                 return False
-            await self._bind_to(record)
+            # A desktop READ attaching to an owner that already exists: an HTTP
+            # request is waiting on it, so this takes the foreground envelope
+            # rather than the proxy's generous one.
+            await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
             return True
 
     async def admit_prompt(
@@ -1117,7 +1227,7 @@ class RemoteSession:
             return await client.ask_answer(request_id, value, question_index=question_index)
         raise ValueError("the answer does not match the current question")
 
-    async def _ensure_bound(self) -> None:
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
         The seam between "looking at a session" and "working in one", and the
@@ -1131,6 +1241,21 @@ class RemoteSession:
         this process, or report the deliberate stop — and engaging a runtime
         there would both contradict that and start a process for a session the
         caller is about to take over itself.
+
+        ``foreground`` picks the envelope, and it defaults to the SHORT one so
+        a caller that forgets cannot accidentally hand a user a two-minute
+        wait. Pass ``foreground=False`` only from a bind nobody is watching:
+        the TUI's speculative mount/keystroke engage and the desktop proxy,
+        both of which are silent on failure. The budgets compose — 30 s engage
+        plus a 15 s welcome ack sit AHEAD of the sync wait on the same call —
+        so a generous sync envelope reaching a foreground caller would make
+        the very wait this fix exists to shorten longer instead.
+
+        A bind that fails is retried a bounded number of times rather than
+        surrendering on the first ``ConnectionError``: see the retry constants
+        for why that is safe (``_bind_to`` discards its rejected client on
+        every failure path, so no attach slot leaks) and why the record is
+        re-read per attempt.
         """
         # Recovery already owns its dial/sync and signals _owner_ready. A
         # prompt or steer must wait on that promise, not start a competing
@@ -1180,26 +1305,77 @@ class RemoteSession:
             # and nothing written it exits in ~3 s and removes its directory.
             if self._disposed:
                 return
-            record, _owner = await asyncio.to_thread(
-                find_owner_record, self._config_dir, self._session_id
+            sync_timeout = (
+                FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
             )
-            if record is None:
-                raise ConnectionError("could not start a runtime for this session")
-            if self._disposed:
-                return
-            await self._bind_to(record)
+            budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
+            deadline = time.monotonic() + budget
+            delay = _BIND_RETRY_INITIAL_S
+            last_error: BaseException | None = None
+            for attempt in range(_BIND_RETRY_ATTEMPTS):
+                # Re-checked on EVERY attempt, not once on entry. The awaits
+                # below (a dial, a sync wait, a backoff sleep) are all points
+                # at which `/new` or `/resume` can dispose this facade, or at
+                # which owner loss can start a recovery that owns the dial —
+                # and binding under either leaves a live socket attached to a
+                # facade nobody owns, which pins the runtime resident and never
+                # offers it back (the failure ``_dial``'s disposed-guard and
+                # review round 1 MAJOR-1 both document).
+                if self._disposed or self._recovering or not self.is_cold:
+                    return
+                # Re-read per attempt rather than reusing the first record: a
+                # runtime that retired between attempts publishes a NEW record
+                # under a new pid, and redialling the dead one would burn every
+                # remaining attempt on a socket that cannot answer.
+                record, _owner = await asyncio.to_thread(
+                    find_owner_record, self._config_dir, self._session_id
+                )
+                if self._disposed:
+                    return
+                if record is None:
+                    # No record at all is not a transient the way a refused
+                    # dial is — ``engage_runtime`` returned, so one existed
+                    # moments ago and has since gone. Report it rather than
+                    # spending the budget rediscovering nothing.
+                    raise ConnectionError("could not start a runtime for this session")
+                try:
+                    await self._bind_to(record, sync_timeout=sync_timeout)
+                    return
+                except (ConnectionError, OSError, TimeoutError) as error:
+                    # ``_bind_to`` has already discarded its client, so the
+                    # facade is clean and the runtime's attach slot is back.
+                    last_error = error
+                    remaining = deadline - time.monotonic()
+                    if attempt == _BIND_RETRY_ATTEMPTS - 1 or remaining <= 0:
+                        break
+                    logger.debug(
+                        "bind attempt %d/%d for %s failed (%s); retrying",
+                        attempt + 1,
+                        _BIND_RETRY_ATTEMPTS,
+                        self._session_id,
+                        error,
+                    )
+                    await asyncio.sleep(min(delay, remaining))
+                    delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
+            if last_error is not None:
+                raise last_error
 
-    async def _bind_to(self, record: SessionRecord) -> None:
+    async def _bind_to(self, record: SessionRecord, *, sync_timeout: float) -> None:
         """Attach this viewer to a live record and adopt its canonical state.
 
         The tail of :meth:`connect`, reused so a cold viewer becoming attached
         takes the identical path a fresh attach does — including the history
         boundary, which is what stops the rows already on screen from painting
         a second time.
+
+        ``sync_timeout`` is the caller's envelope rather than a constant: the
+        same code binds for a user watching a slash command and for a silent
+        speculative engage, and those are different budgets (see the envelope
+        constants at the top of this module).
         """
         try:
-            await self._dial(record)
-            frontend = await self._await_frontend()
+            pending_sync = await self._dial(record)
+            frontend = await self._await_frontend(pending_sync, timeout=sync_timeout)
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
@@ -1262,7 +1438,15 @@ class RemoteSession:
         except Exception:  # noqa: BLE001 - teardown of a connection being abandoned
             logger.debug("closing a rejected owner connection failed", exc_info=True)
 
-    async def _dial(self, record: SessionRecord) -> None:
+    async def _dial(self, record: SessionRecord) -> asyncio.Future[FrontendSync]:
+        """Open the owner socket and return THIS dial's canonical-sync future.
+
+        Returning it, rather than leaving callers to re-read
+        ``self._frontend_future``, is what pins the future's identity across the
+        await that follows: see :meth:`_await_frontend` for the seam that
+        closes. The attribute is still assigned because ``_on_frontend_sync``
+        resolves through it from the pump.
+        """
         self._owner_record = record
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
@@ -1363,15 +1547,65 @@ class RemoteSession:
                 client.close()
                 self._client = None
                 raise
+        return pending_sync
 
-    async def _await_frontend(self) -> FrontendSync:
-        future = self._frontend_future
-        if future is None:
-            raise ConnectionError("owner did not start frontend synchronization")
+    async def _await_frontend(
+        self, future: asyncio.Future[FrontendSync], *, timeout: float
+    ) -> FrontendSync:
+        """Wait for the canonical sync on LIVENESS, with the clock as a backstop.
+
+        The future is a PARAMETER, not ``self._frontend_future``. Re-reading the
+        attribute across the await left the identity unpinned: a concurrent
+        ``_discard_rejected_client`` nulls it (producing the sibling "owner did
+        not start frontend synchronization" refusal for a dial that was fine)
+        and a concurrent redial replaces it, so the caller could end up awaiting
+        a DIFFERENT dial's future. ``_ensure_bound`` holds ``_bind_lock`` but
+        ``_recover_owner`` never takes it, so the two are ordered only by the
+        ``_recovering`` flag — not by a lock. Threading the future through the
+        call closes that seam by construction, which is why the ``None`` case
+        below is an internal invariant rather than an owner fault.
+
+        The wait itself follows ``AGENTS.md``'s "wait on the event, never on the
+        clock". The socket IS the progress signal and it is already wired: a
+        connection that dies fails the future through ``_dial``'s
+        ``on_disconnected`` with the pump's own named reason, in milliseconds.
+        So a live socket with no sync yet means the owner is working or the box
+        is starved — both worth waiting for — while every real failure resolves
+        long before ``timeout``. That leaves the clock doing only what
+        ``AGENTS.md`` calls it: a backstop, not the assertion.
+
+        ``timeout`` is a parameter because the two envelopes are genuinely
+        different budgets and one constant cannot serve both: a foreground bind
+        has a user waiting on a specific command (and its budget composes with
+        the engage and welcome deadlines, see ``FRONTEND_SYNC_FOREGROUND_S``),
+        while a background engage or recovery has nobody waiting and should
+        outlast a busy authoritative loop rather than surrender to it.
+        """
+        if future is None:  # pragma: no cover - invariant, kept as a tripwire
+            raise AssertionError("_await_frontend requires the dial's own future")
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=15.0)
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except TimeoutError as exc:
-            raise ConnectionError("owner did not send frontend synchronization") from exc
+            # Do NOT believe the expiry yet. ``wait_for`` checks a wall clock,
+            # so a viewer loop blocked past the deadline trips it even when the
+            # frame is already sitting in the socket buffer — reproduced with a
+            # deliberately fast owner (frame at 0.30 s, deadline 1.0 s, timeout
+            # raised with ``future.done() is False``, done 0.05 s later). The
+            # race is between the deadline and the SCHEDULER, not between the
+            # deadline and the work, which is why raising the number fixes
+            # nothing: it buys a slower wrong answer.
+            #
+            # Give the loop bounded turns to settle instead. Measured cost of
+            # the resolution is 3 turns, deterministically (6/6 trials); the
+            # ceiling is ~5x that. A turn count is the right instrument here
+            # because it survives the CPU starvation a second count does not.
+            for _ in range(FRONTEND_SYNC_SETTLE_TURNS):
+                if future.done():
+                    break
+                await asyncio.sleep(0)
+            if future.done():
+                return future.result()
+            raise ConnectionError(_SYNC_UNRESPONSIVE_REASON) from exc
 
     async def _load_frontend_history(self, frontend: FrontendSync) -> None:
         """Install the durable cut before live replay or command readiness."""
@@ -2758,7 +2992,7 @@ class RemoteSession:
                     and FRONTEND_CAPABILITY in record.capabilities
                 ):
                     try:
-                        await self._dial(record)
+                        pending_sync = await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):
                         # ``_dial`` closes the client it built on every raise
                         # path and installs ``self._client`` only as its last
@@ -2782,7 +3016,26 @@ class RemoteSession:
                         delay = min(delay * 1.7, 0.5)
                         continue
                     try:
-                        frontend = await self._await_frontend()
+                        # BLOCKED envelope, NOT the generous backstop — a
+                        # deliberate divergence from the design note, which
+                        # filed recovery under "background, nobody waiting".
+                        # It is not: ``_recovering`` is set for the whole of
+                        # this loop, and it refuses prompts, `/fork`, `/model`
+                        # and the rest with "session is reconnecting". Holding
+                        # that for the 120 s backstop would make the TUI
+                        # unusable for two minutes, and it would also starve
+                        # this loop's OWN ``cold_deadline`` (checked at the top
+                        # of each pass) of the chance to fire.
+                        #
+                        # Going cold is not a failure here and is strictly the
+                        # better outcome: the transcript stays on screen and
+                        # the next prompt engages through ``_ensure_bound``,
+                        # which will rediscover this very record and bind to it
+                        # with a retry. So the short envelope loses nothing and
+                        # keeps ``COLD_FALLBACK_S``'s contract intact.
+                        frontend = await self._await_frontend(
+                            pending_sync, timeout=FRONTEND_SYNC_BLOCKED_S
+                        )
                         self._install_frontend(frontend.snapshot, publish=True)
                         # ONE threaded parse feeds both the gap replay and the
                         # history bind: reconnect must not re-parse the file on

@@ -11303,7 +11303,12 @@ class OperatorApp(App[None]):
 
         async def run() -> None:
             try:
-                await cast(Callable[[], Awaitable[None]], ensure)()
+                # BACKGROUND envelope. Nobody is waiting on this engage and it
+                # is silent on failure, so it can afford to outlast an owner
+                # whose authoritative loop is busy with a turn — which is the
+                # condition that used to leave the session cold and make the
+                # user's first command pay for a fresh bind.
+                await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
             except Exception:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent: the user
                 # has not asked for anything yet, and the message they send
@@ -11480,9 +11485,29 @@ class OperatorApp(App[None]):
                 # Clear the latch as the other two triggers do, so the next
                 # keystroke or command retries rather than finding it stuck.
                 self._warm_engage_started = False
-                self._system_notice(
-                    f"could not start a runtime for this session: {error}", "warning"
-                )
+                # "could not start a runtime for this session" was wrong on
+                # both halves for the common case: a runtime very likely DID
+                # start (``engage_runtime`` returned, ``find_owner_record``
+                # found it, the socket authenticated) and the session is not
+                # broken — the bind ran out of its envelope while the owner's
+                # authoritative loop was busy. Reporting that as a boot failure
+                # told the user their session was lost when it was running in
+                # the background the whole time.
+                #
+                # A VETTED sentence is different: those are real configuration
+                # faults the user has to act on (a missing credential, an
+                # unusable model), so they keep their own text and stay a
+                # warning. Everything else now says what is actually known —
+                # the runtime is alive, this attempt did not land, and the next
+                # keystroke retries for free.
+                if getattr(error, "actionable", False):
+                    self._system_notice(str(error), "warning")
+                else:
+                    self._system_notice(
+                        "still connecting to this session's runtime — it is running "
+                        "in the background; try again in a moment",
+                        "info",
+                    )
                 return
             finally:
                 self._set_starting(False)

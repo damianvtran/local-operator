@@ -115,8 +115,8 @@ async def _held_startup(tmp_path, monkeypatch, phase="sync"):
     )
     original = viewer._await_frontend
 
-    async def held_sync():
-        sync = await original()
+    async def held_sync(future, **kwargs):
+        sync = await original(future, **kwargs)
         if phase == "sync":
             reached.set()
             await release.wait()
