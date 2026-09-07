@@ -195,7 +195,50 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
     other pane's version of this key" and needs no mode. `j/k`, `space` and
     `/` are deliberately not bound: this app is not modal-vim anywhere, and
     there is no filter here to open.
+
+    **The card is CHROME, so it is out of the text-selection walk.** See
+    ``ALLOW_SELECT`` below.
     """
+
+    # The card is chrome, not content: `app.Chrome` and
+    # `settings_view._ChromeStatic` state that rule in full and this surface is
+    # the same shape. Its content is reachable through the picker's own copy —
+    # a drag-select of the rules, gutter and footer is meaningless — so the
+    # selection machinery has nothing to offer here and one thing to take.
+    #
+    # WHAT IT TAKES, measured (round 3, Q8/U12, found independently by QA and
+    # the UX round). `Widget._on_click` calls `text_select_all()` on EVERY
+    # `chain == 2` click on a selectable widget; this app turns the resulting
+    # `TextSelected` into a real clipboard write plus a receipt
+    # (`app.on_text_selected` -> `_copy_selection` -> `_put_on_clipboard`). The
+    # card is one `Static`, so a double-click anywhere on it put ~1,450
+    # characters of the picker's own interface on the clipboard and toasted
+    # `copied 23 lines` to say it had worked.
+    #
+    # That write was always there and was always immediately OVERWRITTEN,
+    # because until the U10 refusal every chained click on a row dismissed and
+    # copied. The refusal created the first chained click that does neither, so
+    # the chrome write became the last one standing: the gesture the refusal
+    # exists to protect — click a row, nudge the wheel, click again — destroyed
+    # the user's clipboard and told them it had succeeded, which is a worse
+    # outcome than the wrong-row copy U10 was filed for. `ALLOW_SELECT = False`
+    # is what makes "refuses to copy" mean the clipboard is untouched.
+    #
+    # It closes a second, older doorway with it: double-clicking an EMPTY block
+    # (which `action_choose` refuses with a bell) leaked the card identically
+    # and has done since round 1, as did double-clicking the title, footer,
+    # preview or backdrop — pre-existing on every head and never noticed,
+    # because nobody had reason to look at the clipboard after a click that
+    # copied nothing.
+    #
+    # Set on the SCREEN rather than the card widget: `Screen._forward_event`
+    # arms the drag on `select_widget.allow_select AND self.screen.allow_select`,
+    # so the screen attribute gates the backdrop and any future child at once
+    # rather than needing each to remember. It gates ONLY selection — click
+    # delivery, `on_click`, hover and the picker's own copy are all untouched
+    # (verified: the plain double-click still copies the aimed row and
+    # dismisses).
+    ALLOW_SELECT = False
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
@@ -463,22 +506,49 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             self._repaint()
             return
         clamped = max(0, min(len(self._flat) - 1, index))
-        # ANY movement DISTURBS a live double-click anchor. Textual breaks a
-        # click chain on only two things — a changed screen offset and the
-        # clock — and a wheel notch or an arrow key changes neither, so the
-        # second click still arrived as `chain=2` and copied the PRE-WHEEL row
-        # while the caret and the preview had moved on (round 2, U10: 5/5
-        # frame/clipboard disagreements with a wheel between the clicks, 5/5
-        # with a key, 0/5 plain). That is the same silent wrong-clipboard
-        # failure U1 was filed for, through a narrower but entirely natural
-        # gesture: click a row, realise it is not the one, nudge the wheel,
-        # click again. This is the single path every gesture and key moves
-        # through, so it is the one place that can see them all; `on_click`
-        # re-arms after its own call, so a click cannot erase the anchor it is
-        # establishing.
-        if self._click_anchor is not None:
-            self._anchor_disturbed = True
-        self._click_anchor = None
+        # A movement that MOVED SOMETHING disturbs a live double-click anchor.
+        # Textual breaks a click chain on only two things — a changed screen
+        # offset and the clock — and a wheel notch or an arrow key changes
+        # neither, so the second click still arrived as `chain=2` and copied
+        # the PRE-WHEEL row while the caret and the preview had moved on
+        # (round 2, U10: 5/5 frame/clipboard disagreements with a wheel between
+        # the clicks, 5/5 with a key, 0/5 plain). That is the same silent
+        # wrong-clipboard failure U1 was filed for, through a narrower but
+        # entirely natural gesture: click a row, realise it is not the one,
+        # nudge the wheel, click again. This is the single path every gesture
+        # and key moves through, so it is the one place that can see them all;
+        # `on_click` re-arms after its own call, so a click cannot erase the
+        # anchor it is establishing.
+        #
+        # GATED ON THE CLAMP, exactly as the preview offset below is (round 3,
+        # D19, and the reviewer's own MAJOR by a different route). Disturbing
+        # unconditionally meant a movement that is a complete visual NO-OP —
+        # `up`/`home` already at the top row, `down`/`end` at the last, a wheel
+        # notch at either end — armed the refusal anyway, so the second click
+        # declined to copy against a frame that was byte-identical at all three
+        # points: three gestures, one unchanged picture, nothing copied and
+        # nothing on screen saying why. The refusal's whole defence is that it
+        # is legible — "visible in the frame and one more click from the right
+        # answer", stated in `on_click` — and that defence is only true when
+        # the refusal actually changed the frame.
+        #
+        # It bites hardest on this surface's HEADLINE case, a single long
+        # answer: the tree is ONE row, so 100% of wheel notches and arrow keys
+        # over it are clamped no-ops and any stray notch poisoned the
+        # double-click with no way for the user to see it. Same principle, same
+        # clamp, same file as `test_a_move_that_changes_nothing_keeps_the_
+        # reading_position` (round 1, U2) already pins for the reading
+        # position: nothing moved, so nothing should have changed.
+        #
+        # The ANCHOR ITSELF is preserved too, not merely the flag. Clearing it
+        # on a no-op would send the second click down the fresh-hit-test path,
+        # and `_window_start` recentres the tree under a stationary pointer, so
+        # that path names a different row than the one the gesture aimed at —
+        # U1 returning through the back door.
+        if clamped != self._selected:
+            if self._click_anchor is not None:
+                self._anchor_disturbed = True
+            self._click_anchor = None
         # The preview is a DIFFERENT DOCUMENT once the selection changes, so
         # the offset resets — but ONLY when the index actually changed.
         # Resetting unconditionally meant a movement that is a complete visual
@@ -822,8 +892,8 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
 
         The anchor binds only while the chain is UNDISTURBED. A chained click
         is by definition the same physical spot, but a spot is not a row: the
-        window can move under a still pointer, so anything that moves it
-        clears the anchor in `_move_to` and the second click SELECTS WITHOUT
+        window can move under a still pointer, so anything that ACTUALLY MOVES
+        it clears the anchor in `_move_to` and the second click SELECTS WITHOUT
         COPYING (round 2, U10). What survives is the case the anchor was built for —
         the app moved the row under a hand that did not move — and what no
         longer survives is the case where the USER moved it, where the frame
@@ -831,6 +901,11 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         boundary while it still cut the other way and recommended documenting
         rather than changing it; the UX round measured the same mechanism
         destroying the clipboard silently, so it is a fix here and not a note.
+
+        "Actually moves it" is load-bearing and is the clamp's job: a movement
+        that changes nothing leaves the anchor alone, so the refusal never
+        fires against a frame it did not change (round 3, D19 — see `_move_to`,
+        which owns that condition and the measurement behind it).
         """
         if getattr(event, "button", 1) != 1:
             return
@@ -870,7 +945,10 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # is neither aimed at nor displayed. Refusing is the conservative
         # direction for the reason this docstring already gives: a wrong copy
         # is silent and destroys the clipboard, a refusal is visible in the
-        # frame and one more click away from the right answer.
+        # frame and one more click away from the right answer. That second
+        # half is only true because `_move_to` disturbs on a real move only
+        # (D19) and because `ALLOW_SELECT = False` keeps the refusing click
+        # from writing the card to the clipboard behind the refusal (Q8/U12).
         disturbed = chain >= 2 and not chained and self._anchor_disturbed
         target_index = anchor[0] if chained and anchor is not None else index
         if target_index != self._selected:
@@ -1464,7 +1542,8 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         list, and the interior is mapped over the interior cells only. Over
         the same space, restricted to shapes that actually draw a gutter
         (``rows >= MIN_GUTTER_TRACK_ROWS``): **0 contradictions at either end
-        across 3,898,762 window positions**, bar the five noted below.
+        across 3,898,762 window positions**, with no exceptions once the
+        one-cell-travel shapes below are handled.
 
         The interior mapping spreads ``1 … max_start-1`` over
         ``1 … travel-1`` rather than re-flooring the full-range proportion.
@@ -1474,16 +1553,33 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         full-range floor, i.e. the thumb tracks the list more faithfully in
         the middle where the user is actually reading.
 
-        The five residuals are all ``travel == 1`` with ``max_start > 1``
-        (only ``rows``/``total`` of 3/5, 3/6, 4/6, 5/7): a one-cell travel has
-        two expressible positions for three or more states, so by pigeonhole
-        SOME window must share a cell with an extreme. It is a geometric
-        limit, not a formula defect, and it is resolved deliberately in favour
-        of the BOTTOM — an interior window shares the top cell rather than the
-        bottom one — because the bottom is where the list ends and where the
-        user stops, and because `↑`/`↓` cues carry the fine signal at sizes
-        that small (see ``MIN_GUTTER_TRACK_ROWS``, which sheds the track
-        entirely once it cannot say anything true at all).
+        A one-cell travel cannot express an interior at all: two expressible
+        positions for three or more window states means, by pigeonhole, that
+        some interior window shares a cell with an extreme and contradicts its
+        own cue. Round 2 forfeited those five shapes (``rows``/``total`` of
+        3/5, 3/6, 4/6, 5/7) as "a geometric limit", **which was wrong** — the
+        pigeonhole argument is valid only for a FIXED span, and the span is a
+        free parameter (round 3, D20). All four shapes are reachable at real
+        terminal sizes: the shipped split yields them at 100x20 with a 5- or
+        6-node tree and 100x23 with a 6- or 7-node one, where the frame painted
+        the thumb flush with the top of the track while `↑ 1 more` sat on the
+        rule above it.
+
+        So when the track has no interior to give, one cell of SPAN buys the
+        cell of travel that the invariant needs. Measured over the same
+        3,898,762 states: **5 top contradictions → 0, bottom stays 0, no cue
+        goes missing**, for a cumulative span error of 6724.5 against 6723.4 —
+        1.1 cells spread across the whole space, i.e. the span is one cell off
+        the ideal proportion on four shapes and exact everywhere else. Trading
+        a cell of thumb LENGTH (which says how much of the list you can see,
+        already rounded) for a cell of thumb POSITION (which is the invariant
+        this method exists to hold) is the right direction, and it is only ever
+        taken where the alternative is a frame that contradicts itself.
+
+        Guarded by ``span > 1`` so the floor that keeps a very long tree marked
+        at all is never spent, and by ``max_start > 1`` so a track with only
+        two window states — which a one-cell travel expresses exactly — keeps
+        its full proportional span.
         """
         total = len(self._flat)
         if total <= rows:
@@ -1491,17 +1587,18 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         span = max(1, round(rows * rows / total))
         travel = rows - span
         max_start = total - rows
+        if travel == 1 and max_start > 1 and span > 1:
+            # No interior cell to land an interior window on. Give up a cell of
+            # span for a second cell of travel — see the docstring for the
+            # measurement and for why length is the cheaper of the two.
+            span -= 1
+            travel = rows - span
         if travel <= 0 or max_start <= 0:
             top = 0
         elif start <= 0:
             top = 0
         elif start >= max_start:
             top = travel
-        elif travel < 2:
-            # One cell of travel cannot express an interior at all. Share the
-            # TOP cell, so "flush with the bottom" keeps meaning "nothing
-            # below" — see the docstring on which end this forfeits and why.
-            top = 0
         else:
             top = 1 + ((start - 1) * (travel - 2)) // max(1, max_start - 2)
             top = max(1, min(travel - 1, top))

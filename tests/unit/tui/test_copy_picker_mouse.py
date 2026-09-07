@@ -13,6 +13,16 @@ Mouse events are posted as messages rather than driven through
 it cannot produce the case that matters most here — two events queued with no
 event loop turn between them, which is what a fast double-click on a busy
 machine delivers and what used to crash the app.
+
+**But a posted `Click` cannot see everything.** It reaches the screen's own
+``on_click`` and nothing else, so ``Widget._on_click`` — Textual's own
+handler, which starts a TEXT SELECTION on a `chain == 2` click — never runs.
+A whole class of defect lives there and was invisible to every test in this
+file until round 3 (Q8/U12: the refusing click wrote the card to the
+clipboard). ``_full_click`` below drives real ``MouseDown``/``MouseUp`` pairs
+through ``App.on_event`` for the tests that need that path; ``pilot.click``
+is NOT the alternative, since it fabricates the chain per call, so two calls
+both arrive as ``chain=1`` and never double-click at all.
 """
 
 from __future__ import annotations
@@ -135,6 +145,71 @@ def _wheel(screen: CopyPickerScreen, x: int, y: int, down: bool):
         screen_x=x,
         screen_y=y,
     )
+
+
+async def _full_click(app, x: int, y: int) -> None:
+    """A REAL press and release at ``(x, y)``, with Textual computing the chain.
+
+    Fed to ``App.on_event`` rather than posted to the screen, because that is
+    the only entry point that synthesises the ``Click`` (chain and all) and
+    then routes it through ``Widget._on_click`` — where Textual's select-all
+    lives. The tests that assert on the CLIPBOARD need that path; the tests
+    that assert on the picker's own row arithmetic do not, and keep using the
+    posted `_click` for the no-loop-turn case it exists to reach.
+    """
+    for kind in (events.MouseDown, events.MouseUp):
+        # Spelled out per event rather than splatted from a shared dict: a
+        # `dict(...)` literal widens every value to the union of its types, so
+        # `**common` type-checks as `int | None` against every parameter.
+        await app.on_event(
+            kind(
+                widget=None,
+                x=x,
+                y=y,
+                delta_x=0,
+                delta_y=0,
+                button=1,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=x,
+                screen_y=y,
+            )
+        )
+
+
+async def _full_wheel(app, x: int, y: int, down: bool) -> None:
+    """A real wheel notch through ``App.on_event``, to pair with `_full_click`."""
+    kind = events.MouseScrollDown if down else events.MouseScrollUp
+    await app.on_event(
+        kind(
+            widget=None,
+            x=x,
+            y=y,
+            delta_x=0,
+            delta_y=1 if down else -1,
+            button=0,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            screen_x=x,
+            screen_y=y,
+        )
+    )
+
+
+def _reset_click_chain(app) -> None:
+    """Forget any chain in progress.
+
+    Textual's counter lives on the APP (`_chained_clicks`,
+    `_click_chain_last_offset`, `_click_chain_last_time`), so it OUTLIVES a
+    screen pop: without this a case inherits the previous case's chain and
+    reports the wrong verdict. Found while writing the round-3 probe, where it
+    silently turned a first click into a `chain=2`.
+    """
+    app._chained_clicks = 1
+    app._click_chain_last_offset = None
+    app._click_chain_last_time = None
 
 
 # --- the wheel ---------------------------------------------------------------
@@ -1468,12 +1543,22 @@ async def test_the_thumb_holds_both_ends_across_every_shape_it_can_draw() -> Non
     gutter is SHED rather than drawn (round 1, D14) and an undrawn thumb
     cannot contradict a cue.
 
-    The five residuals are `travel == 1` with `max_start > 1` — a one-cell
-    travel has two expressible positions for three or more window states, so
-    by pigeonhole one must share a cell with an extreme. They are asserted
-    EXACTLY rather than tolerated: the set is pinned by shape, so a formula
-    that regressed a sixth position would fail here even though the count is
-    non-zero, and the forfeited end is asserted to be the top.
+    Round 2 left five `travel == 1` residuals and called them a geometric
+    limit. Round 3 (D20) showed the shapes are REACHABLE at real terminal
+    sizes — 100x20 and 100x23 with 5-to-7-node trees — and that the pigeonhole
+    argument only holds for a fixed span, which is a free parameter. Spending
+    one cell of span to buy a second cell of travel removes all five, so the
+    expectation here is now ZERO at both ends.
+
+    **The end invariants alone are not a sufficient guard, which is the second
+    half of this test.** Collapsing the thumb's whole interior to a constant
+    (`top = 1`) satisfies both of them and passed every test in this file,
+    while destroying the continuity the thumb exists to provide: at 300 rows in
+    30 it takes 28 distinct positions down to 3. So the sweep also asserts that
+    every cell the track can express is actually USED, and that the thumb never
+    travels backwards — properties a constant interior cannot satisfy
+    (measured: the mutant fails 20,452 of 20,976 shapes, worst case 3 of 51
+    cells).
     """
     app = _real_app()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1482,28 +1567,41 @@ async def test_the_thumb_holds_both_ends_across_every_shape_it_can_draw() -> Non
 
         top_bad: list[tuple[int, int, int]] = []
         bottom_bad: list[tuple[int, int, int]] = []
+        crushed: list[tuple[int, int, int, int]] = []
+        backwards: list[tuple[int, int]] = []
         states = 0
         for rows in range(MIN_GUTTER_TRACK_ROWS, 60):
             for total in range(rows + 1, 400):
                 screen._flat = [None] * total  # type: ignore[assignment]
                 max_start = total - rows
+                tops: list[int] = []
                 for start in range(max_start + 1):
                     span = screen._thumb_span(rows, start)
                     states += 1
+                    tops.append(span.start)
                     if (span.stop == rows) != (start == max_start):
                         bottom_bad.append((rows, total, start))
                     if (span.start == 0) != (start == 0):
                         top_bad.append((rows, total, start))
+                # CONTINUITY. The track's cells run 0..max(tops); every one of
+                # them should carry a window, unless there are fewer windows
+                # than cells to spend on them.
+                reachable = min(max(tops) + 1, max_start + 1)
+                if len(set(tops)) < reachable:
+                    crushed.append((rows, total, len(set(tops)), reachable))
+                if any(later < earlier for earlier, later in zip(tops, tops[1:])):
+                    backwards.append((rows, total))
 
         assert states > 3_800_000, f"the sweep must be a sweep: {states} states"
         assert bottom_bad == [], f"the thumb bottoms out away from the list's end: {bottom_bad[:5]}"
-        assert top_bad == [
-            (3, 5, 1),
-            (3, 6, 1),
-            (3, 6, 2),
-            (4, 6, 1),
-            (5, 7, 1),
-        ], f"unexpected top-end residual: {top_bad[:8]}"
+        assert top_bad == [], f"the thumb sits at the top with rows above it: {top_bad[:8]}"
+        assert crushed == [], (
+            "the thumb's interior collapsed — cells the track can express carry no window, "
+            f"so the continuous signal is lost: {crushed[:5]}"
+        )
+        assert (
+            backwards == []
+        ), f"the thumb travelled backwards as the window advanced: {backwards[:5]}"
 
 
 @pytest.mark.parametrize("size", [(80, 24), (100, 30), (140, 44)])
@@ -1735,3 +1833,245 @@ async def test_the_too_small_notice_never_picks_a_form_wider_than_its_box() -> N
         assert (
             str(screen._too_small.content) == TOO_SMALL_NOTICE_SHORT
         ), "with no resolved width the notice chose the form that can clip"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_click_leaves_the_clipboard_exactly_as_it_found_it() -> None:
+    """Round 3, Q8/U12 — found independently by the QA and UX rounds.
+
+    The U10 refusal made the picker DECLINE to copy on a disturbed chain. It
+    did not make the click harmless: `Widget._on_click` calls
+    `text_select_all()` on every `chain == 2` click on a selectable widget,
+    and this app turns the resulting `TextSelected` into a real clipboard
+    write plus a `copied N lines` receipt. The card is one `Static`, so the
+    refusing click put ~1,450 characters of the picker's own chrome — rules,
+    gutter, footer — on the clipboard and told the user it had worked.
+
+    **The refusal did not introduce that write; it removed what was masking
+    it.** Every chained click on a row used to dismiss and copy, so the
+    picker's own copy always overwrote the chrome a moment later. The refusal
+    is the first chained click that does neither, so the chrome write became
+    the last one standing. That is why this test asserts the CLIPBOARD IS
+    UNTOUCHED rather than that the picker stayed open: "refuses to copy" has
+    to mean the user's prior clipboard survives, and the round-2 shape of this
+    file's tests could not tell the difference.
+
+    **Driven through `App.on_event` with real MouseDown/MouseUp pairs, and
+    that is the whole point.** The neighbouring test posts a synthetic `Click`
+    straight to the screen, which never reaches `Widget._on_click`, so it
+    cannot observe this at all — measured: the same gesture reports a clean
+    clipboard when driven that way. `pilot.click` is no better; it fabricates
+    the chain per call, so two calls both arrive as `chain=1`.
+
+    Also covers the pre-existing doorway the same mechanism opened: a
+    double-click on the card's INERT regions (title, footer) leaked the card
+    identically on every earlier head, and an empty block — which
+    `action_choose` refuses with a bell — has leaked since round 1.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        bodies = [f"Answer {index} unique body." for index in range(20, 0, -1)]
+        prior = "PRECIOUS-PRIOR-CLIPBOARD-CONTENTS"
+
+        def _choose(target: CopyTarget | None, sink: list[CopyTarget | None]) -> None:
+            """`_cmd_copy._copy_choice`, which is what closes the loop on the real
+            command: the picker only RETURNS a target, the app writes it. Without
+            the write the control case below cannot tell a working copy from a
+            clipboard nobody touched."""
+            sink.append(target)
+            if target is not None and target.content is not None:
+                app._put_on_clipboard(target.content)
+
+        async def _drive(interlude: str, pane_row: int) -> tuple[str, bool, CopyTarget | None]:
+            got: list[CopyTarget | None] = []
+            screen = await _open(app, _targets(*bodies), pilot, lambda t: _choose(t, got))
+            _reset_click_chain(app)
+            app.copy_to_clipboard(prior)
+            x, y = _tree_row(screen, pane_row)
+
+            await _full_click(app, x, y)
+            await pilot.pause()
+            if interlude == "wheel":
+                await _full_wheel(app, x, y, down=True)
+                await pilot.pause()
+            elif interlude == "key":
+                await pilot.press("down")
+                await pilot.pause()
+            await _full_click(app, x, y)
+            await pilot.pause()
+            await pilot.pause()
+
+            clipboard = app._clipboard
+            copied = got[0] if got else None
+            if screen.is_attached:
+                app.pop_screen()
+                await pilot.pause()
+            return clipboard, screen.is_attached, copied
+
+        # The instrument must be able to see a copy at all, or every assertion
+        # below passes vacuously against an app that never writes anything.
+        clipboard, _still_open, copied = await _drive("none", 4)
+        assert copied is not None, "a plain double-click must still copy"
+        assert clipboard == copied.content, (
+            "the plain double-click left something other than the chosen block on the "
+            f"clipboard: {clipboard[:60]!r}"
+        )
+
+        for interlude in ("wheel", "key"):
+            for pane_row in (0, 4, 8):
+                clipboard, _still_open, copied = await _drive(interlude, pane_row)
+                assert copied is None, f"a {interlude} between the clicks copied a row"
+                assert clipboard == prior, (
+                    f"a {interlude} between the clicks REFUSED to copy but still wrote "
+                    f"{len(clipboard)} characters to the clipboard: {clipboard[:60]!r}"
+                )
+
+        # The inert regions of the card, and the empty-block refusal: both are
+        # the same select-all mechanism through a doorway that predates this
+        # change, and both must also leave the clipboard alone.
+        screen = await _open(app, _targets(*bodies), pilot)
+        region = screen._body.region
+        inert = {
+            "title": (region.x + 4, region.y + 1),
+            "footer": (region.x + 4, region.y + region.height - 2),
+            "preview": _preview_row(screen, 1),
+            "backdrop": (1, 1),
+        }
+        for label, (x, y) in inert.items():
+            _reset_click_chain(app)
+            app.copy_to_clipboard(prior)
+            await _full_click(app, x, y)
+            await pilot.pause()
+            await _full_click(app, x, y)
+            await pilot.pause()
+            await pilot.pause()
+            assert app._clipboard == prior, (
+                f"double-clicking the {label} wrote {len(app._clipboard)} characters of "
+                f"card chrome to the clipboard: {app._clipboard[:60]!r}"
+            )
+        if screen.is_attached:
+            app.pop_screen()
+            await pilot.pause()
+
+        # `super+c` is bound on `Screen` beside `ctrl+c` and copies the live
+        # SELECTION, so it is the same leak by another key. With the card out
+        # of the selection walk there is nothing for it to take.
+        screen = await _open(app, _targets(*bodies), pilot)
+        _reset_click_chain(app)
+        app.copy_to_clipboard(prior)
+        x, y = _tree_row(screen, 4)
+        await _full_click(app, x, y)
+        await pilot.pause()
+        await pilot.press("super+c")
+        await pilot.pause()
+        assert app._clipboard == prior, "super+c copied the card's own chrome"
+        assert (
+            not screen.allow_select
+        ), "the card is chrome: it must stay out of Textual's selection walk"
+        if screen.is_attached:
+            app.pop_screen()
+            await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_movement_that_moves_nothing_does_not_disarm_the_double_click() -> None:
+    """Round 3, D19 — and the reviewer's own MAJOR, found by a different route.
+
+    `_move_to` armed the U10 refusal BEFORE comparing the clamp, so a wheel
+    notch, an arrow key or `end` that is a complete visual NO-OP disarmed the
+    double-click anyway. The user clicks a row, nudges, clicks again: the
+    frame is byte-identical at all three points, nothing is copied, and
+    nothing on screen says why. The refusal's entire defence is that it is
+    legible — "visible in the frame and one more click from the right answer"
+    — and that defence was true in 8 of 9 pane positions and false in exactly
+    these.
+
+    **It is worst on this surface's headline case.** With one long answer the
+    tree is ONE row, so 100% of wheel notches and arrow keys over it are
+    clamped no-ops and every nudge poisoned the double-click.
+
+    The fix is the same clamp comparison the preview offset two lines below
+    already uses, and the principle
+    `test_a_move_that_changes_nothing_keeps_the_reading_position` already pins
+    for the reading position.
+
+    Asserted on the CLIPBOARD, not on `_anchor_disturbed`: the defect is what
+    the user got, and the round-2 fixture missed this entirely because it uses
+    20 targets with the cursor mid-list — no clamped no-op is in its matrix at
+    all. The `noop` assertion below is what makes the fixture discriminating:
+    the frame really must be unchanged, or the case is not the one D19 named.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        many = [f"Answer {index} unique body." for index in range(16, 0, -1)]
+        # The headline case: one long answer, so the tree is a single row and
+        # every tree movement is a no-op by construction.
+        one = ["A single long answer.\n" * 40]
+
+        async def _drive(
+            bodies: list[str], interlude: str, pre_key: str | None
+        ) -> tuple[CopyTarget | None, bool]:
+            got: list[CopyTarget | None] = []
+            screen = await _open(app, _targets(*bodies), pilot, got.append)
+            _reset_click_chain(app)
+            if pre_key is not None:
+                await pilot.press(pre_key)
+                await pilot.pause()
+            tree_rows, _ = screen._split_rows()
+            # Aim at whichever pane row is painting the cursor, so the FIRST
+            # click is itself a no-op and the interlude is the only variable.
+            pane_row = screen._selected - screen._window_start(tree_rows)
+            x, y = _tree_row(screen, pane_row)
+
+            before = screen.render_lines_for_test()
+            await _full_click(app, x, y)
+            await pilot.pause()
+            middle = screen.render_lines_for_test()
+            if interlude == "wheel-down":
+                await _full_wheel(app, x, y, down=True)
+                await pilot.pause()
+            elif interlude == "wheel-up":
+                await _full_wheel(app, x, y, down=False)
+                await pilot.pause()
+            else:
+                await pilot.press(interlude)
+                await pilot.pause()
+            after = screen.render_lines_for_test()
+            await _full_click(app, x, y)
+            await pilot.pause()
+            await pilot.pause()
+
+            copied = got[0] if got else None
+            if screen.is_attached:
+                app.pop_screen()
+                await pilot.pause()
+            return copied, before == middle == after
+
+        cases = [
+            (many, "wheel-up", "home", "wheel up at the first row"),
+            (many, "up", "home", "`up` at the first row"),
+            (many, "home", "home", "`home` at the first row"),
+            (many, "wheel-down", "end", "wheel down at the last row"),
+            (many, "down", "end", "`down` at the last row"),
+            (many, "end", "end", "`end` at the last row"),
+            (one, "wheel-down", None, "wheel over a one-row tree"),
+            (one, "down", None, "`down` on a one-row tree"),
+        ]
+        for bodies, interlude, pre_key, label in cases:
+            copied, noop = await _drive(bodies, interlude, pre_key)
+            assert noop, f"{label}: the fixture's premise — the frame must be unchanged"
+            assert copied is not None, (
+                f"{label} moved nothing, yet the double-click was refused against a frame "
+                "that never changed"
+            )
+
+        # And the refusal STILL fires when something really moved, or this
+        # test's fix would simply be "never refuse" — which is U10 reopened.
+        for interlude, pre_key in (("wheel-down", "home"), ("down", "home")):
+            copied, noop = await _drive(many, interlude, pre_key)
+            assert not noop, "the control's premise: this movement must change the frame"
+            assert (
+                copied is None
+            ), f"a {interlude} that MOVED the cursor no longer refuses — U10 is back"
