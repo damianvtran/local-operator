@@ -68,7 +68,10 @@ from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_TERMINATE_DENIED,
     EVIDENCE_TERMINATE_UNCONFIRMED,
 )
-from lop_osworld_v2_adapter.providers.base import GUEST_COMMAND_TIMEOUT_S, guest_deadline_for
+from lop_osworld_v2_adapter.providers.base import (
+    GUEST_COMMAND_TIMEOUT_S,
+    guest_deadline_for,
+)
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -835,7 +838,8 @@ class AwsProvider:
                     ) from None
                 if result.returncode != 0:
                     raise GuestExecutionError(
-                        f"guest action {index + 1} failed ({_exit_description(result.returncode)}); "
+                        f"guest action {index + 1} failed "
+                        f"({_exit_description(result.returncode)}); "
                         "input may be partial; batch not retried"
                     )
             # Let the desktop settle after the batch, exactly as OSWorld's
