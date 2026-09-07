@@ -7,10 +7,11 @@ exits 0 on success, non-zero on error. Two execution shapes:
   the print renderer, return 0/1;
 - ``--background``: spawn ``python -m local_operator.exec_worker`` detached
   (``start_new_session=True``) with stdout/stderr redirected to a timestamped
-  log under ``~/.local-operator/logs/``, record the job in the lightweight
-  JSONL ledger, print the job id + log path, and return 0 immediately. The
-  worker is what actually runs the task; it appends a terminal record
-  (``finished_at`` + ``exit_code``) to the same ledger on exit.
+  log under :func:`logs_dir` (``~/.local-operator/logs/`` by default, and the
+  override's ``logs/`` when ``LOCAL_OPERATOR_CONFIG_DIR`` is set), record the
+  job in the lightweight JSONL ledger, print the job id + log path, and return
+  0 immediately. The worker is what actually runs the task; it appends a
+  terminal record (``finished_at`` + ``exit_code``) to the same ledger on exit.
 
 No engine imports at module level — the session factory and renderer are
 imported inside the foreground path so ``import local_operator.exec_mode``
@@ -30,8 +31,38 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-#: Root for detached-exec logs and the jobs ledger (the legacy config dir).
-LOGS_DIR = Path.home() / ".local-operator" / "logs"
+
+def logs_dir() -> Path:
+    """Root for detached-exec logs and the jobs ledger: ``config_dir()/logs``.
+
+    Shares :data:`local_operator.paths.LOG_DIRNAME` with the app's rotating
+    log rather than spelling ``"logs"`` a second time. Under an override the
+    two therefore land in one directory, which is fine and deliberate: the
+    filenames are disjoint (``local-operator.log`` vs ``exec-*.log`` /
+    ``exec-jobs.jsonl``) and both roots are created 0700.
+
+    A FUNCTION, not the module constant this used to be, for the reason
+    :func:`local_operator.paths.config_dir` states in its own docstring: a
+    constant freezes whatever the first importer saw, and the override is read
+    from the environment on every call. The old constant was
+    ``Path.home() / ".local-operator" / "logs"``, written in the original CLI
+    rewrite BEFORE ``paths.py`` and ``LOCAL_OPERATOR_CONFIG_DIR`` existed at all
+    — which is what its "the legacy config dir" comment recorded. Three sibling
+    copies of that same expression in this file (the foreground factory, the
+    background worker's factory, and the preflight resolver) have since been
+    fixed to resolve through ``config_dir()``; this was the last one, and it
+    split the jobs ledger away from the root the rest of exec mode honours: with
+    the override set, ``exec --background`` wrote its config and agents under the
+    override while its log and ledger landed in the operator's real home.
+
+    Resolution is UNCHANGED when no override is set — ``config_dir()`` is itself
+    ``~/.local-operator`` — so an existing install's logs and ledger stay exactly
+    where they are. Only an overridden run moves, which is the whole point.
+    """
+    from local_operator.paths import LOG_DIRNAME, config_dir
+
+    return config_dir() / LOG_DIRNAME
+
 
 #: Ledger of spawned background jobs (lightweight; the harness AsyncJobManager
 #: is in-process and cannot track a detached OS process across CLI runs).
@@ -125,15 +156,22 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     return argv
 
 
-def _ensure_logs_dir() -> None:
-    """Create ``LOGS_DIR`` owner-only (CL-10): the directory holds job logs
+def _ensure_logs_dir() -> Path:
+    """Create :func:`logs_dir` owner-only (CL-10): the directory holds job logs
     and the ledger, neither of which other users should read or tamper with.
+
+    Returns the resolved directory so a caller that needs the path uses the
+    SAME resolution this created, rather than calling the resolver a second
+    time — the override could differ between the two calls, and a log written
+    to a directory that was never created is the failure this prevents.
     """
-    LOGS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = logs_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        os.chmod(LOGS_DIR, 0o700)  # umask may have clipped the mode on mkdir
+        os.chmod(directory, 0o700)  # umask may have clipped the mode on mkdir
     except OSError:
         pass
+    return directory
 
 
 def _open_log_file(log_path: Path) -> Any:
@@ -150,8 +188,7 @@ def _append_job_record(log_path: Path, prompt: str, pid: int, job_id: str | None
     ``finished_at``/``exit_code`` start unset; the worker appends a terminal
     record carrying both when the run exits (CL-09).
     """
-    _ensure_logs_dir()
-    jobs_path = LOGS_DIR / JOBS_FILE
+    jobs_path = _ensure_logs_dir() / JOBS_FILE
 
     job_id = job_id or uuid4().hex[:12]
     record = {
@@ -180,7 +217,9 @@ def read_job_records() -> list[dict[str, Any]]:
     """Parse the JSONL ledger; tolerate a partial final line and any stray
     corruption by skipping it (the ledger must never break a reader)."""
     records: list[dict[str, Any]] = []
-    jobs_path = LOGS_DIR / JOBS_FILE
+    # Resolved, not created: a read must not be the thing that materialises the
+    # logs directory on a root that has none.
+    jobs_path = logs_dir() / JOBS_FILE
     if not jobs_path.exists():
         return records
     try:
@@ -204,8 +243,7 @@ def update_job_exit(job_id: str, exit_code: int) -> None:
     """Append the terminal record for ``job_id`` (CL-09): ``finished_at`` +
     ``exit_code``. Append-only keeps this race-free; consumers take the
     latest record per id, so the terminal record supersedes the spawn one."""
-    _ensure_logs_dir()
-    jobs_path = LOGS_DIR / JOBS_FILE
+    jobs_path = _ensure_logs_dir() / JOBS_FILE
     update = {
         "id": job_id,
         "finished_at": datetime.now().astimezone().isoformat(),
@@ -277,9 +315,9 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m", file=sys.stderr)
         return 1
 
-    _ensure_logs_dir()
+    logs_root = _ensure_logs_dir()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = LOGS_DIR / f"exec-{timestamp}-{slugify(command)}.log"
+    log_path = logs_root / f"exec-{timestamp}-{slugify(command)}.log"
 
     job_id = uuid4().hex[:12]
     argv = build_worker_argv(command, exec_args)
