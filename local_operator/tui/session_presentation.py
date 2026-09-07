@@ -130,6 +130,10 @@ class PreparedReplay(ReplayState):
     def _append_block(
         self, block: Any, *, ends_empty_state: bool = True, pin_tail: bool = False
     ) -> None:
+        # Same recording as the live appender: a prepared replay decides its own
+        # empty state from these blocks (`prepare` below), and the commit path
+        # asks the mounted view the same question afterwards.
+        block.ends_empty_state = ends_empty_state
         if not block.navigation_anchor_id:
             block.navigation_anchor_id = self._projection_message_id
             block.navigation_anchor_part = self._projection_part

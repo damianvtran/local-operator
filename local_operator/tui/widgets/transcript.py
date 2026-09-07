@@ -32,7 +32,16 @@ import os
 import time
 import unicodedata
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Iterator, Literal, Protocol, Sequence
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Iterable,
+    Iterator,
+    Literal,
+    Protocol,
+    Sequence,
+)
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -243,6 +252,30 @@ GAP_CLASS = "gap-above"
 BOOT_COLUMN_CLASS = "boot-column"
 
 
+def conversation_started(blocks: Iterable[TranscriptBlock]) -> bool:
+    """Does ``blocks`` contain anything that ENDS the transcript's empty state?
+
+    THE authority for "has this conversation started", shared by every caller
+    that has to decide whether the splash belongs on screen. It is a free
+    function over an iterable rather than a method, because the two shapes a
+    transcript takes here are a mounted ``TranscriptView`` and the plain
+    ``list`` a ``PreparedReplay`` builds off screen, and one predicate over both
+    is the point: a second copy would eventually disagree with the first, and
+    the way that failure looks is a splash centred over a populated transcript.
+
+    The distinction is the one ``OperatorApp._append_block`` already makes and
+    ``_system_notice`` already relies on: "the CONVERSATION has started" is not
+    "something got drawn". A notice about infrastructure the user did not ask
+    about \u2014 an MCP server that failed to connect, a build-skew warning \u2014 is
+    appended with ``ends_empty_state=False`` so it lands UNDER the splash. So
+    ``bool(view.blocks())`` is the WRONG test: it counts those, and the sidebar's
+    commit path used it, which is why returning to an untouched ``/new``
+    conversation showed no empty state at all whenever any such notice was
+    present \u2014 i.e. always on a skewed build or with one broken MCP server.
+    """
+    return any(block.ends_empty_state for block in blocks)
+
+
 class TranscriptBlock(Static):
     """Base class for one transcript entry (assistant, tool, user, notice).
 
@@ -292,6 +325,22 @@ class TranscriptBlock(Static):
     #: which also fires against the empty transcript's top edge because it
     #: marks a turn boundary; this one only separates neighbours.
     SPACING_AIRY: ClassVar[bool] = False
+
+    #: Did this block's arrival START THE CONVERSATION? Recorded per block by
+    #: the appenders (``OperatorApp._append_block`` and
+    #: ``PreparedReplay._append_block``, the two implementations of the
+    #: ``ReplayTarget`` protocol) from their ``ends_empty_state`` argument, so
+    #: that a reader asking "is this transcript still empty?" gets the same
+    #: answer the appender already acted on rather than a second rule beside it
+    #: — see :func:`conversation_started`.
+    #:
+    #: Deliberately an INSTANCE fact, not a class one: the same ``NoticeBlock``
+    #: type is conversation content as a ``/clear`` receipt and infrastructure
+    #: chatter as an MCP-connection warning. It defaults to True so a block
+    #: appended by any path that predates this attribute still counts, which is
+    #: the conservative direction: the failure it protects against is a splash
+    #: left standing over a populated transcript.
+    ends_empty_state: bool = True
 
     #: Set False once the block will never mutate again.
     _finalized: bool = False
@@ -2940,6 +2989,17 @@ class TranscriptView(ScrollableContainer):
     def blocks(self) -> list[TranscriptBlock]:
         """Blocks in append order (live and finalized)."""
         return list(self._blocks)
+
+    def conversation_started(self) -> bool:
+        """Has this transcript any content that ENDS the empty state?
+
+        The question ``bool(view.blocks())`` looks like it answers and does not:
+        a transcript can hold blocks and still be an unstarted conversation,
+        because an infrastructure notice is appended with ``ends_empty_state``
+        False precisely so it lands UNDER the splash. See
+        :func:`conversation_started` for why the two are different questions.
+        """
+        return conversation_started(self._blocks)
 
     def pinned_tail(self) -> TranscriptBlock | None:
         """The block held last by :meth:`pin_tail`, if a turn is in flight.
