@@ -65,6 +65,7 @@ import logging
 import re
 from pathlib import Path
 
+from local_operator.analytics.model import condense_label
 from local_operator.analytics.store import SESSION_NAME_RANK_BACKFILL, AnalyticsStore
 
 logger = logging.getLogger("local_operator.analytics.backfill")
@@ -83,7 +84,8 @@ _ROLE_RE = re.compile(
 
 #: Cap on the parent title quoted into a child's label, so the composed name
 #: still says something after ``short_session_label`` truncates the row to 32
-#: characters for the table.
+#: characters for the table. The cut is marked with an ellipsis like every
+#: other one — see ``_compose_recovered_name``.
 _PARENT_TITLE_CHARS = 40
 
 #: How many names one pass may WRITE. The sweep runs on the store-maintenance
@@ -218,7 +220,16 @@ def _compose_label(
         # Read from the ledger, not from disk: the parent's own row is the name
         # every other surface shows it under, and the parent's directory may
         # well have been pruned while its ledger rows survive.
-        parent_title = parent_title[:_PARENT_TITLE_CHARS].strip()
+        #
+        # Condensed, not sliced (design review D9). This cut happens at WRITE
+        # time, so a bare slice stores a name that IS a prefix without saying
+        # so; the label layer then sees a name already inside its budget and
+        # correctly passes it through untouched, and the row reaches the screen
+        # cut mid-word with no marker. ``condense_label`` is the rule the
+        # display side already uses — a prefix of a sentence is recognisable
+        # only when the reader can see it IS a prefix — and applying it here
+        # keeps the two places a name gets cut cutting the same way.
+        parent_title = condense_label(parent_title, _PARENT_TITLE_CHARS)
     if role and parent_title:
         return f"{role} · {parent_title}"
     if role:

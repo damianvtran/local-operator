@@ -721,7 +721,24 @@ def build_report(
     # 30-cell column at 71 — rows cut to fit a budget the frame was not
     # enforcing. One number now drives both: the labels are built to it and the
     # column is drawn at it.
-    name_cap = 30 if width < 96 else min(48, width - 40)
+    # What the name may spend is what the frame has LEFT after the columns that
+    # are not negotiable (design review D8). The previous rule stepped 30 -> 48
+    # the instant ``width`` reached 96 against a flat ``- 40`` allowance, but the
+    # rest of a row measures 51-55 cells, so one extra cell of frame bought 18
+    # cells of label and the widest row overran the content box across terminal
+    # widths 114-120 — clipping ``% cache`` off every row, silently, because a
+    # row ending in ``cach`` still looks like a row. Measuring the remainder
+    # instead means no width can lose a column: the budget rises a cell at a
+    # time as the frame does, and the clamp only ever narrows it further.
+    #
+    # Both tables share one ``name_col``, so the budget must clear the WIDER of
+    # the two overheads — the provider table's cost column is sized
+    # independently of the session table's and either may be the wider row.
+    overhead = max(
+        _row_overhead(list(aggregate.by_provider.items()), width),
+        _row_overhead(list(aggregate.by_session.items()), width),
+    )
+    name_cap = max(_MIN_NAME_COL, min(_MAX_NAME_COL, width - overhead))
     # Keyed by SESSION ID, never by the rendered label. Two sessions can render
     # the same string (identical names, or names agreeing within the budget),
     # and a label-keyed dict does not merge those rows — it silently keeps the
@@ -768,6 +785,55 @@ def build_report(
 #: irreducible trio; cache is the first to shed, exactly like the status band's
 #: drop ladder.
 _WIDE_TABLE_MIN = 72
+
+#: Floor and ceiling on the session/provider name column. The floor keeps a
+#: label readable on a narrow frame even when the numbers would rather have the
+#: space (a 12-cell label is still a recognisable prefix); the ceiling is the
+#: point past which more name stops buying legibility and just spreads the row.
+_MIN_NAME_COL = 30
+_MAX_NAME_COL = 48
+
+#: Cells the scroll container reserves for its vertical scrollbar. The
+#: ``#analytics-scroll`` rule sets ``scrollbar-gutter: stable``, so the column is
+#: held whether or not the bar is drawn — a report composed against the full
+#: card width therefore paints one cell wider than the box that receives it, and
+#: the rightmost column is cut. Kept beside the width maths that spends it.
+_SCROLLBAR_GUTTER = 1
+
+
+def _row_overhead(groups: "Sequence[tuple[str, UsageAggregate]]", width: int) -> int:
+    """Cells one table row spends on everything that is NOT the name column.
+
+    Measured from the same pieces ``_group_section`` paints, in the same order,
+    rather than carried as a constant — that is the whole point. Design review
+    D8: ``name_cap`` was ``min(48, width - 40)``, and ``- 40`` understated the
+    real overhead by up to 15 cells. The budget therefore stepped 30 -> 48 the
+    instant the content box reached 96 while the rest of the row still needed
+    51-55, so the widest row jumped to 103 against a 96-cell box and terminal
+    widths 114-120 silently clipped the ``% cache`` column off every row. The
+    row still looked complete; it just ended in ``cach``.
+
+    A constant cannot fix that, because the overhead is not constant: the cost
+    column is sized to the widest figure actually present (``$4.20`` vs
+    ``$3.4k+``), and the cache column is dropped entirely below
+    ``_WIDE_TABLE_MIN``. So it is computed from the groups being rendered, and
+    the caller subtracts it from the content box. The arithmetic below mirrors
+    the ``block.append`` sequence in :func:`_group_section` line for line; the
+    two must be changed together.
+    """
+    if not groups:
+        return 0
+    # ``  {name}`` indent, then ``{tokens:>8} tokens``.
+    overhead = 2 + 8 + len(" tokens")
+    # ``   `` gap + the right-aligned cost cell, sized to the widest figure in
+    # this table exactly as ``_group_section`` sizes it.
+    overhead += 3 + max(len(format_cost(agg)) for _, agg in groups)
+    # ``   {calls:>4} calls``
+    overhead += 3 + 4 + len(" calls")
+    # ``   {pct:>4} cache`` — only when the frame is wide enough to keep it.
+    if width >= _WIDE_TABLE_MIN:
+        overhead += 3 + 4 + len(" cache")
+    return overhead
 
 
 def _group_section(
@@ -919,12 +985,20 @@ class AnalyticsScreen(ModalScreen[None]):
         # side, so the report's own column maths matches the width it is
         # actually painted into. The cap here mirrors the CSS cap; raising one
         # without the other either wastes the frame or overruns it.
+        #
+        # ``_SCROLLBAR_GUTTER`` comes off the top because ``#analytics-scroll``
+        # sets ``scrollbar-gutter: stable`` (see the stylesheet): the column is
+        # reserved whether or not the bar is currently drawn, so the body is
+        # ALWAYS painted one cell narrower than the card. Counting it here
+        # rather than at the call sites keeps one number describing "cells the
+        # report may paint into" — measured, not assumed: at a 114-column
+        # terminal the card is 96 and ``scrollable_content_region`` is 95.
         try:
             terminal = self.app.size.width
             card = min(140, int(terminal * 0.9))
-            return max(40, card - 6)
+            return max(40, card - 6 - _SCROLLBAR_GUTTER)
         except Exception:  # noqa: BLE001 — before mount, a sane default
-            return 88
+            return 88 - _SCROLLBAR_GUTTER
 
     def _title_text(self) -> Text:
         # ``fg`` bold, matching the ``/usage`` panel's title (and the app's list
