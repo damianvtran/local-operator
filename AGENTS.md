@@ -612,6 +612,70 @@ under a checked-out `main` moves the branch without touching the index, so
 
 Warnings that still hold, each of which has already cost a release:
 
+- **Derive the window from the commits, not from the commit shape.** Use a
+  plain `git log <last-tag>..origin/main` and read the PR references out of it.
+  **Never `git log --merges`**: GitHub's *merge* button produces a merge commit
+  that `--merges` sees, while its *squash* button produces a single-parent
+  commit that `--merges` silently drops. So the trap fires **per PR, according
+  to which button someone happened to press** — which means a window is not
+  reliably empty when it is wrong, it is **partially listed**, and a partially
+  correct window looks right and survives review. Check it rather than trusting
+  this paragraph:
+
+  ```sh
+  git log --oneline --merges       v0.51.0..v0.51.1   # 3 PRs
+  git log --oneline --first-parent v0.51.0..v0.51.1   # 4 PRs
+  ```
+
+  The one only the second form lists is #720 (`78c20295e`), squash-merged; it
+  nearly shipped unlisted in v0.51.1 and was caught only because its author was
+  watching. `--first-parent` happens to work for *counting* the window because
+  both button shapes land on that chain, but do not adopt it as a general
+  "show me every PR" idiom: for a PR landed with the merge button it shows only
+  `Merge pull request #999 from feat` and never the substantive commit on the
+  second parent, so when a merge subject is uninformative the plain log carries
+  the real description and the first-parent walk does not. A release note that
+  omits a merged PR is a defect in the release, not a cosmetic miss — it is
+  the only record of what changed under a user who is about to update.
+- **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
+  tagging.** A non-empty diff means a merged PR carried its own version bump
+  and has silently consumed the number you are about to use. That is exactly
+  how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
+  ever built, tagged or published, and the next owner had to skip both. The
+  `version-bump-guard` CI job now catches this on the PR, but it does **not**
+  block an `--admin` merge, because `main`'s ruleset configures no required
+  status checks and admins hold a bypass. The pre-tag check is the backstop.
+- **A shard failure on your branch alone is not evidence your diff caused it.**
+  CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
+  `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
+  re-shards every file after it in sort order**. Derive it against the ref CI
+  actually runs, not a stale local checkout:
+
+  ```sh
+  git ls-tree -r --name-only origin/main \
+    | grep -E '^tests/unit/.*test_.*\.py$' | sort | nl \
+    | grep tests/unit/tui/test_app_pilot.py     # 331st of 451 -> index 330
+  ```
+
+  At index 330 that file is in shard 0; add one test file earlier in the
+  ordering and it becomes 331, shard 1. This is not hypothetical — PR #730 did
+  exactly that (451 → 452 files) and its CI failure was `test_app_pilot.py`
+  failing in shard 1, on a branch that touched no TUI file. A test in the file
+  that moved fails on your branch and nowhere else, reading exactly like "your
+  diff broke the TUI". Before concluding you caused a suspect shard failure,
+  check whether your branch changed that file's shard index, and reproduce on
+  clean `origin/main` under the same conditions CI uses (the shard job runs
+  `pytest --cov`, and some of these failures do not reproduce bare).
+  Diagnosing this as a real regression has already cost a review round.
+- **Several PRs going red at once is a shared cause, not several bugs.**
+  `cli-sanity` and `server-sanity` call a live model (both are marked
+  "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
+  429 reddens every open PR simultaneously — including heads that touch
+  neither surface. Re-sharding (above) produces the same fleet-wide pattern
+  from an entirely different cause. Either way the tell is the same: before
+  debugging your diff, check whether sibling PRs went red in the same window,
+  and confirm *which* job failed. A shard failure and a sanity failure look
+  equally alarming on the checks list and have nothing to do with each other.
 - **Never pre-create a bare tag** (`git tag vX.Y.Z && git push --tags`) and
   then make a release from it. The publish workflow triggers on the *release*
   being published, so a bare tag publishes nothing, and `gh release create`
