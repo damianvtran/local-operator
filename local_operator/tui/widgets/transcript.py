@@ -2350,6 +2350,24 @@ class TranscriptView(ScrollableContainer):
         #: clamped against it.
         self._on_user_scroll: UserScrollHook | None = None
         self._on_tail_requested: Callable[[], None] | None = None
+        #: Fired from :meth:`_size_updated` whenever the scrollable EXTENT or
+        #: the viewport changes. Same shape as ``on_clear``: optional,
+        #: app-owned, never required for the widget.
+        #:
+        #: It exists because a copy that describes GEOMETRY goes stale for
+        #: reasons that are not events anyone thought to instrument. The
+        #: resume head notice is decided from two terms — is more history
+        #: held, and can this frame reach it — and the second one moves when
+        #: the terminal is resized or a live turn lengthens the content,
+        #: neither of which passes through a fill exit or a page mount. So the
+        #: app was told about the mounts it caused and never about the
+        #: geometry it did not, and the row went on telling a reader to scroll
+        #: up in a frame with no scrollbar (design review round 2, D1).
+        #:
+        #: Keyed on the extent for exactly the reason :meth:`_size_updated`
+        #: gives for the tail anchor: a rule keyed on the measurement rather
+        #: than on a particular event holds for growth nobody enumerated.
+        self._on_extent_changed: Callable[[], None] | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2420,6 +2438,15 @@ class TranscriptView(ScrollableContainer):
         mount cannot re-acquire following for a reader who just left the tail.
         """
         self._on_user_scroll = hook
+
+    def set_on_extent_changed(self, hook: Callable[[], None] | None) -> None:
+        """Install the hook fired whenever the scrollable extent changes.
+
+        Installed and cleared alongside the other transcript hooks, so a
+        cached view that has been swapped out of the layout stops reporting
+        geometry the app is no longer showing.
+        """
+        self._on_extent_changed = hook
 
     def set_on_tail_requested(self, callback: Callable[[], None] | None) -> None:
         """Let a bounded history window materialize its latest rows on End."""
@@ -3241,6 +3268,12 @@ class TranscriptView(ScrollableContainer):
         line as the user types, the terminal being resized.
         """
         changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if changed and self._on_extent_changed is not None:
+            # Announced BEFORE the anchor work below, and unconditionally on
+            # every extent change: a listener describing the geometry has to
+            # hear about the frame it is describing whether or not the reader
+            # is following the tail.
+            self._on_extent_changed()
         if changed and self._tail_anchor.following:
             self._scroll_to_tail()
         elif changed:

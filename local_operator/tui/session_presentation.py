@@ -74,13 +74,49 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
 
     def __init__(self, text: str) -> None:
         super().__init__(text, "note")
+        self._interactive = True
         self.add_class("interactive-notice")
+
+    def set_interactive(self, interactive: bool) -> None:
+        """Advertise an action only while there is one to take.
+
+        The head notice restates rather than removing itself when the history
+        runs out (removing the first row would shift every row below it and
+        undo the anchor an insert just held), so unlike its tail twin it
+        outlives its own action. A row that keeps `interactive-notice`, keeps
+        `can_focus`, and paints the full-width focus band while activating it
+        does nothing is a focus stop that answers Enter with silence.
+
+        `can_focus` is an instance attribute here, shadowing the class-level
+        value Textual's `can_focus=True` keyword set. Textual reads
+        `allow_focus()` -> `can_focus` per widget at focus time, so flipping it
+        removes the row from the focus chain without touching the class or the
+        twin.
+
+        Idempotent, and reversible in both directions: a remote page can refill
+        an exhausted head, and a control that only ever went one way would be
+        the same stale-state defect the copy already guards against.
+        """
+        if interactive == self._interactive:
+            return
+        self._interactive = interactive
+        self.can_focus = interactive
+        self.set_class(interactive, "interactive-notice")
+        if not interactive and self.has_focus:
+            # Focus cannot rest on a row that just left the focus chain: it
+            # would keep the band painted and keep swallowing Enter.
+            self.blur()
 
     def action_older(self) -> None:
         self.post_message(self.Requested(self))
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
+        if not self._interactive:
+            # Stopped anyway: the row still occupies its cells, and letting the
+            # click fall through to the transcript beneath would scroll a
+            # surface the reader was pointing at, not aiming past.
+            return
         self.action_older()
 
 

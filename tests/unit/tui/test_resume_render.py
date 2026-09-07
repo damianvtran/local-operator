@@ -1167,3 +1167,283 @@ async def test_the_fill_can_mount_more_than_one_page() -> None:
         f"{app_module.RESUME_FILL_MAX_PAGES} is unreachable, so it cannot "
         "iterate on a viewport that needs more than one"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_head_notice_tracks_a_resize_in_both_directions() -> None:
+    """The copy describes GEOMETRY, so it must follow geometry it did not cause.
+
+    Every path that reconciled this notice was a fill exit or a page-mount
+    settle — i.e. a change the app itself made. A terminal resize changes the
+    other term the copy is decided from, the viewport, and goes through
+    neither. So the notice was correct on every path a test drove and wrong on
+    the one a reader takes most often, in BOTH directions (design review round
+    2, D1; QA Q5):
+
+    * grow past the point where three filled pages still fit, and the row went
+      on saying "scroll up to load" on a frame with no scrollbar at all — the
+      unfollowable instruction this whole file exists to remove, reached by
+      dragging a window instead of by pressing a key;
+    * shrink back into a scrollable frame, and it went on offering "select to
+      load" — true, since the control still works, but it names the wrong
+      gesture and hides the one that now works.
+
+    PINNED AT THE HEIGHTS THE DEFECT WAS REPRODUCED AT. 450 is where a filled
+    frame first stops being scrollable on this shape, and 300 is a height that
+    is comfortably scrollable again; both were measured on the real app rather
+    than guessed. There was no ``resize_terminal`` anywhere in this file, which
+    is exactly why the round-1 guard passed while the defect shipped.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 200)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(80):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+
+        def notices() -> list[str]:
+            return [b.text() for b in view.blocks() if isinstance(b, NoticeBlock)]
+
+        def scrollable() -> bool:
+            viewport = view.container_size.height or view.size.height
+            return bool(viewport) and view.virtual_size.height > viewport
+
+        # Precondition: a scrollable frame whose notice keeps its promise.
+        assert scrollable()
+        assert RESUME_OLDER_NOTICE in notices()
+        assert app._resume_pending_head
+
+        # GROW out of it. The frame can no longer be scrolled, so the
+        # instruction can no longer be followed.
+        await pilot.resize_terminal(120, 450)
+        for _ in range(80):
+            await pilot.pause()
+        assert not scrollable(), "expected 120x450 to swallow the filled frame"
+        assert RESUME_OLDER_NOTICE not in notices(), (
+            "the frame has no scrollbar after the resize, but the notice still "
+            "tells the reader to scroll up for history"
+        )
+        assert app_module.RESUME_UNREACHABLE_NOTICE in notices()
+
+        # SHRINK back. The gesture works again, so the copy must name it
+        # again — this is the direction a one-way latch would fail.
+        await pilot.resize_terminal(120, 300)
+        for _ in range(80):
+            await pilot.pause()
+        assert scrollable(), "expected 120x300 to be scrollable again"
+        assert app_module.RESUME_UNREACHABLE_NOTICE not in notices(), (
+            "the frame is scrollable again after the resize, but the notice "
+            "still says the history cannot be reached by scrolling"
+        )
+        assert RESUME_OLDER_NOTICE in notices()
+
+
+@pytest.mark.asyncio
+async def test_the_head_notice_tracks_content_growth_without_a_resize() -> None:
+    """The general case the resize is one instance of (QA Q5).
+
+    A live turn appending rows makes an unscrollable frame scrollable without
+    any resize and without any page mount, so a seam keyed on the resize EVENT
+    would leave this stale. The seam is keyed on the extent instead, which is
+    the same reasoning ``TranscriptView._size_updated`` gives for the tail
+    anchor: a rule keyed on the measurement holds for growth nobody enumerated.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 600)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(120):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+
+        def notices() -> list[str]:
+            return [b.text() for b in view.blocks() if isinstance(b, NoticeBlock)]
+
+        viewport = view.container_size.height or view.size.height
+        assert view.virtual_size.height <= viewport, "expected the unreachable state"
+        assert app_module.RESUME_UNREACHABLE_NOTICE in notices()
+
+        # A turn's worth of output, appended the way live output arrives.
+        for i in range(400):
+            view.append_block(NoticeBlock(f"live row {i}", "info"))
+        for _ in range(80):
+            await pilot.pause()
+
+        viewport = view.container_size.height or view.size.height
+        assert view.virtual_size.height > viewport, "expected the appends to overflow"
+        assert app_module.RESUME_UNREACHABLE_NOTICE not in notices(), (
+            "content growth made the frame scrollable, but the head notice "
+            "still says the history cannot be reached by scrolling"
+        )
+        assert RESUME_OLDER_NOTICE in notices()
+
+
+@pytest.mark.asyncio
+async def test_the_head_notice_stops_being_a_control_once_it_is_inert() -> None:
+    """A focus stop must not answer Enter with silence (design round 2, D7).
+
+    The head notice restates rather than removing itself when the history runs
+    out — removing the first row would shift every row below it and undo the
+    anchor an insert just held — so unlike its tail twin it outlives its own
+    action. It went on carrying ``interactive-notice``, staying focusable and
+    painting the full-width focus band while activating it did nothing.
+
+    Asserted on the widget's own state rather than on a rendered band, because
+    what makes the row a control is `can_focus` and the class; the paint is
+    downstream of both.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 600)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(120):
+            await pilot.pause()
+        notice = app._resume_head_notice
+        assert isinstance(notice, OlderHistoryNotice)
+
+        # While there IS an action, the row advertises it.
+        assert notice.can_focus
+        assert notice.has_class("interactive-notice")
+
+        # Drain the head through the control itself, which is the route a
+        # reader in this state takes.
+        for _ in range(12):
+            if not app._resume_pending_head:
+                break
+            notice.action_older()
+            for _ in range(80):
+                await pilot.pause()
+        assert not app._resume_pending_head, "the head never drained"
+        assert notice.text() == RESUME_START_NOTICE
+
+        # Now it has none, so it must stop advertising one.
+        assert not notice.can_focus, (
+            "the exhausted notice is still focusable, so it sits in the focus "
+            "chain painting a focus band for an Enter that does nothing"
+        )
+        assert not notice.has_class("interactive-notice")
+        assert not notice.focusable
+
+
+@pytest.mark.asyncio
+async def test_the_insert_restore_is_applied_inside_the_programmatic_guard() -> None:
+    """Pin the ``immediate=True`` half of the landing fix ON ITS OWN (QA Q6).
+
+    Mutation testing found that either half of the landing fix could be
+    reverted alone with the suite green: the guards pinned the DEFECT (a resume
+    that opens away from the tail) but not which line prevents it, so a future
+    refactor could delete one and learn nothing until both were gone.
+
+    This pins half A by its defining STRUCTURAL property rather than by the
+    landing, which is what makes it independent of half B: EVERY ``scroll_to``
+    issued inside a ``programmatic_scroll()`` guard must be ``immediate``.
+    Textual defers the offset write with ``call_after_refresh`` otherwise, so
+    the write lands after the ``with`` block has exited, outside the very guard
+    that marks it as the widget's own — and ``watch_scroll_y`` then scores the
+    insert's own restore as a reader's scroll.
+
+    Asserted on the CALL rather than on the landing, and that choice is what
+    makes it work. Watching for a misread offset write finds nothing even with
+    the mutation applied, because ``_reanchor_insert`` has usually already put
+    the offset where the restore wants it, so the deferred write is a no-op
+    that changes no value and fires no watch. The defect is real regardless —
+    the guarantee is that the correction is applied in-frame, not that it
+    happened to be unnecessary this time — and the argument is where that
+    guarantee lives. Measured: 1 deferred in-guard call with half A reverted,
+    0 with it in place.
+
+    It cannot flake: it is a fact about which arguments were passed, with no
+    clock and no frame count in it.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    deferred: list[Any] = []
+    async with app.run_test(size=(120, 200)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        original_scroll_to = view.scroll_to
+
+        def watching(*args: Any, **kwargs: Any) -> None:
+            if view._tail_anchor.programmatic and not kwargs.get("immediate", False):
+                deferred.append(kwargs.get("y"))
+            original_scroll_to(*args, **kwargs)
+
+        view.scroll_to = watching  # type: ignore[method-assign]
+        # A real gesture, so a genuine insert settles under the probe.
+        await _press_and_settle(pilot, view, "ctrl+home")
+        for _ in range(120):
+            await pilot.pause()
+        view.scroll_to = original_scroll_to  # type: ignore[method-assign]
+
+    assert not deferred, (
+        f"{len(deferred)} scroll(s) inside `programmatic_scroll()` were issued "
+        f"without `immediate=True` (targets {deferred[:3]}): the offset write "
+        "is deferred past the guard that marks it as this widget's own, so "
+        "`watch_scroll_y` resyncs the tail anchor and spends the page-back "
+        "latch on a scroll no human made"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tail_following_insert_holds_no_anchor() -> None:
+    """Pin the ``not following_tail`` half of the landing fix ON ITS OWN (Q6).
+
+    Half B's defining property is not the landing either — it is that a reader
+    who is FOLLOWING holds no insert anchor, because they are holding the end
+    and ``_size_updated``'s first branch already carries them there. Two rules
+    for one offset is one too many, and the held anchor is the one that loses:
+    it targets ``max(0, anchor_y - gap)``, which pins a not-yet-scrollable
+    frame to row 0 and keeps re-pinning it as the extent grows.
+
+    Read at insert time, so it is a fact about the arming decision rather than
+    about where the frame settled. Together with the test above, each half of
+    the fix now has a guard that fails for that half alone.
+
+    Instrumented on the APP's mount rather than on the view's ``insert_blocks``,
+    for the reason ``test_the_fill_can_mount_more_than_one_page`` gives: the
+    fill runs off the initial mount's settle, so a probe installed after
+    querying the view races it and misses the insert entirely on roughly one
+    run in three (observed on both the fixed and the pre-fix tree). The app
+    method exists before the app boots, so wrapping it cannot be raced.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    samples: list[tuple[bool, bool]] = []
+    original_mount = app._mount_older_resume_page
+
+    def instrumented(*args: Any, **kwargs: Any) -> None:
+        view = app.query_one(TranscriptView)
+        following = view._tail_anchor.following
+        original_mount(*args, **kwargs)
+        # Read straight after the mount: `insert_blocks` arms the anchor
+        # inside it and holds it for the whole settle, so this is the arming
+        # decision rather than where the frame ended up.
+        samples.append((following, view._insert_anchor is not None))
+
+    app._mount_older_resume_page = instrumented  # type: ignore[assignment]
+    async with app.run_test(size=(120, 200)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(200):
+            await pilot.pause()
+            if samples:
+                break
+        for _ in range(60):
+            await pilot.pause()
+    app._mount_older_resume_page = original_mount  # type: ignore[assignment]
+
+    assert samples, "the fill mounted no page, so this pins nothing"
+    held_while_following = [s for s in samples if s[0] and s[1]]
+    assert not held_while_following, (
+        f"{len(held_while_following)} of {len(samples)} insert(s) armed an "
+        "anchor while the reader was following the tail; the held anchor "
+        "clamps a not-yet-scrollable frame to row 0 and the resume opens on "
+        "the OLDEST row instead of the newest"
+    )
