@@ -834,6 +834,83 @@ def test_session_report_without_children_reports_empty_not_unknown(tmp_path):
     store.close()
 
 
+def _both_surfaces(store, session_id):
+    """``(/analytics row total, /session subtree total)`` for one session.
+
+    The agreement property this whole change exists to establish, expressed once
+    so a test can assert it instead of restating the plumbing. ``/analytics``
+    goes through ``aggregate`` + ``build_session_forest``; ``/session`` goes
+    through ``session_report``. Review F1/F7: asserting only one side is what let
+    the two encode different edge rules.
+    """
+    from local_operator.analytics.model import build_session_forest
+
+    aggregate = store.aggregate()
+    forest = build_session_forest(
+        aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
+    )
+    rows = {node.session_id: node.total.cost_micro for node in forest}
+    report = store.session_report(session_id)
+    return rows.get(session_id), report.subtree_aggregate.cost_micro
+
+
+def test_both_surfaces_share_one_parent_edge_rule(tmp_path):
+    """Review F1: /analytics and /session must not encode different edge rules.
+
+    Two shapes the reviewer reproduced as divergences. Both are unreachable on
+    today's ledger (zero sessions carry more than one distinct parent), which is
+    exactly why they need a test: the property is asserted by a code comment, so
+    only a test defends it against the next change.
+    """
+    import sqlite3
+
+    # SHAPE 1 — a real parent PLUS a degenerate self row. A lexical MAX over the
+    # raw column returns 'xxx' (it sorts above 'aaa'), the self edge is then
+    # discarded, and the REAL edge is lost with it: /analytics said $1000 where
+    # /session said $2000. The shared rule discards the self edge BEFORE the MAX.
+    store = AnalyticsStore(tmp_path / "self.db")
+    store.record_batch([_snap(session_id="aaa"), _child("aaa", "xxx")])
+    conn = store._connect()
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens, cost_micro, cost_known, parent_session_id) "
+        "VALUES (1, 'xxx', 'anthropic', 'claude', 1, 1, 1, 0, 0, 0, 1, 500, 1, 'xxx')"
+    )
+    conn.commit()
+    assert getattr(store.aggregate(), "session_parents", {}) == {"xxx": "aaa"}
+    analytics, session = _both_surfaces(store, "aaa")
+    assert analytics == session
+    assert store.session_report("aaa").descendant_ids == ("xxx",)
+    store.close()
+
+    # SHAPE 2 — a child with rows under TWO real parents. MAX still picks one,
+    # which is the documented tie-break (crediting both would double-count and
+    # break the column-sums-to-total invariant); the requirement is that BOTH
+    # surfaces pick the SAME one. Previously /session credited both parents and
+    # /analytics only the lexically larger, so 'aaa' read 1000 vs 2000.
+    store2 = AnalyticsStore(tmp_path / "two.db")
+    store2.record_batch([_snap(session_id="aaa"), _snap(session_id="bbb"), _child("aaa", "kid")])
+    conn2 = store2._connect()
+    assert conn2 is not None
+    conn2.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens, cost_micro, cost_known, parent_session_id) "
+        "VALUES (1, 'kid', 'anthropic', 'claude', 1, 1, 1, 0, 0, 0, 1, 500, 1, 'bbb')"
+    )
+    conn2.commit()
+    for sid in ("aaa", "bbb"):
+        analytics, session = _both_surfaces(store2, sid)
+        assert analytics == session, sid
+    # And the child is credited to exactly one parent, so nothing is counted twice.
+    parents = getattr(store2.aggregate(), "session_parents", {})
+    assert list(parents) == ["kid"]
+    assert isinstance(sqlite3.connect(str(tmp_path / "two.db")), sqlite3.Connection)
+    store2.close()
+
+
 def test_descendant_walk_survives_a_self_parent_cycle(tmp_path):
     """224 rows in the operator's real ledger carry parent == session. A walk
     that follows that edge either loops or double-counts; this one does

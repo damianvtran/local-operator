@@ -1359,6 +1359,34 @@ Things that will bite you if you forget them:
   token-only ledger. Any new stored column needs a `_MIGRATION_COLUMNS` entry
   with a DEFAULT so old rows read as a sane value, never NULL.
 
+- **An index over a migrated column goes in `_OPTIONAL_INDEXES`, never in
+  `_SCHEMA`.** `_connect` runs `executescript(_SCHEMA)` as ONE unit *before*
+  `_migrate` adds the `_MIGRATION_COLUMNS`. So a `CREATE INDEX` on a migrated
+  column raises `no such column` on any ledger written before that column
+  existed — and because `executescript` aborts on the first error, every
+  statement *after* it in the script is silently lost too. Putting
+  `idx_calls_parent` beside `idx_calls_session` cost a pre-`parent_session_id`
+  ledger its `usage_daily`/`usage_monthly` rollup tables and latched `_broken`
+  for the process (reproduced both ways: rollup tables gone, `aggregate().calls`
+  0). `_OPTIONAL_INDEXES` pairs each index with the column it needs, runs after
+  `_migrate` under the same lock, and guards each statement individually, so a
+  failed index costs its own index and nothing else. Weigh the one-time build:
+  `idx_calls_parent` over a 475k-row ledger is a ~660 ms stall on the first open
+  after upgrade (on the recorder's background thread) and ~4.9 MB of growth.
+
+- **Session parentage has exactly ONE rule: `store._PARENT_EDGE_SQL`.** Both
+  the `/analytics` per-session rollup and the `/session` subtree walk resolve a
+  session's parent through that constant. They used to derive it separately —
+  a per-row filter on one side, a lexical `MAX` on the other — and disagreed
+  about any session carrying more than one distinct `parent_session_id`,
+  including the ledger's real self-parent rows. Two surfaces answering the same
+  question differently is the defect the rollup exists to remove, so a third
+  consumer must call the shared rule rather than write its own. Note the
+  rollup's load-bearing invariant while you are there: the per-session column
+  must keep summing to the headline total on the same screen, which is why
+  children are reachable only as sub-rows of their root (listing them flat *and*
+  rolling up inflates the table by 12.7%).
+
 ## The tool-surface footprint ladder
 
 Every core tool ships its schema on **every** API request. The tools array

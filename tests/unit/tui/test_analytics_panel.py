@@ -692,6 +692,17 @@ def _nested_aggregate() -> UsageAggregate:
     return agg
 
 
+def _is_child_row(row: str) -> bool:
+    """A child row is marked by the └ glyph, not merely by indentation.
+
+    Design D4 added the glyph because 21% of ROOTS are unnamed 12-hex ids, so an
+    unnamed root and a child differed only by two spaces and a colour — a
+    distinction that vanishes under NO_COLOR. Tests classify rows the same way
+    the reader does, so this stays true if the indent width ever changes.
+    """
+    return row.lstrip().startswith("└")
+
+
 def _session_rows(text: list[str]) -> list[str]:
     start = next(i for i, line in enumerate(text) if "By session" in line)
     rows = []
@@ -705,14 +716,18 @@ def test_session_table_shows_roots_with_tree_totals_and_indents_children():
     lines = [line.plain for line in build_report(_nested_aggregate(), 120)]
     rows = _session_rows(lines)
     # Two top-level rows only; the three children moved under their root.
-    top = [r for r in rows if not r.startswith("    ")]
+    top = [r for r in rows if not _is_child_row(r)]
     assert len(top) == 2
     root = next(r for r in rows if "Review and merge open PRs" in r)
-    assert not root.startswith("    ")
+    assert not _is_child_row(root)
     assert "$10.00" in root  # own $1 + kid1 $2 + kid2 $3 + grandkid $4
     # Children are present, indented, and reachable — not deleted.
-    assert any(r.startswith("    ") and "kid1session" in r for r in rows)
-    assert any(r.startswith("      ") and "grandkidses" in r for r in rows)
+    assert any(_is_child_row(r) and "kid1session" in r for r in rows)
+    assert any(_is_child_row(r) and "grandkidses" in r for r in rows)
+    # Depth still reads as depth: the grandchild is one indent step deeper.
+    grandkid = next(r for r in rows if "grandkidses" in r)
+    kid = next(r for r in rows if "kid1session" in r)
+    assert grandkid.index("└") == kid.index("└") + 2
     # And the section says the roots include their subagents.
     assert "totals include subagents" in "\n".join(lines)
 
@@ -724,7 +739,7 @@ def test_session_column_still_sums_to_the_headline_total():
     aggregate = _nested_aggregate()
     lines = [line.plain for line in build_report(aggregate, 120)]
     rows = _session_rows(lines)
-    top = [r for r in rows if not r.startswith("    ")]
+    top = [r for r in rows if not _is_child_row(r)]
     total = 0.0
     for row in top:
         money = next(part for part in row.split() if part.startswith("$"))
@@ -739,7 +754,7 @@ def test_a_flat_ledger_renders_exactly_as_before():
     setattr(aggregate, "session_parents", {})
     rows = _session_rows([line.plain for line in build_report(aggregate, 120)])
     assert len(rows) == 5
-    assert not any(r.startswith("    ") for r in rows)
+    assert not any(_is_child_row(r) for r in rows)
     assert "totals include subagents" not in rows[0]
 
 

@@ -19589,7 +19589,6 @@ class OperatorApp(App[None]):
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger; never interpret arguments as a prompt."""
-        import dataclasses
 
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
@@ -19613,7 +19612,7 @@ class OperatorApp(App[None]):
         # is attached here rather than read inside capture(). /session reconciles
         # the band's ≥ against the ledger figure in prose; see the field's own
         # note for why the two marks stay separate.
-        runtime = dataclasses.replace(runtime, spend_is_floor=self._spend_is_floor)
+        runtime = replace(runtime, spend_is_floor=self._spend_is_floor)
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
         screen = SessionScreen(None, runtime)
