@@ -44,6 +44,15 @@ class CatalogEntry:
     row: SessionRow
     unseen: bool = False
     completion_kind: str = ""
+    #: The token and anchor of this row's latest completion, straight from the
+    #: attention store. Carried because `unseen` alone is a LEVEL — true on
+    #: every poll until the session is read — and an observer that wants to
+    #: announce a background session's completion needs the identity of the
+    #: specific event to arbitrate on (`AttentionStore.claim_delivery`).
+    #: Defaulted so every existing construction site, and the sidebar tests
+    #: that build entries positionally, keep working unchanged.
+    completion_token: str = ""
+    anchor_id: str = ""
 
     @property
     def id(self) -> str:
@@ -266,6 +275,8 @@ def load_catalog(directory: Path) -> list[CatalogEntry]:
                     row,
                     bool(attention[identities[row.id]]["unseen"]),
                     str(attention[identities[row.id]]["kind"] or ""),
+                    str(attention[identities[row.id]]["completion_token"] or ""),
+                    str(attention[identities[row.id]]["anchor_id"] or ""),
                 )
                 for row in rows
             ]

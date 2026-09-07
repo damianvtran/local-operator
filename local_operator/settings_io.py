@@ -796,6 +796,28 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("notify when unfocused", "never notify"),
     ),
     Setting(
+        # The observer path (a background session finishing while you are
+        # looking at a DIFFERENT one) widens where a session name appears: the
+        # toast is about a conversation the terminal is not showing, so its
+        # name is the only thing that identifies it, and macOS repeats banner
+        # titles on the lock screen. Session names are model-written and can
+        # quote the work, so this is the opt-out for anyone who does not want
+        # that on a screen other people can see. Default TRUE because it
+        # matches what every existing notification already does; off falls back
+        # to the brand name, which still says a session finished.
+        key="display.notification_session_name",
+        path=("display.notification_session_name",),
+        section="appearance",
+        # Fits the row's label column at 100 columns. "Name sessions in
+        # notifications" elided to "…notificatio…", losing the one word that
+        # says what the row governs.
+        label="Notification session names",
+        kind=Kind.BOOL,
+        default=True,
+        help="Off titles toasts with the app name instead, for a shared screen.",
+        choices=_bool_choices("name the session", "app name only"),
+    ),
+    Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`
         # cycles freely from it and never writes it back (the same split as
         # `tool_approval_mode` vs `/approvals`). A hard override would make
