@@ -4011,6 +4011,20 @@ class OperatorApp(App[None]):
             factory = self._resume_factory
             if factory is not None:
                 self._session_factory = lambda: factory(session_id)
+            # A sidebar switch IS a conversation swap, so the band's
+            # session-scoped segments are blanked here rather than being left to
+            # the incoming snapshot to overwrite. That repaint is leave-alone on
+            # absent values, and a conversation that has never had a turn
+            # legitimately supplies none: `cumulative_cost` is None until spend
+            # exists and `context_tokens` defaults to None. So switching away
+            # from a `/new` conversation to a busy one and back left the BUSY
+            # session's cost and context window painted over the fresh one, with
+            # nothing arriving to correct them until its first turn ended.
+            #
+            # Immediately BEFORE the adopt, never after: the incoming snapshot
+            # is what puts a real figure back, so a session with genuine spend
+            # still lands on its own number rather than on zero.
+            self._reset_band_for_swap()
             self._adopt_session(session, replay_history=False, reuse_controller=True)
             self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
             history = session.display_history_window()
@@ -6844,6 +6858,39 @@ class OperatorApp(App[None]):
         # dead conversation's already-billed calls from its own turn total and
         # under-report that turn by exactly that much.
         self._turn_accrued_cost = 0.0
+        self._reset_band_for_swap()
+        return (*carried_spend, was_floor)
+
+    def _reset_band_for_swap(self) -> None:
+        """Blank the session-scoped BAND segments, without touching the transcript.
+
+        The band half of :meth:`_reset_ledger_for_swap`, split out because the
+        sidebar's switch path is a conversation swap that must NOT tear the
+        transcript down: it substitutes a prepared presentation rather than
+        rebuilding one, so the steer notices, tool cards, fork receipts and
+        resume state its sibling clears are all state the sidebar deliberately
+        preserves. Calling the whole of `_reset_ledger_for_swap` from there
+        would destroy the presentation the switch just spent a frame preparing.
+
+        Everything reset here is APP-SCOPED — it lives on the band widget, on
+        the dock, or on the app — which is exactly what makes it the half the
+        sidebar needs. The ledger figures themselves (`_total_cost`,
+        `_spend_is_floor`, the naming bookkeeping) are properties of
+        ``self._interaction`` and are therefore already per-conversation: on the
+        sidebar path ``_adopt_session`` swaps the interaction, so those come back
+        correct on their own, and zeroing them HERE would blank the outgoing
+        conversation's real spend — which, unlike a reload's, is parked and
+        returned to rather than retired.
+
+        ORDERING: call this BEFORE ``_adopt_session``, never after. The incoming
+        snapshot's repaint is leave-alone on absent values (`cumulative_cost` is
+        None until a session has had a turn, `context_tokens` defaults to None),
+        so a reset afterwards would erase a real figure, and no reset at all
+        left the previous conversation's cost and context painted over a fresh
+        `/new` — the reported bug. Resetting first means a session with genuine
+        spend still lands on its own number, because its snapshot carries it.
+        """
+        assert self._status is not None
         # The splash notice describes the session being replaced. Left
         # standing, a `/new` would open on the dead session's quota warning.
         self._splash_notice = None
@@ -6886,7 +6933,6 @@ class OperatorApp(App[None]):
         # ones (#525 design §2).
         if self._subagent_panel is not None:
             self._subagent_panel.reset_density()
-        return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -13012,6 +13058,17 @@ class OperatorApp(App[None]):
         if visible == self._welcome_visible:
             return
         self._welcome_visible = visible
+        if visible:
+            # The splash is composed ONCE into the boot transcript, but sidebar
+            # navigation mounts a whole new `TranscriptView` per target and only
+            # gives it an empty state when the target had no history — so after a
+            # switch onto a conversation with messages, `self._welcome` is None
+            # (or points at a view parked off screen) and this call had nothing
+            # to show. The boot layout still applied, so `/new` landed on a
+            # centred, EMPTY card: the reported bug. Materialise the empty state
+            # on the view that is on screen now instead of adding a second
+            # "should the splash show" rule beside this one.
+            self._welcome = self._ensure_welcome_view()
         if self._welcome is not None:
             self._welcome.set_visible(visible)
         self._sync_boot_layout_class()
@@ -13023,6 +13080,54 @@ class OperatorApp(App[None]):
             self.screen.remove_class(BOOT_CARD_CLASS)
             self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
         self._sync_boot_layout()
+
+    def _ensure_welcome_view(self) -> WelcomeView | None:
+        """The CURRENT transcript's empty state, mounting one if it has none.
+
+        Identity, not construction, is the point: the splash lives inside the
+        transcript (see :meth:`compose`), so "the splash" is whichever view the
+        transcript on screen owns. A handle to a view parked in another
+        conversation's viewport is worse than no handle at all — it is a widget
+        that reports `display=True` from one viewport to the right of the screen
+        — so a stale `self._welcome` is REPLACED here rather than reused.
+
+        At most one is ever mounted per transcript: the existing child is
+        adopted when there is one, which is what stops a splash accumulating per
+        sidebar switch. The mount is deliberately not awaited — every caller is
+        synchronous, and the swap path's whole ordering argument (see
+        :meth:`_adopt_session`) is that nothing between the clear and the replay
+        may yield to the event loop.
+
+        Returns None only before the transcript is composed, which is the one
+        state where there is no empty state to own.
+        """
+        try:
+            view = self._transcript_view()
+        except Exception:  # pragma: no cover - only before compose
+            logger.debug("transcript is not mounted yet", exc_info=True)
+            return None
+        existing = next((child for child in view.children if isinstance(child, WelcomeView)), None)
+        if existing is not None:
+            return existing
+        # Same closure as `compose` and as the sidebar's prepare path, so the
+        # splash renders the same info rows wherever it is materialised. It is a
+        # closure rather than a snapshot because the notice, the setup state and
+        # the update banner all resolve AFTER the view is built.
+        welcome = WelcomeView(
+            lambda: session_welcome_info(
+                self._session,
+                self._providers,
+                notice=self._splash_notice,
+                setup=self._setup_state,
+                update_available=self._update_available,
+            )
+        )
+        # The splash is the empty state, so it goes ABOVE the blocks — the same
+        # position `compose` gives it. `mount(before=0)` rather than a plain
+        # mount because a transcript that already holds rows (a `/clear` receipt,
+        # a boot notice) would otherwise get its empty state underneath them.
+        view.mount(welcome, before=0)
+        return welcome
 
     def _sync_row_density_class(self) -> None:
         """Put ``Screen.comfortable-rows`` on iff the setting says so.
