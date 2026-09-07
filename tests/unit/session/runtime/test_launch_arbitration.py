@@ -559,6 +559,59 @@ def test_spawn_capture_is_private_and_anonymous(tmp_path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _sleep_recorder:
+    """A stand-in for ``launch``'s ``asyncio`` that records what it was asked to sleep.
+
+    WHY A PROXY OBJECT AND NOT ``setattr(launch_module.asyncio, "sleep", ...)``
+    ==========================================================================
+    ``launch_module.asyncio`` is not a per-module copy -- it is THE shared
+    ``asyncio`` module object, so setting an attribute on it patches
+    ``asyncio.sleep`` for every module in the process. Under ``-n auto`` the
+    recorder then captures sleeps from whatever else is running in the same
+    worker, and the assertion reports another test's timings as this one's
+    (observed: 0.2 and 1.0 leaking in from ``tests/unit/tui/test_stop_command.py``,
+    which failed a poll-shape test that passes in isolation).
+
+    Rebinding the NAME on the module under test keeps the patch where the test
+    can reason about it: only ``launch``'s own ``asyncio.sleep`` calls are
+    recorded, and nothing outside this module is affected.
+    """
+
+    def __init__(self, slept: list[float], clock: dict[str, float] | None = None) -> None:
+        self._slept = slept
+        self._clock = clock
+
+    async def sleep(self, duration: float) -> None:
+        self._slept.append(duration)
+        # When a virtual clock is in play, the loop's own deadline arithmetic
+        # advances by exactly the sleeps it asked for -- time is DATA here,
+        # never a measurement, so a 3 s window costs no real seconds.
+        if self._clock is not None:
+            self._clock["now"] += duration
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything the module reaches for other than `sleep` is the real thing.
+        return getattr(asyncio, name)
+
+
+class _virtual_clock:
+    """A stand-in for ``launch``'s ``time``, driven by the sleeps it requests.
+
+    Scoped for the same reason as :class:`_sleep_recorder`: ``time`` is a shared
+    module object, and a process-wide ``monotonic`` would be considerably worse
+    than a process-wide ``sleep``.
+    """
+
+    def __init__(self, clock: dict[str, float]) -> None:
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock["now"]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
 def test_poll_delay_is_dense_while_a_construction_is_known_to_be_in_flight() -> None:
     """The unit fact: a known construction polls flat and dense, and the
     open-ended backoff is preserved rather than decayed underneath it.
@@ -629,10 +682,12 @@ async def test_engage_polls_densely_while_its_own_candidate_constructs(
 
     slept: list[float] = []
 
-    async def record_sleep(duration: float) -> None:
-        slept.append(duration)
-
-    monkeypatch.setattr(launch_module.asyncio, "sleep", record_sleep)
+    # Scoped to a PRIVATE asyncio proxy for this module, never to the shared
+    # `asyncio` module object. `launch_module.asyncio` IS the global module, so
+    # `setattr(launch_module.asyncio, "sleep", ...)` patches it for the whole
+    # process and this recorder then captures unrelated sleeps from any test
+    # running beside it (observed: 0.2 and 1.0 leaking in from the TUI suite).
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept))
 
     with pytest.raises(TimeoutError):
         await engage_runtime(
@@ -675,10 +730,12 @@ async def test_engage_uses_the_coarse_grid_when_nothing_is_constructing(
 
     slept: list[float] = []
 
-    async def record_sleep(duration: float) -> None:
-        slept.append(duration)
-
-    monkeypatch.setattr(launch_module.asyncio, "sleep", record_sleep)
+    # Scoped to a PRIVATE asyncio proxy for this module, never to the shared
+    # `asyncio` module object. `launch_module.asyncio` IS the global module, so
+    # `setattr(launch_module.asyncio, "sleep", ...)` patches it for the whole
+    # process and this recorder then captures unrelated sleeps from any test
+    # running beside it (observed: 0.2 and 1.0 leaking in from the TUI suite).
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept))
 
     with pytest.raises(TimeoutError):
         await engage_runtime(
@@ -723,12 +780,10 @@ async def test_a_dense_window_does_not_outlive_its_welcome(tmp_path: Path, monke
     # waiting out three real seconds. Time is DATA here, never a measurement.
     clock = {"now": 0.0}
 
-    async def record_sleep(duration: float) -> None:
-        slept.append(duration)
-        clock["now"] += duration
-
-    monkeypatch.setattr(launch_module.asyncio, "sleep", record_sleep)
-    monkeypatch.setattr(launch_module.time, "monotonic", lambda: clock["now"])
+    # Same scoping as above, for both the sleep and the clock: `time` is a
+    # shared module object too, and a process-wide `monotonic` is far worse.
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept, clock))
+    monkeypatch.setattr(launch_module, "time", _virtual_clock(clock))
 
     with pytest.raises(TimeoutError):
         await engage_runtime(
