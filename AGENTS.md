@@ -1230,6 +1230,24 @@ on this host (Chrome 152.0.7977.76, `--headless=new`), the built
 `Page.captureScreenshot` returned a 34 KB PNG showing the real pairing form;
 `Input.dispatchMouseEvent` dispatched. Nothing appeared on screen.
 
+The launch itself, with the flags this section requires:
+
+```sh
+# Throwaway profile, headless, no keychain prompts, and a port Chrome picks.
+profile=$(mktemp -d /tmp/lo-harness.XXXXXX)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --user-data-dir="$profile" \
+  --remote-debugging-port=0 \
+  --use-mock-keychain --password-store=basic \
+  --no-first-run --no-default-browser-check about:blank &
+
+# Chrome writes DevToolsActivePort asynchronously, so WAIT for it rather than
+# reading it straight after launch: an immediate read gets a missing or empty
+# file and the connect fails intermittently, which reads like a flaky harness.
+until [ -s "$profile/DevToolsActivePort" ]; do sleep 0.2; done
+port=$(head -1 "$profile/DevToolsActivePort")
+```
+
 **Load the extension over CDP, not `--load-extension`.** Branded Chrome removed
 that switch in 137 (`PSA: Removing --load-extension flag in Chrome branded
 builds`, chromium-extensions), and the

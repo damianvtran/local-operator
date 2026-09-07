@@ -45,10 +45,11 @@ window. The extension is built to respect that and you must keep it that way:
   actions to work. If you ever find yourself wanting to activate a tab, don't —
   the whole point is that the user keeps doing their own thing.
 - **Anything you start yourself is bound by the same rule.** If a step needs a
-  browser that is not already running, it gets launched in the background
-  (`open -g -a "Google Chrome"` on macOS) — never in a way that raises a window
-  or pulls the user out of what they are doing. A window appearing on screen
-  because the agent was working is the failure this whole design prevents.
+  browser that is not already running, ask the user before starting it the
+  first time, then launch it in the background (`open -g -a "Google Chrome"` on
+  macOS) — never in a way that raises a window or pulls the user out of what
+  they are doing. A window appearing on screen because the agent was working is
+  the failure this whole design prevents. Step 0 below has the full sequence.
 
 Chrome shows a small "Local Operator is debugging this browser" banner on the
 tab the agent controls. That is intentional and good: it is how the user can
@@ -75,7 +76,8 @@ The one case where a separate browser is legitimate is **developing Local
 Operator's own extension**, where the thing under test is the extension build
 rather than a website. That is a contributor workflow, not a user one, and it
 runs headless with a throwaway profile: `AGENTS.md` in the local-operator
-repository ("Capturing a browser surface") carries the required flags,
+repository, §6 of "Visual validation" ("Capturing a browser surface: headless
+Chrome, never a window"), carries the launch recipe, the required flags,
 teardown, and the measured reasons for each. If you are not changing the
 extension's own code, this does not apply to you.
 
