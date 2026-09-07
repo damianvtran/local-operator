@@ -44,6 +44,9 @@ class FakeSession:
         self._complete_calls: list[tuple[str, str]] = []
         self.prompt_calls: list[str] = []
         self.steer_calls: list[str] = []
+        #: Reasons `abort` was called with, so a stop test can assert the turn
+        #: was stopped and not only the children.
+        self.aborts: list[str] = []
         self.prompt_release = asyncio.Event()
         #: The MCP manager the `/mcp` handlers read. ``None`` matches a real
         #: session before its servers connect; the grant tests substitute a
@@ -136,6 +139,12 @@ class FakeSession:
 
     def running_subagents(self) -> int:
         return 0
+
+    def abort(self, reason: str = "interrupted") -> None:
+        """Part of SessionProtocol, and the control op's first act. Recorded
+        rather than ignored so a test can prove the turn was stopped as well as
+        the children."""
+        self.aborts.append(reason)
 
     async def prompt(self, text: str, images=None) -> None:  # noqa: ANN001
         self.prompt_calls.append(text)
@@ -1390,3 +1399,70 @@ async def test_model_saved_with_no_configured_default_says_so(
     result = await handle._model_slash(session, "saved", SlashResult)
     assert "no boot default saved yet" in result.text
     assert "/model default <provider>/<model-id>" in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_abort_op_stops_the_children_too() -> None:
+    """The control op has NO second rung, so its one press must reach children.
+
+    The keyboard's Esc ladder can afford a narrow first press because a second
+    press is offered on screen. Nothing on this path has that: the mobile
+    relay, a supervisor and `lop` peers send `abort` once into a session they
+    cannot see. Reusing the keyboard's narrow semantics gave those callers a
+    stop that could never end a runaway — the operator sent `abort`, was acked
+    "stopping", and watched the meter run (QA Q-1).
+    """
+    handle, session = make_handle()
+    cancelled: list[str] = []
+    session.cancel_subagents = lambda reason="interrupted": (  # type: ignore[attr-defined]
+        cancelled.append(reason),
+        3,
+    )[1]
+
+    receipt = await handle.abort()
+
+    assert session.aborts, "the turn itself must still be stopped"
+    assert cancelled, "the abort op must reach the children; it is the only rung it has"
+    assert "stopped 3 subagents" in receipt
+
+
+@pytest.mark.asyncio
+async def test_the_abort_receipt_does_not_claim_more_than_it_did() -> None:
+    """The ack must not say "stopping" while things keep running.
+
+    Returning the literal "stopping" whatever survived is how the operator was
+    told the problem was handled while the meter ran. Backgrounded `bash` jobs
+    are deliberately spared (`background=true` exists so a build outlives the
+    turn), so the receipt has to name them rather than imply they stopped.
+    """
+    handle, session = make_handle()
+    session.cancel_subagents = lambda reason="interrupted": 0  # type: ignore[attr-defined]
+
+    async def never(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        await asyncio.sleep(30)
+
+    session.jobs.register("bash", "a long build", never)
+    await asyncio.sleep(0.05)
+
+    receipt = await handle.abort()
+
+    assert "1 background job still running" in receipt
+    assert "jobs cancel" in receipt
+    # No children ran, so the receipt must not invent a number for them.
+    assert "subagent" not in receipt
+
+
+@pytest.mark.asyncio
+async def test_the_abort_op_survives_a_session_that_cannot_stop_children() -> None:
+    """A reduced host must get a stop, not an exception.
+
+    `cancel_subagents` is getattr-probed like every other optional capability
+    in this file: a stop must never fail because the thing it was asked to stop
+    is not implemented.
+    """
+    handle, session = make_handle()
+    assert not hasattr(session, "cancel_subagents")
+
+    receipt = await handle.abort()
+
+    assert "stopping this turn" in receipt
