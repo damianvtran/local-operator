@@ -80,6 +80,16 @@ class RecordingStream:
         either place, is what the model reads. Reading only the blocks would
         report a stale answer for exactly the sessions this bug affected;
         reading a session attribute would miss the wire entirely.
+
+        RAISES rather than returning ``[]`` when it cannot find an inventory to
+        parse, because ``[]`` is indistinguishable from "the model was told
+        about nothing" and every negative assertion in this file would pass on
+        it. That is not hypothetical: while ``_system_state_message`` prepended
+        a label block 1 already carried, the record opened with the heading
+        TWICE, the section scan broke on its own duplicate at line 1, and
+        ``assert "ask" not in stream.described()`` in the uninstall test passed
+        against an empty list — a guard that could not go red. A parser for a
+        guard has to fail loudly on a shape it does not understand.
         """
         request = self.requests[-1]
         sources = list(request.system_blocks or [])
@@ -93,14 +103,29 @@ class RecordingStream:
         ]
         latest = [text for text in sources if TOOL_INVENTORY_HEADING in text]
         if not latest:
-            return []
-        section = latest[-1].split(TOOL_INVENTORY_HEADING, 1)[1]
+            raise AssertionError(
+                "no request source carries the tool inventory: neither the system "
+                "blocks nor any [session-state] record names "
+                f"{TOOL_INVENTORY_HEADING!r}"
+            )
+        source = latest[-1]
+        if source.count(TOOL_INVENTORY_HEADING) != 1:
+            raise AssertionError(
+                f"malformed inventory: {TOOL_INVENTORY_HEADING!r} appears "
+                f"{source.count(TOOL_INVENTORY_HEADING)} times in one source, so the "
+                f"section cannot be delimited. Source begins: {source[:120]!r}"
+            )
+        section = source.split(TOOL_INVENTORY_HEADING, 1)[1]
         names: list[str] = []
         for line in section.splitlines():
             if line.startswith("## "):  # the next section of a multi-part delta
                 break
             if line.startswith("- "):
                 names.append(line[2:].split(":", 1)[0])
+        if not names:
+            raise AssertionError(
+                f"inventory section parsed to no tool names. Section begins: {section[:120]!r}"
+            )
         return names
 
 
@@ -305,7 +330,16 @@ async def test_no_advertised_tool_is_ever_missing_from_the_prompt_inventory(tmp_
 async def test_uninstalling_the_handler_takes_ask_out_of_the_prompt_too(tmp_path) -> None:
     """A host that hands the terminal back stops offering ``ask`` in the array;
     the prompt has to stop naming it in the same turn, or the model is told to
-    use a tool the request no longer carries."""
+    use a tool the request no longer carries.
+
+    The negative is pinned against the inventory this turn ACTUALLY carries,
+    not against ``"ask" not in []``. This turn's inventory reaches the model as
+    a ``[session-state]`` record rather than in the frozen blocks, so a parser
+    that silently failed on that record would make the assertion below vacuous
+    — which it was, until ``_system_state_message`` stopped doubling the
+    heading. Asserting the surviving capabilities are still described is what
+    proves the parser read the delta rather than nothing.
+    """
     stream = RecordingStream()
     session = make_prompt_session(tmp_path, stream)
     session.set_ask_handler(answer_nothing)
@@ -315,7 +349,13 @@ async def test_uninstalling_the_handler_takes_ask_out_of_the_prompt_too(tmp_path
     session.set_ask_handler(None)
     await session.prompt("without one")
 
-    assert "ask" not in stream.described()
+    described = stream.described()
+    # The delta was read: everything the session still advertises is named, so
+    # ``ask``'s absence below is a fact about the inventory rather than about a
+    # parser that found none.
+    assert {"task", "wait", "jobs", "wake", "hub"} <= set(described)
+    assert set(described) == {tool.name for tool in stream.requests[-1].tools if not tool.hidden}
+    assert "ask" not in described
     assert "ask" not in stream.advertised()
     await session.dispose()
 
@@ -353,4 +393,105 @@ async def test_a_changed_inventory_rides_a_state_delta_and_keeps_block_zero(tmp_
     # Names only: the inventory deliberately carries no descriptions (schemas
     # ride the tools array), so match the whole line rather than a prefix.
     assert "\n- ask\n" in str(updates[-1].details["text"])
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_state_delta_names_its_section_exactly_once(tmp_path) -> None:
+    """The inventory delta is the fix's delivery mechanism, so its shape ships.
+
+    ``_system_state_message`` labels each changed block, but block 1 is
+    rendered by ``render_tool_inventory_block`` and already opens with that
+    heading — so prepending unconditionally put ``## Available tools`` on the
+    wire twice, back to back, on the one turn every real session emits this
+    record. Latent on ``main`` (the inventory never changed mid-session, so the
+    delta was never emitted) and reachable here.
+
+    The other labelled sections are asserted alongside it, because the naive
+    fix — stripping the label whenever one is configured — silently unlabels
+    blocks 2 and 3, whose content carries no heading of its own.
+    """
+    stream = RecordingStream()
+    session = make_prompt_session(tmp_path, stream)
+    await session.prompt("before the front end wires itself up")
+
+    session.set_ask_handler(answer_nothing)
+    await session.prompt("and now?")
+
+    updates = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == "session_state"
+    ]
+    assert len(updates) == 1
+    text = str(updates[-1].details["text"])
+    assert text.count(TOOL_INVENTORY_HEADING) == 1
+    assert text.startswith(f"[session-state]\n{TOOL_INVENTORY_HEADING}\n")
+    # And the section is still delimited, i.e. the guard's parser can read it.
+    assert "ask" in stream.described()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_labelled_state_section_without_its_own_heading_keeps_the_label(
+    tmp_path,
+) -> None:
+    """The asymmetry the fix above must preserve.
+
+    Blocks 2 and 3 (environment, knowledge) are plain content: without the
+    prepended label the model receives anonymous prose it cannot attribute to a
+    section. Only block 1 renders its own heading, so only block 1 skips it.
+    """
+    changes = {
+        "1": f"{TOOL_INVENTORY_HEADING}\n\n- bash",
+        "2": "Today is 2026-09-07.",
+        "3": "goal: ship it",
+    }
+    text = str(Session._system_state_message(changes).details["text"])
+
+    assert text.count(TOOL_INVENTORY_HEADING) == 1
+    assert "## Environment\nToday is 2026-09-07." in text
+    assert "## Knowledge and session state\ngoal: ship it" in text
+
+
+@pytest.mark.asyncio
+async def test_the_advisor_sends_the_turns_prefix_not_a_reconciled_one(tmp_path) -> None:
+    """The compaction advisor must stay APPEND-ONLY on the turn's prefix.
+
+    ``advise_compaction``'s own docstring records the measurement: adding one
+    block there scored 0%% cache hit and a full ``cache_write=14590``. Changing
+    block 1's CONTENT is worse than appending — it diverges at position 1, so
+    everything from there on misses. Re-rendering the live inventory into the
+    advisor's blocks did exactly that from the moment a tool was installed
+    after the prefix froze, which is every real TUI session.
+
+    The current inventory still has to reach the advisor; it rides the
+    appended ``[session-state]`` record, the same way the aside carries it.
+    """
+    stream = RecordingStream()
+    session = make_prompt_session(tmp_path, stream)
+    await session.prompt("before the front end wires itself up")
+
+    # After the freeze, as ``_adopt_session`` does it.
+    session.set_ask_handler(answer_nothing)
+    await session.prompt("and now?")
+    turn_blocks = list(stream.requests[-1].system_blocks or [])
+
+    await session.advise_compaction([])
+    advisor = [request for request in stream.requests if request.purpose == "compaction_advisor"][
+        -1
+    ]
+
+    assert list(advisor.system_blocks or []) == turn_blocks
+    # Append-only, not merely equal: the inventory the advisor reads is current
+    # because the record at the tail carries it, not because block 1 was
+    # rewritten. Whole-line match — ``- task`` contains the substring ``ask``.
+    assert "\n- ask\n" not in turn_blocks[1]
+    tail = [
+        message
+        for message in advisor.messages
+        if (message.text or "").startswith("[session-state]")
+    ]
+    assert tail and "\n- ask\n" in (tail[-1].text or "")
+    assert "ask" in {tool.name for tool in advisor.tools}
     await session.dispose()

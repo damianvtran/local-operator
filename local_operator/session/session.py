@@ -3227,11 +3227,33 @@ class Session:
 
     @staticmethod
     def _system_state_message(changes: dict[str, str]) -> CustomMessage:
+        """One ``[session-state]`` record naming each changed section.
+
+        The label is what makes an anonymous block index legible to the model,
+        so it is prepended — EXCEPT where the block already opens with that
+        exact heading, which is an asymmetry rather than an oversight. Block 1
+        is rendered by :func:`render_tool_inventory_block`, whose output starts
+        with ``TOOL_INVENTORY_HEADING`` because the same string has to head the
+        section in the system prefix, where nothing prepends a label. Blocks 2
+        and 3 carry no heading of their own and would be unlabelled prose
+        without this, so stripping the label unconditionally is not the fix.
+
+        Prepending regardless produced ``## Available tools`` twice, back to
+        back, on the wire. That is latent on ``main`` — a session's inventory
+        never changed mid-run, so this delta was never emitted — and became
+        reachable on every real session once the inventory started reconciling
+        against the live tools array, which is the delivery mechanism for that
+        fix. Matched on the whole first LINE, not ``startswith`` on the
+        heading, so a future section named ``## Available tools and rules``
+        still gets its label rather than silently losing it.
+        """
         labels = {1: "Available tools", 2: "Environment", 3: "Knowledge and session state"}
-        text = "[session-state]\n" + "\n\n".join(
-            f"## {labels.get(int(index), 'Session state')}\n{block or '(empty)'}"
-            for index, block in changes.items()
-        )
+        sections: list[str] = []
+        for index, block in changes.items():
+            body = block or "(empty)"
+            heading = f"## {labels.get(int(index), 'Session state')}"
+            sections.append(body if body.split("\n", 1)[0] == heading else f"{heading}\n{body}")
+        text = "[session-state]\n" + "\n\n".join(sections)
         return CustomMessage(
             custom_type="session_state",
             attribution="system",
@@ -9478,19 +9500,22 @@ class Session:
           ``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``
           for the numbers.
         """
-        blocks = self._system_blocks()
-        if inspect.isawaitable(blocks):
-            blocks = await blocks
-        # This call sends the LIVE tools (see the note below), so it carries
-        # the inventory block describing them: the prompt prefix it shares with
-        # ordinary turns has to match, or the advisor call becomes a cache miss
-        # AND describes tools the request does not carry.
-        blocks = self._reconcile_tool_inventory(list(blocks))
+        # Through the aside's own prompt builder, for the append-only contract
+        # above. This call sends the LIVE tools, so the inventory describing
+        # them must be current — but re-rendering it INTO the prefix diverges
+        # from the frozen blocks the turn sends the moment a tool is installed
+        # after the freeze, which is every real TUI session. Divergence at
+        # block 1 is worse than the appended block the docstring already
+        # forbids: it misses everything from position 1 on. ``_read_only_prompt``
+        # reconciles for the delta and then sends the FROZEN list, so the
+        # current inventory rides the appended ``[session-state]`` record
+        # instead — append-only, and the model is told exactly the same thing.
+        blocks, messages = await self._read_only_prompt(turns)
         request = ChatRequest(
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
-            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
+            messages=messages,
             # Live tools, same as an aside: the tools block is the FRONT of the
             # provider cache prefix, so sending [] would change position 0 and
             # force a full re-process at write price instead of a cache read.
