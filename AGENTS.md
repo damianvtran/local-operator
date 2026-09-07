@@ -280,6 +280,18 @@ listing out of a catalogue cache that the same session's own earlier live calls
 had written into the real home. Any cell whose point is a cold cache needs a
 **fresh** `HOME` per cell, not merely a fresh config dir.
 
+**And a redirected config dir is not automatically a redirected write path:
+check the store's WRITE site, not just its read site.** A function can honour
+an injected `config_dir` everywhere it reads and still default its writes to
+the global path, so the isolation looks correct in every observable way while
+the side effects land in the operator's real home. That is not hypothetical —
+the analytics session-name backfill did exactly this and wrote 612 rows into
+the live `~/.local-operator/analytics.db` from a sandboxed run. Production was
+unaffected, because the only production caller passes the real config dir and
+the two therefore agreed, which is precisely why nothing caught it. When you
+isolate a run, verify where its writes actually go, not merely that its reads
+are redirected.
+
 ### Read the committed ref, not the working tree
 
 "Never `git stash` to get a before-frame" (in the visual-validation section
@@ -441,8 +453,21 @@ been released yet is the normal state of `main`, not a problem to fix.
 
 Releases are cut by a single **release owner** for a **window**: the set of
 PRs merged since the last tag that are ready around the same time (about an
-hour). A PR that merges after the owner has started cutting simply rides the
-next window; nothing is lost, and nobody holds a merge to make a window.
+hour). Nobody holds a merge to make a window.
+
+**A PR that merges after the owner starts cutting does not reliably ride the
+next window — it may ride *this* one, unlisted.** The tag names a SHA and
+everything reachable from it ships, and the bump commit is not a barrier: in
+v0.51.4 the bump landed at 07:16 on its own release branch and #731 merged to
+`main` at 07:18, so the two sat on divergent branches and both were reachable
+from the tagged merge. #731 was the ordinary merge to `main`, and it shipped
+while being absent from the notes. So: **if you merge while a window is open,
+send the owner your PR number and merge SHA at merge time**, not when you next
+happen to talk to them. The owner cannot poll continuously, and a peer who
+confirms a window list and then quietly merges into it has broken the protocol
+even though every individual step looked correct. The owner's matching duty —
+re-derive the window immediately before tagging — is in the release-mechanics
+warnings below.
 
 **The lock on a window is the open bump PR, not a message.** Two sessions
 that both run `lop sessions` and both announce themselves in the same minute
@@ -637,6 +662,21 @@ Warnings that still hold, each of which has already cost a release:
   the real description and the first-parent walk does not. A release note that
   omits a merged PR is a defect in the release, not a cosmetic miss — it is
   the only record of what changed under a user who is about to update.
+- **Re-derive the window immediately before `gh release create`, not once when
+  you claim it.** The bump commit is not a barrier: anything merged after it
+  and before the tag still rides the release, because the tag names a SHA and
+  everything reachable from it ships. This happened in v0.51.4 — #731 merged
+  *above* the bump commit `d1ce356ac`, shipped in the tag, and was absent from
+  the notes, even though the owner had polled every peer and derived the window
+  correctly when they started. Deriving it right once does not help if the
+  derivation is stale by the time you tag. The check is one command:
+
+  ```sh
+  git log --oneline <last-tag>..origin/main   # immediately before tagging
+  ```
+
+  The other half of this is the merger's duty, and it is stated where a merger
+  will actually read it — see "One release owner per window" above.
 - **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
   tagging.** A non-empty diff means a merged PR carried its own version bump
   and has silently consumed the number you are about to use. That is exactly
@@ -1193,8 +1233,25 @@ a bound because it went red is how a guard stops guarding.
 
 ### Prove the test can still fail
 
-A guard that cannot go red is worse than no guard, because it is believed. When
-you change how a test detects a regression, reintroduce the regression and
+A guard that cannot go red is worse than no guard, because it is believed. That
+holds for every kind of test, not just the timing ones this section is about,
+and it fails in more ways than a widened threshold. Four instances landed in a
+single session: a test that asserted an assumption instead of behaviour; a test
+named for a mechanism that still passed with the mechanism stubbed out; a QA
+cell that passed *vacuously* because the thing it checked was absent rather
+than correct (`cards.get(...) != "interrupted"` is true when there is no card);
+and an entire suite of 36 that stayed green when the fix under it was reverted,
+because the one test reaching that code stubbed its collaborators with
+`lambda *a: object()` and discarded the value the fix changed. Each looked like
+coverage on the checks list.
+
+So whenever a test is the evidence for a claim — a review round, a QA cell, a
+PR's "this is fixed" — **make it fail on purpose before you rely on it**: run
+it against the unfixed tree, or revert the fix in place, or mutate the
+mechanism it names. If it passes either way it is decoration, and the honest
+next step is to fix the test or drop the claim.
+
+When you change how a test detects a regression, reintroduce the regression and
 watch it fail:
 
 ```sh
