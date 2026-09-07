@@ -1,12 +1,17 @@
 """Regenerate ``tests/durations.json``, the shard-balancing weight manifest.
 
 Usage:
-    # From JUnit XML you already have (preferred -- CI's own artifacts):
-    python scripts/gen_test_durations.py --junit report.xml [more.xml ...]
-
-    # Or measure locally, then write the manifest (slow; see the load warning):
+    # Measure locally, then write the manifest. This is the path that works
+    # today, and how tests/durations.json was produced (slow; see the load
+    # warning below before starting one).
     python -m pytest tests/unit --junit-xml=/tmp/d.xml
     python scripts/gen_test_durations.py --junit /tmp/d.xml
+
+    # From JUnit XML you already have. CI would be the better source -- its
+    # runs are on dedicated hardware -- but the workflow emits no JUnit
+    # artifact yet, so this route needs a `--junit-xml` + upload step added to
+    # the shard job first. Do not read it as an available option until then.
+    python scripts/gen_test_durations.py --junit report.xml [more.xml ...]
 
 ``scripts/shard_tests.py`` consumes the output; read its module docstring for
 why the manifest is committed rather than computed at workflow time, and why a
