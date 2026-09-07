@@ -28,8 +28,12 @@ import pytest
 
 from local_operator.tui.notify import (
     APP_NAME,
+    BACKGROUND_FALLBACK_TITLE,
     BEL,
     BODIES,
+    BODY_BACKGROUND,
+    BODY_BACKGROUND_DIGEST,
+    CONTEXT_MIXED,
     CONTEXTS,
     MAX_TITLE_CHARS,
     OSC9_PREFIX,
@@ -38,10 +42,12 @@ from local_operator.tui.notify import (
     Notifier,
     _spawn_detached,
     argv_safe,
+    background_digest_title,
     cmux_command,
     cmux_surface_id,
     desktop_notify_command,
     detect_protocol,
+    digest_subtitle,
     notification_sequence,
     notification_writes,
     notifications_enabled,
@@ -724,3 +730,85 @@ def test_the_privacy_flag_defaults_to_naming_the_session(
     notifier.set_label("Fix quota reporting")
     notifier.send("complete")
     assert "Fix quota reporting" in sink.joined
+
+
+def test_the_digest_says_a_state_only_when_every_session_is_in_it() -> None:
+    """A digest must not assert an outcome the remainder did not have (D8).
+
+    The digest speaks for whatever the per-tick cap held back, and the catalog
+    ranks by ``(tier, -mtime, id)`` rather than by kind — so an over-cap set can
+    be entirely ``error`` or entirely ``interrupted``. It hardcoded ``Complete``
+    regardless, which told a user on a lock screen that five failures had
+    succeeded.
+
+    Both halves matter and both are asserted here: a UNIFORM set keeps its real
+    category out of the house vocabulary, so the digest reads like the row
+    banners beside it when it honestly can; a MIXED set gets neither the
+    majority's category nor the first row's, because either would be the same
+    false assertion at a smaller scale.
+    """
+    assert digest_subtitle(["complete", "complete", "complete"]) == CONTEXTS["complete"]
+    assert digest_subtitle(["error", "error"]) == CONTEXTS["error"]
+    assert digest_subtitle(["interrupted"]) == CONTEXTS["interrupted"]
+
+    # 3 complete + 2 errors is neither "Complete" nor "Needs attention".
+    mixed = digest_subtitle(["complete", "complete", "complete", "error", "error"])
+    assert mixed == CONTEXT_MIXED
+    assert mixed not in (CONTEXTS["complete"], CONTEXTS["error"])
+    # Majority-of-one in the other direction, so a majority rule cannot pass.
+    assert digest_subtitle(["error", "error", "error", "complete"]) == CONTEXT_MIXED
+    # Order-independent: a "first row wins" rule cannot pass either.
+    assert digest_subtitle(["complete", "error"]) == digest_subtitle(["error", "complete"])
+
+    # No sessions is no claim; both backends accept an empty subtitle.
+    assert digest_subtitle([]) == ""
+    # An unrecognised kind makes the set mixed rather than inheriting Complete:
+    # a future kind defaults to quiet, never to a false success.
+    assert digest_subtitle(["complete", "abandoned"]) == CONTEXT_MIXED
+    assert digest_subtitle(["abandoned"]) == CONTEXT_MIXED
+    # "mixed" is a property of a SET, so no single completion can resolve to it.
+    assert CONTEXT_MIXED not in CONTEXTS.values()
+
+
+def test_the_digest_title_is_absolute_distinct_and_survives_the_clip() -> None:
+    """The digest must not look like the row banner beside it (D9/D11).
+
+    With nameless over-cap sessions the digest was the fourth banner in a stack
+    of four carrying ``BACKGROUND_FALLBACK_TITLE`` — identical title, identical
+    subtitle, differing only in the body, which is the line macOS truncates
+    first. At N=1 it also self-contradicted: "A session finished" over "1 more
+    session finished" describes two events in one frame.
+
+    Three properties are pinned: the title never collides with the row banner's,
+    it carries an ABSOLUTE count rather than one relative to a cap the user may
+    never have seen (D11), and it stays inside the ~43-character macOS clip at
+    every count so the number lands in the line that survives.
+    """
+    for total in (1, 2, 3, 4, 9, 25, 100, 9999):
+        title = background_digest_title(total)
+        assert str(total) in title
+        assert title != BACKGROUND_FALLBACK_TITLE
+        # The count is in the TITLE, which macOS clips last, and it fits.
+        assert len(title) <= 43, (total, title, len(title))
+    # Singular reads as one event, not two: no "more", no contradiction.
+    assert background_digest_title(1) == "1 session finished"
+    assert "more" not in background_digest_title(1)
+    assert background_digest_title(2) == "2 sessions finished"
+
+
+def test_the_digest_body_says_where_to_go_since_it_cannot_take_you() -> None:
+    """The digest is the one inert banner in a clickable stack (D10).
+
+    It passes no ``session_id`` — it stands for several sessions, so there is no
+    single transcript to reopen — and said nothing about it. ``detached_notify``
+    already sets this precedent for the ``osascript`` leg ("— reopen with: lop
+    --resume <id>"); this is the same courtesy pointed at the surface that CAN
+    take the user there.
+    """
+    assert "sidebar" in BODY_BACKGROUND_DIGEST.lower()
+    # Routing, not outcome: the body must not restate a state category, which
+    # is the subtitle's job and the tautology design round 1 removed (D5).
+    assert not any(
+        context.lower() in BODY_BACKGROUND_DIGEST.lower() for context in CONTEXTS.values()
+    )
+    assert BODY_BACKGROUND_DIGEST != BODY_BACKGROUND

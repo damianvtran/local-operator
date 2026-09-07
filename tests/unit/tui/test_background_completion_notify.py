@@ -527,11 +527,12 @@ async def test_a_backlog_is_capped_and_the_remainder_is_summarised(
     named = [call for call in spawned if call[2]]
     digests = [call for call in spawned if not call[2]]
     assert len(named) == _BACKGROUND_NOTIFY_MAX_PER_TICK, spawned
-    # The count is reported rather than lost: 12 backlogged, 3 named, 9 summarised.
+    # The count is reported rather than lost: 12 backlogged, 3 named, and the
+    # digest carries the ABSOLUTE total of 12 rather than the remainder of 9 —
+    # "9 more" is only meaningful to a user who noticed the three banners it
+    # counts from, which a lock screen does not guarantee (design round 2, D11).
     assert len(digests) == 1, spawned
-    assert f"{backlog - _BACKGROUND_NOTIFY_MAX_PER_TICK} more sessions finished" in " ".join(
-        digests[0]
-    )
+    assert f"{backlog} sessions finished" in " ".join(digests[0])
     # Claimed, not merely skipped — otherwise the backlog re-floods next tick.
     fresh = AttentionStore(store_root / "attention.db")
     assert all(
@@ -1044,3 +1045,115 @@ async def test_the_opt_out_banner_is_distinguishable_from_the_nameless_one(
         assert APP_NAME in argv
         assert BACKGROUND_FALLBACK_TITLE not in argv
         assert "Secret client migration" not in argv
+
+
+@pytest.mark.parametrize(
+    ("kinds", "expected_subtitle_key"),
+    [
+        # ALL-ERROR remainder. The catalog ranks by `(tier, -mtime, id)`, not by
+        # kind, so this is not a contrived shape — it is what the cap produces
+        # whenever a batch of failures finishes together.
+        (["error"] * 8, "error"),
+        (["interrupted"] * 8, "interrupted"),
+        # MIXED remainder, and mixed NO MATTER WHICH ROWS THE CAP ANNOUNCES.
+        # Both kinds exceed the cap, so at most one of them can be fully
+        # consumed by the three banners and the remainder always holds both.
+        # An earlier draft used 5 complete + 3 error and PASSED AGAINST THE
+        # DEFECT: the catalog announced the three errors, leaving an all-
+        # complete remainder that `Complete` described correctly. That is QA
+        # round 1's Q2 vacuity repeating, and this composition is what removes
+        # the dependency on an ordering the test does not control.
+        (["complete"] * 5 + ["error"] * 5, None),
+    ],
+    ids=["all-error", "all-interrupted", "mixed"],
+)
+@pytest.mark.asyncio
+async def test_the_digest_never_asserts_an_outcome_the_remainder_did_not_have(
+    store_root: Path,
+    spawned: list[list[str]],
+    kinds: list[str],
+    expected_subtitle_key: str | None,
+) -> None:
+    """The digest hardcoded `Complete` over whatever the cap held back (D8).
+
+    This is design round 1's D3 — `interrupted` folded into a state it is not —
+    reappearing at the scale of an arbitrary number of sessions rather than one.
+    A user reading "Complete · 5 more sessions finished" on a lock screen has
+    been told five things succeeded when all five failed, and the sidebar's `✗`
+    is the only thing that contradicts it.
+
+    Driven through the real observer against a real store, so what is asserted
+    is the banner the user would actually receive rather than a helper's return
+    value. Round 1 shipped a vacuous guard here once already (QA Q2, which
+    passed WITH the defect because catalog recency put the poisoned row last),
+    so every row in the over-cap remainder carries the kind under test: whatever
+    ordering the catalog chooses, the remainder's composition is the same.
+    """
+    from local_operator.tui.app import _BACKGROUND_NOTIFY_MAX_PER_TICK
+    from local_operator.tui.notify import CONTEXT_MIXED, CONTEXTS
+
+    _make_session(store_root, "current", "Current conversation")
+    store = AttentionStore(store_root / "attention.db")
+    # An ESTABLISHED store, so this is the steady state rather than the tick
+    # that creates the deliveries table.
+    seed = _make_session(store_root, "bg0000000000", "Seed")
+    seed_token = str(uuid.uuid4())
+    store.publish(conversation_identity(seed), seed_token, "old", "complete")
+    store.acknowledge(conversation_identity(seed), seed_token)
+
+    for index, kind in enumerate(kinds):
+        directory = _make_session(store_root, f"bg00000002{index:02d}", f"Overnight {index}")
+        store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", kind)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot, rounds=8)
+
+    # Structural discriminator, not prose: the digest is the only delivery with
+    # no `session_id`, because it covers several sessions.
+    assert all(len(call) == 4 for call in spawned), spawned
+    digests = [call for call in spawned if not call[2]]
+    assert len(digests) == 1, spawned
+    title, body, _, subtitle = digests[0]
+
+    # THE GUARD IS ONLY MEANINGFUL IF THE REMAINDER IS THE SHAPE UNDER TEST, so
+    # the remainder's composition is DERIVED from what actually went out rather
+    # than assumed from the parametrisation. Each named banner's subtitle is its
+    # own kind's category, so subtracting those from the published set leaves
+    # the kinds the digest really spoke for — which is the check the vacuous
+    # draft above was missing.
+    named = [call for call in spawned if call[2]]
+    remainder = list(kinds)
+    for shown in (call[3] for call in named):
+        for kind, context in CONTEXTS.items():
+            if context == shown and kind in remainder:
+                remainder.remove(kind)
+                break
+    assert len(remainder) == len(kinds) - _BACKGROUND_NOTIFY_MAX_PER_TICK, (spawned, remainder)
+
+    if expected_subtitle_key is None:
+        # Not vacuous: the set the digest stands for genuinely holds both kinds.
+        assert len(set(remainder)) > 1, remainder
+        assert subtitle == CONTEXT_MIXED, digests
+        # The exact failure: neither side's category may be asserted over a set
+        # that is only partly in it.
+        assert subtitle != CONTEXTS["complete"], digests
+        assert subtitle != CONTEXTS["error"], digests
+    else:
+        assert set(remainder) == {expected_subtitle_key}, remainder
+        assert subtitle == CONTEXTS[expected_subtitle_key], digests
+    # The defect in one line, for every case: a remainder that is not uniformly
+    # complete must never be announced as complete.
+    assert subtitle != CONTEXTS["complete"], digests
+
+    # The title carries the tick's ABSOLUTE total — banners shown plus the ones
+    # held back — so it means something to a user who never saw the cap (D11).
+    assert str(len(kinds)) in title, digests
+    assert f"{len(kinds) - _BACKGROUND_NOTIFY_MAX_PER_TICK} more" not in title, digests
+    # …and it is not the row banners' title, so the summary is a different kind
+    # of object at a glance rather than a fourth identical sibling (D9).
+    assert named, spawned
+    assert all(title != call[0] for call in named), spawned
+    # The one inert banner in the stack says where to go instead (D10).
+    assert "sidebar" in body.lower(), digests
