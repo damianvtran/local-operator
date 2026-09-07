@@ -467,3 +467,97 @@ def test_the_surface_scoped_schema_is_still_byte_stable_across_turns() -> None:
     second = json.dumps(public_reply_schema(LEGACY_ACTION_SURFACE), sort_keys=True)
 
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Round 2 review: the round 1 fixes reopened one defect and widened the schema.
+# ---------------------------------------------------------------------------
+
+
+class TwoEmptyCallStream:
+    """Prose carries a COMPLETE envelope; the channel is named twice, emptily.
+
+    The single-empty-call case was already guarded. Joining several empty calls
+    produced a string of separators, which is TRUTHY, so the guard was bypassed
+    and the good prose reply was destroyed anyway.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.requests: list[Any] = []
+
+    def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        return self._events()
+
+    async def _events(self) -> AsyncIterator[Any]:
+        yield StreamTextDelta(delta=self.text)
+        for index in range(2):
+            yield StreamToolCallDelta(index=index, id=f"call-{index}", name=REPLY_CHANNEL_TOOL_NAME)
+        yield StreamEndEvent(stop_reason="toolUse")
+
+
+@pytest.mark.asyncio
+async def test_several_empty_channel_calls_still_leave_the_prose_reply_standing() -> None:
+    """Joining empty calls must not manufacture a truthy reply out of separators."""
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    client = _client(TwoEmptyCallStream(body), model_spec=_spec(supports_tools=True))
+
+    decision = await client.decide(current, _turns(current))
+
+    assert isinstance(decision.action_batch, ActionBatch)
+    decision.action_batch.validate_for(current)
+
+
+def test_the_flattened_schema_admits_exactly_what_the_validator_admits() -> None:
+    """Flattening a discriminated union must not widen the admitted set.
+
+    ``kind`` carries the discriminator and pydantic leaves it out of
+    ``required`` because each member defaults it. That is safe under a
+    discriminated union, where the tag selects the member before its fields are
+    checked, and unsafe under a bare ``anyOf``, where a tag-less action matches
+    whichever member its other fields happen to satisfy. Admitting at the
+    schema what the validator rejects invites the model into a rejection, which
+    is the failure class this contract exists to prevent.
+    """
+
+    import jsonschema
+
+    items = public_reply_schema()["properties"]["action_batch"]["properties"]["actions"]["items"]
+    base = {
+        "protocol_version": "1.0",
+        "task_id": "t",
+        "episode_id": "e",
+        "observation_id": "o",
+        "kind": "action_batch",
+    }
+
+    def admitted_by_schema(action: dict[str, Any]) -> bool:
+        try:
+            jsonschema.validate(action, items)
+            return True
+        except jsonschema.ValidationError:
+            return False
+
+    def admitted_by_validator(action: dict[str, Any]) -> bool:
+        try:
+            ActionBatch.model_validate({**base, "actions": [action]})
+            return True
+        except Exception:
+            return False
+
+    cases = [
+        # The exact widening round 2 found: no ``kind``, but a click's fields.
+        {"observation_id": "o", "frame_id": "f", "x": 1, "y": 2},
+        {"kind": "click", "observation_id": "o", "frame_id": "f", "x": 1, "y": 2},
+        {"kind": "wait", "observation_id": "o", "duration_ms": 10},
+        {"kind": "type", "observation_id": "o", "text": "hi"},
+        {"kind": "finish", "observation_id": "o", "status": "done", "reason": "r"},
+        {"kind": "nope", "observation_id": "o"},
+        {"kind": "wait", "observation_id": "o", "duration_ms": 999999},
+    ]
+
+    for action in cases:
+        assert admitted_by_schema(action) == admitted_by_validator(action), action

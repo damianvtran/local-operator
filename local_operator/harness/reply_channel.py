@@ -193,17 +193,33 @@ def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | 
     # refuses -- "which one did the model mean?" -- and taking the first would
     # execute a decision the model may have superseded.
     #
-    # Rather than inventing a second rejection, hand the decoder BOTH envelopes
-    # concatenated. Its competing-batch rule keys on ``observation_id``, so two
-    # batches for one observation produce its own "send exactly one action
-    # batch" message, and two for DIFFERENT observations stay tolerated exactly
-    # as they are in prose. One notion of a well-formed reply, one set of
-    # rejections -- which is the property this channel exists to preserve.
+    # Rather than inventing a second rejection, hand the decoder every envelope
+    # the model sent, concatenated, and let its own rules judge them. The
+    # property being preserved is PARITY, not any particular message: the same
+    # concatenated text fails identically whether it arrives as prose or as
+    # calls, so the channel cannot accept a shape prose refuses.
+    #
+    # Which rule fires depends on the reply version. The v1 envelope decoder
+    # requires exactly one object with no trailing text, so it refuses two
+    # envelopes on framing before observation ids are ever compared -- two
+    # batches for DIFFERENT observations are refused there too, and that is
+    # the pre-existing v1 contract rather than anything this channel adds.
+    # The legacy actions-only decoder keeps its own competing-batch rule keyed
+    # on ``observation_id``. Either way the channel inherits the verdict.
+    #
+    # Only calls that actually CARRY an envelope are joined. Joining empty ones
+    # would produce a string of separators -- truthy, so the caller would
+    # prefer it over a perfectly good prose reply and destroy it, which is
+    # exactly the regression the empty-single-call path already guards against.
     if len(matched) > 1:
-        return "\n".join(_call_text(call) for call in matched)
+        carried = [text for text in map(_call_text, matched) if text.strip()]
+        if not carried:
+            return ""
+        if len(carried) == 1:
+            return carried[0]
+        return "\n".join(carried)
 
-    call = matched[0]
-    return _call_text(call)
+    return _call_text(matched[0])
 
 
 def _call_text(call: "ToolCall") -> str:

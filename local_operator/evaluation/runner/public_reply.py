@@ -218,6 +218,21 @@ def _inlined_action_schema(model: Any) -> dict[str, Any]:
     schema = model.model_json_schema()
     defs = schema.pop("$defs", {})
 
+    # ``kind`` carries the discriminator, and pydantic does not mark it
+    # ``required`` because each model defaults it. That is safe under a
+    # discriminated union, where the tag selects the member before its fields
+    # are checked; it is NOT safe under the bare ``anyOf`` this flattening
+    # produces, because a batch omitting ``kind`` then satisfies whichever
+    # member happens to match on its other fields. The old schema denied such
+    # a batch and pydantic still rejects it, so leaving it out would admit at
+    # the schema what the validator refuses -- inviting the model into exactly
+    # the rejection this contract exists to prevent. Requiring the tag keeps
+    # the flattened set identical to the discriminated one.
+    required = schema.get("required")
+    if "kind" in schema.get("properties", {}) and isinstance(required, list):
+        if "kind" not in required:
+            schema["required"] = sorted([*required, "kind"])
+
     def resolve(node: Any) -> Any:
         if isinstance(node, dict):
             ref = node.get("$ref")
