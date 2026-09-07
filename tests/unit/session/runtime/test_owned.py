@@ -1466,3 +1466,62 @@ async def test_the_abort_op_survives_a_session_that_cannot_stop_children() -> No
     receipt = await handle.abort()
 
     assert "stopping this turn" in receipt
+
+
+@pytest.mark.asyncio
+async def test_the_abort_op_really_terminates_live_children(tmp_path) -> None:
+    """End to end on a REAL Session: the children are gone, not just counted.
+
+    The receipt naming stopped subagents is worth nothing if they keep running,
+    so this drives real jobs through the real job manager rather than a double
+    and asserts on their status afterwards. The children here would run for 30
+    seconds on their own, so a "cancelled" status cannot be them finishing.
+    """
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.session.session import ModelSpec, Session
+    from local_operator.session.transcript import Transcript
+
+    def stream(request, signal):  # noqa: ANN001, ANN202
+        async def gen():
+            await asyncio.sleep(0.01)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = Session(
+        model=ModelSpec(
+            provider="test", model_id="T", context_window=100_000, supports_images=True
+        ),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    started = asyncio.Event()
+
+    async def child(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        started.set()
+        await asyncio.sleep(30)
+        return "a child that never finishes on its own"
+
+    job_ids = [session.jobs.register("task", f"child-{n}", child) for n in range(3)]
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.2)
+    assert session.running_subagents() == 3
+
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    receipt = await handle.abort()
+
+    def statuses() -> list[str]:
+        rows = [session.jobs.get(job_id) for job_id in job_ids]
+        assert all(row is not None for row in rows), "a registered job vanished"
+        return [row.status for row in rows if row is not None]
+
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if all(status == "cancelled" for status in statuses()):
+            break
+    assert statuses() == ["cancelled"] * 3
+    assert session.running_subagents() == 0
+    assert "stopped 3 subagents" in receipt
+    await session.dispose()
