@@ -1951,10 +1951,17 @@ class OperatorApp(App[None]):
         #: runtime destroys the namespace it built up. Latched when the call is
         #: drawn rather than re-derived from the transcript, because `/clear`
         #: and a bounded resume both edit the VIEW while the kernel lives on
-        #: (see `_session_used_eval`). Reset when the session is replaced —
-        #: the successor has its own kernel, and inheriting the flag would warn
-        #: about a loss that belongs to a conversation the user has left.
+        #: (see `_session_used_eval`).
         self._session_used_eval_latch = False
+        #: The session the latch above was stamped for. KEYED rather than
+        #: cleared at each swap: the conversation is replaced under the viewer
+        #: by three different paths, and a reset installed at only the one
+        #: being edited leaked the flag across the other two — telling a
+        #: conversation that never ran `eval` that its namespace was destroyed
+        #: (review MAJOR-4.1). A key makes a stale latch structurally unable to
+        #: answer, so a swap site added later cannot reintroduce the leak by
+        #: forgetting to clear.
+        self._eval_latch_session_id = ""
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -4755,6 +4762,23 @@ class OperatorApp(App[None]):
         # cold session that never started a runtime, leaving exactly the
         # half-empty band this change exists to remove.
         self._warm_engage_started = False
+        # THE EVAL LATCH IS KEYED TO THE SESSION, and re-keyed here for the
+        # same reason `_warm_engage_started` is reset here: it belongs to the
+        # BINDING, not to the app. Round 4 reset it in `_reload_session` only,
+        # which is one of three paths that replace the conversation under the
+        # viewer — `_apply_sidebar_presentation` rebinds `_transcript` to the
+        # incoming view and `_attach_or_refuse` adopts a successor, and neither
+        # went through that reset. The latch leaked across both, so a
+        # conversation that never ran `eval` was told its namespace had been
+        # destroyed (review MAJOR-4.1).
+        #
+        # Keyed rather than cleared because clearing has to be REMEMBERED at
+        # every future swap site, and the same defect appearing at a third site
+        # later is the same defect. Adoption is the one edge where the identity
+        # is known, so a latch stamped with another session's id is
+        # structurally unable to answer for this one.
+        self._session_used_eval_latch = False
+        self._eval_latch_session_id = self._adopted_session_id
         # The user can type `/team lop` while the boot worker is still building
         # the session. Its one opening fill then sees no registry, so adoption is
         # the second authoritative edge that must refill the CURRENT query and
@@ -6647,10 +6671,6 @@ class OperatorApp(App[None]):
         async with self._turn_provider_lock:
             pass
         self._session = None
-        # The successor gets its own `eval` kernel, so the latch belongs to the
-        # session being disposed and must not outlive it — carrying it over
-        # would warn a NEW conversation about a namespace it never had.
-        self._session_used_eval_latch = False
         # THE WATCHED ID DELIBERATELY SURVIVES THIS WINDOW. It is the only
         # lever a stranded viewer has, and clearing it here disarmed the kill
         # switch on the exact path this feature exists to serve: if anything
@@ -15414,7 +15434,13 @@ class OperatorApp(App[None]):
         stated policy; deriving it from the screen quietly broke that policy in
         the one direction that costs the user work (review round 3, MAJOR-1).
         """
-        if self._session_used_eval_latch:
+        # The latch answers only for the session it was stamped for. A swap
+        # that rebinds the transcript or adopts a successor without going
+        # through `_adopt_session` leaves the flag set against a DIFFERENT id,
+        # and a stale key must not warn conversation B about conversation A's
+        # namespace (review MAJOR-4.1).
+        current_id = getattr(self._session, "session_id", "") or ""
+        if self._session_used_eval_latch and self._eval_latch_session_id == current_id:
             return True
         transcript = self._transcript
         if transcript is None:
@@ -15427,7 +15453,11 @@ class OperatorApp(App[None]):
             isinstance(block, ToolCard) and block.tool_name == "eval"
             for block in transcript.blocks()
         ):
+            # Memoised against the CURRENT session, not the one that was bound
+            # when the flag was last written: caching it under a stale key
+            # would make the answer unreadable on the very next call.
             self._session_used_eval_latch = True
+            self._eval_latch_session_id = current_id
             return True
         return False
 
@@ -16880,8 +16910,11 @@ class OperatorApp(App[None]):
         # view: `/clear` empties it and a bounded resume renders only the tail,
         # so re-deriving "did this session use eval" from the screen loses the
         # answer while the kernel is still alive (`_session_used_eval`).
+        # Stamped with the session it belongs to, so a later swap cannot make
+        # this fact answer for a conversation that never ran the call.
         if isinstance(block, ToolCard) and block.tool_name == "eval":
             self._session_used_eval_latch = True
+            self._eval_latch_session_id = getattr(self._session, "session_id", "") or ""
         if self._projection_message_id:
             if not block.navigation_anchor_id:
                 block.navigation_anchor_id = self._projection_message_id

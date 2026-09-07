@@ -716,21 +716,30 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
 #: ``tab`` instead spends 75 to keep paging and lose completion, which is how
 #: the opening frame briefly lost ``tab complete`` everywhere (design D7).
 #:
-#: THE NUMBERS ABOVE ARE CARD CELLS, AND THE CARD IS TEN CELLS NARROWER THAN
-#: THE TERMINAL — ``_card_width`` subtracts screen padding (2),
-#: ``PICKER_WIDTH_MARGIN`` (6) and its own padding (4). So 73 card cells is an
-#: **86-column terminal**, and at the very common 80-column terminal (68 card
-#: cells) ``tab`` is still given up. That is a deliberate trade, not an
-#: oversight: keeping both there would need ``type to filter or path``
-#: shortened to ``type filter/path`` to reach 67 cells, and a copy regression
-#: on the hint round 1 fought to keep is worse than losing ``tab`` at one
-#: width. ``tab`` is the one dropped because the header already names the mode
-#: the instant you type, while nothing announces ``tab``.
+#: THE NUMBERS ABOVE ARE CARD CELLS, AND THE CARD IS TWELVE CELLS NARROWER
+#: THAN THE TERMINAL. Two of those are spent before ``_card_width`` runs at
+#: all: it measures ``_screen_size()``, which is the Screen CONTENT box and is
+#: already inset by ``Screen { padding: 1 }`` (terminal - 2). It then subtracts
+#: ``PICKER_WIDTH_MARGIN`` (6) and its own padding (``PICKER_PADDING_CELLS``
+#: x2 = 4). So 2 + 6 + 4 = 12, and 73 card cells is an **85-column terminal** —
+#: measured end to end, not derived: 84 columns (72 cells) is the last width
+#: without ``tab`` and 85 (73 cells) the first with it.
+#:
+#: At the very common 80-column terminal (68 card cells) ``tab`` is still
+#: given up. That is a deliberate trade, not an oversight: keeping both there
+#: would need ``type to filter or path`` shortened to ``type filter/path`` to
+#: reach 67 cells, and a copy regression on the hint round 1 fought to keep is
+#: worse than losing ``tab`` at one width. ``tab`` is the one dropped because
+#: the header already names the mode the instant you type, while nothing
+#: announces ``tab``.
 #:
 #: Stated in terminal columns because that is the unit a reader has: quoting
 #: card cells with the terminal in parentheses is exactly how the guard for
 #: D7 came to assert 80 CARD cells while claiming to test an 80-column
-#: terminal (design D10).
+#: terminal (design D10) — and getting the offset wrong is how the fix for
+#: THAT then named 86 as the boundary when it is 85 (review MAJOR-4.3). The
+#: derivation is written out above so the next reader checks it rather than
+#: trusting a total.
 #:
 #: ONE order for both list shapes. A second constant existed to protect
 #: paging on a scrolling list, and paging is precisely what should shed first
