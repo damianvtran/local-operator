@@ -636,37 +636,127 @@ def usage_component_chars_json(chars: Mapping[str, int]) -> str:
 _WS_RE = re.compile(r"\s+")
 
 
-#: Width the per-session table renders a label at. Named because the collision
-#: disambiguator below has to budget against it: a suffix that is truncated away
-#: does not disambiguate anything.
+#: Fallback width the per-session table renders a label at, used when a caller
+#: has no frame to budget against (a test, or a report built before layout).
+#:
+#: The RENDERED budget is passed in per frame — see :func:`session_table_labels`
+#: — because a fixed pre-render constant cuts rows to fit a width the panel is
+#: not actually enforcing. Design review D2: at 140 columns ``build_report``
+#: offers the name column 48 cells, so every label composed against 32 left 16
+#: of them empty while its own title was being amputated to fit.
 SESSION_LABEL_CHARS = 32
+
+#: Floor on the budget a caller may ask for. Below this the name has stopped
+#: doing its job — an id fragment plus two characters of title identifies
+#: nothing — so a narrower frame drops columns (``_WIDE_TABLE_MIN``) rather
+#: than shaving the label further.
+_MIN_LABEL_CHARS = 12
 
 #: Shortest id fragment a disambiguating suffix may use. Grown per collision
 #: group until the group's members are actually distinguishable, so the common
 #: case stays short and a 22-way collision still resolves.
 _MIN_SUFFIX_CHARS = 4
 
+#: Name characters a suffixed label must keep. The fragment may grow only until
+#: it would cut into this, which is what bounds the suffix (review F8): without
+#: a ceiling it grew to the longest id in the group, so a long id ate its own
+#: name entirely and the row rendered as a bare ``· <id>`` — indistinguishable
+#: from an unnamed row, and wider than the column, which pushed the number
+#: columns right. Eight characters is a role plus a separator (``coder · …``),
+#: the least that still says what KIND of session this is.
+_MIN_NAME_CHARS = 8
 
-def short_session_label(session_id: str, name: str = "") -> str:
+
+def _fragment_cap(budget: int) -> int:
+    """Longest id fragment a suffix may use at this label ``budget``.
+
+    Derived from the budget rather than fixed, so the ``len(label) <= budget``
+    invariant holds at every width while the fragment is still allowed to grow
+    as far as it must to separate a group. At the 32-char budget this yields 21
+    — comfortably past the 12 characters a canonical session id has, so hex ids
+    always separate fully and only the long synthetic ``lop-eval-…`` shapes can
+    reach the ceiling. There a group's members stay ambiguous in the LABEL,
+    which is honest: they remain separate rows carrying their own money.
+    """
+    return max(_MIN_SUFFIX_CHARS, budget - 3 - _MIN_NAME_CHARS)
+
+
+#: Characters dropped from the end of a cut label before the ``…`` is added.
+#:
+#: ``resume._condense``'s set is ``" ,.;:"`` — sentence punctuation, so a cut
+#: does not read as ``sentence.…``. This adds ``·``, and that ONE character is
+#: the only deliberate difference between the two rules. It exists because
+#: analytics COMPOSES labels the picker never sees: a subagent row is
+#: ``<role> · <parent title>``, so a narrow frame that condenses the title away
+#: leaves ``architect ·… · 1aae`` — a separator with nothing on either side of
+#: it, which reads as a rendering fault rather than as a shortened title.
+#: Measured on the operator's backfilled ledger: 20 rows at a 30-cell budget.
+_CONDENSE_STRIP = " ,.;:·"
+
+
+def condense_label(text: str, max_chars: int) -> str:
+    """``text`` on one line, cut on a word boundary and marked with ``…``.
+
+    The rule is ``resume._condense``'s, reused rather than re-invented: cut a
+    character short of the limit, back up to the last word boundary when that
+    costs less than 12 characters, drop trailing punctuation so the ellipsis
+    does not read as ``sentence.…``, and mark the cut. The only difference is
+    the strip set — see :data:`_CONDENSE_STRIP`.
+
+    It is duplicated here rather than imported because ``resume`` is
+    import-guarded to stay free of the engine and the dependency may only point
+    one way (analytics may read resume; resume must never import analytics) —
+    and this module is on the recorder's hot path. Kept in step with that
+    function so the two sibling surfaces cut the same way; the picker's
+    docstring states the shared principle, that *a prefix of a sentence is still
+    recognisable* only when the reader can see it IS a prefix.
+
+    Without the marker (design review D1) 78% of composed rows ended in a word
+    fragment — ``Apply config.`` reads as a complete title, ``Update Provid``
+    reads as a rendering fault, and neither tells the reader which it is.
+    """
+    flat = _WS_RE.sub(" ", (text or "").strip())
+    if max_chars <= 0:
+        return ""
+    if len(flat) <= max_chars:
+        return flat
+    if max_chars == 1:
+        return "…"
+    cut = flat[: max_chars - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= max_chars - 12:
+        cut = spaced
+    return cut.rstrip(_CONDENSE_STRIP) + "…"
+
+
+def short_session_label(session_id: str, name: str = "", budget: int = SESSION_LABEL_CHARS) -> str:
     """A compact label for a session in the per-session table.
 
     Prefers a human name when one exists, falling back to the 12-hex id. Kept
     here so the store and the TUI agree on how a session is named without the
     store importing a widget.
 
+    A name longer than ``budget`` is condensed WITH an ellipsis rather than hard
+    cut (design review D1/D5): 249 of 325 plain named rows were silently losing
+    their tail, so the table gave the reader no way to tell a complete title
+    from a fragment. The id fallback is NOT ellipsised — an id prefix is a
+    prefix by construction and every other surface shows it the same way.
+
     NOT unique across sessions, by construction — two sessions with the same
-    name, or whose names agree in their first ``SESSION_LABEL_CHARS``, render
-    the same string. Anything building a per-session TABLE must therefore key
-    it by session id and treat this as display text only; see
-    :func:`session_table_labels`.
+    name, or whose names agree within ``budget``, render the same string.
+    Anything building a per-session TABLE must therefore key it by session id
+    and treat this as display text only; see :func:`session_table_labels`.
     """
+    budget = max(_MIN_LABEL_CHARS, int(budget))
     name = _WS_RE.sub(" ", (name or "").strip())
     if name:
-        return name[:SESSION_LABEL_CHARS]
+        return condense_label(name, budget)
     return (session_id or "unknown")[:12]
 
 
-def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
+def session_table_labels(
+    names_by_id: Mapping[str, str], budget: int = SESSION_LABEL_CHARS
+) -> dict[str, str]:
     """Per-session-id display labels, disambiguated where they would collide.
 
     A row that renders the same string as another row is not just ugly, it is
@@ -678,12 +768,24 @@ def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
     real ledger has parents with 46, 29 and 24 such children.
 
     So a label shared by more than one session gets a ``· <id fragment>``
-    suffix, and the name is cut to make ROOM for it rather than letting the
-    suffix fall off the 32-char edge — a truncated disambiguator disambiguates
-    nothing. The fragment is the shortest prefix (>= 4) that separates the
-    members of that collision group, so the ordinary case stays short and a
-    22-way collision still resolves; it is a prefix of the session id precisely
-    so it can be matched against the id every other surface shows.
+    suffix, and the name is condensed to make ROOM for it rather than letting
+    the suffix fall off the budget's edge — a truncated disambiguator
+    disambiguates nothing. The fragment is the shortest prefix (>= 4) that
+    separates the members of that collision group, so the ordinary case stays
+    short and a 22-way collision still resolves; it is a prefix of the session
+    id precisely so it can be matched against the id every other surface shows.
+
+    ``budget`` is the width the FRAME will actually render this column at, and
+    it is the caller's to supply (design review D2). The panel grows its name
+    column with the card — 30 cells narrow, up to 48 wide — so composing against
+    a fixed 32 both mutilated wide rows that had room to spare and overran the
+    narrow column, which is what sent the number columns ragged.
+
+    Grouping is on the CONDENSED stem, not the full name (review F7). Two
+    different names that condense to the same stem are the same string on
+    screen, so they are one collision group and their fragments are chosen to
+    separate all of them; grouping on the pre-cut name let two groups render
+    identical labels while each believed itself resolved.
 
     An UNNAMED row's label is already an id prefix, so it is widened in place
     rather than given a suffix that would repeat the id back to itself.
@@ -692,8 +794,9 @@ def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
     :func:`short_session_label` renders them — the suffix is a cost paid only
     where it buys something.
     """
+    budget = max(_MIN_LABEL_CHARS, int(budget))
     base: dict[str, str] = {
-        sid: short_session_label(sid, name) for sid, name in names_by_id.items()
+        sid: short_session_label(sid, name, budget) for sid, name in names_by_id.items()
     }
     groups: dict[str, list[str]] = {}
     for sid, label in base.items():
@@ -704,10 +807,12 @@ def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
         if len(sids) == 1:
             labels[sids[0]] = label
             continue
-        # Widen the fragment until it actually separates this group. Bounded by
-        # the longest id present, so ids sharing a full value (which cannot
-        # happen for a primary key) terminate rather than loop.
-        longest = max((len(sid) for sid in sids), default=0)
+        # Widen the fragment until it actually separates this group, bounded at
+        # both ends: by the longest id present (ids sharing a full value cannot
+        # happen for a primary key, but the loop must terminate regardless) and
+        # by the budget-relative cap, so the suffix can never grow past the
+        # point where it would consume the name it is meant to qualify.
+        longest = min(max((len(sid) for sid in sids), default=0), _fragment_cap(budget))
         width = _MIN_SUFFIX_CHARS
         while width < longest and len({sid[:width] for sid in sids}) < len(sids):
             width += 1
@@ -717,10 +822,16 @@ def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
                 # second copy of that id would read ``abc123 · abc1``. Widen the
                 # prefix in place instead: it is the same fallback, just far
                 # enough along the id to be unambiguous.
-                labels[sid] = (sid or "unknown")[: max(width, 12)][:SESSION_LABEL_CHARS]
+                labels[sid] = (sid or "unknown")[: max(width, 12)][:budget]
                 continue
-            fragment = (sid or "unknown")[:width]
-            suffix = f" · {fragment}"
-            room = max(0, SESSION_LABEL_CHARS - len(suffix))
-            labels[sid] = f"{label[:room].rstrip()}{suffix}"
+            suffix = f" · {(sid or 'unknown')[:width]}"
+            # Condensed from the ORIGINAL name against the reduced room, not
+            # re-cut from the already-condensed stem: cutting twice spends a
+            # character on an ellipsis that a second ellipsis then replaces, so
+            # the row loses a letter of title for nothing. ``room`` is provably
+            # positive because ``_fragment_cap`` bounds the suffix by a third of
+            # the budget (review F8/F9) — a label can never collapse to a bare
+            # ``· frag`` with a leading separator and no name.
+            room = budget - len(suffix)
+            labels[sid] = f"{condense_label(names_by_id.get(sid) or '', room)}{suffix}"
     return labels

@@ -1,0 +1,100 @@
+{
+  "source": "/private/tmp/d717r2/before-wt",
+  "size": [
+    140,
+    45
+  ],
+  "pages_scrolled": 3,
+  "screen": "AnalyticsScreen",
+  "session_rows_rendered": 27,
+  "session_rows_seeded": 27,
+  "rows_on_screen": 27,
+  "audit_all_rows": {
+    "tokens_end_columns": {
+      "48": 27
+    },
+    "alignment_classes": 1,
+    "labels_marked_cut": 0,
+    "labels_with_dangling_separator": 0,
+    "distinct_labels": 27
+  },
+  "audit_on_screen": {
+    "tokens_end_columns": {
+      "50": 27
+    },
+    "alignment_classes": 1,
+    "labels_marked_cut": 0,
+    "labels_with_dangling_separator": 0,
+    "distinct_labels": 27
+  },
+  "ledger_unchanged": true,
+  "scroll": {
+    "size": [
+      120,
+      29
+    ],
+    "virtual_size": [
+      119,
+      51
+    ],
+    "max_y": 22
+  },
+  "rows": [
+    "OSWorld benchmark evaluation and   252.9k tokens    $3.4k      2 calls    58% cache",
+    "Article search service integrati   256.5k tokens      $3k      2 calls    57% cache",
+    "Revise Agent Risk Assessments PD   260.1k tokens      $3k      2 calls    56% cache",
+    "Harden Against Credential Leak P   263.7k tokens    $2.2k      2 calls    56% cache",
+    "Implement and release feature re   267.3k tokens      $2k      2 calls    55% cache",
+    "Fix duplicated peer message disp   270.9k tokens    $1.8k      2 calls    54% cache",
+    "Improve lop README features and    274.5k tokens    $1.5k      2 calls    53% cache",
+    "reviewer \u00b7 Article-search \u00b7 4fa0   278.1k tokens   $41.60      2 calls    53% cache",
+    "reviewer \u00b7 Article-search \u00b7 d677   281.7k tokens   $40.85      2 calls    52% cache",
+    "reviewer \u00b7 Article-search \u00b7 1a24   285.3k tokens   $37.47      2 calls    51% cache",
+    "reviewer \u00b7 Article-search \u00b7 2c39   288.9k tokens   $36.78      2 calls    51% cache",
+    "reviewer \u00b7 Article-search \u00b7 4a5e   292.5k tokens   $36.70      2 calls    50% cache",
+    "reviewer \u00b7 Article-search \u00b7 9b13   296.1k tokens   $35.94      2 calls    49% cache",
+    "reviewer \u00b7 Article-search \u00b7 c802   299.7k tokens   $35.31      2 calls    49% cache",
+    "reviewer \u00b7 Article-search \u00b7 71c9   303.3k tokens   $34.88      2 calls    48% cache",
+    "qa-tester \u00b7 Update Provid \u00b7 3d6a   306.9k tokens   $33.90      2 calls    47% cache",
+    "qa-tester \u00b7 Update Provid \u00b7 3a58   310.5k tokens   $33.42      2 calls    47% cache",
+    "qa-tester \u00b7 Update Provid \u00b7 4e6d   314.1k tokens   $32.53      2 calls    46% cache",
+    "architect \u00b7 Auto-update i \u00b7 1aae   317.7k tokens   $31.20      2 calls    46% cache",
+    "architect \u00b7 Auto-update i \u00b7 9085   321.3k tokens   $30.75      2 calls    45% cache",
+    "coder \u00b7 Fix subagent effort leve   324.9k tokens   $29.80      2 calls    45% cache",
+    "ux-reviewer \u00b7 Review and merge t   328.5k tokens   $28.44      2 calls    44% cache",
+    "copy-reviewer \u00b7 Improve lop READ   332.1k tokens   $27.13      2 calls    44% cache",
+    "eval osworld/chrome-0421 \u00b7 claud   335.7k tokens   $26.86      2 calls    43% cache",
+    "eval osworld/vscode-0117 \u00b7 claud   339.3k tokens   $25.19      2 calls    43% cache",
+    "98bfe7686ffe                       342.9k tokens   $24.99      2 calls    42% cache",
+    "21f046e9312b                       346.5k tokens   $23.48      2 calls    42% cache"
+  ],
+  "on_screen": [
+    "  OSWorld benchmark evaluation and   252.9k tokens$3.4k      2 calls    58% cache",
+    "  Article search service integrati   256.5k tokens$3k      2 calls    57% cache",
+    "  Revise Agent Risk Assessments PD   260.1k tokens$3k      2 calls    56% cache",
+    "  Harden Against Credential Leak P   263.7k tokens$2.2k      2 calls    56% cache",
+    "  Implement and release feature re   267.3k tokens$2k      2 calls    55% cache",
+    "  Fix duplicated peer message disp   270.9k tokens$1.8k      2 calls    54% cache",
+    "  Improve lop README features and    274.5k tokens$1.5k      2 calls    53% cache",
+    "  reviewer \u00b7 Article-search \u00b7 4fa0   278.1k tokens$41.60      2 calls    53% cache",
+    "  reviewer \u00b7 Article-search \u00b7 d677   281.7k tokens$40.85      2 calls    52% cache",
+    "  reviewer \u00b7 Article-search \u00b7 1a24   285.3k tokens$37.47      2 calls    51% cache",
+    "  reviewer \u00b7 Article-search \u00b7 2c39   288.9k tokens$36.78      2 calls    51% cache\u2584",
+    "  reviewer \u00b7 Article-search \u00b7 4a5e   292.5k tokens$36.70      2 calls    50% cache",
+    "  reviewer \u00b7 Article-search \u00b7 9b13   296.1k tokens$35.94      2 calls    49% cache",
+    "  reviewer \u00b7 Article-search \u00b7 c802   299.7k tokens$35.31      2 calls    49% cache",
+    "  reviewer \u00b7 Article-search \u00b7 71c9   303.3k tokens$34.88      2 calls    48% cache",
+    "  qa-tester \u00b7 Update Provid \u00b7 3d6a   306.9k tokens$33.90      2 calls    47% cache",
+    "  qa-tester \u00b7 Update Provid \u00b7 3a58   310.5k tokens$33.42      2 calls    47% cache",
+    "  qa-tester \u00b7 Update Provid \u00b7 4e6d   314.1k tokens$32.53      2 calls    46% cache",
+    "  architect \u00b7 Auto-update i \u00b7 1aae   317.7k tokens$31.20      2 calls    46% cache",
+    "  architect \u00b7 Auto-update i \u00b7 9085   321.3k tokens$30.75      2 calls    45% cache",
+    "  coder \u00b7 Fix subagent effort leve   324.9k tokens$29.80      2 calls    45% cache",
+    "  ux-reviewer \u00b7 Review and merge t   328.5k tokens$28.44      2 calls    44% cache",
+    "  copy-reviewer \u00b7 Improve lop READ   332.1k tokens$27.13      2 calls    44% cache",
+    "  eval osworld/chrome-0421 \u00b7 claud   335.7k tokens$26.86      2 calls    43% cache",
+    "  eval osworld/vscode-0117 \u00b7 claud   339.3k tokens$25.19      2 calls    43% cache",
+    "  98bfe7686ffe                       342.9k tokens$24.99      2 calls    42% cache",
+    "  21f046e9312b                       346.5k tokens$23.48      2 calls    42% cache"
+  ]
+}

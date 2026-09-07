@@ -2240,3 +2240,73 @@ def test_eval_labels_of_one_run_stay_distinct_after_table_truncation() -> None:
     ]
     assert labels[0] != labels[1]
     assert "ep-1a2b3c4d" in labels[0] and "ep-9f8e7d6c" in labels[1]
+
+
+def test_an_eval_row_says_which_task_ran_when_the_runner_knows_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Design D4: ``eval ep-<12 hex>`` is still a hex id with a word in front.
+
+    The label answers "is this an eval?" but not "which task ran", which is the
+    question it exists for — and the model half, the only other content, is cut
+    mid-token because the episode id has already spent 21 cells. ``task_id`` is
+    what a human recognises and the runner has had it all along.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.evaluation.runner import provider_client
+    from local_operator.model import configure
+
+    monkeypatch.setattr(
+        configure,
+        "create_stream_fn",
+        lambda auth_store, settings, *, session_id=None: object(),
+    )
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    recorder = reset_recorder_for_test(store)
+    try:
+        provider_client.create_provider_model_client(
+            auth_store=object(),
+            settings=None,
+            route=ROUTE,
+            model_spec=ModelSpec(provider="provider", model_id="model"),
+            artifact_root=tmp_path,
+            episode_id="ep-0a52bce248bd",
+            task_id="osworld/chrome-0421",
+        )
+        recorder.flush_for_test()
+        conn = store._connect()
+        assert conn is not None
+        row = conn.execute(
+            "SELECT name FROM session_names WHERE session_id = 'lop-eval-ep-0a52bce248bd'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == f"eval osworld/chrome-0421 · {ROUTE.model_id}"
+        # The SESSION id stays per-episode: two episodes of one task are two
+        # runs and must not share a row or a prompt-cache prefix.
+        assert "ep-0a52bce248bd" in "lop-eval-ep-0a52bce248bd"
+    finally:
+        recorder.close()
+
+
+def test_an_eval_row_falls_back_to_the_episode_when_there_is_no_task() -> None:
+    """A caller outside ``run_episode`` has no task; the row must still be unique."""
+    from local_operator.evaluation.runner import provider_client
+
+    captured: list[tuple[str, str]] = []
+
+    class _Recorder:
+        def note_session_name(self, session_id: str, name: str) -> None:
+            captured.append((session_id, name))
+
+    import local_operator.analytics as analytics_pkg
+
+    original = analytics_pkg.get_recorder
+    analytics_pkg.get_recorder = lambda: _Recorder()  # type: ignore[assignment]
+    try:
+        provider_client._note_eval_session_name(
+            "lop-eval-ep-42", route=ROUTE, episode_id="ep-42", task_id="   "
+        )
+    finally:
+        analytics_pkg.get_recorder = original  # type: ignore[assignment]
+    assert captured == [("lop-eval-ep-42", f"eval ep-42 · {ROUTE.model_id}")]

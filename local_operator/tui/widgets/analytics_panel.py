@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
@@ -48,6 +49,7 @@ from local_operator.analytics.model import (
     short_session_label,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.tool_card import truncate_cells
 
 
 class _CostLike(Protocol):
@@ -712,24 +714,33 @@ def build_report(
     # frame the shared column is allowed to grow (review D3) so the extra width
     # widens the content rather than leaving a dead right gutter.
     names = getattr(aggregate, "session_names", {}) or {}
+    # The label budget is decided BEFORE the labels are composed, from the frame
+    # this report is being rendered into (design review D2). Composing against a
+    # fixed constant and then padding to a different column is what left 34
+    # cells of dead gutter at 140 columns while simultaneously overrunning the
+    # 30-cell column at 71 — rows cut to fit a budget the frame was not
+    # enforcing. One number now drives both: the labels are built to it and the
+    # column is drawn at it.
+    name_cap = 30 if width < 96 else min(48, width - 40)
     # Keyed by SESSION ID, never by the rendered label. Two sessions can render
-    # the same 32-char string (identical names, or names agreeing in their first
-    # 32 characters), and a label-keyed dict does not merge those rows — it
-    # silently keeps the last one and drops the rest, taking their tokens, calls
-    # and cost off the screen entirely. On the operator's ledger that hid 46
-    # sessions before subagent naming existed and 355 after it, so the table is
-    # built as (label, aggregate) pairs whose identity is the id.
-    session_labels = session_table_labels({sid: names.get(sid, "") for sid in aggregate.by_session})
+    # the same string (identical names, or names agreeing within the budget),
+    # and a label-keyed dict does not merge those rows — it silently keeps the
+    # last one and drops the rest, taking their tokens, calls and cost off the
+    # screen entirely. On the operator's ledger that hid 46 sessions before
+    # subagent naming existed and 355 after it, so the table is built as
+    # (label, aggregate) pairs whose identity is the id.
+    session_labels = session_table_labels(
+        {sid: names.get(sid, "") for sid in aggregate.by_session}, name_cap
+    )
     session_rows = [
-        (session_labels.get(sid, short_session_label(sid, names.get(sid, ""))), agg)
+        (session_labels.get(sid, short_session_label(sid, names.get(sid, ""), name_cap)), agg)
         for sid, agg in aggregate.by_session.items()
     ]
     all_names = [n for n in aggregate.by_provider] + [label for label, _ in session_rows]
     if all_names:
         # Grow the name column with the frame: a wide card gets a roomier column
         # (up to 48) so its width is used; a narrow one stays compact (30).
-        name_cap = 30 if width < 96 else min(48, width - 40)
-        name_col = min(name_cap, max((len(n) for n in all_names), default=0) + 1)
+        name_col = min(name_cap, max((cell_len(n) for n in all_names), default=0) + 1)
     else:
         name_col = 0
 
@@ -808,7 +819,15 @@ def _group_section(
     cost_col = max(len(format_cost(agg)) for _, agg in ordered)
     for name, agg in ordered:
         block.append("\n")
-        block.append(f"  {name:<{name_col}}", style=fg)
+        # TRUNCATE as well as pad (design review D3). ``{name:<{name_col}}``
+        # alone is a pad and nothing else, so any name wider than the column
+        # pushed tokens/cost/calls right by however much it overran and the
+        # numeric columns stopped lining up — the cost column is the one thing
+        # this screen exists to let you scan straight down. Provider names reach
+        # here uncondensed and session labels are already budgeted to
+        # ``name_col``, so this is a backstop for the former and a no-op for the
+        # latter; ``truncate_cells`` measures in CELLS, matching the pad.
+        block.append(f"  {truncate_cells(name, name_col):<{name_col}}", style=fg)
         block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.

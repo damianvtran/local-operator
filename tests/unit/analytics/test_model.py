@@ -15,6 +15,7 @@ from local_operator.analytics.model import (
     CallSnapshot,
     UsageAggregate,
     apportion_components,
+    condense_label,
     price_snapshot,
     session_table_labels,
     snapshot_component_chars,
@@ -400,3 +401,135 @@ def test_session_table_labels_widens_an_unnamed_row_instead_of_repeating_its_id(
 def test_session_table_labels_never_exceeds_the_table_width():
     names = {f"{i:012x}": "x" * 80 for i in range(5)}
     assert all(len(v) <= SESSION_LABEL_CHARS for v in session_table_labels(names).values())
+
+
+def test_a_truncated_label_is_marked_with_an_ellipsis():
+    """Design D1/D5: a cut name must SAY it was cut.
+
+    A bare mid-token cut renders ``Apply config.`` for ``Apply configuration
+    changes to the runner`` — a trailing period that reads as a complete
+    sentence — so the reader cannot tell a full title from a fragment. The
+    sibling ``/resume`` picker settled this the other way and its docstring
+    states why: a prefix of a sentence is still recognisable, but only when the
+    reader can see it IS a prefix.
+    """
+    labels = session_table_labels({"aa11": "Apply configuration changes to the runner"}, 32)
+    assert labels["aa11"].endswith("…")
+    assert "Apply config" in labels["aa11"]
+    # Trailing punctuation goes with the cut word rather than sitting in front
+    # of the marker, the same rule ``resume._condense`` applies.
+    assert "…" not in labels["aa11"][:-1]
+
+
+def test_a_label_that_fits_is_left_exactly_alone():
+    """The marker is a cost paid only where something was actually removed."""
+    labels = session_table_labels({"aa11": "Fix the rollup"}, 32)
+    assert labels == {"aa11": "Fix the rollup"}
+
+
+def test_condense_label_matches_the_resume_pickers_rule():
+    """The two sibling surfaces must cut the same way.
+
+    ``condense_label`` is a deliberate duplicate of ``resume._condense`` (the
+    dependency may only point one way — analytics may read resume, never the
+    reverse), so this pins them together: a divergence here means the analytics
+    table and the ``/resume`` picker start rendering the same session name
+    differently, which is exactly the inconsistency D1 reported.
+
+    The ONE sanctioned difference is the trailing ``·``, which only analytics
+    composes into a label — asserted separately below so an accidental
+    divergence still fails here.
+    """
+    from local_operator.resume import _condense
+
+    samples = [
+        "Apply configuration changes to the runner",
+        "Fix subagent effort levels per model",
+        "one",
+        "",
+        "   spaced   out   words   here   ",
+        "trailing punctuation, here it is;",
+    ]
+    for text in samples:
+        for cap in (2, 8, 12, 25, 30, 32, 48, 200):
+            assert condense_label(text, cap) == _condense(text, cap), (text, cap)
+
+
+def test_a_composed_label_never_ends_on_a_dangling_separator():
+    """A subagent label is ``<role> · <parent title>``.
+
+    A budget narrow enough to condense the title away otherwise leaves
+    ``architect ·… · 1aae`` — a separator with nothing either side, which reads
+    as a rendering fault rather than a shortened title. 20 such rows on the
+    operator's backfilled ledger at a 30-cell budget.
+    """
+    names = {f"{i:012x}": "architect · Auto-update inactive session names" for i in range(5)}
+    for budget in (12, 16, 20, 24, 30, 32, 48):
+        for label in session_table_labels(names, budget).values():
+            head = label.rpartition(" · ")[0] or label
+            assert not head.rstrip("…").rstrip().endswith("·"), (budget, label)
+
+
+def test_the_label_budget_follows_the_frame_not_a_constant():
+    """Design D2: a wide frame must spend its width on the name.
+
+    ``SESSION_LABEL_CHARS`` is a FALLBACK for callers with no frame, not the
+    rendered budget. The panel offers 48 cells at 140 columns and 30 at 71, so
+    composing everything against a fixed 32 both mutilated wide rows that had
+    room to spare and overran the narrow column.
+    """
+    name = "coder · Fix subagent effort levels per model"
+    wide = session_table_labels({"aa11": name}, 48)["aa11"]
+    narrow = session_table_labels({"aa11": name}, 30)["aa11"]
+    assert wide == name, "a 43-char title fits 48 cells and must not be cut"
+    assert len(narrow) <= 30 and narrow.endswith("…")
+
+
+def test_a_label_never_exceeds_the_budget_it_was_given():
+    """The invariant every width depends on, checked across widths and shapes.
+
+    The old ``<= 32`` assertion used 12-char ids only, so it could not see the
+    case review F8 found: an unbounded fragment growing past the budget.
+    """
+    shapes = {
+        "hex": [f"{i:012x}" for i in range(40)],
+        "long-eval": [f"lop-eval-ep-{i:020x}" for i in range(5)],
+        "shared-prefix": ["a" * 34 + str(i) for i in range(4)],
+    }
+    for budget in (12, 20, 30, 32, 48, 60):
+        for ids in shapes.values():
+            for name in ("reviewer · Article-search-svc schema review", "x" * 80, "ab", ""):
+                labels = session_table_labels({sid: name for sid in ids}, budget)
+                assert all(len(v) <= budget for v in labels.values()), (budget, labels)
+
+
+def test_a_suffixed_label_always_keeps_some_of_its_name():
+    """Review F8/F9: the fragment may not consume the name it qualifies.
+
+    With the fragment unbounded, an id long enough drove ``room`` to 0 and the
+    row rendered as a bare ``· <id>`` — a leading separator and no name, which
+    reads as an UNNAMED row and is a worse lie than an ambiguous one.
+    """
+    ids = ["a" * 40 + str(i) for i in range(3)]
+    labels = session_table_labels({sid: "coder · shared parent title" for sid in ids}, 32)
+    for label in labels.values():
+        assert not label.lstrip().startswith("·"), label
+        assert label.split(" · ")[0].strip(), label
+        assert label.startswith("coder"), label
+
+
+def test_two_groups_that_condense_to_one_stem_are_still_told_apart():
+    """Review F7: grouping must be on what is RENDERED, not on the raw name.
+
+    Two different names that condense to the same stem are the same string on
+    screen. Grouped on the pre-cut name, each group chose its fragment believing
+    itself resolved, and two rows could still render identically.
+    """
+    names = {
+        "1a2b00000001": "reviewer - Article-search service schema review alpha",
+        "1a2b00000002": "reviewer - Article-search service schema review beta",
+        "1a2b00000003": "reviewer - Article-search service schema review alpha",
+        "1a2b00000004": "reviewer - Article-search service schema review beta",
+    }
+    labels = session_table_labels(names, 32)
+    assert len(set(labels.values())) == len(names), labels
