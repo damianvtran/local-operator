@@ -229,18 +229,34 @@ class SessionPresentation:
         is RESIDENT BYTES of retained text, not characters and not the JSON
         wire frame the window layer prices itself in. It exists so ONE parked
         view cannot pin an unbounded slice of a 200 MB journal in RAM;
-        ``RETAINED_PRESENTATIONS`` parked views each get this budget, so the
-        real ceiling is N x this number.
+        ``RETAINED_PRESENTATIONS`` parked views each get this budget, so
+        N x this number bounds the retained TEXT.
+
+        It does **not** bound a retained presentation's total resident cost.
+        The mounted ``TranscriptView`` and its widget tree are parked (offset
+        ``100vw``), not freed, and that tree is not what this method measures —
+        so N x the budget is a bound on one term, not a memory ceiling for the
+        cache. Stated plainly because the previous wording ("the real ceiling
+        is N x this number") reads as the latter, and the next person tuning
+        this needs to know which quantity they are holding. The text term is
+        still the one worth bounding here: it is the term that scales with
+        conversation length, which is what makes a long transcript expensive.
 
         **Why ``sys.getsizeof`` and not ``len(value) * k``.** CPython stores
         ``str`` in PEP 393 compact form: 1, 2 or 4 bytes per character
         depending on the widest code point, plus a header. So no constant
         multiplier is right for all content — measured here, the same 4096
         characters cost 4137 bytes as ASCII, 8250 as BMP and 16444 as astral.
-        ``getsizeof`` is the honest measure, it is the only one that cannot be
-        wrong in either direction, and it costs ~75 ns against ~29 ns for
-        ``len`` on a 500 KB string — irrelevant beside the mount + layout this
-        predicate decides whether to repeat.
+        ``getsizeof`` is the honest measure of one string object, and it costs
+        ~75 ns against ~29 ns for ``len`` on a 500 KB string — irrelevant
+        beside the mount + layout this predicate decides whether to repeat.
+
+        It is honest **per object**, which is why the charge sits below the
+        ``id(value) in seen`` check: charged above it, one string aliased by N
+        blocks was charged N times for a single allocation (measured: one
+        300 KB string under 5 keys charged 1.43 MiB and was refused at a true
+        cost of 0.29 MiB). Over-charging is how both previous mis-tunings
+        failed, so the identity check is load-bearing, not tidiness.
 
         **This bound has now been mis-tuned twice, in the same direction.**
         The node cap (see the comment below) silently refused every real owner
@@ -285,6 +301,20 @@ class SessionPresentation:
             self.held_steer_blocks,
         ]
         seen: set[int] = set()
+        # `seen` stores ADDRESSES, and an address only identifies an object
+        # among those that are simultaneously ALIVE. Every node the walk drops
+        # can therefore have its address handed to a later, unrelated node,
+        # which `seen` then skips as already-visited — silently un-charging it.
+        # This is not hypothetical: `retained_payloads()` builds a FRESH tuple
+        # per block, so on a 64-block presentation holding 64 KiB of distinct
+        # text each, 62 of 64 tuples reused a freed address and the walk
+        # charged 0.13 MiB against 4.00 MiB actual — and admitted it.
+        #
+        # So everything that gets an id in `seen` is kept alive here until the
+        # walk returns. Bounded by construction: the node cap caps the pointer
+        # count, and the string budget caps the transient TEXT held, because
+        # the walk returns False as soon as `remaining` goes negative.
+        alive: list[Any] = []
         remaining = RETAIN_TEXT_BYTES
         nodes = 0
         while stack:
@@ -300,19 +330,27 @@ class SessionPresentation:
             # trips long before on any real content.
             if nodes > 65536:
                 return False
+            if value is None or isinstance(value, (bool, int, float)):
+                continue
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            alive.append(value)
             if isinstance(value, str):
                 # Resident cost, not character count: see the docstring. A
                 # `len(value) * 4` estimate here over-charged ASCII content 4x
                 # and disabled the cache entirely.
+                #
+                # Charged BELOW the identity check, so one string object held
+                # by N blocks costs one copy of RAM and is charged once. Above
+                # it, a transcript with repeated identical tool output was
+                # charged N x for a single allocation — an over-estimate, and
+                # over-estimating is the direction that produced both previous
+                # mis-tunings.
                 remaining -= sys.getsizeof(value)
             elif isinstance(value, bytes):
                 remaining -= len(value)
-            elif value is None or isinstance(value, (bool, int, float)):
-                pass
-            elif id(value) in seen:
-                continue
             else:
-                seen.add(id(value))
                 if isinstance(value, TranscriptBlock):
                     payload = value.retained_payloads()
                     if payload is None:
