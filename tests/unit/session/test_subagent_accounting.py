@@ -20,6 +20,12 @@ from local_operator.session.frontend_state import (
 from local_operator.tui.costs import cost_summary, turn_cost
 from local_operator.tui.widgets.subagent_panel import job_stats
 
+#: Loop TURNS to allow the app's boot worker, not seconds. A turn count
+#: survives the contention a wall-clock budget does not (AGENTS.md, "Wait on
+#: the event, never on the clock"), and the only test here that drives a real
+#: ``OperatorApp`` needs the band mounted before it can assert on the ledger.
+MAX_BOOT_TURNS = 200
+
 
 @pytest.mark.parametrize("bad", [-1, float("nan"), float("inf")])
 def test_invalid_estimates_cannot_enter_durable_usage(bad):
@@ -199,7 +205,19 @@ async def test_rendered_footer_uses_whole_owner_ledger():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
+        # Wait for the BAND to exist, not for a fixed number of pauses.
+        # ``_apply_frontend_state`` returns early while ``_status`` is None, so
+        # a single pause asserts nothing about the ledger on a machine where
+        # boot has not finished within one loop turn — the total simply stays
+        # 0.0 and the failure names the cost rather than the race. Idle, one
+        # pause is enough (measured); under CI shard load it is not, which is
+        # how this went red on a branch that only ever ADDED unrelated test
+        # files: file-index sharding moved this test to a busier shard.
+        for _ in range(MAX_BOOT_TURNS):
+            await pilot.pause()
+            if app._status is not None:
+                break
+        assert app._status is not None, "the band never mounted"
         state = FrontendSessionState(
             epoch="money",
             session_id="money",
