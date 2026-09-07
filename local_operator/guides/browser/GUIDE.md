@@ -49,6 +49,98 @@ Chrome shows a small "Local Operator is debugging this browser" banner on the
 tab the agent controls. That is intentional and good: it is how the user can
 always see which tab the agent has. Tell them it is expected, not a warning.
 
+### Testing the extension: any Chrome YOU launch is headless
+
+The rules above govern the browser the user already has open. A test harness
+launches its own Chrome, and the same principle binds it: **a Chrome an agent
+starts for testing, capture, or CDP work runs `--headless=new`, always.**
+
+On 2026-09-07 agent harnesses driving this extension launched headful Chrome
+and its windows took focus from the operator mid-session, repeatedly. Everything
+else here is engineered so that cannot happen; a harness is not exempt because
+the check is quick.
+
+New headless is the same browser without a window, so nothing is given up.
+Measured on Chrome 152.0.7977.76: the built `extension/dist` loaded, its popup
+rendered at an explicit 300x600 viewport, `Page.captureScreenshot` returned a
+real PNG of the pairing form, and `Input.dispatchMouseEvent` dispatched — with
+no window on screen.
+
+```sh
+# Throwaway profile, headless, no keychain prompts, and a port Chrome picks.
+profile=$(mktemp -d /tmp/lo-harness.XXXXXX)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --user-data-dir="$profile" \
+  --remote-debugging-port=0 \
+  --use-mock-keychain --password-store=basic \
+  --no-first-run --no-default-browser-check about:blank &
+
+# Chrome writes the port it actually bound; never assume one.
+until [ -s "$profile/DevToolsActivePort" ]; do sleep 0.2; done
+port=$(head -1 "$profile/DevToolsActivePort")
+```
+
+- **Load the extension over CDP `Extensions.loadUnpacked`, not
+  `--load-extension`.** Branded Chrome removed that switch in 137 and it is
+  now **silently ignored** — no error, just a Chrome with no extension, which
+  reads as "headless does not support extensions" and is not what happened.
+  Verified on 152: `--load-extension` produced no matching target;
+  `Extensions.loadUnpacked` returned the id and the popup drove normally.
+- **Set the viewport with `Emulation.setDeviceMetricsOverride`, not
+  `--window-size`.** Headless inherits no window, so it defaults to whatever
+  the platform picks (measured 756x469, `dpr=1`, with no flag) — and a frame
+  whose size you did not set is not evidence. `--window-size` looks like the
+  remedy and is not: on Chrome 152 the width clamps at a 500px floor and the
+  height loses 87px to chrome, so `--window-size=300,600` yields **500x513**,
+  silently. Measured, same flags, fresh profile each run:
+
+  | flag | resulting viewport |
+  |---|---|
+  | `--window-size=300,600` | `500x513 dpr=1` |
+  | `--window-size=400,600` | `500x513 dpr=1` |
+  | `--window-size=500,600` | `500x513 dpr=1` |
+  | `--window-size=1000,800` | `1000x713 dpr=1` |
+  | `Emulation.setDeviceMetricsOverride 300x600` | `300x600 dpr=2` ✓ |
+
+  The CDP override is exact, controls `deviceScaleFactor` (which the flag
+  cannot), and wins regardless of how Chrome was started — verified giving a
+  true `300x600 dpr=2` even on a browser launched with the clamped flag. Use it
+  for the extension popup's 300x600 metrics and for every other capture size.
+- **Let Chrome choose the debug port: `--remote-debugging-port=0`, then read
+  `"$profile/DevToolsActivePort"`.** A hardcoded port is a shared path in the
+  same sense as a shared profile dir, and this machine runs many agent sessions
+  at once. Measured: two harnesses on distinct profiles both asking for 39222 —
+  the second starts fine, writes **no** `DevToolsActivePort`, reports **no**
+  error, and the port answers as the *first* harness's browser. A harness that
+  then connects believes it drives its own Chrome while every CDP call,
+  screenshot and `Target.closeTarget` lands on another session's. With port `0`
+  the same pair got 57827 and 57829 and each drove its own browser. Chrome only
+  writes `DevToolsActivePort` when it picked the port itself (under an explicit
+  port the file is absent entirely), so reading that file is both the fix and
+  its own proof.
+- **Never compare a headful before-frame with a headless after-frame.** Device
+  pixel ratio and scrollbar presence differ across the modes, so the pair shows
+  differences your change did not cause. Recapture both sides in one mode.
+- **Unique `--user-data-dir` per launch, under `/tmp`** — never the operator's
+  profile, never a shared path.
+- **`--use-mock-keychain --password-store=basic`** — without them real Chrome
+  on macOS reaches for the login keychain and raises modal "Keychain not found"
+  dialogs on the operator's screen (reported from a run of ~37 concurrent
+  instances). On-screen dialogs defeat headless on their own.
+- **`start_new_session=True`, teardown by process group** (SIGTERM to the pgid,
+  then SIGKILL), **plus an `atexit` handler**. The hazard is the harness dying
+  before its cleanup runs: measured here, `SIGKILL` to the harness left the
+  whole Chrome tree alive with the browser reparented to `PPID 1`, still
+  holding the profile dir. A previous session reportedly leaked 47 that way.
+  Helper counts vary per run, so assert **zero** afterwards with
+  `pgrep -f <your profile prefix>` rather than against a remembered count.
+- **Never touch the operator's own Chrome.** Match your own profile prefix;
+  never `pkill -f "Google Chrome"`.
+
+This does not change how you wake the user's *real* paired browser — see the
+next section, where `open -g` is correct precisely because it is a different
+activity.
+
 ## When the `browser` tool is missing: set the extension up
 
 Treat the tool's absence as a one-minute setup step, not a dead end. Do the
@@ -78,6 +170,13 @@ starting. Never launch with
 `--remote-debugging-port` or developer flags: the extension is the debugger,
 and a debug-port browser on a real logged-in profile is an open door for any
 local process.
+
+This is the operator's real logged-in browser, not a harness, so it is **not**
+headless and must not be made so: the user has to be able to see and use it,
+and headless would defeat the point of pairing to the browser they already
+have. `-g` is what keeps it focus-safe. The headless rule above governs a
+throwaway Chrome an agent starts for testing; conflating the two ends with
+someone "fixing" this line and breaking reconnection.
 
 ### 1. Check status
 
@@ -332,7 +431,9 @@ Every failure is one actionable string; act on it rather than retrying blindly:
      launch it BACKGROUNDED so it never steals focus:
      `open -g -a "Google Chrome"` (macOS). Never add `--remote-debugging-port`
      or other debug flags — the extension IS the debugger; a debug-port
-     browser on a real profile is a security hole.
+     browser on a real profile is a security hole. Not headless either: this
+     is the user's own browser, and the headless rule in "Testing the
+     extension" covers only a throwaway Chrome an agent launches itself.
   2. **Browser running but still disconnected?** The service worker may be
      idle-suspended. A periodic reconnect alarm rewakes and reconnects it on
      its own — up to ~1 minute in a packed/released build (Chrome clamps
