@@ -660,10 +660,11 @@ Warnings that still hold, each of which has already cost a release:
 
   `LC_ALL=C` is load-bearing, not decoration: CI sorts in Python's byte order,
   while shell `sort` honours `LC_COLLATE`. On an `en_*.UTF-8` locale the two
-  orderings diverge, and because each divergence is an adjacent swap **every
-  divergent file lands in a different shard** — 51 of 452 when measured,
-  versus 0 under `LC_ALL=C`. Getting this wrong says a file moved shards when it
-  did not, which is the same misattribution this warning exists to prevent.
+  orderings diverge, and since no displacement happens to be a multiple of 5,
+  **every divergent file lands in a different shard** — 51 of 452 when
+  measured, versus 0 under `LC_ALL=C`. Getting this wrong says a file moved
+  shards when it did not, which is the same misattribution this warning exists
+  to prevent.
 
   Run it once against `origin/main` and once against your branch. If the shard
   differs, the failing test ran in a different group than it does on `main`, so
