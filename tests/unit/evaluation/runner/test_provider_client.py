@@ -148,7 +148,10 @@ class ScriptedStream:
 
 
 def _client(stream: Any, tmp_path: Path | None = None, **overrides: Any) -> ProviderModelClient:
-    spec = ModelSpec(provider="provider", model_id="model")
+    # The spec is an override like any other: the reply-channel tests need a
+    # model whose ``supports_tools`` differs, and a second near-identical
+    # factory beside this one would be the drift it exists to prevent.
+    spec = overrides.pop("model_spec", None) or ModelSpec(provider="provider", model_id="model")
     root = tmp_path if tmp_path is not None else Path("/nonexistent-artifact-root")
     return ProviderModelClient(
         stream, route=ROUTE, model_spec=spec, artifact_root=root, **overrides
