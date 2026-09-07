@@ -46,7 +46,7 @@ def isolated_sidebar(tmp_path, monkeypatch):
     monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
 
 
-def _quiesce_sidebar_refresh(app) -> None:
+def _quiesce_sidebar_refresh(app: OperatorApp) -> None:
     """Stop both catalog-refresh paths that opening the sidebar starts.
 
     Every pilot test that hands the list its OWN rows needs this, or the real
@@ -60,11 +60,18 @@ def _quiesce_sidebar_refresh(app) -> None:
       bumping the counter is what retires a read already in flight; there is no
       worker handle to cancel.
 
-    What goes wrong differs by test, which is why this lives in one place
-    rather than being restated at each call site: a test that looks a row up by
-    name raises when the empty catalog replaces its rows, while a test that
-    only measures geometry sees the list's HEIGHT change under it and can read
-    a different ``virtual_size``. Both are the same cause.
+    The observed failure is a test that looks a row up by name raising when the
+    empty catalog replaces its rows. The two geometry tests here call it as
+    well, but as PROPHYLAXIS rather than against a demonstrated failure: what
+    they assert (the docked width, the conversation lane, ``virtual_size``) is a
+    pure function of terminal width and does not move with the row count — tested
+    directly, by landing 300 rows at this exact point with the quiesce disabled,
+    which changed neither assertion in 15 samples (code review round 5).
+
+    Kept at those sites anyway, and stated rather than quietly dropped: a
+    catalog arriving mid-assertion is a variable the test does not control, and
+    the next person to add a row-reading assertion there should not have to
+    rediscover why the other two tests needed it.
 
     **The bump retires the CURRENT read, not future ones** — ``_refresh_sidebar``
     bumps the counter itself on entry, so anything that starts a refresh AFTER
