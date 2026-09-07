@@ -15337,9 +15337,56 @@ class OperatorApp(App[None]):
             # callback this app already installs — `_on_runtime_refreshed` —
             # engages the successor eagerly. Starting a second engage from here
             # would race that one for the same session's lease.
+            #
+            # THE EVAL KERNEL DOES NOT SURVIVE THE REBIND, and the user is told
+            # so rather than discovering it from a `NameError` two turns later.
+            # `tools/eval.py` caches one interpreter per session in `_KERNELS`
+            # and `Session` registers `close_session_kernel` as a dispose hook,
+            # so retiring the runtime disposes the session and takes every
+            # variable, import and function the user built up with it — while
+            # the conversation, the transcript and the session id all survive,
+            # which is exactly what makes the loss surprising. Narrated, not
+            # refused: losing it is a real consequence of a move the user asked
+            # for, not a reason to decline the move.
+            if self._session_used_eval():
+                notice(
+                    f"moved to {label} — this session's runtime restarted there,"
+                    " so the eval kernel's variables were lost"
+                )
+                return
             notice(f"moved to {label} — this session's runtime restarted there")
             return
         notice(f"moved to {label}")
+
+    def _session_used_eval(self) -> bool:
+        """Whether this conversation has run `eval`, so a rebind loses state.
+
+        READ FROM THE TRANSCRIPT, which is the only honest source available in
+        THIS process. The registry that actually holds the interpreters
+        (`tools/eval.py:_KERNELS`) is a module global in the runtime CHILD —
+        `Session` is built by `process.amain` over the socket, never here — so
+        the viewer cannot ask "is a kernel resident" without inventing a wire
+        op, which is a great deal of machinery for one clause of one receipt.
+
+        The transcript answers a slightly different question — "did a call to
+        `eval` happen in this conversation" rather than "is an interpreter
+        resident right now" — and the difference is deliberately in the
+        direction that cannot mislead. An idle kernel can have been reaped
+        (`_reap_idle`) or evicted (`_remember`) before the move, in which case
+        this warns about state that was already gone; the eval tool's own
+        stale-namespace receipt covers that case and the user has still lost
+        nothing they had. The reverse error — staying silent for a user who
+        does have a live kernel — is the one that costs work, and it cannot
+        happen: no `eval` call in the transcript means no kernel for this
+        session was ever created here.
+        """
+        transcript = self._transcript
+        if transcript is None:
+            return False
+        return any(
+            isinstance(block, ToolCard) and block.tool_name == "eval"
+            for block in transcript.blocks()
+        )
 
     def _push_cwd_to_band(self, cwd: str) -> None:
         """Repaint the band's directory segment for ``cwd``.

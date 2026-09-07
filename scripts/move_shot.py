@@ -13,6 +13,8 @@ Run from the worktree root:
 * ``path`` — a path typed, COMPLETING against the filesystem. This is the
   frame worth looking at hardest: the header has to say which of the two modes
   is in force, because an empty list means different things in each.
+* ``kernel-lost`` — the receipt of a rebind in a session that has used
+  ``eval``, whose persistent namespace the restart destroys.
 * ``in-flight`` — the transcript WHILE a move that has to wait is waiting.
   The frame that shows whether the user was told anything at all during the
   join+retire gap; a property read cannot answer that, only a painted frame.
@@ -58,6 +60,7 @@ from local_operator.tui.move_targets import (  # noqa: E402
 )
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.move_picker import MovePickerScreen  # noqa: E402
+from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
@@ -154,6 +157,41 @@ async def main() -> None:
                 app._push_cwd_to_band(str(project))
                 app._apply_move(str(target), app._system_notice)
                 for _ in range(6):
+                    await pilot.pause()
+                save_capture(app, out)
+                return
+
+            if state == "kernel-lost":
+                # The RECEIPT of a rebind in a session that has used `eval`.
+                # Retiring the runtime disposes the session, whose dispose hook
+                # closes the cached interpreter, so every variable the user
+                # built up is gone while the transcript above it survives
+                # untouched — which is what makes the loss surprising and why
+                # it is said out loud. Only a painted frame shows whether the
+                # sentence still reads as one receipt rather than two.
+                os.environ["HOME"] = str(home)
+                target = home / "oss" / "oh-my-pi"
+
+                class _Rebinding:
+                    is_cold = False
+
+                    async def dispose(self) -> None:
+                        return None
+
+                    def move_will_wait(self) -> bool:
+                        return True
+
+                    async def set_working_directory(self, cwd: str) -> str:
+                        return "rebound"
+
+                app._session = _Rebinding()  # type: ignore[assignment]
+                app._push_cwd_to_band(str(project))
+                # A real `eval` card in the transcript is the signal the
+                # receipt reads, so the frame exercises the same predicate the
+                # running app does rather than a flag set for the capture.
+                app._append_block(ToolCard(tool_call_id="shot-eval", tool_name="eval"))
+                app._apply_move(str(target), app._system_notice)
+                for _ in range(8):
                     await pilot.pause()
                 save_capture(app, out)
                 return
