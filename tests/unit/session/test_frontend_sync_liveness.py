@@ -35,7 +35,7 @@ import pytest
 
 from local_operator.session import remote as remote_module
 from local_operator.session.frontend_state import FrontendSync
-from local_operator.session.remote import RemoteSession
+from local_operator.session.remote import FRONTEND_SYNC_SETTLE_TURNS, RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -122,10 +122,16 @@ async def _stalled_viewer_scenario(
     write_at = deadline / 5
 
     async def owner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await reader.readline()
-        await asyncio.sleep(write_at)
-        writer.write(b"frontend_sync\n")
-        await writer.drain()
+        try:
+            await reader.readline()
+            await asyncio.sleep(write_at)
+            writer.write(b"frontend_sync\n")
+            await writer.drain()
+        finally:
+            # The handler owns this transport, and from 3.12 ``wait_closed``
+            # waits for every handler's connection as well as the listener.
+            # Leaving it open parks the teardown in ``select`` forever.
+            writer.close()
 
     server = await asyncio.start_server(owner, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -153,7 +159,19 @@ async def _stalled_viewer_scenario(
                     await viewer._await_frontend(future, timeout=deadline)
                 return "synced"
             except TimeoutError:
-                return "TimeoutError"
+                # The pre-fix path only. Establish, HERE — while the socket is
+                # still up and the pump still alive — that the expiry was
+                # FALSE: the frame resolves within the same bounded turns the
+                # fixed code grants. Asserting this after the helper returns
+                # would race its teardown, and a pump cancelled by teardown
+                # looks identical to a frame that never came.
+                turns = 0
+                while not future.done() and turns < FRONTEND_SYNC_SETTLE_TURNS:
+                    await asyncio.sleep(0)
+                    turns += 1
+                return f"TimeoutError (frame present after {turns} turns)" if future.done() else (
+                    "TimeoutError (frame genuinely absent)"
+                )
             except ConnectionError as error:
                 return f"ConnectionError: {error}"
 
@@ -164,16 +182,14 @@ async def _stalled_viewer_scenario(
         time.sleep(deadline * 2.5)
         verdict = await waiting
     finally:
-        # From 3.12 ``wait_closed`` also waits for the HANDLERS of live
-        # connections, so the client side has to go first or the teardown
-        # blocks on this probe's own still-open socket. Cancel the pump before
-        # closing the writer: it is parked in ``readline`` on that transport.
+        # Cancel the pump before closing the writer: it is parked in
+        # ``readline`` on that transport. The owner handler closes its own
+        # side (see above), so nothing here can outlive the probe.
         if pumping is not None:
             pumping.cancel()
         if writer is not None:
             writer.close()
         server.close()
-        await server.wait_closed()
     return verdict, future
 
 
@@ -219,21 +235,20 @@ async def test_the_old_wait_for_shape_fails_this_exact_scenario() -> None:
     and asserts it still trips. If the scenario ever stops reproducing the
     bug, this test fails and the one above is revealed as vacuous.
     """
-    verdict, future = await _stalled_viewer_scenario(None, deadline=0.2)
+    verdict, _future = await _stalled_viewer_scenario(None, deadline=0.2)
 
-    assert verdict == "TimeoutError", (
+    assert verdict.startswith("TimeoutError"), (
         f"the pre-fix shape reported {verdict!r} rather than timing out; the "
         "scenario no longer reproduces the bug, so the guard above proves "
         "nothing"
     )
-    # And the data really was there: the timeout was false, not merely early.
-    for _ in range(remote_module.FRONTEND_SYNC_SETTLE_TURNS):
-        if future.done():
-            break
-        await asyncio.sleep(0)
-    assert future.done(), (
-        "the frame must be present after a bounded number of turns — that is "
-        "what makes the timeout FALSE rather than correct"
+    # And the timeout was FALSE, not merely early: the frame is already there,
+    # recoverable inside the same bounded turns the fixed wait grants. Without
+    # this the test would also pass against a genuinely silent owner, which is
+    # a different scenario and not the bug.
+    assert "frame present after" in verdict, (
+        f"the pre-fix shape reported {verdict!r}; the frame must already be on "
+        "the socket for this to be the false-timeout bug rather than a real one"
     )
 
 
@@ -550,8 +565,8 @@ def test_a_foreground_bind_never_inherits_the_background_backstop() -> None:
         remote_module.FRONTEND_SYNC_FOREGROUND_S <= 15.0
     ), "a foreground sync wait must not exceed what it already was before this change"
     assert (
-        remote_module._FOREGROUND_BIND_BUDGET_S < remote_module.FRONTEND_SYNC_BACKSTOP_S
-    ), "retries must not let a foreground bind reach the catastrophe budget"
+        remote_module._FOREGROUND_BIND_BUDGET_S <= remote_module.FRONTEND_SYNC_FOREGROUND_S
+    ), "retries must fit INSIDE the pre-fix envelope, never extend it"
     # And the backstop stays FINITE: a wedged owner must fail, not hang (#401).
     assert 0 < remote_module.FRONTEND_SYNC_BACKSTOP_S < float("inf")
 
@@ -589,13 +604,24 @@ async def test_the_foreground_default_is_the_short_envelope(
         monkeypatch.setattr(viewer, "_bind_to", record_timeout)
         with pytest.raises(ConnectionError):
             await viewer._ensure_bound()
-        assert seen and set(seen) == {remote_module.FRONTEND_SYNC_FOREGROUND_S}
+        # Never MORE than the foreground envelope. Attempts after the first are
+        # clamped further, to whatever is left of the budget, which is what
+        # keeps three attempts from composing into three envelopes.
+        assert seen, "the bind must have been attempted"
+        assert max(seen) <= remote_module.FRONTEND_SYNC_FOREGROUND_S
+        assert seen == sorted(seen, reverse=True), (
+            f"attempt envelopes {seen} must be non-increasing: each is bounded "
+            "by the budget the previous attempts left"
+        )
 
         seen.clear()
         viewer._ready_for_events = False
         with pytest.raises(ConnectionError):
             await viewer._ensure_bound(foreground=False)
-        assert seen and set(seen) == {remote_module.FRONTEND_SYNC_BACKSTOP_S}
+        assert seen and max(seen) <= remote_module.FRONTEND_SYNC_BACKSTOP_S
+        assert min(seen) > remote_module.FRONTEND_SYNC_FOREGROUND_S, (
+            "a background bind must get the generous envelope, not the short one"
+        )
         await viewer.dispose()
     finally:
         server.close()

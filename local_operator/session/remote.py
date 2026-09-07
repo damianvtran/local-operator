@@ -178,12 +178,28 @@ FRONTEND_SYNC_FOREGROUND_S = 15.0
 #: on the next keystroke rather than a lost session.
 FRONTEND_SYNC_BLOCKED_S = 15.0
 
-#: Total wall-clock a bind may spend across its retry attempts, per envelope.
-#: The foreground figure bounds the whole loop rather than each attempt, so
-#: three attempts cannot silently triple the wait a user sits through; the
-#: background figure is the backstop itself, since a silent engage has nobody
-#: to be hostile to.
-_FOREGROUND_BIND_BUDGET_S = 25.0
+#: Total wall-clock a bind may spend across ALL its retry attempts, per
+#: envelope. It bounds the whole loop rather than each attempt, so three
+#: attempts cannot triple the wait a user sits through.
+#:
+#: The foreground budget is deliberately EQUAL to the single-attempt envelope,
+#: which means this change adds no worst-case foreground wait at all: 15 s was
+#: what a user could already sit through before it, with no retry and a boot
+#: failure at the end. Retries fit inside that budget rather than extending it.
+#:
+#: That works because retrying only ever helps a FAST failure — a refused dial,
+#: a socket that died in milliseconds, a record that moved — and those return
+#: with the budget almost untouched, leaving the next attempt a full envelope.
+#: The one case a retry cannot help is a genuinely silent owner, which is also
+#: the only case that consumes the envelope; a second attempt there would ask
+#: the same busy loop the same question and wait the same 15 s for it. So
+#: spending more than one envelope on the foreground path buys nothing and
+#: costs the user real time.
+#:
+#: A measured worst case, against an owner that accepts and never syncs:
+#: 25.0 s over 2 attempts under an earlier 25 s budget, versus 15 s pre-fix.
+#: That was a regression on exactly the path the change exists to improve.
+_FOREGROUND_BIND_BUDGET_S = FRONTEND_SYNC_FOREGROUND_S
 _BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
 
 #: Bounded retry of the INITIAL bind. A first attempt that loses its race with
@@ -1339,7 +1355,16 @@ class RemoteSession:
                     # spending the budget rediscovering nothing.
                     raise ConnectionError("could not start a runtime for this session")
                 try:
-                    await self._bind_to(record, sync_timeout=sync_timeout)
+                    # Clamp the ATTEMPT to what is left of the budget, not just
+                    # the backoff between attempts. Without this a second
+                    # attempt starts its full envelope after the first has
+                    # already spent most of the budget, so three 15 s attempts
+                    # overrun a 25 s foreground budget to 45 s — the budgets
+                    # would compose exactly the way this change exists to stop.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await self._bind_to(record, sync_timeout=min(sync_timeout, remaining))
                     return
                 except (ConnectionError, OSError, TimeoutError) as error:
                     # ``_bind_to`` has already discarded its client, so the
