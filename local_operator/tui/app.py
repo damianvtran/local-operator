@@ -15172,7 +15172,11 @@ class OperatorApp(App[None]):
             return
 
         from local_operator.paths import config_dir
-        from local_operator.tui.move_targets import complete_path, suggest_targets
+        from local_operator.tui.move_targets import (
+            complete_path,
+            resolve_self,
+            suggest_targets,
+        )
 
         cwd = self._session_cwd()
         try:
@@ -15186,15 +15190,25 @@ class OperatorApp(App[None]):
             # relative path completes from where the band says the session is.
             return complete_path(query, cwd=cwd)
 
+        def _self_target(query: str):
+            # Lets a directory with no subdirectories still be chosen, instead
+            # of completing to nothing and reporting "no directory matches"
+            # for a path the user just walked to (D1/U1). Same cwd binding.
+            return resolve_self(query, cwd=cwd)
+
         def _move_choice(path: str | None) -> None:
             # Dismissed with Esc — the session is left exactly where it was,
             # with nothing said: a cancelled picker is not an event worth a
             # transcript line (the rule `_cmd_resume` states).
             if path:
-                self._apply_move(path, notice, typed=False)
+                # ``typed=True`` even from the picker, so choosing the row
+                # labelled `current` says `already in ~/x` instead of closing
+                # in silence — which was byte-identical to Esc on the one row
+                # whose whole purpose is to answer "where am I?" (UX U4).
+                self._apply_move(path, notice, typed=True)
 
         self.push_screen(
-            MovePickerScreen(targets, current=cwd, complete=_complete),
+            MovePickerScreen(targets, current=cwd, complete=_complete, self_target=_self_target),
             _move_choice,
         )
 
@@ -15239,6 +15253,18 @@ class OperatorApp(App[None]):
             if typed:
                 notice(f"already in {format_label(destination)}")
             return
+        # NARRATED BEFORE the transition, exactly as `/resume` does one method
+        # above, and only when a runtime actually has to be replaced. That
+        # retire is an RPC to a child process that must finish draining —
+        # ~600 ms measured — during which the picker has closed, the band still
+        # reads the old directory, and `_session_transition_pending` swallows a
+        # typed Enter without replaying it. With no line printed the app simply
+        # looked like it had ignored the user (UX U2). The cold path needs no
+        # such line: it settles within the frame, so an in-flight notice would
+        # be immediately contradicted by its own receipt.
+        session = self._session
+        if session is not None and not getattr(session, "is_cold", True):
+            notice(f"moving to {format_label(destination)}… restarting the runtime there")
         self._run_session_transition(self._move_session(destination, notice))
 
     async def _move_session(self, destination: str, notice: NoticeFn) -> None:

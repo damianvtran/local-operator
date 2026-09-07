@@ -24,6 +24,7 @@ from local_operator.tui.widgets.move_picker import (
     NO_PATH_NOTICE,
     PAGE_ROWS_MAX,
     MovePickerScreen,
+    _footer_hints,
     _truncate_head,
     render_rows,
 )
@@ -282,3 +283,105 @@ async def test_the_cursor_can_only_sit_on_a_row_the_card_drew() -> None:
         painted = "\n".join(screen.render_lines_for_test())
         assert screen.selected_path() is not None
         assert str(screen.selected_path()) in painted
+
+
+# -- the completion dead end (design D1 / UX U1) -----------------------------
+
+
+def _leaf_tree(tmp_path: Path) -> Path:
+    """A directory that exists, is readable, and has no SUBdirectories."""
+    leaf = tmp_path / "scripts"
+    leaf.mkdir()
+    (leaf / "a_file.py").write_text("files are not subdirectories")
+    return leaf
+
+
+def _walking_screen(tmp_path: Path) -> MovePickerScreen:
+    from local_operator.tui.move_targets import (
+        complete_path,
+        resolve_self,
+        suggest_targets,
+    )
+
+    targets = suggest_targets(tmp_path, config_dir=tmp_path / "cfg", home=tmp_path)
+    return MovePickerScreen(
+        targets,
+        current=str(tmp_path),
+        complete=lambda q: complete_path(q, cwd=tmp_path, home=tmp_path),
+        self_target=lambda q: resolve_self(q, cwd=tmp_path, home=tmp_path),
+    )
+
+
+def test_tab_onto_a_childless_directory_leaves_it_selectable(tmp_path: Path) -> None:
+    """`tab` appends a separator and completing INSIDE a directory with no
+    subdirectories returns nothing — so the directory the user had just walked
+    to rendered as "no directory matches that path", and `enter` there
+    dismissed with `None`, which the caller reads as Esc: picker closed, no
+    move, no notice. Found independently by design (D1) and UX (U1), and it
+    made the picker strictly weaker than the typed path it fronts.
+    """
+    leaf = _leaf_tree(tmp_path)
+    screen = _walking_screen(tmp_path)
+    index = next(i for i, r in enumerate(screen.visible_rows) if r.path == str(leaf))
+    screen._move_to(index)
+    screen.action_complete()
+
+    assert screen.visible_rows, "the directory the user walked to vanished from the card"
+    assert screen.selected_path() == str(leaf), "enter would not move to that directory"
+    painted = "\n".join(screen.render_lines_for_test())
+    assert NO_PATH_NOTICE not in painted, "a real directory reported as no match"
+    assert "enter" in painted.splitlines()[-1], "the footer dropped `enter move`"
+
+
+def test_a_path_that_does_not_resolve_still_reports_no_match(tmp_path: Path) -> None:
+    """The fix must not make the empty state unreachable: a path that genuinely
+    does not exist is still a no-match, and keeps that sentence."""
+    _leaf_tree(tmp_path)
+    screen = _walking_screen(tmp_path)
+    screen.set_query("~/nope/")
+    assert screen.visible_rows == []
+    assert NO_PATH_NOTICE in "\n".join(screen.render_lines_for_test())
+
+
+def test_tab_completes_into_the_tidy_label_not_a_raw_absolute_path(tmp_path: Path) -> None:
+    """The row reads `~/scripts`; inserting the absolute path made the header
+    jump to a long string that did not resemble the row just chosen (D3)."""
+    leaf = _leaf_tree(tmp_path)
+    screen = _walking_screen(tmp_path)
+    index = next(i for i, r in enumerate(screen.visible_rows) if r.path == str(leaf))
+    screen._move_to(index)
+    screen.action_complete()
+    assert screen.filter_query == "~/scripts/"
+
+
+def test_the_mode_hint_survives_on_a_scrolling_card(tmp_path: Path) -> None:
+    """`type to filter or path` is the ONLY disclosure that a second input mode
+    exists, and it was shed FIRST when the list scrolls — which a freshly
+    opened picker almost always does (11-12 rows against PAGE_ROWS_MAX=10), so
+    the opening frame never carried it at any width (D2)."""
+    for width in (100, 80, 68):
+        hints = [key for key, _ in _footer_hints(width, scrolls=True)]
+        assert "type" in hints, f"the mode hint was shed at width={width}"
+
+
+def test_ctrl_w_backs_out_one_path_segment(tmp_path: Path) -> None:
+    """Backing out of a completed path cost 15 backspaces — the only editing
+    key bound — which is why walking in felt one-way (U1)."""
+    screen = _walking_screen(tmp_path)
+    screen.set_query("~/a/b/c/")
+    screen.action_kill_segment()
+    assert screen.filter_query == "~/a/b/"
+    screen.action_kill_segment()
+    assert screen.filter_query == "~/a/"
+    screen.action_kill_query()
+    assert screen.filter_query == ""
+
+
+def test_the_current_marker_survives_a_long_path(tmp_path: Path) -> None:
+    """`current` answers "where am I?", not "why is this offered", so unlike
+    every other note it is not dropped to buy label cells — it disappeared on
+    exactly the deep paths this machine is full of (D4)."""
+    deep = "~/workspace/repos/minerva-data-agent-service-integration-v2"
+    row = MoveTarget(path=deep, label=deep, kind="current", detail="current")
+    painted = render_rows([row], 0, 68)[0].plain
+    assert "current" in painted

@@ -38,6 +38,11 @@ class MovableSession(FakeSession):
         self._outcome = outcome
         self.moves: list[str] = []
         self.error: Exception | None = None
+        #: The app reads this to decide whether a move has to WAIT for a
+        #: runtime to retire, and so whether to narrate before the transition
+        #: (UX U2). Declared here rather than set ad hoc so the two states a
+        #: test can put this double in are both part of its surface.
+        self.is_cold: bool = True
 
     async def set_working_directory(self, cwd: str) -> str:
         self.moves.append(cwd)
@@ -257,3 +262,49 @@ async def test_choosing_a_row_in_the_picker_moves_there(tmp_path: Path) -> None:
 
         assert session.moves == [chosen]
         assert str(chosen) in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_a_bound_move_narrates_before_the_runtime_restarts(tmp_path: Path) -> None:
+    """The retire is an RPC to a child that must drain — ~600 ms measured —
+    during which the picker has closed, the band still reads the old directory
+    and `_session_transition_pending` swallows a typed Enter without replaying
+    it. With nothing printed the app looked like it had ignored the user
+    (UX U2). `/resume` prints its receipt BEFORE the transition; this matches.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    session.is_cold = False  # a bound runtime: the path that has to wait
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, f"/move {destination}")
+
+        texts = _notices(app)
+        assert any(
+            "restarting the runtime" in t for t in texts
+        ), f"no in-flight line before the rebind: {texts}"
+
+
+@pytest.mark.asyncio
+async def test_choosing_the_current_row_says_you_are_already_there(tmp_path: Path) -> None:
+    """Selecting the row labelled `current` closed the picker in silence —
+    byte-identical to Esc, on the one row whose purpose is to answer "where am
+    I?" — while typing the same path said `already in …` (UX U4)."""
+    session = MovableSession(cwd=str(tmp_path))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/move")
+        for _ in range(4):
+            await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, MovePickerScreen)
+        assert screen.visible_rows[0].kind == "current"
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+
+        assert session.moves == [], "the current row must not issue a move"
+        assert any("already in" in t for t in _notices(app)), _notices(app)
