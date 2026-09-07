@@ -239,7 +239,8 @@ TranscriptView {
 /* Blocks: zero outer margin, zero padding — no declarations here by design
  * (the minimalism defense asserts their absence; anything uniform here would
  * be the "blank row between everything" regression). */
-TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard, WakeBlock {
+TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard, WakeBlock,
+PeerMessageBlock {
     width: 1fr;
     height: auto;
 }
@@ -336,11 +337,12 @@ Screen > .screen--selection {
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
  * cell for one frame, which is the right failure. */
-ToolCard, WakeBlock {
+ToolCard, WakeBlock, PeerMessageBlock {
     height: 1;
     background: $lo-surface;
     /* The hand pointer, not just the hover tint: the whole row is the click
-     * target for expand/collapse (see ToolCard.on_click / WakeBlock.on_click),
+     * target for expand/collapse (ExpandableActionBlock.on_click, shared by
+     * all three),
      * so the cursor is the affordance that says so BEFORE the click. Textual
      * walks this rule on every mouse event and emits OSC 22, which ghostty
      * implements and a terminal that does not simply ignores. */
@@ -349,10 +351,10 @@ ToolCard, WakeBlock {
 
 /* Expanded is the ONE case that is content-sized: the summary row plus one
  * row per line of revealed output (each already truncated to width, so
- * nothing reflows). The class beats the type selector above. WakeBlock uses
- * its own class name because it is a different widget; the height contract
- * is the same. */
-ToolCard.tool-expanded, WakeBlock.wake-expanded {
+ * nothing reflows). The class beats the type selector above. WakeBlock and
+ * PeerMessageBlock use their own class names because they are different
+ * widgets; the height contract is the same. */
+ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded {
     height: auto;
 }
 
@@ -387,12 +389,13 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded {
  *
  * Expanded rows are exempt: they are already `height: auto` and content-sized,
  * and the payload gives the pointer plenty to hit. */
-.comfortable-rows ToolCard, .comfortable-rows WakeBlock {
+.comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock {
     height: 2;
     padding: 1 0 0 0;
 }
 
-.comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded {
+.comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
+.comfortable-rows PeerMessageBlock.peer-expanded {
     height: auto;
     padding: 1 0 0 0;
 }
@@ -411,7 +414,7 @@ ToolCard.tool-error {
 /* Mouse affordance: the whole row is the click target for expand/collapse,
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
-ToolCard:hover, WakeBlock:hover, .interactive-notice:hover {
+ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, .interactive-notice:hover {
     background: $lo-overlay;
 }
 
@@ -428,7 +431,7 @@ ToolCard:hover, WakeBlock:hover, .interactive-notice:hover {
  * Last rule in the block, so it wins over the state tints AND over :hover:
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
-ToolCard:focus, WakeBlock:focus, .interactive-notice:focus {
+ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:focus {
     background: $lo-tint-select;
 }
 
