@@ -1138,13 +1138,27 @@ async def test_a_composing_call_reports_its_final_size():
 
 
 @pytest.mark.asyncio
-async def test_a_late_call_id_does_not_change_the_compose_key():
-    """The key is latched on the first announcement.
+async def test_a_late_call_id_never_changes_the_compose_key_unannounced():
+    """The key never moves SILENTLY. It may move, but only by announcement.
 
     An OpenAI-compatible endpoint may send the tool NAME before the call id.
     Recomputing the key each time changed it mid-stream, and the UI — which keys
     its rows by it — mounted a second row and then marked the abandoned one
     interrupted, for a call that had in fact succeeded.
+
+    This test originally asserted the proxy for that: one distinct id across the
+    whole stream. The proxy stopped describing the invariant once the key
+    acquired a way to move that consumers can FOLLOW — a frame naming both the
+    old and the new id, which is how a row announced under a placeholder is
+    reconciled with the real id every ``tool_execution_start``/``_end`` carries
+    (without it a mid-turn joiner is left holding a composing row nothing can
+    adopt, painted ``⊘ interrupted`` on a call that SUCCEEDED).
+
+    So the assertion is now the invariant itself rather than its proxy: an id
+    the stream introduces without saying what it replaces is the original bug,
+    and a second unannounced id is exactly what mounted the second row. The
+    proof that no second row results is in ``tests/unit/tui``, driven against
+    the real app.
     """
     stream = ScriptedStream(
         [
@@ -1167,7 +1181,22 @@ async def test_a_late_call_id_does_not_change_the_compose_key():
         async for event in loop.run([Message.user("go")], context, make_config(stream), None)
         if isinstance(event, ToolCallComposeEvent)
     ]
-    assert len({event.tool_call_id for event in composes}) == 1
+
+    # Walk the stream the way a consumer does and retire each superseded key.
+    # Anything still standing at the end is a row that consumer would be
+    # holding; more than one of those is the two-rows-for-one-call bug.
+    outstanding: list[str] = []
+    for event in composes:
+        superseded = event.supersedes_tool_call_id
+        if superseded and superseded in outstanding:
+            outstanding.remove(superseded)
+        if event.tool_call_id not in outstanding:
+            outstanding.append(event.tool_call_id)
+    assert outstanding == ["call_late"]
+
+    # And the surviving key is the one execution uses, which is the equality
+    # whose absence stranded the row in the first place.
+    assert executed == ["echo"]
 
 
 class TestSystemBlocksAreReadAtEveryCall:
