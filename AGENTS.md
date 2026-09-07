@@ -834,6 +834,55 @@ Never tag an owner in a *comment* to ask for review unless their review is
 genuinely required — the auto-request is not a comment tag, and a comment tag
 is what says the PR is waiting on that person.
 
+### Scope round N+1 to the remediation delta
+
+**A remediation is the most likely place in a PR for a new defect**, so the
+round that follows one is scoped to `<previous-head>..<new-head>` rather than
+re-reading the whole diff. Read that as a *detection* measure, not an
+efficiency one: a whole-diff re-read spreads attention over hundreds of
+already-approved lines, so the twenty that changed get the same share as the
+rest. A remediation also arrives with social proof — a reviewer asked for it,
+it is small, it is framed as closing something rather than opening anything —
+and each of those lowers scrutiny at exactly the moment it should not.
+
+This is not a hunch. Over one day, eight sessions reported this shape on
+unrelated PRs — a fix reproducing its own defect at larger scale in a second
+surface, a fix whose two halves drifted into describing different scopes, a
+round-2 fix leaving a resumed conversation ~120 messages behind. The reports
+are on the PR threads; what matters here is that the shape recurs often enough
+to plan for.
+
+Scoping to the delta is necessary but not sufficient. Three things make the
+round conclusive rather than merely narrow:
+
+- **Run the same probe against the previous head.** "Is this new?" is only
+  answerable by comparison — otherwise a reviewer finds a defect in the delta
+  and cannot tell whether the remediation introduced it or whether they missed
+  it twice.
+- **Check the guard the remediation added can observe the defect it names.**
+  A fix can be right while its regression test is structurally incapable of
+  seeing what that same fix broke elsewhere — a real case closed one end of a
+  contradiction, opened its mirror at the other, and asserted only on the end
+  it had fixed.
+- **Assert on what is painted, not only on the contract.** A round can verify
+  a contract is honoured and still miss that the resulting frame is wrong.
+
+Two further corollaries. Do not re-open dimensions the delta cannot have
+touched — a backend-only remediation keeps a design round valid, and
+re-running it spends a reviewer on unchanged pixels. And when a rebase moves
+the base, prove the content is unchanged (`git range-diff` plus byte-identical
+`+`/`-` line sets) and then run **one** convergence round over
+`<old-head>..<new-head>`, checking semantic conflicts only in files the
+upstream also touched.
+
+**Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
+landing after a clean round — including ones driven by a *different* stream,
+such as a design fix after a terminal code round — make it stale, and the
+merge gate needs a fresh round on the current head. "Everything else is green"
+is exactly when that lapses. The one narrow exception: changes since the
+review that are exclusively non-conflicting fixes from parallel approved
+streams — a docs or nit commit from another round — leave it fresh.
+
 ## Security advisories
 
 Any agent handling a reported vulnerability or a GHSA for this repository
