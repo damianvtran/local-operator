@@ -1335,11 +1335,92 @@ class OwnedSessionHandle(SessionHandle):
         return detail
 
     async def abort(self) -> str:
+        """Stop this session's turn AND its children, and say what was stopped.
+
+        THE CONTROL OP HAS NO SECOND RUNG. The keyboard's Esc ladder can afford
+        a narrow first press because a second press within
+        ``DOUBLE_STOP_WINDOW_S`` is right there, offered on screen, and stops
+        the children. Nothing on this path has that: the mobile relay, a
+        supervisor and ``lop`` peers all send ``abort`` once into a session
+        they cannot see, and there is no gesture that escalates. Reusing the
+        keyboard's narrow semantics here therefore gave callers a stop that
+        could NEVER reach a runaway — the operator sent ``abort``, was acked
+        ``stopping``, and watched 39 paid provider calls land in the next two
+        seconds while their children kept reporting in (QA Q-1). Escalating is
+        what makes "a user must always be able to halt a runaway" true on the
+        surface that has no ladder to climb.
+
+        THE RECEIPT MUST NOT OVERSTATE. It previously returned the literal
+        ``"stopping"`` whatever survived, which is how the operator was told
+        the problem was handled while the meter ran. It now names what was
+        actually stopped, and — because backgrounded ``bash`` jobs deliberately
+        outlive a stop (``background=true`` exists so a build survives the turn
+        that started it) — names what is still running and how to reach it.
+        """
         self._check_loop_thread()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
+        # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
+        # result back to the parent, and a parent still accepting work would
+        # open a turn on it — so stopping the parent first is what makes the
+        # children's teardown quiet instead of one last round of arrivals.
         self._session.abort("stopped from mobile")
-        return "stopping"
+        # `cancel_subagents` reports how many it acted on, counted at cancel
+        # time: the receipt describes THIS abort, not a roster that has since
+        # moved.
+        stopped_children = self._cancel_children("stopped from mobile")
+        return self._abort_receipt(stopped_children)
+
+    def _cancel_children(self, reason: str) -> int:
+        """Cancel this session's subagents, tolerating a host that has none.
+
+        ``getattr``-probed like every other optional capability in this file: a
+        reduced handle or a test double need not implement the subagent
+        protocol, and a stop must not fail because the thing it was asked to
+        stop does not exist.
+        """
+        cancel = getattr(self._session, "cancel_subagents", None)
+        if not callable(cancel):
+            return 0
+        try:
+            return int(cast(int, cancel(reason)))
+        except Exception:  # noqa: BLE001 — a stop must never fail on its children
+            logger.warning("cancelling subagents during abort failed", exc_info=True)
+            return 0
+
+    def _abort_receipt(self, stopped_children: int) -> str:
+        """What the abort actually did, including what it deliberately left.
+
+        Survivors are named only when there ARE any: unconditional, it is noise
+        on the overwhelmingly common stop that had nothing else running.
+        """
+        parts = ["stopping this turn"]
+        if stopped_children:
+            plural = "s" if stopped_children != 1 else ""
+            parts.append(f"stopped {stopped_children} subagent{plural}")
+        spared = self._background_bash_jobs()
+        if spared:
+            plural = "s" if spared != 1 else ""
+            parts.append(f"{spared} background job{plural} still running — jobs cancel to stop")
+        return "; ".join(parts)
+
+    def _background_bash_jobs(self) -> int:
+        """Backgrounded ``bash`` jobs, which a stop never touches.
+
+        Deliberately spared (see ``Session.cancel_subagents``) and genuinely
+        surprising to someone who just asked for everything to stop, so the
+        receipt names them. Never raises: this runs inside a kill switch.
+        """
+        try:
+            jobs = self._session.jobs.list()
+        except Exception:  # noqa: BLE001 — an unreadable ledger must not break a stop
+            logger.warning("listing background jobs during abort failed", exc_info=True)
+            return 0
+        return sum(
+            1
+            for job in jobs
+            if getattr(job, "type", "") == "bash" and getattr(job, "status", "") == "running"
+        )
 
     async def cancel_gracefully(self, reason: str = "cancelled by supervisor") -> str:
         """Stop at the next post-tool boundary, leaving in-flight work intact.

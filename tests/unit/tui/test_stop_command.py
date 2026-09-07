@@ -90,16 +90,28 @@ async def test_bare_stop_ends_the_session_and_keeps_the_transcript() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_with_no_session_is_a_warning() -> None:
-    class NeverBoots(FakeSession):
-        pass
+    """A session that has genuinely not arrived yet.
 
-    app = OperatorApp(lambda: _factory(NeverBoots()))
+    The factory is held open rather than adopting and then dropping
+    ``app._session``: those are two DIFFERENT states that used to share one
+    answer, and conflating them is what let `/stop` tell a user with a live,
+    spending session to wait for a boot that had already finished (QA Q-2).
+    The adopted-then-unbound state is pinned separately below.
+    """
+    release = asyncio.Event()
+
+    async def never_boots() -> Any:
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(never_boots)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        app._session = None
+        assert app._session is None
         app._run_slash_command("/stop")
         await pilot.pause()
         assert "session is still starting…" in _notices(app)
+        release.set()
 
 
 @pytest.mark.asyncio
@@ -912,3 +924,143 @@ async def test_a_mid_turn_stop_does_not_add_a_bare_interrupted_row() -> None:
             await pilot.pause()
         bare = [b for b in app.query(NoticeBlock) if b._text == "interrupted"]
         assert not bare, "a bare interrupted row was added beside the per-card mark"
+
+
+@pytest.mark.asyncio
+async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE KILL SWITCH MUST WORK IN THE STATE IT IS NEEDED IN.
+
+    The refusal used to test the VIEWER's binding rather than whether a session
+    exists to stop. With the session adopted, alive and undisposed but the
+    viewer's reference dropped — a swap, a reload, a reconnect race — `/stop`
+    answered "session is still starting…" for a session that was visibly
+    burning money, and told the user to WAIT (QA Q-2).
+    """
+    target = _record(77777, "the runaway")
+    stopped: list[str] = []
+
+    def fake_resolve(**kwargs: Any):
+        return target, [], ""
+
+    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+        stopped.append(record.session_id)
+        return control.StopOutcome(
+            record.pid, record.session_id, "the runaway", "socket", 'stopped "the runaway"'
+        )
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", fake_resolve)
+    monkeypatch.setattr(control, "stop_session", fake_stop)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        # The incident's shape: the session is ALIVE and spending; only the
+        # viewer's reference is gone.
+        app._session = None
+        assert session.disposed is False
+        app._run_slash_command("/stop")
+        for _ in range(20):
+            await pilot.pause()
+            if stopped:
+                break
+        assert stopped, "an unbound viewer must still be able to stop what it is watching"
+        assert "session is still starting…" not in _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_binding_never_tells_the_user_to_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the stop genuinely cannot be routed, the copy must still be honest.
+
+    "Still starting" is false for a session that has been adopted, and its
+    advice — wait — is the most expensive thing a user can do when the session
+    they cannot reach is spending money. The residual answer names the state
+    and points at the lever that works from outside this viewer.
+    """
+
+    def fake_resolve(**kwargs: Any):
+        return None, [], "no live session matches"
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", fake_resolve)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._session = None
+        app._run_slash_command("/stop")
+        for _ in range(20):
+            await pilot.pause()
+            if any("lost its link" in text for text in _notices(app)):
+                break
+        notices = _notices(app)
+        assert any("lost its link" in text for text in notices), notices
+        assert any("lop stop" in text for text in notices), notices
+        assert "session is still starting…" not in notices
+
+
+@pytest.mark.asyncio
+async def test_a_booting_session_still_says_it_is_starting() -> None:
+    """The guard on the copy change: "still starting" is TRUE during boot.
+
+    The fix must narrow that message to the state it describes, not delete it —
+    a user who typed `/stop` a beat after launch should still be told the
+    session is on its way.
+    """
+    release = asyncio.Event()
+
+    async def delayed_factory():
+        await release.wait()
+        return FakeSession()
+
+    app = OperatorApp(delayed_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app._session is None
+        assert app._adopted_session_id == ""
+        app._run_slash_command("/stop")
+        await pilot.pause()
+        assert "session is still starting…" in _notices(app)
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_an_unbound_stop_does_not_recurse_into_itself() -> None:
+    """A regression guard found while building the fallback.
+
+    Routing the unbound case through `_stop_target_worker` looked right, but
+    that worker's self-pid branch calls back into `_cmd_stop` — which, with no
+    bound session, takes the unbound fallback again and dispatches another
+    worker, forever. It painted nothing at all, a quieter version of the defect
+    being fixed.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        own_pid = os.getpid()
+        calls: list[str] = []
+        original = app._stop_target_worker
+
+        async def counting_worker(target: str) -> None:
+            calls.append(target)
+            await original(target)
+
+        app._stop_target_worker = counting_worker  # type: ignore[assignment]
+        # Resolve to THIS process, the branch that used to recurse.
+        own = _record(own_pid, "me")
+        app._session = None
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "local_operator.mobile.peer_send.resolve_peer_target",
+                lambda **kwargs: (own, [], ""),
+            )
+            app._run_slash_command("/stop")
+            for _ in range(20):
+                await pilot.pause()
+        # The self-pid case is answered here, not bounced back into the
+        # command: at most one delegation, and no unbounded growth.
+        assert len(calls) == 0, calls
+        assert any("lost its link" in text for text in _notices(app)), _notices(app)
