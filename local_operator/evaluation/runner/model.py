@@ -83,6 +83,10 @@ class ModelDecision(ProtocolModel):
     stop_reason: StrictIdentifier = "stop"
     provider_request_id: StrictIdentifier = "unknown"
     tool_call_count: SafeCount = 0
+    #: Tools the request PUT ON THE WIRE. Distinct from ``tool_call_count``,
+    #: which counts how the model answered: a bundle showing a call against a
+    #: request that offered nothing is a state the wire cannot produce.
+    offered_tool_count: SafeCount = 0
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
     compaction: CompactionRecord | None = None
@@ -144,6 +148,7 @@ class DecisionRejected(Exception):
         stop_reason: str = "stop",
         provider_request_id: str = "unknown",
         tool_call_count: int = 0,
+        offered_tool_count: int = 0,
         prompt_cache_key: str | None = None,
         context_tokens: int | None = None,
         compaction: CompactionRecord | None = None,
@@ -167,6 +172,7 @@ class DecisionRejected(Exception):
         self.stop_reason = stop_reason
         self.provider_request_id = provider_request_id
         self.tool_call_count = tool_call_count
+        self.offered_tool_count = offered_tool_count
         self.prompt_cache_key = prompt_cache_key
         self.context_tokens = context_tokens
         self.compaction = compaction
