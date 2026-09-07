@@ -4811,7 +4811,22 @@ def create_stream_fn(
     a pinned credential row with its parent would be a genuine bug), while the
     cache key is a routing hint whose whole purpose is to follow an identical
     prefix.
+
+    OMITTING ``session_id`` IS ALLOWED BUT COSTS ATTRIBUTION, so it says so out
+    loud. Every call this stream function makes is recorded to the shared
+    analytics ledger keyed on the session id, and a missing one records under
+    the empty string: the spend is counted in the totals but belongs to no
+    session, so ``/analytics`` shows an unattributable bucket that reads like a
+    broken session. A one-shot probe or a server-side completion with no session
+    of its own should pass a stable descriptive id (``"probe-ask-restraint"``)
+    rather than nothing. Debug rather than a warning because this is a
+    diagnostic about bookkeeping, not a fault the user can act on mid-call.
     """
+    if not session_id:
+        logger.debug(
+            "create_stream_fn called with no session_id: this call's analytics "
+            "will be recorded against an empty session id and cannot be attributed"
+        )
     return SessionStreamFn(auth_store, settings, session_id, cache_lineage_id)
 
 

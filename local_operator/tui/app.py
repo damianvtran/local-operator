@@ -14721,6 +14721,45 @@ class OperatorApp(App[None]):
         # conversation the same frame the tab does, instead of "untitled"
         # until a generated title lands (or forever, if naming 429s).
         self._notify_mobile_title(label)
+        # ...and tell the analytics ledger the same thing, for the same reason.
+        # The band and the phone have always shown SOMETHING here; only
+        # ``/analytics`` was left rendering a bare 12-hex id, because its row
+        # was written exclusively by ``set_conversation_name`` and a stand-in
+        # deliberately never reaches that path. So a naming outage cost a
+        # session its identity in the one surface where the operator later goes
+        # looking for what an expensive session was about — five sessions worth
+        # $1,312 were reported that way, unreadable months after the fact even
+        # though the band had shown a perfectly good label the whole time.
+        #
+        # It rides at PROVISIONAL rank, which is what makes this safe: the
+        # ledger upsert is rank-gated, so this can only ever fill an empty row,
+        # and the real title that follows (or a ``/rename``, or a resume
+        # restore) overwrites it from the higher rank. The precedence rule
+        # naming.py documents for the holder therefore holds in the ledger too,
+        # without the stand-in ever entering the holder itself — which would
+        # cancel the very naming call it stands in for.
+        self._mirror_provisional_to_analytics(label)
+
+    def _mirror_provisional_to_analytics(self, label: str) -> None:
+        """Record the stand-in label against this session's ledger row.
+
+        Guarded and never awaited: analytics is an accelerator and a failure
+        here must not cost a keystroke, let alone a turn. The session id is read
+        from the live session rather than held on the app, because a reload
+        swaps the session underneath and the ledger row must follow the
+        conversation the label actually describes.
+        """
+        session = self._session
+        session_id = str(getattr(session, "session_id", "") or "") if session else ""
+        if not session_id or not label:
+            return
+        try:
+            from local_operator.analytics import get_recorder
+            from local_operator.analytics.store import SESSION_NAME_RANK_PROVISIONAL
+
+            get_recorder().note_session_name(session_id, label, rank=SESSION_NAME_RANK_PROVISIONAL)
+        except Exception:  # noqa: BLE001 — analytics is best-effort
+            logger.debug("analytics: provisional name mirror failed", exc_info=True)
 
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.

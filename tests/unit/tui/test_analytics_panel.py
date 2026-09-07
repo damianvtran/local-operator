@@ -661,3 +661,125 @@ def test_toggle_hint_shown_only_with_series():
             assert "t cost/tokens" not in hint3
 
     asyncio.run(run())
+
+
+def _sub(cost_micro: int, calls: int = 1) -> UsageAggregate:
+    """A minimal per-session aggregate carrying a distinguishable cost."""
+    return UsageAggregate(
+        calls=calls,
+        input_tokens=1_000,
+        output_tokens=500,
+        context_tokens=1_500,
+        cost_micro=cost_micro,
+        cost_known_calls=calls,
+    )
+
+
+def test_sessions_sharing_a_rendered_label_each_get_their_own_row():
+    """N sessions with one label render N rows, not one (round-1 F1).
+
+    The table used to be a dict keyed by the RENDERED label, so a collision did
+    not merge rows — it dropped every row but the last, taking its tokens, calls
+    and cost off the screen. On the operator's ledger that hid 355 sessions and
+    $3,913. The label is display text; the row's identity is the session id.
+    """
+    agg = _agg()
+    spend = {"aa11bb22cc33": 900_000, "dd44ee55ff66": 500_000, "1122334455aa": 250_000}
+    agg.by_session = {sid: _sub(cost) for sid, cost in spend.items()}
+    # One shared name, exactly what the backfill mints for sibling subagents.
+    shared = "reviewer · Article-search-svc schema review"
+    setattr(agg, "session_names", {sid: shared for sid in spend})
+
+    lines = build_report(agg, width=140)
+    body = "\n".join(line.plain for line in lines)
+    session_block = body.split("By session", 1)[1]
+
+    # Every session is on screen, with ITS OWN cost — not one merged row.
+    for cost in spend.values():
+        assert f"${cost / 1_000_000:.2f}" in session_block, session_block
+    # ...and each row is separately addressable rather than three identical ones.
+    rows = [ln for ln in session_block.splitlines() if "tokens" in ln]
+    assert len(rows) == len(spend)
+    assert len({ln.strip() for ln in rows}) == len(spend), rows
+
+
+def test_a_unique_session_label_is_left_exactly_as_it_was():
+    """The disambiguator is paid only where it buys something."""
+    agg = _agg()
+    agg.by_session = {"aa11bb22cc33": _sub(900_000), "dd44ee55ff66": _sub(500_000)}
+    setattr(
+        agg,
+        "session_names",
+        {"aa11bb22cc33": "Fix the analytics rollup", "dd44ee55ff66": "Rename the sessions"},
+    )
+    body = "\n".join(line.plain for line in build_report(agg, width=140))
+    assert "Fix the analytics rollup " in body
+    assert "·" not in body.split("By session", 1)[1].split("Fix the analytics rollup")[1][:40]
+
+
+def _long_named_agg(count: int = 12) -> UsageAggregate:
+    """An aggregate whose session names are longer than any name column.
+
+    The shape design review D3 measured on the real ledger: once subagent
+    naming lands, composed ``<role> · <parent title>`` labels are the MAJORITY
+    of rows rather than the exception, so a name column that only pads is
+    ragged for most of the table instead of a few rows.
+    """
+    agg = _agg()
+    agg.by_session = {}
+    names = {}
+    for index in range(count):
+        sub = UsageAggregate(
+            calls=10 + index,
+            input_tokens=500_000,
+            output_tokens=120_000,
+            context_tokens=3_500_000,
+            cost_micro=4_200_000 + index,
+            cost_known_calls=10 + index,
+        )
+        sid = f"{index:012x}"
+        agg.by_session[sid] = sub
+        names[sid] = f"reviewer · Article-search-svc schema review number {index}"
+    setattr(agg, "session_names", names)
+    return agg
+
+
+def test_the_number_columns_line_up_however_long_the_names_are():
+    """Design D3: the name column must TRUNCATE, not only pad.
+
+    ``{name:<{name_col}}`` is a pad and nothing else, so a name wider than the
+    column pushed tokens/cost/calls right by however much it overran. The cost
+    column is the one thing this screen exists to let you scan straight down,
+    and on the real ledger 78% of rows overflowed at 100 columns.
+    """
+    agg = _long_named_agg()
+    for width in (71, 100, 140):
+        # A section is ONE ``Text`` carrying embedded newlines, so the rows have
+        # to be split back out of the rendered block rather than read off the
+        # returned list.
+        text = "\n".join(line.plain for line in build_report(agg, width))
+        block = text.split("By session", 1)[-1]
+        rows = [li for li in block.splitlines() if "calls" in li and " tokens" in li]
+        assert len(rows) == 12, (width, rows)
+        offsets = {li.index(" tokens") for li in rows}
+        assert len(offsets) == 1, (width, sorted(offsets), rows[:3])
+
+
+def test_a_wide_frame_spends_its_width_on_the_name():
+    """Design D2: the budget follows the frame.
+
+    At 140 columns the panel offers 48 cells, so a 43-character title must
+    arrive whole; at 71 it offers 30 and the same title is condensed. Composing
+    against a fixed 32 left 34 cells of dead right gutter on the wide frame.
+    """
+    agg = _agg()
+    title = "coder · Fix subagent effort levels per model"
+    agg.by_session = {"abc123": next(iter(agg.by_session.values()))}
+    setattr(agg, "session_names", {"abc123": title})
+
+    wide = "\n".join(line.plain for line in build_report(agg, 140))
+    narrow = "\n".join(line.plain for line in build_report(agg, 71))
+    assert title in wide, "a 43-char title fits the wide frame's 48-cell column"
+    assert title not in narrow
+    narrow_row = next(li for li in narrow.splitlines() if "coder · Fix" in li)
+    assert "…" in narrow_row, "a cut name must say it was cut"

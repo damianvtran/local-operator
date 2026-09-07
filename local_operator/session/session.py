@@ -4071,14 +4071,10 @@ class Session:
             # ``/analytics /usage`` per-session table shows a title rather than
             # a 12-hex id. Best-effort and off the hot path (the recorder runs
             # the upsert on its own thread); a failure here must never cost the
-            # rename, which is why it is guarded and never awaited.
-            if stored:
-                try:
-                    from local_operator.analytics import get_recorder
-
-                    get_recorder().note_session_name(self.session_id, stored)
-                except Exception:  # noqa: BLE001 — analytics is best-effort
-                    logger.debug("analytics: note_session_name failed", exc_info=True)
+            # rename, which is why it is guarded and never awaited. Shared with
+            # the resume restore, which must mirror the same way without
+            # claiming a fresh user action — see ``_load_conversation_name``.
+            self._mirror_name_to_analytics(stored)
             # Rename the browser tab group this session already opened. The
             # title normally lands a second or two INTO the first turn, which is
             # after an opening "look at this page" created the group, so without
@@ -4289,6 +4285,37 @@ class Session:
         # asks "has naming been requested?" would spend a second provider call
         # to re-derive a name the session is already wearing.
         self._conversation_name.requested = True
+        # Mirror the restored title into the analytics ledger. Writing the
+        # holder's fields directly (above) is what keeps a restore from reading
+        # as a fresh user action — but it also bypasses
+        # ``set_conversation_name``, which until now was the ONLY writer of the
+        # ledger's name row. A session named in one process and resumed in
+        # another therefore rendered as a bare 12-hex id in ``/analytics``
+        # forever, unless it happened to be renamed again later.
+        #
+        # This is the mirror and nothing else: no journal write, no fork-tag
+        # clear, no browser-tab rename. Those belong to a name CHANGING, and
+        # nothing has changed here — this is the same name the session already
+        # had, being told to a store that never heard it.
+        self._mirror_name_to_analytics(self._conversation_name.text)
+
+    def _mirror_name_to_analytics(self, name: str) -> None:
+        """Best-effort: tell the analytics ledger this session's human name.
+
+        One helper for the two callers that must mirror without going through
+        :meth:`set_conversation_name` (the resume restore) and the one that does
+        (the rename/auto-name path), so the guard discipline — analytics is an
+        accelerator and may never raise into a session — is written once rather
+        than copied. The upsert itself runs on the recorder's writer thread.
+        """
+        if not name:
+            return
+        try:
+            from local_operator.analytics import get_recorder
+
+            get_recorder().note_session_name(self.session_id, name)
+        except Exception:  # noqa: BLE001 — analytics is best-effort
+            logger.debug("analytics: note_session_name failed", exc_info=True)
 
     async def _persist_conversation_name(self) -> None:
         """Journal the title in force (newest entry wins on replay).

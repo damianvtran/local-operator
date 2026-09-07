@@ -1169,6 +1169,23 @@ class OwnedSessionHandle(SessionHandle):
         if label:
             self._fold.set_state(conversation_name=label)
             self._notify()
+            # Mirror the stand-in to the analytics ledger at PROVISIONAL rank,
+            # exactly as the TUI band does. A mobile-started session goes
+            # through this path INSTEAD of the TUI's, so without this a phone
+            # session whose naming call failed is the same unreadable 12-hex row
+            # in ``/analytics``. Rank-gated, so the real title still overwrites
+            # it the moment ``set_conversation_name`` runs below.
+            try:
+                from local_operator.analytics import get_recorder
+                from local_operator.analytics.store import SESSION_NAME_RANK_PROVISIONAL
+
+                session_id = str(getattr(self._session, "session_id", "") or "")
+                if session_id:
+                    get_recorder().note_session_name(
+                        session_id, label, rank=SESSION_NAME_RANK_PROVISIONAL
+                    )
+            except Exception:  # noqa: BLE001 — analytics is best-effort
+                logger.debug("analytics: provisional name mirror failed", exc_info=True)
         self._name_requested = True
         # Hold a strong reference until the task settles: a bare ensure_future
         # is only weakly held by the loop and can be collected before it runs.

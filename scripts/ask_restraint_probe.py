@@ -239,7 +239,27 @@ async def main() -> int:
 
     config_root = Path(os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", Path.home() / ".local-operator"))
     credential_manager = CredentialManager(config_root)
-    stream_fn = create_stream_fn(AuthStore(credential_manager=credential_manager))
+    # NAME THE PROBE'S SPEND. Every provider call is recorded to the shared
+    # analytics ledger, and ``create_stream_fn`` with no ``session_id`` records
+    # them under the empty string — so this probe's runs landed in the
+    # operator's real ledger as an unattributable bucket (measured: 224 calls /
+    # $2.87 in one afternoon, indistinguishable from a broken session). The
+    # config dir is deliberately the REAL one here, because the probe needs the
+    # machine's actual credentials; that makes labelling the spend the fix
+    # rather than isolating the store.
+    probe_session_id = "probe-ask-restraint"
+    stream_fn = create_stream_fn(
+        AuthStore(credential_manager=credential_manager),
+        session_id=probe_session_id,
+    )
+    # ...and give that id a human label, since a probe has no conversation to
+    # derive one from and would otherwise render as a bare id in ``/analytics``.
+    try:
+        from local_operator.analytics import get_recorder
+
+        get_recorder().note_session_name(probe_session_id, f"probe ask-restraint ({MODEL})")
+    except Exception:  # noqa: BLE001 — a probe never fails on its diagnostics
+        pass
     spec = configure_model(HOSTING, MODEL, credential_manager=credential_manager).spec
 
     # Sampled, not single-shot. The model is non-deterministic, so one call per

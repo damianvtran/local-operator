@@ -79,6 +79,29 @@ _WRITE_RETRY_BACKOFF_S = 0.05
 _WAL_RETRIES = 6
 _WAL_RETRY_BACKOFF_S = 0.05
 
+#: Precedence of a name written to ``session_names``, mirroring the rules
+#: ``session/naming.py`` documents for the live ``ConversationName`` holder.
+#: Higher wins; equal replaces (a re-title must be able to replace the title it
+#: supersedes). The gate lives in the SQL of ``upsert_session_name`` rather than
+#: in each caller, because the callers run on three different threads and in two
+#: different processes — several ``lop`` sessions share this file — so a
+#: read-then-write check in Python would be a race by construction.
+#:
+#: ``PROVISIONAL`` is the opener-derived stand-in the TUI already paints on the
+#: status band the instant a message is submitted. It is deliberately BELOW a
+#: real title: it quotes the question rather than answering it, and it exists so
+#: that a session whose naming call never lands still reads as something a human
+#: recognises instead of a bare 12-hex id.
+#:
+#: ``BACKFILL`` sits at the same level as ``PROVISIONAL`` and not higher,
+#: despite often recovering a genuine journalled title: the sweep cannot tell
+#: from disk whether what it found was user-set, so ranking it above a live
+#: title would let a startup sweep overwrite a rename that had not yet been
+#: journalled. Filling an empty slot is all it is for.
+SESSION_NAME_RANK_PROVISIONAL = 10
+SESSION_NAME_RANK_BACKFILL = 10
+SESSION_NAME_RANK_TITLE = 20
+
 
 def _is_lock_error(exc: BaseException) -> bool:
     """Whether an OperationalError is contention (retryable) or a real fault.
@@ -148,10 +171,21 @@ CREATE INDEX IF NOT EXISTS idx_calls_provider ON calls(provider);
 -- Human-readable session names, so the per-session table can show a title
 -- rather than a 12-hex id. Upserted opportunistically; absence just means the
 -- report falls back to the id, never an error.
+--
+-- ``rank`` carries the PRECEDENCE of the name in the row, mirroring the rules
+-- ``session/naming.py`` documents for the live holder. Several sources now
+-- mirror a label here and they do not arrive in quality order: the instant
+-- opener-derived stand-in is written at submit, seconds before the model's
+-- real title, and a startup backfill can reconstruct either from disk long
+-- after both. Without a rank the last writer would win and a session that HAS
+-- a real title could be relabelled with a quote of its own opening question.
+-- The upsert is therefore rank-gated (see ``upsert_session_name``): a name may
+-- only be replaced by one of equal or higher rank. See ``SESSION_NAME_RANK_*``.
 CREATE TABLE IF NOT EXISTS session_names (
   session_id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
-  updated_at_ms INTEGER NOT NULL
+  updated_at_ms INTEGER NOT NULL,
+  rank INTEGER NOT NULL DEFAULT {SESSION_NAME_RANK_TITLE}
 );
 
 -- Calendar ROLLUP tables. These are NOT a second source of truth: every row is
@@ -653,6 +687,24 @@ class AnalyticsStore:
                 existing.add(name)
             except Exception:  # noqa: BLE001 — a failed add leaves the older shape
                 logger.debug("analytics: could not add column %s", name, exc_info=True)
+        # ``session_names.rank`` reaches an existing ledger the same way: the
+        # CREATE TABLE in _SCHEMA never alters a table that already exists, so a
+        # database from any earlier release has the name table without it. The
+        # DEFAULT is TITLE, which is the truth for every row written before this
+        # column existed — the only writer then was ``set_conversation_name``,
+        # i.e. a real generated or user-set title. Defaulting to PROVISIONAL
+        # instead would let the new backfill sweep overwrite genuine titles.
+        try:
+            name_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(session_names)").fetchall()
+            }
+            if name_columns and "rank" not in name_columns:
+                conn.execute(
+                    "ALTER TABLE session_names ADD COLUMN rank INTEGER NOT NULL "
+                    f"DEFAULT {SESSION_NAME_RANK_TITLE}"
+                )
+        except Exception:  # noqa: BLE001 — an un-migratable name table is not fatal
+            logger.debug("analytics: could not add session_names.rank", exc_info=True)
         # Scope cost to the cost columns only (NOT "all optional present"): with
         # c_images now in _MIGRATION_COLUMNS an all-present check would flip cost
         # off on a cost-capable DB that merely lacks images.
@@ -788,23 +840,149 @@ class AnalyticsStore:
                 return 0
         return 0
 
-    def upsert_session_name(self, session_id: str, name: str) -> None:
-        """Record (or update) a session's human name for the per-session table."""
-        if not session_id:
+    def upsert_session_name(
+        self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
+    ) -> None:
+        """Record (or update) a session's human name for the per-session table.
+
+        RANK-GATED, which is the whole reason this is not a plain upsert. The
+        ledger is now mirrored from several sources that do not arrive in
+        quality order — the provisional stand-in lands at submit, the model's
+        title a second or two later, a resume restores whichever was journalled,
+        and a startup backfill reconstructs one from disk at any time. Letting
+        the last writer win would have a provisional excerpt displace a real
+        title, which is precisely the precedence ``session/naming.py`` protects
+        on the live holder. The ``WHERE excluded.rank >= session_names.rank``
+        clause makes the same rule true of the ledger: a same-or-better source
+        may correct the row, a weaker one may only fill an empty slot — and an
+        EMPTY incumbent name counts as an empty slot at any rank (see the
+        ``session_names.name = ''`` arm of the gate below).
+
+        Equal rank still overwrites, deliberately: a re-title is the same rank
+        as the title it replaces and MUST be able to replace it.
+
+        An empty ``name`` is rejected outright rather than written. Storing one
+        creates a row that is simultaneously PRESENT (so it pins a rank) and
+        MISSING (``sessions_missing_names`` selects on ``name = ''``), which the
+        startup backfill would re-derive and re-attempt on every launch forever
+        while the rank gate rejected it — unbounded work that can never
+        converge. The recorder already guards this; the store is the shared
+        surface, so the guard belongs here too.
+        """
+        if not session_id or not name:
             return
         conn = self._connect()
         if conn is None:
             return
         try:
             conn.execute(
-                "INSERT INTO session_names (session_id, name, updated_at_ms) "
-                "VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
-                "name=excluded.name, updated_at_ms=excluded.updated_at_ms",
-                (session_id, name or "", self._now_ms()),
+                "INSERT INTO session_names (session_id, name, updated_at_ms, rank) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                "name=excluded.name, updated_at_ms=excluded.updated_at_ms, "
+                "rank=excluded.rank WHERE excluded.rank >= session_names.rank "
+                "OR session_names.name = ''",
+                (session_id, name, self._now_ms(), int(rank)),
             )
             conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("analytics: session name upsert failed", exc_info=True)
+
+    def session_names_present(self) -> set[str]:
+        """Every session id that already carries a ledger name.
+
+        Read by the startup backfill so it can skip the sessions that need no
+        work without opening a transcript for each — the sweep walks the whole
+        session store and a per-directory read would be the expensive half.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return set()
+        try:
+            rows = conn.execute("SELECT session_id FROM session_names WHERE name <> ''").fetchall()
+            return {str(row[0]) for row in rows}
+        except Exception:  # noqa: BLE001 — a failed read means "backfill nothing"
+            logger.debug("analytics: session name read failed", exc_info=True)
+            return set()
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def session_names_map(self) -> dict[str, str]:
+        """Every known ledger name, keyed by session id.
+
+        Read by the backfill so a delegated session can be labelled with its
+        PARENT's title without one query per row.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute("SELECT session_id, name FROM session_names WHERE name <> ''")
+            return {str(sid): str(name) for sid, name in rows.fetchall()}
+        except Exception:  # noqa: BLE001
+            logger.debug("analytics: session name map read failed", exc_info=True)
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def session_parents(self) -> dict[str, str]:
+        """child session id -> parent session id, from the recorded call rows.
+
+        The self-parent edge is EXCLUDED. 224 rows on the operator's real ledger
+        carry ``parent_session_id == session_id`` (all of them the degenerate
+        empty-id case), which is a genuine cycle edge in the data; a consumer
+        that walked this map without the guard would loop. Filtering it here
+        means every caller inherits the guard rather than having to remember it.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT session_id, parent_session_id FROM calls "
+                "WHERE parent_session_id <> '' AND session_id <> '' "
+                "AND session_id <> parent_session_id"
+            ).fetchall()
+            return {str(child): str(parent) for child, parent in rows}
+        except Exception:  # noqa: BLE001
+            logger.debug("analytics: session parent read failed", exc_info=True)
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def sessions_missing_names(self) -> set[str]:
+        """Session ids that HAVE ledger rows but no name — the backfill's worklist.
+
+        Scoped to ids the ledger actually knows about so the sweep never mints a
+        name for a session that cost nothing, and so its work is bounded by the
+        ledger rather than by the session store.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return set()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT c.session_id FROM calls c "
+                "LEFT JOIN session_names n ON n.session_id = c.session_id "
+                "WHERE c.session_id <> '' AND (n.name IS NULL OR n.name = '')"
+            ).fetchall()
+            return {str(row[0]) for row in rows}
+        except Exception:  # noqa: BLE001 — a failed read means "backfill nothing"
+            logger.debug("analytics: missing-name read failed", exc_info=True)
+            return set()
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def prune(self, *, now_ms: int | None = None) -> int:
         """Delete rows past their retention window. Returns raw-ledger rows removed.
