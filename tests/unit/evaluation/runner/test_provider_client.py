@@ -40,6 +40,7 @@ from local_operator.evaluation.runner.provider_client import (
     build_system_prompt,
     parse_decision,
 )
+from local_operator.harness.reply_channel import REPLY_CHANNEL_TOOL_NAME
 from local_operator.harness.types import (
     ImageContent,
     ModelSpec,
@@ -146,7 +147,10 @@ class ScriptedStream:
 
 
 def _client(stream: Any, tmp_path: Path | None = None, **overrides: Any) -> ProviderModelClient:
-    spec = ModelSpec(provider="provider", model_id="model")
+    # The spec is an override like any other: the reply-channel tests need a
+    # model whose ``supports_tools`` differs, and a second near-identical
+    # factory beside this one would be the drift it exists to prevent.
+    spec = overrides.pop("model_spec", None) or ModelSpec(provider="provider", model_id="model")
     root = tmp_path if tmp_path is not None else Path("/nonexistent-artifact-root")
     return ProviderModelClient(
         stream, route=ROUTE, model_spec=spec, artifact_root=root, **overrides
@@ -453,9 +457,13 @@ async def test_client_sends_the_system_prompt_as_a_cacheable_block() -> None:
     request = stream.requests[0]
     assert len(request.system_blocks) == 1
     assert request.messages[0].role == "user"
-    # The episode drives the environment through the protocol, not through
-    # harness tools, so the provider must not be offered any.
-    assert request.tool_choice == "none"
+    # The episode still drives the environment through the protocol, never
+    # through harness tools: the ONLY function offered is the reply channel,
+    # which nothing executes. ``auto`` rather than the old ``none`` because
+    # forbidding the channel we just offered is the contradiction that made a
+    # tool-trained model's reply unparseable — see harness/reply_channel.py.
+    assert request.tool_choice == "auto"
+    assert [tool.name for tool in request.tools] == [REPLY_CHANNEL_TOOL_NAME]
 
 
 @pytest.mark.asyncio
