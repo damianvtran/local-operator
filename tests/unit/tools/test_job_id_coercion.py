@@ -26,10 +26,18 @@ from __future__ import annotations
 import json
 import random
 import uuid
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from local_operator.tools.builtin import _coerce_job_targets, _coerce_single_job_id
+from local_operator.tools.builtin import (
+    HubParams,
+    JobsParams,
+    _coerce_hub_to,
+    _coerce_job_targets,
+    _coerce_single_job_id,
+)
 
 # Fixed seed: the corpus must be identical on every run and on CI, so a failure
 # is reproducible from the message alone rather than "sometimes red".
@@ -162,6 +170,79 @@ def test_known_id_shapes(value, expected):
     assert _coerce_job_targets(value) == expected
 
 
+def test_bare_int_survives_because_str_int_is_lossless():
+    """A model that emits ``{"job_id": 920883861377}`` unquoted is still served.
+
+    JSON forbids leading zeros, ``+`` and underscores in an integer literal, so
+    the decoded ``int`` round-trips to exactly the characters that were written
+    and recovering it invents nothing.
+    """
+    assert _coerce_job_targets(920883861377) == "920883861377"
+    # The int is deliberately off-annotation: `job_id` is declared `str | None`
+    # and the before-validator is precisely what widens the accepted input, so
+    # the type checker is right about the signature and wrong about the intent.
+    bare_int: Any = 920883861377
+    assert JobsParams(op="peek", job_id=bare_int).job_id == "920883861377"
+
+
+@pytest.mark.parametrize(
+    ("literal", "decoded"),
+    [
+        ("7019316393e2", 701931639300.0),  # retyped: a different, valid-looking id
+        ("177650473e52", 1.77650473e60),
+        ("13190e419943", float("inf")),  # overflow: the id is destroyed outright
+        ("1e5", 100000.0),
+    ],
+)
+def test_bare_float_is_refused_rather_than_turned_into_a_different_id(literal, decoded):
+    """MAJOR-1 (review round 1): never fabricate an id from a parsed float.
+
+    Unlike the string path, a BARE unquoted scalar has already been through the
+    outer tool-argument decode, which destroyed the source text before this
+    code runs. ``13190e419943`` is a legal ``uuid4().hex[:12]``, so this is
+    reachable in production at the same ~0.65% rate as the rest of the defect.
+
+    Formatting the survivor would emit ``'701931639300.0'`` or ``'inf'`` -- a
+    syntactically plausible id that was never minted, which is precisely the
+    trap this module exists to close, and *worse* than the pre-fix behaviour
+    that at least failed loudly. Where the literal is unrecoverable the value
+    must pass through so the field's own validation reports it.
+    """
+    assert json.loads(literal) == decoded  # the decode really is lossy
+    assert _coerce_job_targets(decoded) is decoded  # passed through, not formatted
+    with pytest.raises(ValidationError, match="valid string"):
+        JobsParams(op="peek", job_id=decoded)
+
+
+@pytest.mark.parametrize("depth", [5, 30, 999, 1001, 5000, 20000])
+def test_deep_nesting_is_bounded_and_never_raises(depth):
+    """MINOR-1 (review round 1): no ``RecursionError`` escapes at any depth.
+
+    Two distinct stack consumers had to be bounded: this module's own recursion
+    (capped by ``_MAX_TARGET_NEST_DEPTH``) and ``json.loads``, which does its
+    own recursive descent and blows up *before* that cap is consulted. Since
+    ``RecursionError`` is not a ``ValueError``, it would otherwise sail past
+    the parse guard and past the callers' ``ValidationError`` handlers.
+    """
+    payload = "[" * depth + '"920883861377"' + "]" * depth
+    result = _coerce_job_targets(payload)  # must not raise
+    assert isinstance(result, (str, list))
+    assert _coerce_hub_to(payload) is not None
+
+
+def test_dict_policy_matches_the_documented_asymmetry():
+    """MINOR-2 (review round 1): code and comment must agree.
+
+    A real Python list PRESERVES a non-id item so the field's own validation
+    reports it; a bracketed STRING drops it, because there the surrounding
+    value is a single string with no per-item validation left to speak for it,
+    and preserving the dict would fail the whole payload instead of resolving
+    the real ids beside it. Both behaviours are now stated where they happen.
+    """
+    assert _coerce_job_targets([{"a": 1}, "920883861377"]) == [{"a": 1}, "920883861377"]
+    assert _coerce_job_targets('[{"a":1}, "920883861377"]') == "920883861377"
+
+
 @pytest.mark.parametrize("value", [None, True, False])
 def test_bare_non_id_scalars_pass_through_untouched(value):
     """A bare ``None`` means the argument was OMITTED, not an id spelled 'null'.
@@ -189,3 +270,101 @@ def test_measured_mangle_rate_over_real_uuid4_ids_is_zero():
     ids = [uuid.uuid4().hex[:12] for _ in range(10_000)]
     mangled = [i for i in ids if _coerce_job_targets(f"[{i}]") != i]
     assert not mangled, f"{len(mangled)}/{len(ids)} ids mangled, e.g. {mangled[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# The same defect in the sibling coercion: hub's ``to`` field.
+#
+# Found by QA on round 1 while this PR was fixing ``_coerce_job_targets``.
+# ``_coerce_hub_to`` parsed with a plain ``json.loads`` and kept only
+# ``isinstance(item, str)``, so a numeric-looking subagent id was parsed to a
+# number and then dropped: ``'[920883861377]'`` coerced to ``[]``. The failure
+# mode is worse than a bad lookup -- ``to`` became EMPTY, so ``hub op='ask'``
+# addressed nobody and a parent blocking on the answer simply never got one,
+# with no error to explain it.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_to_round_trips_every_generated_id_shape(id_corpus):
+    """PROPERTY: any id, in any wire shape, reaches ``to`` intact.
+
+    Fails on the pre-fix code at the first all-digit or exponent-shaped id.
+    """
+    for job_id in id_corpus:
+        assert _coerce_hub_to(job_id) == [job_id], f"bare {job_id!r}"
+        assert _coerce_hub_to(f"[{job_id}]") == [job_id], f"bracketed {job_id!r}"
+        assert _coerce_hub_to(json.dumps([job_id])) == [job_id], f"json {job_id!r}"
+
+
+def test_hub_to_never_silently_empties(id_corpus):
+    """The invariant that matters: a named target must never vanish.
+
+    An empty ``to`` is the dangerous outcome -- ``ask`` reports no recipient
+    rather than an error, so the caller waits for an answer nobody was asked
+    for.
+    """
+    for job_id in id_corpus:
+        for shape in (job_id, f"[{job_id}]", json.dumps([job_id])):
+            assert _coerce_hub_to(shape), f"{shape!r} coerced to an empty target list"
+
+
+def test_hub_to_multi_target_fan_out_survives(id_corpus):
+    """``resume``/``send`` fan one message out to a batch; numeric ids included."""
+    rng = random.Random(_SEED + 2)
+    for _ in range(300):
+        a, b = rng.choice(id_corpus), rng.choice(id_corpus)
+        assert _coerce_hub_to(f"[{a}, {b}]") == [a, b]
+        assert _coerce_hub_to(json.dumps([a, b])) == [a, b]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("[920883861377]", ["920883861377"]),
+        ("920883861377", ["920883861377"]),
+        ('["920883861377"]', ["920883861377"]),
+        ("[13190e419943]", ["13190e419943"]),  # overflows to inf if parsed
+        ("[12e345678901]", ["12e345678901"]),
+        ("[000123456789]", ["000123456789"]),
+        ("[920883861377, 468698086935]", ["920883861377", "468698086935"]),
+        ("[a1b2c3d4e5f6]", ["a1b2c3d4e5f6"]),
+        ("all", ["all"]),
+        ("reviewer", ["reviewer"]),
+    ],
+)
+def test_hub_to_known_shapes(value, expected):
+    assert _coerce_hub_to(value) == expected
+    assert HubParams(op="ask", to=value, message="ping").to == expected
+
+
+@pytest.mark.parametrize("payload", ["[null]", "[true]", "[false]"])
+def test_hub_to_still_drops_bare_json_literals(payload):
+    """Deliberate divergence from ``_coerce_job_targets``, and a pre-existing
+    contract: a ``to`` target is resolved against live peers rather than looked
+    up as an id, so a bare JSON literal must not become a peer literally named
+    ``null``.
+
+    The empty list is the intended carrier of that refusal. ``HubParams``
+    accepts it -- ``op='list'`` legitimately has no target -- and
+    ``execute_hub`` is what reports ``needs a 'to' target``, so the assertion
+    is on the empty ``to``, not on a ``ValidationError`` the model never
+    raises.
+    """
+    assert _coerce_hub_to(payload) == []
+    assert HubParams(op="ask", to=payload, message="ping").to == []
+
+
+def test_hub_ask_reaches_a_child_whose_id_is_all_digits():
+    """End-to-end shape: an id of the kind a real ``AsyncJobManager`` mints at
+    this rate survives coercion and lands in ``to`` as one addressable target.
+
+    Contrast the pre-fix behaviour, where ``to`` came back ``[]`` and the ask
+    was answered by nobody.
+    """
+    minted = "920883861377"
+    # `to` is declared `list[str]`; passing the bracketed STRING is the whole
+    # point of the before-validator under test (a model emitted it that way).
+    bracketed: Any = f"[{minted}]"
+    params = HubParams(op="ask", to=bracketed, message="are you there?")
+    assert params.to == [minted]
+    assert params.op == "ask"
