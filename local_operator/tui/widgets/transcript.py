@@ -262,7 +262,6 @@ class TranscriptBlock(Static):
     #: Grouping key for adaptive spacing. Blocks that share a kind stack
     #: tight while each stays one row; a change of kind always opens a gap.
     SPACING_KIND: ClassVar[str] = "block"
-    completion_anchor_id: str = ""
     # Scroll identity is separate from completion receipts: every message may
     # anchor a viewport, but only a rendered terminal completion may be read.
     navigation_anchor_id: str = ""
@@ -271,6 +270,8 @@ class TranscriptBlock(Static):
 
     def set_navigation_visible(self, visible: bool) -> None:
         self._navigation_visible = visible
+
+    completion_anchor_id: str = ""
     #: True for a block that always opens a gap above itself regardless of
     #: what preceded it — the turn boundary, not a content difference.
     SPACING_LEAD: ClassVar[bool] = False
@@ -2133,6 +2134,17 @@ class WorkingBlock(TranscriptBlock):
             self._timer.stop()
         self._timer = self.set_interval(self._tick_ms / 1000, self._tick)
 
+    def set_navigation_visible(self, visible: bool) -> None:
+        super().set_navigation_visible(visible)
+        if self._timer is not None:
+            if visible:
+                self._sync_rate()
+                if self._timer is not None:
+                    self._timer.resume()
+                self._paint()
+            else:
+                self._timer.pause()
+
     def sync_animation_rate(self) -> None:
         """Re-rate after a focus change, and repaint so nothing reads stale.
 
@@ -2982,6 +2994,10 @@ class TranscriptView(ScrollableContainer):
         """Whether growth currently carries the viewport with it."""
         return self._tail_anchor.following
 
+    def set_navigation_visible(self, visible: bool) -> None:
+        for block in self._blocks:
+            block.set_navigation_visible(visible)
+
     def restore_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> bool:
         """Restore the same message, not a stale screen-row offset after resize."""
         anchor = next(
@@ -3006,7 +3022,9 @@ class TranscriptView(ScrollableContainer):
             + min(offset, max(0, anchor.region.height - 1))
         )
         with self._tail_anchor.programmatic_scroll():
-            self.scroll_to(y=max(0, y), animate=False, immediate=True)
+            # Disabled means no user input, not no restoration: staged views
+            # are non-interactive while their canonical anchor is laid out.
+            self.scroll_to(y=max(0, y), animate=False, immediate=True, force=True)
         return True
 
     def follow_tail(self) -> None:
@@ -3101,7 +3119,7 @@ class TranscriptView(ScrollableContainer):
         short of the tail.
         """
         with self._tail_anchor.programmatic_scroll():
-            self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True)
+            self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True, force=True)
 
     def _size_updated(
         self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True

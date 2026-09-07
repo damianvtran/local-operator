@@ -1874,7 +1874,7 @@ class OperatorApp(App[None]):
         #: suppressed, so a question raised while the user was watching was
         #: never announced after they tabbed away — indefinitely, since the
         #: latch re-arms only by answering the question they do not know exists.
-        self._waiting_kind: str | None = None
+        self._waiting_kind = None
         #: Whether a turn completion was suppressed because delegated work was
         #: still outstanding, and therefore still owes the user a toast. The
         #: docstring's original claim — that silence costs nothing because a
@@ -1884,7 +1884,7 @@ class OperatorApp(App[None]):
         #: manager's cancel branch never delivers at all. Left to that, a
         #: parent that finished while a child was later CANCELLED was never
         #: announced. This flag is what lets the last child's settle deliver it.
-        self._completion_deferred: bool = False
+        self._completion_deferred = False
         #: Job ids whose ``SubagentEnded`` this app has already handled but
         #: which the job manager may not have marked settled yet. A SET, not a
         #: single id, because a `task` batch settles its children inside one
@@ -1893,7 +1893,7 @@ class OperatorApp(App[None]):
         #: ITSELF saw its siblings as outstanding and returned early. Nobody was
         #: last, so nobody delivered the completion — and the deferred flag then
         #: latched, swallowing every later completion in the session.
-        self._settled_child_ids: set[str] = set()
+        self._settled_child_ids = set()
         #: Whether a turn is OPEN — set by ``TurnStarted``, cleared by
         #: ``_finalize_turn`` and by the two teardown paths that throw a turn
         #: away. It is the latch that makes turn retirement at-most-once: a
@@ -2420,7 +2420,7 @@ class OperatorApp(App[None]):
         # epoch it entered in and denies if the latch covers that epoch, so a
         # `TurnStarted` racing the wake cannot un-deny a stopped turn's tools.
         self._turn_epoch = 0
-        self._approvals_denied_epoch: int | None = None
+        self._approvals_denied_epoch = None
         # Tool cards the last turn boundary marked interrupted. Read once, by
         # `on_turn_ended`, to decide whether an abort still owes the user a
         # standalone notice or has already said it on the rows themselves.
@@ -2618,6 +2618,48 @@ class OperatorApp(App[None]):
     @property
     def _turn_notified(self) -> bool:
         return self._interaction.turn.notified
+        self._status = StatusLine(self.query_one("#status-band", Static))
+        self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        # Attached AFTER the first `update`, so the first STABLE title already
+        # carries the working directory it falls back to while the conversation
+        # is unnamed. Attaching first would leave a bare `lo ›` on screen for
+        # as long as the boot takes.
+        self._start_terminal_title()
+        # Inline images write kitty graphics APCs through the same driver door
+        # (`tui/images.py` docs the interleaving hazard). Installed with the
+        # same gate as the title: no driver or headless means no terminal to
+        # transmit to, and ImageBlock then falls back to half-cells or text on
+        # its own — the writer's absence is a mode signal, never an error.
+        driver = self._driver
+        if driver is not None and not self.is_headless:
+            images_mod.set_escape_writer(driver.write)
+        # Same driver, same gating, one line later: the notifier is the title's
+        # out-of-app counterpart (state vs edge — see `tui/notify.py`), and both
+        # want the terminal available and the app non-headless.
+        self._start_notifier()
+        # Straight after the band exists and before the session is asked for:
+        # the saved mode has to be in force by the time the first tool can ask,
+        # and the band has to say so on the boot frame rather than on whichever
+        # later event happens to repaint it.
+        self._load_approvals_default()
+        editor = self.query_one(Editor)
+        # Installed here rather than in the Editor's constructor: the editor is
+        # built inside `compose`, before the app has anything for it to call, and a
+        # widget that reached back into its host would invert the dependency this
+        # whole module is arranged around.
+        editor.set_model_handler(self._on_model_row_chosen)
+        editor.focus()
+        # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
+        self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
+        # Prime the reader observation while mount still owns a known-live
+        # driver. A tty can EOF before the first interval tick, and requiring a
+        # prior observation is what keeps headless/alternate drivers safe.
+        self._check_terminal_frontend()
+        # Keep the active provider's quota warm in the shared cache so `/usage`
+        # answers from disk (see USAGE_WARM_INTERVAL_S).
+        self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
 
     @_turn_notified.setter
     def _turn_notified(self, value: bool) -> None:
@@ -3123,6 +3165,7 @@ class OperatorApp(App[None]):
             getattr(state, "generation", 0),
             getattr(state, "history_cursor", None),
             getattr(state, "streaming", False),
+            getattr(source.session, "display_history_revision", 0),
         )
 
     def _capture_sidebar_presentation(self) -> SessionPresentation:
@@ -3141,6 +3184,7 @@ class OperatorApp(App[None]):
         return SessionPresentation(
             replay=replay,
             revision=self._interaction.presentation_revision,
+            replay_revision=getattr(self._session, "display_history_revision", 0),
             source_stamp=self._sidebar_source_stamp(self._interaction),
             source_token=self._interaction.token,
             history_size=self._history_length(),
@@ -3272,6 +3316,8 @@ class OperatorApp(App[None]):
         from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_catalog import session_directory_name
 
+        if not session_directory_name(session_id):
+            raise ValueError("The conversation identifier is not valid")
         if self._session is not None and self._session.session_id == session_id:
             return self._interaction, self._capture_sidebar_presentation()
         if not speculative:
@@ -3289,6 +3335,7 @@ class OperatorApp(App[None]):
                 await asyncio.wait_for(session._ensure_bound(), 15)
             if session.is_cold:
                 raise RuntimeError("The conversation has not finished connecting")
+            await session.ensure_display_current()
             gate = session.frontend_state.pending_gate
             if gate is not None and gate.kind not in {"ask", "approval"}:
                 raise RuntimeError("This viewer does not support the conversation's pending input")
@@ -3317,17 +3364,28 @@ class OperatorApp(App[None]):
                     source.draft.following_tail = True
                     source.draft.scroll_anchor_id = ""
             history = session.display_history_window()
+            replay_revision = session.display_history_revision
             source_stamp = self._sidebar_source_stamp(source)
             replay.prepare(
                 history,
                 bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
             )
+            self._mark_pending_tool_rows(replay.blocks, session)
             replay.view.styles.layer = "session-cache"
-            replay.view.styles.visibility = "hidden"
+            # visibility:hidden removes the compositor map and makes size=0.
+            # A screen overlay is excluded from flow/virtual bounds; parking it
+            # one viewport to the right preserves its real dimensions and scroll
+            # layout while clipping ALL ink/hit targets (unlike cached opacity).
+            replay.view.styles.overlay = "screen"
+            replay.view.styles.offset = ("100vw", 0)
+            replay.view.disabled = True
+            replay.view.set_navigation_visible(False)
+            for block in replay.blocks:
+                block.set_navigation_visible(False)
             replay.view.styles.height = self._transcript_view().outer_size.height
             conversation = self.query_one("#session-conversation")
-            conversation.styles.layers = "default session-cache"
+            conversation.styles.layers = "session-cache default"
             await conversation.mount(replay.view)
             if not replay.blocks:
                 welcome = WelcomeView(
@@ -3360,6 +3418,7 @@ class OperatorApp(App[None]):
             return source, SessionPresentation(
                 replay,
                 revision=revision,
+                replay_revision=replay_revision,
                 source_stamp=source_stamp,
                 source_token=source.token,
                 history_size=session.history_message_count,
@@ -3459,17 +3518,55 @@ class OperatorApp(App[None]):
             )
 
     def _sidebar_gate_surface_ready(self, source: SessionInteraction) -> bool:
-        if not self._is_current(source) or getattr(source.session, "is_cold", False):
+        if (
+            not self._is_current(source)
+            or getattr(source.session, "is_cold", False)
+            or not getattr(source.session, "display_history_current", True)
+        ):
             return False
         view = self._transcript_view()
         editor = self._editor()
-        if not view.is_on_screen or not editor.is_mounted or editor.disabled:
+        # Widget.region may lazily reflow a newer layout after the display that
+        # invoked this hook. Only the compositor map used by that display can
+        # prove its target pixels/gates were actually on screen. Never rebuild
+        # a map here and then treat the next frame's geometry as already shown.
+        displayed = getattr(self, "_sidebar_displayed_frame", None)
+        if displayed is None:
             return False
+        frame_token, frame_generation, replay_revision, presentation_revision, painted = displayed
+        if (
+            frame_token != source.token
+            or frame_generation != self._sidebar_navigation.generation
+            or replay_revision != getattr(source.session, "display_history_revision", 0)
+            or presentation_revision != source.presentation_revision
+        ):
+            return False
+
+        def region(widget: Widget) -> Any:
+            entry = painted.get(id(widget._render_widget))
+            return entry[0] if entry is not None else None
+
+        view_region = region(view)
+        if (
+            view_region is None
+            or region(editor) is None
+            or not editor.is_mounted
+            or editor.disabled
+        ):
+            return False
+        content = view_region.shrink(view.styles.gutter)
         blocks = view.blocks()
+        if blocks and not any(
+            (area := region(block)) is not None and area.overlaps(content) for block in blocks
+        ):
+            return False
         if source.draft.following_tail:
             last = next((block for block in reversed(blocks) if block.display), None)
-            if not view.is_near_bottom() or (
-                last is not None and last.region.bottom > view.content_region.bottom
+            last_region = region(last) if last is not None else None
+            if last is not None and (
+                last_region is None
+                or not last_region.overlaps(content)
+                or last_region.bottom > content.bottom
             ):
                 return False
         elif source.draft.scroll_anchor_id:
@@ -3483,14 +3580,20 @@ class OperatorApp(App[None]):
                 None,
             )
             if anchor is not None:
-                offset = min(source.draft.scroll_offset, max(0, anchor.region.height - 1))
-                if (
-                    anchor.region.y + offset != view.content_region.y
-                    and 0 < view.scroll_y < view.max_scroll_y
-                ):
+                anchor_region = region(anchor)
+                if anchor_region is None or not anchor_region.overlaps(content):
                     return False
-        state = getattr(source.session, "frontend_state", None)
-        gate = getattr(state, "pending_gate", None)
+                offset = min(source.draft.scroll_offset, max(0, anchor_region.height - 1))
+                if anchor_region.y + offset != content.y and 0 < view.scroll_y < view.max_scroll_y:
+                    return False
+        # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
+        # the entire state (jobs, usage, trajectories) on every display, which
+        # profiling measured as the largest single cost of the cold frame. A
+        # reduced facade without the narrow accessor still falls back below.
+        session = source.session
+        gate = getattr(session, "pending_gate", None)
+        if gate is None and not hasattr(session, "pending_gate"):
+            gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
         if gate is None:
             return self._ask_screen is None and self._approval is None
         if gate.kind == "approval" and bool(source.draft.approve_all):
@@ -3501,7 +3604,7 @@ class OperatorApp(App[None]):
             and card.source_binding
             == (source.token, self._sidebar_gate_identity(source), source.gate_view_generation)
             and card.is_mounted
-            and card.is_on_screen
+            and region(card) is not None
             and not card.disabled
             and not card.settled
         )
@@ -3522,8 +3625,37 @@ class OperatorApp(App[None]):
 
         timer = self.set_timer(15, expired)
         future.add_done_callback(lambda _future: timer.stop())
-        self.refresh()
+        # The first target frame must cover its transcript, draft and gates,
+        # not merely a sidebar/status fragment sharing the new geometry map.
+        self.screen.refresh(layout=True)
         return future
+
+    def _display(self, screen: "Screen[Any]", renderable: Any) -> None:
+        from textual._compositor import LayoutUpdate
+
+        if (
+            getattr(self, "_sidebar_ready_frame", None) is not None
+            and isinstance(renderable, LayoutUpdate)
+            and self._running
+            and not self._closed
+            and not self._batch_count
+            and screen is self.screen
+        ):
+            painted = screen._compositor._visible_widgets
+            if painted is not None:
+                # Textual calls post_display_hook even for renderable=None.
+                # A full update proves all target surfaces were painted, not
+                # just a sidebar fragment. Store only IDs/geometry so this
+                # evidence cannot retain a dismissed secret-input widget.
+                source = self._interaction
+                self._sidebar_displayed_frame = (
+                    source.token,
+                    self._sidebar_navigation.generation,
+                    getattr(source.session, "display_history_revision", 0),
+                    source.presentation_revision,
+                    {id(widget): geometry for widget, geometry in painted.items()},
+                )
+        super()._display(screen, renderable)
 
     def post_display_hook(self) -> None:
         super().post_display_hook()
@@ -3540,11 +3672,23 @@ class OperatorApp(App[None]):
             # update. Only now are the target frame and its input surface ready.
             self._sidebar_ready_frame = None
             future.set_result(None)
+        elif (
+            generation == self._sidebar_navigation.generation
+            and self._is_current(source)
+            and getattr(source.session, "display_history_current", True)
+        ):
+            # A container can land before its parked children's translated
+            # scroll map. Request the actual follow-up layout/paint now rather
+            # than waiting for the unrelated two-second catalog poll. The same
+            # displayed-map gate still decides readiness; no timer waives it.
+            self.screen.refresh(layout=True)
 
     def _sidebar_navigation_pending(self, session_id: str) -> None:
         from local_operator.session.remote import RemoteSession
 
         current = self._session
+        if session_id:
+            self._sidebar_displayed_frame = None
         if isinstance(current, RemoteSession):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
@@ -3768,6 +3912,13 @@ class OperatorApp(App[None]):
             return
         if not isinstance(session, RemoteSession) or session.is_cold:
             raise RuntimeError("The conversation is not ready for input")
+        if (
+            not session.display_history_current
+            or incoming.replay_revision != session.display_history_revision
+        ):
+            from local_operator.tui.session_navigation import PreparationInvalidated
+
+            raise PreparationInvalidated("canonical replay changed during preparation")
         outgoing = self._interaction
         previous = outgoing.session
         if previous is not None and not isinstance(previous, RemoteSession):
@@ -3831,16 +3982,26 @@ class OperatorApp(App[None]):
         self._settle_key_prompt()
         self._approval = None
         old_view = self._transcript_view()
+        old_view.set_navigation_visible(False)
+        if self._welcome is not None:
+            self._welcome.set_navigation_visible(False)
         old_view.set_on_user_scroll(None)
         old_view.set_on_tail_requested(None)
         old_view.set_on_clear(None)
         old_view.styles.layer = "session-cache"
-        old_view.styles.visibility = "hidden"
+        old_view.styles.overlay = "screen"
+        old_view.styles.offset = ("100vw", 0)
+        old_view.disabled = True
         old_view.styles.height = old_view.outer_size.height
         displaced = self._sidebar_presentations.pop(session_id, None)
         self._apply_sidebar_presentation(incoming)
         incoming.replay.view.styles.layer = "default"
-        incoming.replay.view.styles.visibility = "visible"
+        incoming.replay.view.styles.overlay = "none"
+        incoming.replay.view.styles.offset = (0, 0)
+        incoming.replay.view.disabled = False
+        incoming.replay.view.set_navigation_visible(True)
+        if incoming.welcome is not None:
+            incoming.welcome.set_navigation_visible(True)
         incoming.replay.view.styles.height = "1fr"
         incoming.replay.view.set_on_clear(self._on_transcript_cleared)
         incoming.replay.view.set_on_user_scroll(self._transcript_scrolled)
@@ -3851,6 +4012,7 @@ class OperatorApp(App[None]):
             if factory is not None:
                 self._session_factory = lambda: factory(session_id)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
             history = session.display_history_window()
             total = session.history_message_count
             if total > incoming.history_size:
@@ -4164,10 +4326,9 @@ class OperatorApp(App[None]):
 
         def collect() -> list[CatalogEntry]:
             from local_operator.paths import config_dir
-            from local_operator.resume import recent_session_rows
+            from local_operator.tui.session_catalog import load_catalog
 
-            rows = self._overlay_live_state(recent_session_rows(config_dir(), limit=None))
-            return [CatalogEntry(row) for row in rows]
+            return load_catalog(config_dir())
 
         async def refresh() -> None:
             try:
@@ -4180,7 +4341,7 @@ class OperatorApp(App[None]):
                 session = self._session
                 self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
                 self._session_sidebar.set_entries(entries)
-                self._prewarm_sidebar(entries)
+                self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
             except Exception:
                 if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
                     self._session_sidebar.show_error("Could not refresh conversations")
@@ -4283,7 +4444,7 @@ class OperatorApp(App[None]):
         return TranscriptScreen(id="_default")
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="session-workspace"):
+        with SessionWorkspace(id="session-workspace"):
             yield self._session_sidebar
             with Container(id="session-conversation"):
                 # The welcome splash is the transcript's EMPTY STATE, so it is mounted
@@ -4613,7 +4774,7 @@ class OperatorApp(App[None]):
             # the transcript to stop mid-air (round-3 D3-1/Q3-2/U3-1).
             set_stopped = getattr(session, "set_stopped_callback", None)
             if callable(set_stopped):
-                set_stopped(self._on_watched_session_stopped)
+                set_stopped(lambda: self._on_watched_session_stopped(source))
             # The third outcome, and the only one that is housekeeping rather
             # than an ending: the runtime retired ITSELF because `lop-update`
             # put a newer build on disk. Re-engage at once so the band never
@@ -4917,7 +5078,7 @@ class OperatorApp(App[None]):
         )
         self._refresh_band()
 
-    def _on_watched_session_stopped(self) -> None:
+    def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
 
         Says the same thing the owner's own ``/stop`` says, because it is the
@@ -4925,7 +5086,18 @@ class OperatorApp(App[None]):
         id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
         is what turns every later "owner is reconnecting" into the truth.
         """
-        session = self._session
+        source = source or self._interaction
+        session = source.session
+        source.turn.open = False
+        source.loop.cancelled = True
+        source.gate_draft = None
+        source.gate_view_generation += 1
+        source.presentation_revision += 1
+        if not self._is_current(source):
+            # The facade already owns its stopped state and invokes this same
+            # source-bound callback on a later adoption. A hidden owner's stop
+            # must never settle the selected conversation's approval/ask widgets.
+            return
         session_id = getattr(session, "session_id", "") if session is not None else ""
         if session_id:
             self._stopped_session_id = session_id
@@ -5637,11 +5809,22 @@ class OperatorApp(App[None]):
         self._resume_in_zone = True
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
 
+    @staticmethod
+    def _mark_pending_tool_rows(blocks: list[Any], session: Any) -> None:
+        pending = getattr(session, "pending_display_tool_ids", None)
+        if callable(pending):
+            call_ids = cast(set[str], pending())
+            for block in blocks:
+                if isinstance(block, ToolCard) and block.tool_call_id in call_ids:
+                    block.mark_waiting()
+
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         try:
-            return project_settled_rows(self, history, bound=bound)
+            projected = project_settled_rows(self, history, bound=bound)
+            self._mark_pending_tool_rows(self._transcript_view().blocks(), self._session)
+            return projected
         finally:
             self._projection_message_id = ""
 
@@ -13470,10 +13653,9 @@ class OperatorApp(App[None]):
         # — but through the SAME public `sync_animation_rate` seam as the four
         # above, not through its privates: a second convention for "re-rate
         # yourself" is exactly what this module's docstring warns against.
-        try:
-            welcome = self.query_one(WelcomeView)
-        except Exception:
-            return  # no splash mounted, or already torn down: the ordinary case
+        welcome = self._welcome
+        if welcome is None:
+            return
         try:
             welcome.sync_animation_rate()
         except Exception:  # pragma: no cover - defensive; chrome must not raise
@@ -14059,6 +14241,7 @@ class OperatorApp(App[None]):
             # No such implementation exists in tree, and unlike the prompt path
             # there is no signature to probe — a re-minting host would have to
             # be caught by its own tests (round 1, F2).
+            user_block.navigation_anchor_id = steer_message.id
             self._register_user_echo(sent, message_id=steer_message.id)
             # Held with the notice so Esc can lift the whole steer — the queued
             # row, the user row and its image blocks — back out of the
@@ -14099,6 +14282,8 @@ class OperatorApp(App[None]):
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
             self._interaction.compaction.accepted_draft = self._interaction.turn.submitted_draft
+            self._interaction.compaction.accepted_message_id = self._echo_message_id(session.prompt)
+            user_block.navigation_anchor_id = self._interaction.compaction.accepted_message_id
             # Only when they differ, so the common path leaves this empty and
             # the hand-back below falls through to the held prompt itself.
             #
@@ -14120,7 +14305,9 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(named)
             return
-        self._start_turn(sent, images)
+        echo = self._start_turn(sent, images)
+        if isinstance(echo, _PendingUserEcho):
+            user_block.navigation_anchor_id = echo.message_id
         # AFTER the turn is dispatched, and then concurrently with it: the
         # title is decoration, so it must never sit in front of the user's
         # first reply — but it must also not wait for the whole turn, which is
@@ -14141,7 +14328,8 @@ class OperatorApp(App[None]):
         images: list[ImageContent] | None = None,
         *,
         accepted: SessionDraft | None = None,
-    ) -> None:
+        message_id: str = "",
+    ) -> _PendingUserEcho | None:
         """Run one user prompt as a turn, reporting a failure as a notice.
 
         Extracted from :meth:`_submit_prompt` so a prompt HELD through a
@@ -14170,7 +14358,7 @@ class OperatorApp(App[None]):
         source.turn.operation += 1
         turn_operation = source.turn.operation
         echo = self._register_user_echo_for(
-            source, text, message_id=self._echo_message_id(session.prompt)
+            source, text, message_id=message_id or self._echo_message_id(session.prompt)
         )
         # A turn STARTING ends any barren click gesture: from here Ctrl+C means
         # "stop this turn", and a claim raised before the turn existed cannot
@@ -14342,10 +14530,11 @@ class OperatorApp(App[None]):
                 # working blip bounded by the owner's prompt preparation, not by
                 # the relay of the OUTCOME. That is not the flash this closes.
                 knows_outcome = not bool(getattr(session, "is_remote", False))
-                self._retire_turn_band(
-                    session,
-                    failed=(bool(error_text) and not aborted) if knows_outcome else None,
-                )
+                if self._is_current(source):
+                    self._retire_turn_band(
+                        session,
+                        failed=(bool(error_text) and not aborted) if knows_outcome else None,
+                    )
                 # POSTED, NEVER CALLED INLINE. For an in-process `Session`,
                 # `prompt()` returns only after the pipeline's `finally` has
                 # flushed the held end, which `_emit`s `agent_end`
@@ -14361,6 +14550,7 @@ class OperatorApp(App[None]):
                 )
 
         self.run_worker(run_prompt(), thread=False, group=source.worker_group("turns"))
+        return echo
 
     def _retire_turn_band(self, session: Any, *, failed: bool | None = None) -> None:
         """Clear the status band for a turn whose worker is done with it.
@@ -16316,8 +16506,9 @@ class OperatorApp(App[None]):
         into the scrollback is not the edge that starts a conversation.
         """
         if self._projection_message_id:
-            block.navigation_anchor_id = self._projection_message_id
-            block.navigation_anchor_part = self._projection_part
+            if not block.navigation_anchor_id:
+                block.navigation_anchor_id = self._projection_message_id
+                block.navigation_anchor_part = self._projection_part
             self._projection_part += 1
         if self._block_sink is not None:
             self._block_sink.append(block)
@@ -16586,10 +16777,10 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
-        if "display.dock" in changed:
-            self._apply_dock_density()
         if any(key in changed for key in ("tui.sidebar_visible", "tui.sidebar_position")):
             self._apply_sidebar_settings()
+        if "display.dock" in changed:
+            self._apply_dock_density()
         if "tui.theme" in changed:
             values = getattr(change, "values", {})
             tui_block = values.get("tui") if isinstance(values, Mapping) else None
@@ -20513,6 +20704,13 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
+    @staticmethod
+    async def _prompt_loop_turn(session: SessionProtocol, prompt: str, **kwargs: Any) -> None:
+        # Local Session.prompt already awaits the pipeline. Remote interactive
+        # prompt only admits it; a loop needs its explicit terminal-outcome API.
+        complete = getattr(session, "prompt_and_wait", session.prompt)
+        await cast(Callable[..., Awaitable[None]], complete)(prompt, **kwargs)
+
     async def _loop_worker(self, iterations: int, source: SessionInteraction | None = None) -> None:
         """Run up to ``iterations`` goal-advancing turns, sequentially."""
 
@@ -20568,7 +20766,7 @@ class OperatorApp(App[None]):
                 )
                 loop_error: str | None = None
                 try:
-                    await session.prompt(LOOP_PROMPT, **echo.prompt_kwargs())
+                    await self._prompt_loop_turn(session, LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     loop_error = str(error)
                     # THROUGH the same helper the composer's turn uses. A loop
@@ -20585,11 +20783,8 @@ class OperatorApp(App[None]):
                     crashed = True
                     break
                 finally:
-                    # Through the shared gate, not a bare write: on a follower
-                    # this `finally` runs on the owner's ACK, mid-turn, and the
-                    # bare write published `lo ›` for a turn still running (see
-                    # `_retire_turn_band`).
-                    self._retire_turn_band(session)
+                    if self._is_current(source):
+                        self._retire_turn_band(session)
                     # The SAME retirement the composer's turn gets. A loop
                     # iteration is an ordinary turn as far as the transcript is
                     # concerned — it mounts a working line and opens the latch —
@@ -20640,10 +20835,9 @@ class OperatorApp(App[None]):
         aside worker). We do not pass `on_delta`: the judge answer must not
         stream to any visible surface.
         """
-        # Belt-and-suspenders: `/loop` already routes to the session OWNER,
-        # where `complete_aside` is the real implementation (a follower's raises),
-        # but guard in case a future path reaches the worker on a session lacking
-        # it — treat a missing primitive as a judge failure, not a crash.
+        # The local scheduler passes the captured source facade. Modern remotes
+        # route complete_aside to that owner; an older source without the
+        # primitive is a judge failure, not a reason to affect the current view.
         source = self._interactions.get(id(session), self._interaction)
         if not hasattr(session, "complete_aside"):
             return None, ""
@@ -20653,7 +20847,7 @@ class OperatorApp(App[None]):
                 turns, on_usage=lambda usage: self._charge_aside_for(source, usage)
             )
         except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
-            self._append_block(NoticeBlock(f"judge unavailable, continuing: {error}", "warning"))
+            self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
             return None, ""
         achieved, reason = _parse_loop_verdict(answer)
         if achieved is None:
@@ -20719,9 +20913,10 @@ class OperatorApp(App[None]):
                     source, prompt, message_id=self._echo_message_id(session.prompt)
                 )
                 try:
-                    await session.prompt(prompt, **echo.prompt_kwargs())
+                    await self._prompt_loop_turn(session, prompt, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
-                    self._retire_turn_band(session)
+                    if self._is_current(source):
+                        self._retire_turn_band(session)
                     # Same helper, same reason as the numeric worker: a held
                     # goal loop is the MOST unattended surface in the app, and
                     # it was printing a bare `str(error)` (review U6).
@@ -20748,7 +20943,8 @@ class OperatorApp(App[None]):
                 completed += 1
                 # --- yield boundary reached: judge the settled turn ---
                 if source.loop.cancelled or source.retired:
-                    self._retire_turn_band(session)
+                    if self._is_current(source):
+                        self._retire_turn_band(session)
                     break
                 # Keep the status in a working state ACROSS the judge call. The
                 # judge is a real `complete_aside` network round-trip that can
@@ -20756,7 +20952,8 @@ class OperatorApp(App[None]):
                 # `loop N` and `loop N+1` while it is in fact spending tokens on
                 # the verdict. Cleared once the verdict is in hand (below).
                 achieved, reason = await self._judge_goal(session, goal)
-                self._retire_turn_band(session)
+                if self._is_current(source):
+                    self._retire_turn_band(session)
                 if achieved is True:
                     released = True
                     break
@@ -20800,6 +20997,9 @@ class OperatorApp(App[None]):
             # release path is unaffected: it calls `_notify` directly, and its
             # own `await _judge_goal` already drained the final `TurnEnded`.
             source.loop.running = False
+            # Match the numeric worker: every exit releases its one retained
+            # source lease before retirement eligibility is checked.
+            source.active_workers -= 1
             self.call_later(self._source_frontend_changed, source)
             source.loop.goal = ""
             self.call_later(self._release_loop_completion_suppression, source, operation)
@@ -25474,7 +25674,8 @@ class OperatorApp(App[None]):
         # already in the message queue when the stop landed ran before the parked
         # asker woke, so the stopped turn's write/exec tool got a fresh question.
         # An epoch bump cannot arrive early for an asker that captured the old one.
-        self._turn_epoch += 1
+        if not message.projection:
+            self._turn_epoch += 1
         # The turn is OPEN from here, and exactly one of `_finalize_turn` or a
         # teardown path closes it again. Set after the epoch bump so the flag
         # and the epoch a queued fallback is matched against always agree.
@@ -26369,7 +26570,9 @@ class OperatorApp(App[None]):
         entry", not from any ordering guarantee."""
         if self._consume_user_echo(message.prompt, message_id=message.message_id):
             return  # our own echo — the row is already painted
-        self._append_block(UserBlock(message.prompt, message.image_count))
+        block = UserBlock(message.prompt, message.image_count)
+        block.navigation_anchor_id = message.message_id
+        self._append_block(block)
         self._append_image_blocks(list(message.images))
 
     @staticmethod
@@ -26510,6 +26713,7 @@ class OperatorApp(App[None]):
         # TUI-020: adopt the authoritative text carried by the event.
         block.update_text(message.text)
         block.completion_anchor_id = message.message_id
+        block.navigation_anchor_id = message.message_id
         block.finalize_text()
         self._streaming_block = None
         # The prose is settled, so "responding…" is over: whatever the turn does

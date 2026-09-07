@@ -83,6 +83,7 @@ class SessionEvent(Message):
     """Queued events retain the viewer that emitted them across navigation."""
 
     origin: EventController | None = None
+    projection: bool = False
 
 
 class StartFlushTimer(SessionEvent):
@@ -511,6 +512,7 @@ class EventController:
         self._assistant_seen: str = ""
         self._flush_timer = None
         self._unsubscribe: Callable[[], Any] | None = None
+        self._restoring_projection = False
 
     # -- lifecycle ----------------------------------------------------------
     def restore_live_projection(
@@ -920,4 +922,5 @@ class EventController:
         # Unsubscribe cannot retract messages already in Textual's queue.
         # The consumer rejects this origin after committing another session.
         message.origin = self
+        message.projection = self._restoring_projection
         self._app.post_message(message)

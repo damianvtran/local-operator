@@ -143,50 +143,6 @@ JOB_ERROR_WIRE_CHARS = 2_000
 JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
 JOB_TEXT_FLOOR_CHARS = 200
 
-#: Smallest catalogue the wire will clip to, however little the frame has left.
-#:
-#: ``model_catalogue`` is the same shape as the job text above — one row per
-#: offerable model, bounded by "whatever the provider lists" rather than by
-#: anything in this process — but it CANNOT take the same fixed budget, and the
-#: arithmetic is worth recording because the obvious fix is the wrong one.
-#:
-#: A production row is 11 keys and ~267 B (see :meth:`refresh_model_catalogue`).
-#: Real providers already list ~600 models and one QA backend published 1,410,
-#: so honouring the real catalogue needs ~392 KB. But the frame guard's
-#: pathological session (a 200-child roster, every collection field maxed) is
-#: already ~981 KB with an EMPTY catalogue, leaving only ~67 KB of the 1 MiB
-#: socket line — about 241 rows. No constant satisfies both: a budget big
-#: enough for a real provider overflows that frame, and one small enough to fit
-#: it hides two thirds of OpenRouter from the picker to satisfy a fixture.
-#:
-#: So the budget is RESIDUAL rather than constant: the catalogue is measured
-#: against what the socket line actually has left once every other field has
-#: been bounded, which is the only quantity that answers both cases. An
-#: ordinary session — the deepest roster ever observed on the reference machine
-#: is 19, and 1,410 models there serialize to ~442 KB against a 1 MiB cap —
-#: has hundreds of kilobytes spare and is never touched. Only the pathological
-#: combination clips, which is the case the socket cannot carry anyway.
-#:
-#: Clipping keeps the FIRST rows in the owner's existing sort order (best/most
-#: relevant first, the order the picker already renders) rather than dropping
-#: from the middle, and sets ``model_catalogue_truncated`` so the reader can
-#: say the list is partial instead of presenting it as the whole set.
-#:
-#: The floor is what stops a frame that is over budget for OTHER reasons from
-#: emptying the picker: an empty catalogue reads as "this session can switch to
-#: nothing", which is a lie the reader cannot detect, exactly the reasoning
-#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` gives for never dropping a job row.
-MODEL_CATALOGUE_FLOOR_ROWS = 50
-
-#: The control socket's line limit, mirrored rather than imported.
-#:
-#: ``runtime.server`` imports THIS module (``FRONTEND_CAPABILITY``), so
-#: importing ``_MAX_LINE_BYTES`` back would close a cycle. The value is pinned
-#: to the reader's by ``test_the_catalogue_budget_tracks_the_socket_line_limit``
-#: — the same "mirror it and pin it" discipline ``settings_io`` uses for
-#: ``tools.builtin.BASH_SHELL_PATH``, and for the same reason: the consumer
-#: must stay cheap to import.
-_MODEL_CATALOGUE_LINE_LIMIT = 1 << 20
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
 #: whole-state deep copy — see that method for the measurement that motivates
 #: it.
@@ -245,6 +201,51 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "cumulative_parent_cost",
     }
 )
+
+#: Smallest catalogue the wire will clip to, however little the frame has left.
+#:
+#: ``model_catalogue`` is the same shape as the job text above — one row per
+#: offerable model, bounded by "whatever the provider lists" rather than by
+#: anything in this process — but it CANNOT take the same fixed budget, and the
+#: arithmetic is worth recording because the obvious fix is the wrong one.
+#:
+#: A production row is 11 keys and ~267 B (see :meth:`refresh_model_catalogue`).
+#: Real providers already list ~600 models and one QA backend published 1,410,
+#: so honouring the real catalogue needs ~392 KB. But the frame guard's
+#: pathological session (a 200-child roster, every collection field maxed) is
+#: already ~981 KB with an EMPTY catalogue, leaving only ~67 KB of the 1 MiB
+#: socket line — about 241 rows. No constant satisfies both: a budget big
+#: enough for a real provider overflows that frame, and one small enough to fit
+#: it hides two thirds of OpenRouter from the picker to satisfy a fixture.
+#:
+#: So the budget is RESIDUAL rather than constant: the catalogue is measured
+#: against what the socket line actually has left once every other field has
+#: been bounded, which is the only quantity that answers both cases. An
+#: ordinary session — the deepest roster ever observed on the reference machine
+#: is 19, and 1,410 models there serialize to ~442 KB against a 1 MiB cap —
+#: has hundreds of kilobytes spare and is never touched. Only the pathological
+#: combination clips, which is the case the socket cannot carry anyway.
+#:
+#: Clipping keeps the FIRST rows in the owner's existing sort order (best/most
+#: relevant first, the order the picker already renders) rather than dropping
+#: from the middle, and sets ``model_catalogue_truncated`` so the reader can
+#: say the list is partial instead of presenting it as the whole set.
+#:
+#: The floor is what stops a frame that is over budget for OTHER reasons from
+#: emptying the picker: an empty catalogue reads as "this session can switch to
+#: nothing", which is a lie the reader cannot detect, exactly the reasoning
+#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` gives for never dropping a job row.
+MODEL_CATALOGUE_FLOOR_ROWS = 50
+
+#: The control socket's line limit, mirrored rather than imported.
+#:
+#: ``runtime.server`` imports THIS module (``FRONTEND_CAPABILITY``), so
+#: importing ``_MAX_LINE_BYTES`` back would close a cycle. The value is pinned
+#: to the reader's by ``test_the_catalogue_budget_tracks_the_socket_line_limit``
+#: — the same "mirror it and pin it" discipline ``settings_io`` uses for
+#: ``tools.builtin.BASH_SHELL_PATH``, and for the same reason: the consumer
+#: must stay cheap to import.
+_MODEL_CATALOGUE_LINE_LIMIT = 1 << 20
 
 #: Wire bounds for the launch-row reconciliation identities (see
 #: :func:`_wire_launch_prompts`).
@@ -1470,6 +1471,7 @@ class FrontendSessionState(BaseModel):
     #: omitting hundreds of them.
     model_catalogue_truncated: bool = False
     history_cursor: str | None = None
+    history_generation: int = 0
     attachment_root: str | None = None
     # Durable receipts are independent of owner epoch and pending action gates.
     attention: dict[str, Any] = Field(default_factory=dict)
@@ -2305,6 +2307,19 @@ class FrontendStateStore:
         return getattr(self._state, name)
 
     @property
+    def pending_gate(self) -> "PendingGateState | None":
+        """The pending gate alone, WITHOUT cloning the whole state.
+
+        ``state`` deep-copies every job, usage and trajectory row so no caller
+        can mutate the store's instance. A per-frame readiness check only needs
+        this one immutable field, and paying that clone on every display cost
+        ~23 ms of the cold sidebar frame — the single largest item in its
+        profile. ``PendingGateState`` is never mutated in place by the reducer
+        (it is replaced), so sharing the instance is safe here.
+        """
+        return self._state.pending_gate
+
+    @property
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
 
@@ -2730,6 +2745,7 @@ class FrontendStateStore:
             mcp_servers=mcp_servers,
             mcp_startup=mcp_startup,
             history_cursor=history_cursor,
+            history_generation=int(getattr(transcript, "_history_generation", 0)),
             attachment_root=str(getattr(transcript, "directory", "") or "") or None,
             slash_capabilities=_slash_capabilities(),
         )

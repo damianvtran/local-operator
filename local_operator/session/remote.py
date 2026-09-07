@@ -303,6 +303,14 @@ class RemoteSession:
         self._display_window_requested = False
         self._owner_record: SessionRecord | None = None
         self._display_refresh_lock = asyncio.Lock()
+        self._display_refresh_task: asyncio.Task[None] | None = None
+        self._prompt_completion_waiters: set[asyncio.Future[AgentEndEvent]] = set()
+        self._prompt_completion_observers: set[EventHandler] = set()
+        self._display_invalidated = False
+        self._display_revision = 0
+        self._loaded_history_generation = 0
+        self._display_window_supported = False
+        self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
         self._display_history: DisplayHistoryWindow | None = None
         self._history_hydrated = True
@@ -511,8 +519,8 @@ class RemoteSession:
         *,
         config_dir: Path,
         takeover_factory: Callable[[], Any],
-        surface: str = "terminal",
         display_window: bool = False,
+        surface: str = "terminal",
     ) -> "RemoteSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
@@ -1295,6 +1303,7 @@ class RemoteSession:
             events=True,
             on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
+            display_window=self._display_window_requested,
             surface=self._surface,
             # THE full-TUI viewer is the client that renders action-carrying
             # receipts: ``_render_authoritative_slash`` submits their
@@ -1303,7 +1312,6 @@ class RemoteSession:
             # command twice. A viewer that omitted this (every build before
             # the field) is exactly the case the runtime completes for.
             slash_consumers=list(SLASH_ACTION_RECEIPTS),
-            display_window=self._display_window_requested,
             on_frontend_sync=lambda data: (
                 self._on_frontend_sync(data) if self._client is client else None
             ),
@@ -1357,6 +1365,13 @@ class RemoteSession:
     async def _load_frontend_history(self, frontend: FrontendSync) -> None:
         """Install the durable cut before live replay or command readiness."""
         window = frontend.display_history if self._display_window_requested else None
+        self._display_window_supported = window is not None
+        self._loaded_history_generation = (
+            window.history_generation
+            if window is not None
+            else frontend.snapshot.history_generation
+        )
+        self._display_revision += 1
         previous = self._display_history
         if window is None or window.status != "ok":
             # Legacy owners and oversized prose keep the honest full replay.
@@ -1499,16 +1514,50 @@ class RemoteSession:
             await self._refresh_display_history()
 
     async def _refresh_display_history(self) -> None:
-        """Reattach only this viewer; never restart, stop, or prompt the owner."""
+        """Capture a fresh canonical cut on the existing authenticated stream.
+
+        Redialling here abandons pending RPCs (including the compact operation
+        whose success triggered this refresh) or leaks their old connection.
+        A read-only sync uses the same atomic owner capture and buffers live
+        deltas until its exact cursor/gates/history are installed instead.
+        """
         async with self._display_refresh_lock:
-            record = self._owner_record
-            if record is None or self._client is None or not self._client.connected:
-                record, _ = await asyncio.to_thread(
-                    find_owner_record, self._config_dir, self._session_id
-                )
-            if record is None:
-                raise ConnectionError("history owner is unavailable")
-            await self._bind_to(record)
+            self._display_invalidated = True
+            while self._display_invalidated:
+                client = self._client
+                if client is None or not client.connected:
+                    raise ConnectionError("history owner is unavailable")
+                self._ready_for_events = False
+                self._owner_ready.clear()
+                self._pending_frontend_updates = []
+                try:
+                    frontend = FrontendSync.model_validate(await client.frontend_sync())
+                    if (
+                        self._client is not client
+                        or self._disposed
+                        or frontend.snapshot.session_id != self._session_id
+                        or frontend.epoch != self.frontend_state.epoch
+                    ):
+                        raise ConnectionError("history binding changed during refresh")
+                    self._frontend_refresh_cut = (frontend.epoch, frontend.sequence)
+                    self._install_frontend(frontend.snapshot, publish=True)
+                    await self._load_frontend_history(frontend)
+                    self._display_invalidated = (
+                        self.frontend_state.history_generation != self._loaded_history_generation
+                    )
+                    self._finish_sync()
+                except BaseException:
+                    # The transport remains usable even when this read fails.
+                    # Preserve its ordered updates and surface the history error
+                    # to navigation, without cancelling source work or its gates.
+                    pending, self._pending_frontend_updates = self._pending_frontend_updates, None
+                    for update in pending or ():
+                        self._on_frontend_update(update.model_dump(mode="json"))
+                    self._ready_for_events = True
+                    self._drain_buffered_events()
+                    raise
+                finally:
+                    self._owner_ready.set()
 
     @property
     def history_before_token(self) -> str | None:
@@ -1940,6 +1989,12 @@ class RemoteSession:
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
         update = FrontendUpdate.model_validate(data)
+        cut = self._frontend_refresh_cut
+        if cut is not None and update.epoch == cut[0] and update.sequence <= cut[1]:
+            # The old subscription can deliver this captured prefix after the
+            # read response. Its fields are already in the installed snapshot;
+            # the AttachClient still validates the original stream's sequence.
+            return
         if self._pending_frontend_updates is not None:
             self._pending_frontend_updates.append(update)
             return
@@ -1947,6 +2002,8 @@ class RemoteSession:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
         self._apply_frontend_facades(state)
+        if state.history_generation != self._loaded_history_generation:
+            self._invalidate_display_history()
 
     def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
         if state.session_id != self._session_id:
@@ -1967,6 +2024,11 @@ class RemoteSession:
         self._apply_frontend_facades(state)
         pending, self._pending_frontend_updates = self._pending_frontend_updates, None
         for update in pending or ():
+            # A same-connection refresh can overtake queued deltas already
+            # represented by its snapshot. Only this captured prefix is skipped;
+            # future gaps still fail the ordinary exact-sequence check.
+            if update.epoch == state.epoch and update.sequence <= state.sequence:
+                continue
             self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
@@ -1995,6 +2057,15 @@ class RemoteSession:
 
     def _on_wire_event(self, data: dict[str, Any]) -> None:
         event = deserialize_event(data)
+        # Command completion is an owner lifecycle fact, not a painting event.
+        # A canonical display refresh may buffer/dedupe UI replay, but it must
+        # never hide the requested turn's terminal outcome from its scheduler.
+        for observer in tuple(self._prompt_completion_observers):
+            observer(event)
+        if isinstance(event, CompactionEndEvent) and event.success:
+            # The success event itself closes eligibility even if its preceding
+            # canonical generation delta has not reached this reader yet.
+            self._invalidate_display_history()
         # A message-grade event whose row is already durable (history was read
         # after the socket began buffering) or already painted live is dropped
         # by stable message id — the single dedup rule for both seams. The
@@ -2127,7 +2198,6 @@ class RemoteSession:
                 approved = await call_approval_gate(handler, pending.title, pending.detail)
             else:
                 return
-            approved = await call_approval_gate(handler, pending.title, pending.detail)
             if not self._gate_reply_is_current(pending, client):
                 return
             await client.approval_answer(pending.request_id, approved)
@@ -2178,6 +2248,8 @@ class RemoteSession:
                 secret=pending.secret,
             )
             answer = await handler([question])
+            if not self._gate_reply_is_current(pending, client):
+                return
             if not answer:
                 return
             values = answer.get(pending.request_id) or []
@@ -2202,6 +2274,7 @@ class RemoteSession:
     # -- owner loss ---------------------------------------------------------
 
     def _on_disconnected(self, _reason: str) -> None:
+        self._fail_prompt_completion_waiters("owner connection lost while awaiting turn completion")
         self._runtime_pid = None
         if self._disposed or self._recovering:
             return
@@ -3074,9 +3147,7 @@ class RemoteSession:
 
     def resume_viewer_gates(self) -> None:
         """Recreate bridges only after the source is the visible input target."""
-        if self._gates_detached:
-            self._gates_detached = False
-            self._gate_handled_key = None
+        self._gates_detached = False
         self._maybe_start_gate()
 
     async def adopt_aside(self, messages: list[Message]) -> None:
@@ -3163,6 +3234,85 @@ class RemoteSession:
         return CompactionOutcome(True, detail=detail)
 
     # -- driving turns ------------------------------------------------------
+
+    def _fail_prompt_completion_waiters(self, reason: str) -> None:
+        for waiter in tuple(self._prompt_completion_waiters):
+            if not waiter.done():
+                waiter.set_exception(ConnectionError(reason))
+
+    async def prompt_and_wait(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        """Submit one FIFO prompt and await its owner's actual terminal outcome.
+
+        ``prompt`` intentionally returns on durable admission for interactive
+        callers. A loop cannot treat that ACK as completion. Correlate the
+        producer's user-row ID, then the owner's generation(s), on the same
+        serialized event stream. Auto-continuations remain inside the owner's
+        pipeline; its held final agent_end is the completion, not a busy flag.
+        This also works with older owners that implement the existing ID/epoch/
+        generation contract, without a new scheduler or longer RPC timeout.
+        """
+        await self._ensure_bound()
+        await self._owner_ready.wait()
+        if self._takeover_target is not None:
+            await self.prompt(text, images=images, message_id=message_id)
+            return
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("owner connection lost")
+        images_wire = [_image_to_wire(image) for image in (images or [])]
+        command = (
+            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            if message_id
+            else ContinuationCommand.create(self._session_id, text, images_wire)
+        )
+        epoch = self.frontend_state.epoch
+        admitted = False
+        generation: int | None = None
+        completed: asyncio.Future[AgentEndEvent] = asyncio.get_running_loop().create_future()
+        self._prompt_completion_waiters.add(completed)
+
+        def observe(event: AgentEvent[Any]) -> None:
+            nonlocal admitted, generation
+            if completed.done():
+                return
+            if self.frontend_state.epoch != epoch:
+                completed.set_exception(ConnectionError("owner changed during loop iteration"))
+                return
+            message = getattr(event, "message", None)
+            if (
+                isinstance(event, MessageStartEvent)
+                and getattr(message, "id", None) == command.command_id
+            ):
+                admitted = True
+            elif isinstance(event, AgentStartEvent) and admitted:
+                generation = event.generation
+            elif isinstance(event, AgentEndEvent) and admitted:
+                if generation is None or event.generation == generation:
+                    completed.set_result(event)
+
+        self._prompt_completion_observers.add(observe)
+        try:
+            # Loop iterations are queued prompt turns, never steering inferred
+            # from a transient current-busy observation.
+            await client.send_command(command, streaming=False)
+            outcome = await completed
+            if outcome.error:
+                raise RuntimeError(outcome.error)
+            if outcome.aborted:
+                raise RuntimeError("owner interrupted the loop iteration")
+        finally:
+            self._prompt_completion_observers.discard(observe)
+            self._prompt_completion_waiters.discard(completed)
+            if not completed.done():
+                completed.cancel()
+            elif not completed.cancelled():
+                completed.exception()
 
     async def prompt(
         self,
@@ -3441,6 +3591,11 @@ class RemoteSession:
 
     async def dispose(self) -> None:
         self._disposed = True
+        self._fail_prompt_completion_waiters("viewer disposed while awaiting turn completion")
+        refresh = self._display_refresh_task
+        if refresh is not None and refresh is not asyncio.current_task() and not refresh.done():
+            refresh.cancel()
+            await asyncio.gather(refresh, return_exceptions=True)
         if self._gate_task is not None:
             self._gate_task.cancel()
         if self._recovery_task is not None and self._recovery_task is not asyncio.current_task():

@@ -5786,6 +5786,12 @@ class Session:
         # snapshot that already contains this event, never an off-by-one view.
         store = getattr(self, "_frontend_state_store", None)
         if store is not None and (self._has_ui or store.has_subscribers):
+            # Replay-changing commits precede their public events. Publish the
+            # scalar first so retained viewers cannot select a stale tail after
+            # compaction, pruning, or a fold; unchanged events do no extra work.
+            replay_generation = self._transcript._history_generation
+            if store.state.history_generation != replay_generation:
+                store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
         for handler in list(self._handlers):
             try:

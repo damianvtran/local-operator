@@ -231,6 +231,7 @@ _PAYLOAD_OPS = {
     "fork_snapshot",
     "credential",
     "history_page",
+    "frontend_sync",
     "record_shell",
 }
 
@@ -544,13 +545,12 @@ class RuntimeServer:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
-            # Three independent capabilities, each gated by its own condition.
-            # The desktop watch surface is unconditional (this server always
-            # serves it), while the frontend and completion-ack capabilities
-            # are advertised only when the handle actually implements them --
-            # advertising one the handle cannot honour is worse than omitting
-            # it, because the client then negotiates a surface that is not
-            # there.
+            # Independent capabilities, each gated by its own condition. The
+            # desktop watch surface is unconditional (this server always serves
+            # it), while the rest are advertised only when the handle actually
+            # implements them -- advertising one the handle cannot honour is
+            # worse than omitting it, because the client then negotiates a
+            # surface that is not there.
             capabilities=(
                 [DESKTOP_WATCH_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
@@ -2113,6 +2113,43 @@ class RuntimeServer:
             if inspect.isawaitable(outcome):
                 await outcome
             return "accepted"
+        if op == "frontend_sync":
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                oversized_frame_report,
+                sync_wire_payload,
+            )
+
+            capture = getattr(h, "subscribe_frontend", None)
+            if not callable(capture):
+                raise ValueError("canonical history refresh is unavailable")
+            outcome = capture(lambda _update: None, display_window=True)
+            subscription = cast(
+                FrontendSubscription, await outcome if inspect.isawaitable(outcome) else outcome
+            )
+            try:
+                payload = sync_wire_payload(subscription.sync)
+                # Keep the existing live subscription. This temporary capture
+                # only supplies an atomic cut; it must not multiply observers.
+                response = {"op": "result", "req": frame.get("req"), "data": payload}
+                if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
+                    window = subscription.sync.display_history
+                    if window is not None:
+                        payload["display_history"] = window.model_copy(
+                            update={
+                                "status": "full_required",
+                                "messages": [],
+                                "durable_seed_ids": [],
+                                "durable_seed_tool_ids": [],
+                                "before_token": None,
+                                "snapshot_token": None,
+                            }
+                        ).model_dump(mode="json")
+                    if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
+                        raise ValueError("canonical refresh exceeds the transport frame limit")
+                return payload
+            finally:
+                subscription.unsubscribe()
         if op == "history_page":
             fetch = getattr(h, "history_page", None)
             before = frame.get("before")

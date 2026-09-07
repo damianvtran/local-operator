@@ -1820,7 +1820,16 @@ class OwnedSessionHandle(SessionHandle):
         from local_operator.harness.types import Message
 
         messages = [Message.model_validate(turn) for turn in turns]
-        return await self._session.complete_aside(messages)
+        complete = self._session.complete_aside
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+            # A remote caller receives text, not a billable usage callback. The
+            # authoritative owner must charge the request here; otherwise a
+            # hidden goal judge (and other remote asides) silently costs zero.
+            return await complete(
+                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
+            )
+        return await complete(messages)
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork a viewer's aside exchange into the durable conversation."""
