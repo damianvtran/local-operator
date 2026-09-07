@@ -162,12 +162,43 @@ def test_system_md_states_harness_identity() -> None:
 
 def test_system_md_requires_owned_browser_cleanup_before_final_response() -> None:
     """Long-lived interactive sessions do not dispose between turns, so the
-    packaged invariant must make normal cleanup the agent's responsibility."""
-    text = render_template("system.md", {})
+    packaged invariant must make normal cleanup the agent's responsibility.
+
+    Rendered with ``has_browser`` because the browser sections are gated: the
+    invariant only has to reach a session that actually has the tool.
+    """
+    text = render_template("system.md", {"has_browser": True})
     assert "action=close" in text
     assert "BEFORE the final response" in text
     assert "Never close another" in text
     assert "session teardown is a fallback" in text
+
+
+def test_browser_prose_is_gated_on_the_tool_being_present() -> None:
+    """~1,500 characters of browser instruction must not ship to a host whose
+    `browser` builder returned None — and the two halves must not both ship.
+
+    The setup playbook ("the extension can be set up in a minute") is the
+    mirror image of the usage prose, so exactly one of them is correct for any
+    given session.
+
+    Asserts the TEMPLATE's branching only. The wiring — what
+    ``build_system_blocks`` actually passes — is pinned separately below,
+    because a test that hand-writes the flags cannot observe a caller that
+    passes the wrong ones.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "When the `browser` tool is NOT in your tool list"
+
+    with_browser = render_template("system.md", {"has_browser": True, "no_browser": False})
+    assert usage in with_browser
+    assert setup not in with_browser
+
+    without = render_template("system.md", {"has_browser": False, "no_browser": True})
+    assert usage not in without
+    assert setup in without
+    # The gating is only worth doing if it actually removes weight.
+    assert len(without) < len(with_browser)
 
 
 def test_system_md_teaches_eval_digest_pipeline() -> None:
@@ -406,9 +437,11 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     assert DATE not in instructions
     assert "Darwin" not in instructions
 
-    # block 1: tool inventory ONLY — skills never leak in here
-    assert "- bash: Run a shell command." in inventory
-    assert "- read: Read a file." in inventory
+    # block 1: tool NAMES only — the descriptions are already in the provider
+    # tools array, and repeating them here cost ~9,995 chars per request.
+    assert "- bash" in inventory
+    assert "- read" in inventory
+    assert "Run a shell command." not in inventory
     assert "secret" not in inventory
     assert "demo" not in inventory
     assert DATE not in inventory and "Darwin" not in inventory
@@ -460,7 +493,7 @@ def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     # blocks).
     blocks = build_system_blocks(TOOLS, "", ENV, DATE)
     assert len(blocks) == 4
-    assert "- bash: Run a shell command." in blocks[1]
+    assert "- bash" in blocks[1]
     assert blocks[2].startswith(f"Today is {DATE}.")
     assert blocks[3] == "<skills/>"
 
@@ -523,12 +556,58 @@ def test_inventory_block_matches_default_tool_order() -> None:
     assert [line.split(":")[0][2:] for line in lines] == expected
 
 
-def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole() -> None:
+def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> None:
+    """The inventory is an ANCHOR ("these tools exist"), not a second copy of
+    the tool descriptions.
+
+    Regression guard for the reduction: ``tool.description`` is serialized
+    verbatim into the provider tools array for every tool, so emitting it here
+    too shipped the same bytes twice on every request — measured at 9,995
+    characters (~3,600 billed tokens) across the 24-tool default surface. A
+    future change that "helpfully" restores the descriptions must fail here.
+    """
+    descriptive = [
+        _tool("bash", "Run a shell command."),
+        _tool("read", "Read a file."),
+        _tool("browser", "Drive the user's real browser."),
+    ]
+    inventory = build_system_blocks(descriptive, SKILLS, ENV, DATE)[1]
+    for tool in descriptive:
+        assert f"- {tool.name}" in inventory
+        assert tool.description not in inventory
+    # The header stays: it is what makes the bare list legible as an inventory.
+    assert inventory.startswith("## Available tools")
+
+
+def test_a_tool_without_a_description_still_appears_in_the_inventory() -> None:
+    """MCP allows an optional description; a callable tool must not vanish.
+
+    Skipping these made sense while a line was `- name: description` (the line
+    would have trailed a bare colon). Now that the line is just the name, the
+    filter would hide a real tool from the only list that says what exists.
+    """
+    tools = [_tool("bash", "Run a shell command."), _tool("mcp__notion_search", "")]
+    inventory = build_system_blocks(tools, SKILLS, ENV, DATE)[1]
+    assert "- mcp__notion_search" in inventory
+    # Hidden is still the thing that removes a tool from the list.
+    hidden = [*tools, _tool("secret", "", hidden=True)]
+    assert "secret" not in build_system_blocks(hidden, SKILLS, ENV, DATE)[1]
+
+
+def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole(monkeypatch) -> None:
     """The browser builder is createIf-gated on a reachable cmux, so on a host
     without one the model can only see an ABSENCE — and an absence reads as
     "arrange your own". A real session answered a screenshot request by writing
     a playwright script and downloading a Chromium that could not carry the
-    user's logins. The inventory says the capability is missing and why."""
+    user's logins. The inventory says the capability is missing and why.
+
+    Both probes are forced OFF here (the autouse fixture forces cmux ON for the
+    ordering test): this case is specifically the HOST having no backend, which
+    is what makes the "no cmux CLI is reachable" diagnosis true. A host that
+    HAS a backend gets a different note — see the role-restricted test below.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
 
     inventory = blocks[1]
@@ -547,6 +626,144 @@ def test_inventory_note_is_absent_when_a_browser_tool_exists() -> None:
     inventory = build_system_blocks(tools, SKILLS, ENV, DATE)[1]
     assert "NO browser tool" not in inventory
     assert "playwright" not in inventory
+
+
+def test_build_system_blocks_wires_the_browser_flags_it_renders_with(monkeypatch) -> None:
+    """Pins the WIRING, not the template's branching.
+
+    The template test above hand-writes the flags, so it cannot see a caller
+    that passes the wrong ones. Three mutations at the render call were tried
+    against the template-only test and ALL of them stayed green: hardcoding
+    ``has_browser=True`` (usage prose ships to a browserless host), inverting
+    the flags (the two sections swap), and passing ``{}`` (BOTH sections
+    vanish silently — `{{#if}}` on a missing key drops its body with no
+    marker, and several call sites in this tree already render with ``{}``).
+
+    This test kills all three, because it goes through the real entry point
+    with a real tool list and asserts on what actually ships.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    # Browser present: usage prose, no playbook, no inventory note.
+    with_browser = build_system_blocks(
+        [*TOOLS, _tool("browser", "Drive the user's real browser.")], SKILLS, ENV, DATE
+    )
+    assert usage in with_browser[0]
+    assert setup not in with_browser[0]
+    assert "browser tool" not in with_browser[1].split("## Available tools")[1].split("\n\n")[0]
+
+    # Host genuinely has no backend: playbook, no usage prose, and the note
+    # still ships on the inventory — the asymmetry the code comment protects.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+    without = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    assert usage not in without[0]
+    assert setup in without[0]
+    assert "NO browser tool" in without[1]
+
+    # A missing flag must never be how a section disappears: whichever way the
+    # host is configured, exactly one of the two sections is present.
+    for blocks in (with_browser, without):
+        assert (usage in blocks[0]) != (setup in blocks[0])
+
+
+def test_rendering_system_md_without_flags_still_ships_a_browser_section() -> None:
+    """`{{#if}}` has no else, so the pair of flags is easy to half-supply — and
+    a missing key drops its body with no marker in the output.
+
+    `render_template("system.md", {})` therefore used to produce a prompt with
+    NEITHER browser section, ~1.5k chars lighter than anything a session
+    ships. Product code always passes both, but a dozen probe and test call
+    sites render with `{}` and would silently measure a prompt that does not
+    exist. Deriving the missing member makes the half-satisfied state
+    unreachable rather than merely unused.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    bare = render_template("system.md", {})
+    assert (usage in bare) != (setup in bare), "neither section shipped"
+    # Derivation must not override an explicit caller.
+    explicit = render_template("system.md", {"has_browser": True, "no_browser": False})
+    assert usage in explicit and setup not in explicit
+
+
+def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> None:
+    """The two sections are mutually exclusive claims; NO input may ship both.
+
+    Regression guard for a defect a defaulting fix introduced: merging
+    `{"has_browser": False, "no_browser": True}` under the caller's dict fixed
+    the empty case but made a caller who supplied only `has_browser=True`
+    inherit `no_browser=True`, so the prompt asserted "Browser work goes
+    through the `browser` tool" AND "the host has neither backend connected...
+    set it up with the user" — 686 characters contradicting the paragraph
+    above them.
+
+    It defeated an existing test WITHOUT touching it: the caller at
+    `test_system_md_requires_owned_browser_cleanup_before_final_response`
+    renders exactly `{"has_browser": True}`, passed before on a coherent
+    prompt, and passed after on an incoherent one. So this asserts the
+    invariant over every combination, including the half-supplied ones a
+    single-case test cannot see.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    # Every representable input: absent, half-supplied either way, and both.
+    values: list[dict[str, Any]] = [{}]
+    for key in ("has_browser", "no_browser"):
+        values += [{key: True}, {key: False}]
+    for a in (True, False):
+        for b in (True, False):
+            if not (a and b):  # (True, True) is refused; asserted below
+                values.append({"has_browser": a, "no_browser": b})
+
+    for data in values:
+        text = render_template("system.md", data)
+        assert not (usage in text and setup in text), f"both sections shipped for {data}"
+
+    # Half-supplying tool presence must not flip the host claim: this is the
+    # exact case the defaulting fix regressed.
+    only_has = render_template("system.md", {"has_browser": True})
+    assert usage in only_has and setup not in only_has
+
+    # And the one pair with no meaning is refused rather than rendered — a
+    # session cannot hold the browser tool on a host with no backend.
+    with pytest.raises(ValueError, match="cannot both be true"):
+        render_template("system.md", {"has_browser": True, "no_browser": True})
+
+
+def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> None:
+    """`reviewer`, `scout`, `manager` and `architect` seeds omit `browser`.
+
+    Their tool list therefore has no browser on a host that has one. Telling
+    such a child "the host has neither backend connected... do that setup with
+    the user" is factually wrong and actionably wrong — it invites a read-only
+    subagent to walk the operator through an install it cannot use. It is also
+    the exact inversion of the principle stated for the no-browser note:
+    claiming a capability is absent while one would answer is worse than
+    saying nothing.
+
+    The no-install rule still has to reach it (the playwright dead end is just
+    as available to a restricted child), so what changes is the diagnosis, not
+    the prohibition.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+
+    instructions, inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
+
+    # The false claims must be absent.
+    assert "the host has neither backend" not in instructions
+    assert "NO browser tool" not in inventory
+    assert "no cmux CLI is reachable" not in inventory
+    # The prohibition must still be present, with the true diagnosis.
+    assert "was not given the browser tool" in inventory
+    assert "A browser IS available on this host" in inventory
+    assert "never install or script a browser engine" in inventory.lower()
+    # And it must not advertise a tool it does not have.
+    assert not any(line.startswith("- browser") for line in inventory.splitlines())
 
 
 def test_inventory_note_follows_membership_not_visibility() -> None:
