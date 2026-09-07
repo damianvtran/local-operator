@@ -460,6 +460,56 @@ def complete_path(
     return out
 
 
+def resolve_self(text: str, *, cwd: str | Path, home: Path | None = None) -> MoveTarget | None:
+    """``text`` as a row for ITSELF when it names a directory you can move to.
+
+    The completion tier lists what is INSIDE a path, so a directory with no
+    subdirectories completes to nothing and was reported as "no directory
+    matches that path" — for a directory the user had just selected, one
+    keystroke earlier, from this same card. Enter there chose nothing and the
+    picker closed silently (design D1 / UX U1, found independently).
+
+    Offering the resolved directory as its own row makes the walk terminate
+    where a walk naturally ends: at the directory you were walking to. Returns
+    ``None`` when the path does not exist or cannot be entered — those really
+    are "no match" and keep that sentence.
+
+    ``detail`` states why the row is there, in the vocabulary the other tiers
+    use, because at that moment it is the only row on the card and "this
+    folder" is what distinguishes it from the children it does not have.
+    """
+    raw = text.strip()
+    if not raw:
+        return None
+    root = home if home is not None else Path.home()
+    # ``~`` is expanded against the SAME root the labels are written against,
+    # not the process's ``$HOME``. ``os.path.expanduser`` reads the environment,
+    # so a caller that passes ``home=`` (every test, and any embedder with a
+    # relocated home) would have its ``~`` rows resolve somewhere the labels
+    # never point — the row would render and then refuse to resolve.
+    if raw == "~":
+        expanded = str(root)
+    elif raw.startswith("~" + os.sep):
+        expanded = str(root / raw[2:])
+    else:
+        expanded = os.path.expanduser(raw)
+    # A trailing separator is how ``action_complete`` marks "descend into
+    # this", and it is exactly the state that produces an empty completion, so
+    # it must resolve to the directory itself rather than be rejected.
+    candidate = Path(expanded.rstrip(os.sep) or os.sep)
+    if not candidate.is_absolute():
+        candidate = Path(cwd) / candidate
+    path = os.path.normpath(str(candidate))
+    if not _readable_dir(path):
+        return None
+    return MoveTarget(
+        path=path,
+        label=format_label(path, home=root),
+        kind="typed",
+        detail="this folder",
+    )
+
+
 def looks_like_path(text: str) -> bool:
     """Whether ``text`` should be COMPLETED as a path rather than used to filter.
 
@@ -473,7 +523,16 @@ def looks_like_path(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    return stripped.startswith(("~", "/", ".")) or os.sep in stripped
+    # ``~`` anchors a path only when it is the whole string or is followed by a
+    # separator. ``~x`` is a filter word: routing it to completion returned
+    # nothing instead of narrowing the suggestions to labels containing ``x``
+    # (review MINOR-3). ``/`` and ``.`` need no such qualification — both are
+    # legal path starts on their own and neither begins an ordinary word.
+    if stripped in ("~", "."):
+        return True
+    if stripped.startswith("~"):
+        return stripped[1:2] == os.sep
+    return stripped.startswith(("/", ".")) or os.sep in stripped
 
 
 def filter_targets(targets: list[MoveTarget], query: str) -> list[MoveTarget]:

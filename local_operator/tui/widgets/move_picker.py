@@ -83,6 +83,12 @@ NO_MATCH_NOTICE = "no suggestion matches that"
 NO_PATH_NOTICE = "no directory matches that path"
 
 
+#: Tiers whose note states WHAT THE ROW IS rather than why it was offered.
+#: Rendered at the paths' own weight so the grouping reads as structure; the
+#: structural tiers stay faint. See ``render_rows`` (design D5).
+_IDENTITY_KINDS = frozenset({"current", "recent"})
+
+
 def render_rows(
     targets: list[MoveTarget],
     selected: int,
@@ -110,9 +116,16 @@ def render_rows(
         line.append("❯ " if is_selected else "  ", style=accent if is_selected else faint)
         room = max(1, width - CURSOR_CELLS)
         note = target.detail
-        # The note only earns its cells when the label still fits beside it.
+        # ``current`` is EXEMPT from the note drop, unlike every other note.
+        # The others say why a row was offered and are expendable beside the
+        # label being chosen; `current` answers a different question — "where
+        # am I now?" — and it was dropped first on exactly the deep paths this
+        # machine is full of, so the marker vanished for the users most likely
+        # to need it (design D4). It costs 7 cells and the label is truncated
+        # to pay for them.
+        pinned = target.kind == "current"
         note_cells = cell_len(note) + 2 if note else 0
-        if note and cell_len(target.label) + note_cells > room:
+        if note and not pinned and cell_len(target.label) + note_cells > room:
             note, note_cells = "", 0
         label = _truncate_head(target.label, max(1, room - note_cells))
         line.append(label, style=fg if is_selected else dim)
@@ -120,7 +133,14 @@ def render_rows(
             pad = room - cell_len(label) - cell_len(note)
             if pad > 0:
                 line.append(" " * pad)
-            line.append(note, style=faint)
+            # The IDENTITY notes (`current`, `recent`) are lifted to `dim`,
+            # the weight the paths carry; the structural ones (`home`,
+            # `parent`, `in this folder`) stay `faint`. The tiers were legible
+            # only through the notes, and the notes were the lowest-contrast
+            # thing on the row, so the ordering's meaning was invisible
+            # (design D5). A gradient gives the grouping without spending rows
+            # on separators, which a 10-row budget cannot afford.
+            line.append(note, style=dim if target.kind in _IDENTITY_KINDS else faint)
         if hovered is not None and index == hovered and not is_selected:
             line.stylize(Style(bgcolor=theme_mod.semantic_color("raised")))
         out.append(line)
@@ -167,6 +187,13 @@ class MovePickerScreen(ModalScreen[str | None]):
         Binding("home", "jump(0)", "First", show=False),
         Binding("end", "jump(1)", "Last", show=False),
         Binding("backspace", "backspace", "Edit filter", show=False),
+        # A PATH is long, so the readline word/line kills are not a nicety
+        # here: backing out of a completed path one character at a time cost 15
+        # backspaces in the UX walk, and they were the only editing key bound.
+        # `ctrl+w` deletes the last path SEGMENT rather than the last word,
+        # which is what "back up one directory" means on this card.
+        Binding("ctrl+w", "kill_segment", "Delete segment", show=False),
+        Binding("ctrl+u", "kill_query", "Clear", show=False),
         # Tab COMPLETES the highlighted row into the query rather than choosing
         # it, which is what makes the card a navigator: completing
         # `~/workspace` and pressing tab again lists inside it, so a user can
@@ -181,6 +208,7 @@ class MovePickerScreen(ModalScreen[str | None]):
         current: str = "",
         *,
         complete: Callable[[str], list[MoveTarget]] | None = None,
+        self_target: Callable[[str], MoveTarget | None] | None = None,
     ) -> None:
         super().__init__()
         self._all = list(targets)
@@ -195,6 +223,11 @@ class MovePickerScreen(ModalScreen[str | None]):
         # filters its suggestions and nothing more, which is a smaller feature
         # rather than an error.
         self._complete = complete
+        # Resolves a typed path to ITSELF when it names a usable directory, so
+        # a directory with no subdirectories is still selectable rather than
+        # reported as "no match" (D1/U1). Supplied by the host for the same
+        # reason ``complete`` is: it needs the session's cwd for relative paths.
+        self._self_target = self_target
         # Filtering runs on every keystroke and again on every paint, so the
         # result is cached against the query that produced it. The path tier
         # is cached on the SAME key because it is the same keystroke's work,
@@ -226,10 +259,42 @@ class MovePickerScreen(ModalScreen[str | None]):
     def _resolve_rows(self, query: str) -> list[MoveTarget]:
         if query and looks_like_path(query) and self._complete is not None:
             try:
-                return list(self._complete(query))
+                rows = list(self._complete(query))
             except Exception:  # noqa: BLE001 — a failed listing is an empty one
-                return []
+                rows = []
+            if rows:
+                return rows
+            # NO CHILDREN IS NOT NO MATCH. ``action_complete`` appends a
+            # separator so the next tab descends, and completing INSIDE a
+            # directory with no subdirectories returns nothing — so the
+            # directory the user just walked to rendered as "no directory
+            # matches that path", one keystroke after being a selectable row,
+            # and Enter there dismissed with ``None`` (read by the caller as
+            # Esc: no move, no notice). That is the dead end design D1 and UX
+            # U1 found independently, and it made the picker strictly weaker
+            # than the typed-path route it fronts.
+            #
+            # A query that RESOLVES to a readable directory is offered as
+            # itself, so Enter moves there. Typing the path by hand lands here
+            # too, which is why this sits in row resolution rather than in
+            # ``action_complete``.
+            here = self._resolve_self(query)
+            if here is not None:
+                return [here]
         return filter_targets(self._all, query)
+
+    def _resolve_self(self, query: str) -> MoveTarget | None:
+        """``query`` as its own row when it names a usable directory.
+
+        Returns ``None`` for a path that does not exist or cannot be entered —
+        those are genuinely "no match" and keep the existing sentence.
+        """
+        if self._self_target is None:
+            return None
+        try:
+            return self._self_target(query)
+        except Exception:  # noqa: BLE001 — an unresolvable path is simply not offered
+            return None
 
     @property
     def is_path_query(self) -> bool:
@@ -275,10 +340,17 @@ class MovePickerScreen(ModalScreen[str | None]):
         and without the separator tab would appear to do nothing on the second
         press.
         """
-        target = self.selected_path()
-        if target is None:
+        rows = self.visible_rows
+        if not rows:
             return
-        self.set_query(target.rstrip("/") + "/")
+        row = rows[min(self._selected, len(rows) - 1)]
+        # The LABEL, not the absolute path. The row the user pressed tab on
+        # reads ``~/workspace/repos/x``; inserting ``path`` put a long absolute
+        # string in the header, which then head-truncated into something that
+        # did not resemble the row they had just chosen (design D3).
+        # ``complete_path`` expands ``~`` itself, so the tidy form round-trips.
+        text = row.label or row.path
+        self.set_query(text.rstrip("/") + "/")
 
     def action_move(self, delta: int) -> None:
         self._move_to(self._selected + delta)
@@ -292,6 +364,24 @@ class MovePickerScreen(ModalScreen[str | None]):
     def action_backspace(self) -> None:
         if self._query:
             self.set_query(self._query[:-1])
+
+    def action_kill_segment(self) -> None:
+        """Drop the last path segment — "back up one directory".
+
+        A trailing separator is dropped with the segment it closes, so a query
+        left at ``~/a/b/`` by ``tab`` goes to ``~/a/`` in one press rather than
+        stripping the separator and leaving the user where they were.
+        """
+        if not self._query:
+            return
+        trimmed = self._query.rstrip("/")
+        head, sep, _ = trimmed.rpartition("/")
+        self.set_query(head + sep if sep else "")
+
+    def action_kill_query(self) -> None:
+        """Clear the query, returning the card to its suggestions."""
+        if self._query:
+            self.set_query("")
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
         """Printable keys type into the query.
@@ -447,9 +537,13 @@ class MovePickerScreen(ModalScreen[str | None]):
             self._offset = 0
             self._repaint()
             return
-        # CLAMPED, never wrapping. `session_picker._move_to` clamps and
-        # AGENTS.md's exception covers a full surface like this one; a Down at
-        # the bottom that silently returned to the top reads as the list having
+        # CLAMPED, never wrapping, because `session_picker._move_to` clamps and
+        # this card is its twin down to the CSS — AGENTS.md names that picker
+        # explicitly ("`session_picker._move_to` already clamps, and it is a
+        # full surface too"). NOT on the `/settings` exception, which is about
+        # a full PAGE and would equally license clamping `/model` and
+        # `/command` — the same paragraph forbids those by name. A Down at the
+        # bottom that silently returned to the top reads as the list having
         # reset itself.
         self._selected = max(0, min(len(rows) - 1, index))
         # Scroll only far enough to keep the cursor on screen, so the list is
@@ -546,6 +640,13 @@ class MovePickerScreen(ModalScreen[str | None]):
             # is a mistyped word, a path that matched nothing is a directory
             # that does not exist. The header already echoes the query, so
             # neither repeats it.
+            #
+            # A path that RESOLVES is no longer one of these cases: it comes
+            # back as its own row from ``_resolve_rows``, so "no directory
+            # matches that path" is now only said about a path that genuinely
+            # does not resolve — which is what made the sentence false before
+            # (design D1, UX U3: it was shown for a directory the user had
+            # just selected).
             out.append(NO_PATH_NOTICE if self.is_path_query else NO_MATCH_NOTICE, style=dim)
         else:
             window = rows[self._offset : self._offset + page]
@@ -601,14 +702,24 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
     ("enter", "move"),
     ("esc", "cancel"),
 )
-_FOOTER_DROP_ORDER = ("pgup/pgdn", "type", "tab", "↑↓")
+#: ``type to filter or path`` sheds LATE, and that is the whole of design D2.
+#: It is the only thing anywhere on this card that says a second input mode
+#: exists, and path completion is the half of the feature that makes any
+#: directory on the machine reachable. Shedding it first meant the mode was
+#: advertised only to users who had already found it.
+#:
+#: Paging is inferable from a scrollbar-less list with a `showing N–M of T`
+#: counter; a hidden second input mode is not inferable from anything. So
+#: ``pgup/pgdn`` goes first in both orders and ``type`` outlives ``tab``.
+_FOOTER_DROP_ORDER = ("pgup/pgdn", "tab", "type", "↑↓")
 
-#: Drop order for a list that SCROLLS. ``pgup/pgdn`` is the first thing shed by
-#: the order above, which is right for a list that fits on one page and wrong
-#: for one that does not — the card would advertise paging where paging is a
-#: no-op and withdraw it where it is the fastest way through the list. The same
-#: correction ``session_picker`` makes, for the same reason.
-_FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "tab", "↑↓")
+#: Drop order for a list that SCROLLS — which a freshly opened picker almost
+#: always is: ``PAGE_ROWS_MAX`` is 10 and the default suggestion set runs to
+#: 11-12 rows, so this is the order the OPENING frame uses at every width.
+#: That is precisely why ``type`` may not lead it. ``pgup/pgdn`` is kept ahead
+#: of ``tab`` here (the reverse of the non-scrolling order) because paging is
+#: real on a scrolling list and is the fastest way through it.
+_FOOTER_DROP_ORDER_SCROLLING = ("tab", "pgup/pgdn", "type", "↑↓")
 
 
 #: The footer for a query that matched nothing. Movement, paging, completion

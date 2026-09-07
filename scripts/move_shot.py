@@ -49,6 +49,7 @@ from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.move_targets import (  # noqa: E402
     complete_path,
     remember_recent,
+    resolve_self,
     suggest_targets,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
@@ -128,6 +129,7 @@ async def main() -> None:
                 targets,
                 current=str(project),
                 complete=lambda query: complete_path(query, cwd=project, home=home),
+                self_target=lambda query: resolve_self(query, cwd=project, home=home),
             )
             app.push_screen(screen)
             # Let the overlay's layout SETTLE before the capture: the first
@@ -142,6 +144,22 @@ async def main() -> None:
                 screen.set_query(f"{project}/")
             elif state == "empty":
                 screen.set_query(f"{project}/zzz")
+            elif state == "leaf":
+                # The D1/U1 frame: `tab` onto a directory with no
+                # subdirectories. This used to render "no directory matches
+                # that path" for a directory the user had just selected, with
+                # `enter move` shed from the footer.
+                index = next(
+                    (
+                        i
+                        for i, r in enumerate(screen.visible_rows)
+                        if r.path == str(project / "scripts")
+                    ),
+                    None,
+                )
+                if index is not None:
+                    screen._move_to(index)
+                screen.action_complete()
             for _ in range(4):
                 await pilot.pause()
             await pilot.wait_for_scheduled_animations()
