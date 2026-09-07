@@ -7,6 +7,7 @@ acknowledgement, or reference to the currently selected app session.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -24,6 +25,15 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
 )
+
+#: Resident bytes of retained text one parked presentation may hold, measured
+#: with ``sys.getsizeof`` rather than estimated from a character count. It must
+#: stay >= ``DISPLAY_HISTORY_BYTES`` (512 KiB): the window layer is permitted to
+#: produce a payload that large, so a smaller retain budget structurally refuses
+#: presentations the layer above legitimately built. See
+#: :meth:`SessionPresentation.retainable` for what this protects against and how
+#: to measure a real presentation against it before changing it.
+RETAIN_TEXT_BYTES = 1024 * 1024
 
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):
@@ -214,6 +224,48 @@ class SessionPresentation:
 
         One cached view can otherwise retain arbitrarily much history. Unknown
         renderers (including decoded images) are rebuilt instead of guessing.
+
+        **What the budget is protecting against, and in what units.** The bound
+        is RESIDENT BYTES of retained text, not characters and not the JSON
+        wire frame the window layer prices itself in. It exists so ONE parked
+        view cannot pin an unbounded slice of a 200 MB journal in RAM;
+        ``RETAINED_PRESENTATIONS`` parked views each get this budget, so the
+        real ceiling is N x this number.
+
+        **Why ``sys.getsizeof`` and not ``len(value) * k``.** CPython stores
+        ``str`` in PEP 393 compact form: 1, 2 or 4 bytes per character
+        depending on the widest code point, plus a header. So no constant
+        multiplier is right for all content — measured here, the same 4096
+        characters cost 4137 bytes as ASCII, 8250 as BMP and 16444 as astral.
+        ``getsizeof`` is the honest measure, it is the only one that cannot be
+        wrong in either direction, and it costs ~75 ns against ~29 ns for
+        ``len`` on a 500 KB string — irrelevant beside the mount + layout this
+        predicate decides whether to repeat.
+
+        **This bound has now been mis-tuned twice, in the same direction.**
+        The node cap (see the comment below) silently refused every real owner
+        once. Then the string term charged ``len(value) * 4`` — a worst-case
+        UTF-32 assumption — against a 1 MiB budget, so the effective budget was
+        256 KiB while ``DISPLAY_HISTORY_BYTES`` permits the window layer to
+        hand this predicate a 512 KiB payload. The two limits contradicted each
+        other and the cache silently never cached: a refused presentation is
+        never inserted into ``_sidebar_presentations``, so it never stops
+        matching the prewarm candidate filter and is fully re-prepared (mount +
+        layout + unmount, on the event loop) on every 2 s sidebar poll. Three
+        of the operator's ten live sessions were stuck in that loop, which is
+        the reported "lag with the sidebar open, fine when I close it".
+
+        **How to verify this rather than re-derive it.** Do not reason about
+        the multiplier; measure a real presentation. Walk the same roots this
+        method walks, sum ``sys.getsizeof`` over the strings, and compare
+        against ``RETAIN_TEXT_BYTES``. On the operator's eight largest real
+        transcripts the retained text measures 3-660 KiB (the roots are the
+        blocks plus the unmounted ``_resume_pending_head``/``_resume_results``
+        paging buffers, which dominate at 127-357 KiB), so 1 MiB admits every
+        one of them with the largest at 64% of budget. If you are considering
+        tightening this, get that measurement first: the failure mode of a too-
+        tight bound here is not a rejected cache entry, it is a permanent
+        re-preparation loop that looks like general UI slowness.
         """
         if len(self.replay.view.blocks()) > 128:
             return False
@@ -233,7 +285,7 @@ class SessionPresentation:
             self.held_steer_blocks,
         ]
         seen: set[int] = set()
-        remaining = 1024 * 1024
+        remaining = RETAIN_TEXT_BYTES
         nodes = 0
         while stack:
             value = stack.pop()
@@ -249,7 +301,10 @@ class SessionPresentation:
             if nodes > 65536:
                 return False
             if isinstance(value, str):
-                remaining -= len(value) * 4
+                # Resident cost, not character count: see the docstring. A
+                # `len(value) * 4` estimate here over-charged ASCII content 4x
+                # and disabled the cache entirely.
+                remaining -= sys.getsizeof(value)
             elif isinstance(value, bytes):
                 remaining -= len(value)
             elif value is None or isinstance(value, (bool, int, float)):
