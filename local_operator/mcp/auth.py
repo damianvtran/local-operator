@@ -563,6 +563,17 @@ class McpTokenStorage:
         connect that is already failing over a dead grant, so it degrades to
         today's behaviour (the storm) rather than raising. See
         :data:`GRANT_DEAD_AT_KEY` for why this carries no expiry.
+
+        Known window, recorded because a FALSE tombstone is the worst failure
+        this marker can introduce: the read-modify-write is not inside
+        :func:`_oauth_refresh_lock`, so a sibling process that persists a
+        rotated token between our read and our write has that write overwritten
+        by our stale snapshot plus the marker, and a live grant then reads as
+        dead until an interactive login. The ordering makes it unlikely — we
+        only reach here after the server rejected the grant, under the lock on
+        the coordinator path — and it is a pre-existing property of the same
+        read-modify-write in :meth:`set_tokens`, so it is left as-is rather than
+        fixed here alone; closing it means giving both writers the lock.
         """
         try:
             creds = self._read() or {}
@@ -2148,9 +2159,14 @@ async def ensure_mcp_oauth_fresh(
         # proceeds to the point where it raises McpAuthRequiredError, which the
         # manager renders as the actionable "run /mcp reauth" toast.
         #
-        # Logged at INFO, once per server per process (this runs once per
-        # server on the startup path): silence would read as "fixed" when it
-        # means "suppressed", and the operator still owes an interactive login.
+        # Logged at INFO once per CONNECT, not once per process: this is reached
+        # from _connect_server, which also serves auto-reconnect and /mcp login,
+        # so a server that reconnects logs it again. That is bounded rather than
+        # a storm — _reconnect's McpAuthRequiredError arm abandons auto-reconnect
+        # instead of retrying — and INFO is deliberate: silence would read as
+        # "fixed" when it means "suppressed", and the operator still owes an
+        # interactive login. Plain logger.info also means it reaches CLI and
+        # headless hosts, not only the TUI's toast surface.
         logger.info(
             "MCP OAuth grant for %s is known-dead (invalid_grant); skipping refresh "
             "-- run /mcp reauth to restore it",
@@ -2378,12 +2394,35 @@ def _make_refresh_coordinating_provider(
             if self._refresh_coord_storage.grant_is_dead():
                 # Same suppression as ensure_mcp_oauth_fresh, before the lock.
                 # Debug rather than info: the startup path already logged the
-                # actionable reauth line for this server this process, and this
-                # site can run per request.
+                # actionable reauth line for this connect, and this site can run
+                # per request.
                 logger.debug(
                     "MCP in-flight refresh skipped for %s: grant is known-dead",
                     self._refresh_coord_server_url,
                 )
+                # STRIPPING HERE IS LOAD-BEARING, not a tidy-up: returning from
+                # this coroutine falls through to the SDK's own UNLOCKED
+                # _refresh_token, which reads ctx.current_tokens directly and
+                # would POST the very token the authorization server already
+                # rejected — the family-revoking request this whole subsystem
+                # exists to prevent. Suppressing OUR refresh without dropping
+                # the token therefore removes the harmless POSTs and keeps the
+                # harmful one, which is strictly worse than not suppressing at
+                # all, because it also looks fixed.
+                #
+                # This branch is the STEADY STATE: boot 1 writes the tombstone
+                # and takes the "dead" arm below (which strips for the same
+                # reason); every boot after it arrives here instead. Measured at
+                # the wire before this strip existed: 1 SDK POST on every one of
+                # 5 already-tombstoned boots.
+                #
+                # Dropping the in-memory refresh token makes can_refresh_token()
+                # read False, so the SDK skips its refresh branch and goes to
+                # the authorization branch, which our non-interactive redirect
+                # handler turns into an actionable McpAuthRequiredError.
+                with contextlib.suppress(Exception):
+                    if ctx.current_tokens is not None:
+                        ctx.current_tokens.refresh_token = None
                 return
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url) as locked:

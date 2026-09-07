@@ -3337,17 +3337,30 @@ class TestDeadGrantTombstone:
     async def _drive_auth_flow(self, provider) -> None:
         """Pump async_auth_flow the way httpx does, feeding a 200 to whatever it
         yields, so coordination runs without real network."""
+        await self._collect_flow_requests(provider)
+
+    async def _collect_flow_requests(self, provider) -> list[Any]:
+        """Pump the flow and RETURN every request it yielded.
+
+        The requests are the only place a caller can see what the authorization
+        server would receive: the SDK's own unlocked ``_refresh_token`` POSTs
+        through its vendored httpx, so a test that spies on our helpers is blind
+        to it. Returning them lets a test assert on the wire rather than on our
+        own call graph.
+        """
         import httpx
 
+        yielded: list[Any] = []
         gen = provider.async_auth_flow(httpx.Request("POST", self.URL))
         try:
             request = await gen.__anext__()
             while True:
+                yielded.append(request)
                 response = httpx.Response(200, request=request)
                 try:
                     request = await gen.asend(response)
                 except StopAsyncIteration:
-                    return
+                    return yielded
         finally:
             await gen.aclose()
 
@@ -3426,11 +3439,22 @@ class TestDeadGrantTombstone:
         assert provider.context.current_tokens.refresh_token == "r-old"
 
     @pytest.mark.asyncio
-    async def test_tombstoned_row_makes_zero_coordinator_posts(
+    async def test_already_tombstoned_boot_yields_no_token_post(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """F4b: the coordinator short-circuits before taking the lock, so an
-        already-tombstoned grant costs no POST on the in-flight path either."""
+        """F4b: a boot whose row is ALREADY tombstoned must yield zero token
+        POSTs — asserted at the wire, not on our helper.
+
+        This is the STEADY STATE the tombstone exists to serve: boot 1 writes
+        the marker and takes the ``"dead"`` branch, every boot after it takes
+        the pre-lock short-circuit instead. The earlier version of this test
+        counted calls to our monkeypatched ``_refresh_oauth_token_locked``,
+        which stays at zero while the SDK POSTs the dead token from its own
+        unlocked ``_refresh_token`` — so it could not observe the very leak it
+        claimed to cover, and 383 green tests coexisted with a POST on every
+        boot. Assert on the REQUESTS THE FLOW YIELDS instead: that is the thing
+        the authorization server actually sees.
+        """
         from local_operator.mcp import auth as auth_mod
         from local_operator.mcp.auth import build_oauth_provider
 
@@ -3441,6 +3465,8 @@ class TestDeadGrantTombstone:
         async with provider.context.lock:
             await provider._initialize()
 
+        # Tombstone AFTER _initialize: the provider is holding the dead refresh
+        # token in memory exactly as it does on a real boot 2+.
         storage.mark_grant_dead()
 
         refresh_calls = {"n": 0}
@@ -3451,6 +3477,16 @@ class TestDeadGrantTombstone:
 
         monkeypatch.setattr(auth_mod, "_refresh_oauth_token_locked", counting_refresh)
 
-        await self._drive_auth_flow(provider)
+        yielded = await self._collect_flow_requests(provider)
 
+        token_posts = [r for r in yielded if str(r.url).endswith("/token")]
+        assert token_posts == [], f"the SDK POSTed a tombstoned grant: {token_posts}"
+        # Our locked exchange must not run either — the short-circuit is before
+        # the lock, so a dead grant costs neither an acquire nor a POST.
         assert refresh_calls["n"] == 0
+        # The structural invariant behind the wire assertion: with no in-memory
+        # refresh token the SDK's refresh branch is unreachable, so this cannot
+        # regress into "did not POST this run" by accident.
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token is None
+        assert provider.context.can_refresh_token() is False
