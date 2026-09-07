@@ -92,6 +92,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only its named temporary draft file after a failed atomic replacement",
     ),
+    # `/move`'s recent-directory list, and the same shape as the draft store
+    # above: one named FILE at `<config_dir>/move-recents.json`, written to a
+    # tempfile in that same directory and replaced over. The destination is a
+    # literal filename joined to the config root, so it can never name a
+    # directory and never resolve under sessions/ — and the value written is a
+    # list of path STRINGS, never a path this code opens or removes.
+    (
+        "local_operator/tui/move_targets.py::remember_recent",
+        "os.replace",
+        "Atomic replacement of the single move-recents.json file in the config dir, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/tui/move_targets.py::remember_recent",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",

@@ -120,6 +120,32 @@ SLASH_COMMANDS: list[SlashCommand] = [
         aliases=("recall",),
         desktop_destination="sessions.resume",
     ),
+    # Beside the session-transition family because it changes the same session
+    # rather than replacing it: `/new` discards the conversation, `/resume`
+    # moves to another, and this one keeps the conversation and changes WHERE
+    # it works. Placed after `/resume` and before `/rename` because those two
+    # are the other commands that alter a session in place.
+    #
+    # NOT an echo, the rule `/approvals` and `/rename` follow: the argument is
+    # a setting rather than words the model is given, and the receipt names the
+    # directory that ended up in force — strictly more than the typed words,
+    # which may have been `~/x` or a relative path the app resolved.
+    SlashCommand(
+        "move",
+        # Names the two ways to answer it, because the argument form is the
+        # half a picker cannot teach: a user who has only ever seen the list
+        # will not guess that a path can be typed straight in. 44 cells, inside
+        # the ~55 at which the description column wraps (see `/model`, where a
+        # wrapping row renders a phantom command name in `/help`).
+        "Change this session's working directory",
+        # OPTIONAL: a bare `/move` opens the picker, which is the discoverable
+        # route, and the space offers the same suggestions for a user who would
+        # rather type. Enter on the bare command still does something useful,
+        # which is exactly the distinction `/approvals` and `/effort` draw
+        # against `/login`'s REQUIRED.
+        arguments=ArgumentMode.OPTIONAL,
+        desktop_destination="session.move",
+    ),
     # Beside `/resume` because it names the thing the picker lists. NOT an echo:
     # the argument is the conversation's own label — it goes on the band and the
     # terminal tab, never into anything the model is told — and the receipt

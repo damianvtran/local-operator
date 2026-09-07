@@ -1106,6 +1106,95 @@ class RemoteSession:
             return await client.ask_answer(request_id, value, question_index=question_index)
         raise ValueError("the answer does not match the current question")
 
+    async def set_working_directory(self, cwd: str) -> str:
+        """Point this session at ``cwd``; returns what happened, for the receipt.
+
+        THE CWD IS BAKED IN AT SPAWN. ``_spawn_runtime`` passes it as
+        ``LOP_MOBILE_CHILD_CWD`` and the child reads it once in ``amain``,
+        which is then the session's ``_cwd`` for the rest of that runtime's
+        life — it reaches the system prompt's environment block, every tool
+        call's ``ToolContext.cwd``, skill discovery and MCP config resolution.
+        There is no live setter to call and adding one would be wrong: those
+        consumers read the value at different moments, so a mid-flight change
+        would leave one turn's prompt disagreeing with the tools that turn
+        actually ran.
+
+        So the honest implementations are exactly two, and which one applies is
+        a property of the viewer rather than a choice:
+
+        * COLD — no runtime yet. The directory is simply the one the next
+          engage will spawn with, so this is a field assignment and costs
+          nothing. This is the "at the start of a session" case, and it is the
+          common one: ``lop`` opens cold.
+        * BOUND — a runtime is already serving. It is retired and a fresh one
+          is engaged at the new directory. That is a REBIND, not a new
+          conversation: the session id, the transcript and everything on screen
+          are untouched, and the successor replays the same durable history the
+          predecessor wrote. It is the same shape as the build-refresh path
+          (``_go_cold(refresh=True)`` → re-engage), which exists precisely
+          because retiring an idle runtime and starting its successor is a
+          housekeeping event rather than an ending.
+
+        A BUSY runtime is REFUSED rather than rebuilt. Retiring mid-turn would
+        abort a model call the user is paying for and did not ask to lose, and
+        "apply it to the next turn" is the option that produces exactly the
+        divergence AGENTS.md calls out for ``/reload``: the band would show the
+        new directory while the running turn's tools still resolve against the
+        old one. Refusing states the situation and leaves both surfaces
+        agreeing.
+
+        It leaves by the RETIRING route (``retire_now``), never the stopping
+        one, and that distinction is the whole correctness argument for the
+        bound path. ``stop`` announces ``stopping``, which latches
+        ``_deliberate_stop`` in ``_on_disconnected`` and parks this viewer in
+        the stopped state — the right answer for a session the user ENDED and
+        the wrong one for a move, which ends a runtime while the conversation
+        continues. ``retiring`` already means "a successor is owed; engage
+        one": it goes cold with ``refresh=True`` and fires the refresh callback
+        the app re-engages on. So a move reuses the mechanism the build refresh
+        established rather than issuing a stop and then trying to un-latch it —
+        which cannot work anyway, since the disconnect that sets the flag
+        arrives AFTER this method's ack has returned.
+
+        The move is applied to ``_cwd`` FIRST and only then is the runtime
+        asked to go, so the successor cannot be engaged before the field it
+        reads is set. If the retire is refused the field is put back: a viewer
+        whose ``_cwd`` says one thing while its runtime works in another is
+        precisely the divergence this method exists to avoid.
+        """
+        previous = self._cwd
+        if self.is_cold:
+            self._cwd = cwd
+            return "cold"
+        # ``owner_idle`` is the SAME reading the build-refresh seam uses, and
+        # it already covers every term that matters here — streaming, a parked
+        # approval/ask gate, and a running background job — so this asks one
+        # question rather than reassembling the predicate and drifting from it.
+        # The runtime re-checks on its own side anyway (``may_refresh``): a
+        # retire that races work arriving is refused there and surfaces below.
+        if not self.owner_idle():
+            raise RuntimeError(
+                "this session is working right now — /move again when the turn finishes"
+            )
+        client = self._client
+        ask = getattr(client, "retire_now", None) if client is not None else None
+        if not callable(ask):
+            raise RuntimeError("this session's runtime is too old to be moved; /reload first")
+        self._cwd = cwd
+        try:
+            detail = str(await cast(Callable[[], Awaitable[str]], ask)())
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            self._cwd = previous
+            raise RuntimeError(f"could not move: {error}") from error
+        if detail != "retiring":
+            # The runtime kept itself — work arrived between this viewer's idle
+            # read and the runtime's own re-check, which is the race the
+            # re-check exists to catch. Its reason is the honest receipt, and
+            # the directory goes back because nothing moved.
+            self._cwd = previous
+            raise RuntimeError(f"could not move: {detail.removeprefix('kept: ')}")
+        return "rebound"
+
     async def _ensure_bound(self) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 

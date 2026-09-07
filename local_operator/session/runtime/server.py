@@ -1570,6 +1570,28 @@ class RuntimeServer:
                     detail = f"kept: {observers} viewer(s) still attached"
                 else:
                     detail = await self._retire_if_pristine(leaving=conn)
+            elif op == "retire_now":
+                # ``/move``: the viewer changed the directory this session
+                # works in, and the cwd is baked in at spawn
+                # (``LOP_MOBILE_CHILD_CWD``), so the only way to honour it is
+                # to retire and let the viewer engage a successor at the new
+                # path.
+                #
+                # A SIBLING of ``refresh_if_idle`` rather than a reuse of it,
+                # because the two differ in exactly one term and it is the
+                # gating one: a refresh is owed only when the build on disk has
+                # moved, whereas a move is owed whenever the user asked for it.
+                # Everything downstream is deliberately identical — the same
+                # idle predicate, the same ``retiring`` announcement, the same
+                # re-check after it — so a moved runtime and a refreshed one
+                # leave by one path and a viewer needs no new frame to
+                # understand either.
+                #
+                # Handled HERE rather than in ``_dispatch`` for the same reason
+                # its two siblings are: these are lifecycle ops that must not
+                # trigger the post-ack refresh (the exemption list below), and
+                # a dispatcher that has no ``conn`` cannot make that call.
+                detail = await self._retire_for("moved")
             elif op == "refresh_if_idle":
                 # The viewer-side belt for the runtime's own self-refresh
                 # (design-runtime-autorefresh §3.3): a `lop --resume` in the
@@ -1639,6 +1661,10 @@ class RuntimeServer:
                 "stop",
                 "retire_if_pristine",
                 "refresh_if_idle",
+                # Same exemption, same reason: it either retired (nothing to
+                # push, and the handle is mid-dispose) or refused (nothing
+                # changed, so there is nothing to push).
+                "retire_now",
             ):
                 await self._handle.refresh()
                 await self._push()
@@ -1737,15 +1763,37 @@ class RuntimeServer:
         but costs the user a cold start they did not need, a wrong "keep"
         costs the reaper's next check.
         """
-        h = self._handle
-        may_refresh = getattr(h, "may_refresh", None)
-        if not callable(may_refresh):
-            return "kept: this runtime cannot judge itself idle"
         from local_operator.session.runtime import process as process_mod
 
         newer = process_mod._build_changed(self._boot_build)
         if newer is None:
             return "kept: build on disk matches (or has not settled)"
+        logger.info(
+            "session runtime: viewer asked for a refresh; build on disk is %s, loaded %s",
+            newer.label(),
+            self._boot_build.label(),
+        )
+        return await self._retire_for("stale-build", to=newer.label())
+
+    async def _retire_for(self, reason_label: str, *, to: str = "") -> str:
+        """Retire this runtime iff it is idle, announcing ``reason_label``.
+
+        The shared body of the two viewer-driven retirements — a stale build
+        (``refresh_if_idle``) and a directory change (``retire_now``). They
+        differ only in what makes the retirement OWED, which each caller
+        establishes before calling; everything after that decision is the same
+        ordering and must stay so, because a second copy of it is how one path
+        grows a re-check the other lacks.
+
+        Every failure path RETURNS ``kept: …`` rather than raising, and every
+        one keeps the runtime alive. The asymmetry ``_retire_if_pristine``
+        records holds here too: a wrong "retire" costs a cold start nobody
+        asked for, a wrong "keep" costs one more check.
+        """
+        h = self._handle
+        may_refresh = getattr(h, "may_refresh", None)
+        if not callable(may_refresh):
+            return "kept: this runtime cannot judge itself idle"
         try:
             reason = str(may_refresh() or "")
         except Exception as exc:  # noqa: BLE001 — uncertainty keeps the runtime
@@ -1755,7 +1803,7 @@ class RuntimeServer:
         request_stop = getattr(h, "request_stop", None)
         if not callable(request_stop):
             return "kept: this runtime cannot stop itself gracefully"
-        await self.announce_retiring("stale-build", to=newer.label())
+        await self.announce_retiring(reason_label, to=to)
         # The one await between decision and stop; re-ask, as
         # ``_retire_if_pristine`` does after its broadcast.
         try:
@@ -1764,11 +1812,7 @@ class RuntimeServer:
             return f"kept: idle probe failed ({exc})"
         if reason:
             return f"kept: {reason} (arrived while retiring was announced)"
-        logger.info(
-            "session runtime: viewer asked for a refresh; build on disk is %s, loaded %s; retiring",
-            newer.label(),
-            self._boot_build.label(),
-        )
+        logger.info("session runtime: retiring (%s)", reason_label)
         result = request_stop()
         if inspect.isawaitable(result):
             await result

@@ -224,6 +224,7 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
@@ -15075,6 +15076,181 @@ class OperatorApp(App[None]):
             self._notify_mobile_title(stored)
         return stored
 
+    def _cmd_move(self, arg: str, notice: NoticeFn) -> None:
+        """``/move`` — pick a working directory; ``/move <path>`` — go straight there.
+
+        A bare ``/move`` opens :class:`MovePickerScreen`, because choosing a
+        directory is the same two-way question `/resume` answers with a card:
+        the app offers what it knows, the user picks one. An explicit path
+        skips it — a user who already knows where they are going should not be
+        made to answer a prompt — and is expanded (``~``, relative) against the
+        SESSION's directory rather than the process's, since a resumed session
+        routinely differs from the terminal's own cwd.
+
+        FRONTEND-LOCAL, and it must stay that way: the picker draws on this
+        terminal, the suggestions are read from THIS machine's session records,
+        and the directory a user means is one on the machine they are sitting
+        at. Routing it to the owner would offer a remote host's directories to
+        someone who cannot see them — the same argument ``/settings`` and
+        ``/theme`` make about config.yml.
+        """
+        session = self._session
+        if session is None:
+            # A rejected command changed nothing, so the boot composition must
+            # survive it: `_system_notice`, the rule every rejecting branch
+            # here follows.
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+
+        if arg.strip():
+            self._apply_move(arg.strip(), notice, typed=True)
+            return
+
+        from local_operator.paths import config_dir
+        from local_operator.tui.move_targets import complete_path, suggest_targets
+
+        cwd = self._session_cwd()
+        try:
+            targets = suggest_targets(cwd, config_dir=config_dir())
+        except Exception:  # noqa: BLE001 — a picker that cannot suggest still opens
+            logger.debug("could not assemble move suggestions", exc_info=True)
+            targets = []
+
+        def _complete(query: str):
+            # Bound to the SESSION's cwd, not the process's, so a typed
+            # relative path completes from where the band says the session is.
+            return complete_path(query, cwd=cwd)
+
+        def _move_choice(path: str | None) -> None:
+            # Dismissed with Esc — the session is left exactly where it was,
+            # with nothing said: a cancelled picker is not an event worth a
+            # transcript line (the rule `_cmd_resume` states).
+            if path:
+                self._apply_move(path, notice, typed=False)
+
+        self.push_screen(
+            MovePickerScreen(targets, current=cwd, complete=_complete),
+            _move_choice,
+        )
+
+    def _apply_move(self, raw: str, notice: NoticeFn, *, typed: bool) -> None:
+        """Validate ``raw`` and move the session to it, or say why not.
+
+        Validation happens HERE, before anything is changed, so a bad target
+        costs the user one line and never a half-applied state: the three
+        rejections (absent, not a directory, unenterable) are told apart
+        because they call for three different next moves.
+
+        ``typed`` says whether the path came from the composer rather than the
+        picker. Only a typed path can be a no-op worth reporting — picking the
+        row you are already on is a deliberate "stay here" — so the two produce
+        different receipts for the same situation.
+        """
+        from local_operator.tui.move_targets import (
+            MoveError,
+            expand_path,
+            format_label,
+            validate_target,
+        )
+
+        session = self._session
+        if session is None:
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+        try:
+            target = validate_target(expand_path(raw, cwd=self._session_cwd()))
+        except MoveError as error:
+            notice(str(error), "warning")
+            return
+        except OSError as error:
+            # A path on an unmounted volume, or a symlink loop: the same class
+            # of answer as a MoveError, and equally not a traceback's business.
+            notice(f"cannot move to {raw}: {error}", "warning")
+            return
+
+        destination = str(target)
+        if destination == self._session_cwd():
+            if typed:
+                notice(f"already in {format_label(destination)}")
+            return
+        self._run_session_transition(self._move_session(destination, notice))
+
+    async def _move_session(self, destination: str, notice: NoticeFn) -> None:
+        """Point the session at ``destination``, rebuilding its runtime if bound.
+
+        The two outcomes are the session's to decide, not this app's — see
+        ``RemoteSession.set_working_directory``, which owns the reasoning about
+        why a cold viewer is a field assignment and a bound one is a runtime
+        rebind. This method is the UI half: it reports what happened, keeps the
+        band in step, and re-engages the successor.
+
+        Run behind ``_run_session_transition`` because the bound path DOES
+        replace the runtime under the conversation, and Enter must not address
+        the outgoing one while that is in flight — the same boundary `/new` and
+        `/resume` use for the same reason.
+
+        THE BAND IS THE INVARIANT. It is repainted from the value the session
+        now holds, immediately and on both paths, because the failure this
+        feature must not have is the one AGENTS.md names for `/reload`: a
+        screen showing one directory while the agent works in another. On the
+        cold path nothing else would repaint it (there is no runtime to push a
+        snapshot), and on the bound path the successor's snapshot arrives
+        seconds later — so the push here is what makes the two agree at the
+        moment the receipt is printed rather than eventually.
+        """
+        session = self._session
+        move = getattr(session, "set_working_directory", None)
+        if not callable(move):
+            # A reduced facade (a test double, an embedder's host) that never
+            # grew the method. Refusing names the situation rather than
+            # silently doing nothing.
+            self._system_notice("this session cannot be moved", "warning")
+            return
+        from local_operator.tui.move_targets import format_label, remember_recent
+
+        label = format_label(destination)
+        try:
+            outcome = await cast(Callable[[str], Awaitable[str]], move)(destination)
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            notice(str(error), "warning")
+            return
+
+        # The band FIRST, before any await: it is the surface the user is
+        # looking at when the receipt lands, and the whole point is that it
+        # never disagrees with where the session works.
+        self._push_cwd_to_band(destination)
+
+        from local_operator.paths import config_dir
+
+        remember_recent(config_dir(), destination)
+
+        if outcome == "rebound":
+            # NOTHING to re-engage here. The runtime leaves by the `retiring`
+            # route (see `RemoteSession.set_working_directory`), which the
+            # facade turns into `_go_cold(refresh=True)` and the refresh
+            # callback this app already installs — `_on_runtime_refreshed` —
+            # engages the successor eagerly. Starting a second engage from here
+            # would race that one for the same session's lease.
+            notice(f"moved to {label} — this session's runtime restarted there")
+            return
+        notice(f"moved to {label}")
+
+    def _push_cwd_to_band(self, cwd: str) -> None:
+        """Repaint the band's directory segment for ``cwd``.
+
+        One call paints the band AND pushes the terminal title (see
+        ``StatusLine._sync_terminal_title``), so neither surface can lag the
+        other by a frame — the discipline `_cmd_rename` follows for the name.
+        The title matters here specifically: an unnamed conversation is
+        LABELLED by its directory (``terminal_title.cwd_label``), so a move
+        that did not push would leave the tab naming the old folder.
+        """
+        if self._status is None:
+            return
+        self._status.update(cwd=cwd)
+
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
         """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
 
@@ -17735,6 +17911,8 @@ class OperatorApp(App[None]):
             self._cmd_resume(arg, notice)
         elif command == "/fork":
             self._cmd_fork(prompt_arg, notice)
+        elif command == "/move":
+            self._cmd_move(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
         elif command == "/model":
@@ -22584,6 +22762,33 @@ class OperatorApp(App[None]):
             return
         if message.command == "analytics":
             picker.set_choices(self._analytics_choices())
+            picker.set_notice("")
+            return
+        if message.command == "move":
+            # The same suggestions the picker opens with, offered inline for a
+            # user who typed the space rather than pressing Enter — one
+            # vocabulary, two routes to it, so the list cannot propose a
+            # directory the picker would not. Free typing is unaffected: the
+            # editor's list RANKS what is typed and never filters what may be
+            # submitted, so an arbitrary path still reaches `_cmd_move`.
+            from local_operator.paths import config_dir
+            from local_operator.tui.move_targets import suggest_targets
+
+            try:
+                targets = suggest_targets(self._session_cwd(), config_dir=config_dir())
+            except Exception:  # noqa: BLE001 — an unreadable store is an empty list
+                logger.debug("could not assemble move argument rows", exc_info=True)
+                targets = []
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name=target.label,
+                        description=target.path,
+                        detail=target.detail,
+                    )
+                    for target in targets
+                ]
+            )
             picker.set_notice("")
             return
         if message.command == "mcp":

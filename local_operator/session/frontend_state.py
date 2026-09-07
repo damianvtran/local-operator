@@ -562,6 +562,13 @@ _FRONTEND_LOCAL_SLASHES = {
     "reload",
     "update",
     "resume",
+    # The picker draws on THIS terminal, its suggestions are read from THIS
+    # machine's session records and wake index, and the directory a user means
+    # is one on the machine they are sitting at — the same argument `/settings`
+    # and `/theme` make about config.yml. Routed to the owner it would offer a
+    # remote host's directories to someone who cannot see them, and move a
+    # session into a path that may not exist here at all.
+    "move",
     # A fork opens a window on THIS machine and reads THIS machine's config.yml
     # for where to put it — the same argument `/settings` and `/theme` make. On a
     # follower attached to a remote owner, forking must open a window here, not
