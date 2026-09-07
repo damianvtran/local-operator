@@ -629,10 +629,13 @@ Warnings that still hold, each of which has already cost a release:
 
   The one only the second form lists is #720 (`78c20295e`), squash-merged; it
   nearly shipped unlisted in v0.51.1 and was caught only because its author was
-  watching. `--first-parent` happens to work here because both button shapes
-  land on that chain, but do not adopt it as a general "show me every PR"
-  idiom: it is another shape-based filter, and the next thing that does not fit
-  the shape will be dropped just as quietly. A release note that omits a
+  watching. `--first-parent` happens to work for *counting* the window because
+  both button shapes land on that chain, but do not adopt it as a general
+  "show me every PR" idiom: for a PR landed with the merge button it shows only
+  `Merge pull request #999 from feat` and never the substantive commit on the
+  second parent, so when a merge subject is uninformative the plain log carries
+  the real description and the first-parent walk does not. A release note that
+  omits a
   merged PR is a defect in the release, not a cosmetic miss — it is the only
   record of what changed under a user who is about to update.
 - **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
@@ -646,21 +649,34 @@ Warnings that still hold, each of which has already cost a release:
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
   `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
-  re-shards every file after it in sort order**. Verified: adding one file
-  early in the ordering moves `tests/unit/tui/test_app_pilot.py` from index 252
-  to 253, i.e. shard 2 to shard 3. A test in the file that moved then fails on
-  your branch and nowhere else, reading exactly like "your diff broke the TUI"
-  when the diff touches no TUI file at all. It is load-sensitive and mostly
-  appears under coverage. Before concluding you caused a suspect shard failure,
-  reproduce it on clean `origin/main` **with** `--cov=local_operator` (several
-  of these pass 3/3 bare and fail intermittently under coverage) and check
-  whether your branch changed that file's shard index. Diagnosing this as a
-  real regression has already cost a review round.
-- **A red `cli-sanity`/`server-sanity` across several PRs at once is the
-  provider, not your diff.** Those jobs call a live model, so a third-party
+  re-shards every file after it in sort order**. Derive it against the ref CI
+  actually runs, not a stale local checkout:
+
+  ```sh
+  git ls-tree -r --name-only origin/main \
+    | grep -E '^tests/unit/.*test_.*\.py$' | sort | nl \
+    | grep tests/unit/tui/test_app_pilot.py     # 331st of 451 -> index 330
+  ```
+
+  At index 330 that file is in shard 0; add one test file earlier in the
+  ordering and it becomes 331, shard 1. This is not hypothetical — PR #730 did
+  exactly that (451 → 452 files) and its CI failure was `test_app_pilot.py`
+  failing in shard 1, on a branch that touched no TUI file. A test in the file
+  that moved fails on your branch and nowhere else, reading exactly like "your
+  diff broke the TUI". Before concluding you caused a suspect shard failure,
+  check whether your branch changed that file's shard index, and reproduce on
+  clean `origin/main` under the same conditions CI uses (the shard job runs
+  `pytest --cov`, and some of these failures do not reproduce bare).
+  Diagnosing this as a real regression has already cost a review round.
+- **Several PRs going red at once is a shared cause, not several bugs.**
+  `cli-sanity` and `server-sanity` call a live model (both are marked
+  "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
   429 reddens every open PR simultaneously — including heads that touch
-  neither surface. The tell is shared fate: check whether sibling PRs went red
-  in the same window, and rerun the job before debugging your change.
+  neither surface. Re-sharding (above) produces the same fleet-wide pattern
+  from an entirely different cause. Either way the tell is the same: before
+  debugging your diff, check whether sibling PRs went red in the same window,
+  and confirm *which* job failed. A shard failure and a sanity failure look
+  equally alarming on the checks list and have nothing to do with each other.
 - **Never pre-create a bare tag** (`git tag vX.Y.Z && git push --tags`) and
   then make a release from it. The publish workflow triggers on the *release*
   being published, so a bare tag publishes nothing, and `gh release create`
