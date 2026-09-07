@@ -166,18 +166,39 @@ def test_recovery_text_names_server_count_and_supersedes() -> None:
 
 
 def test_recovery_text_agrees_in_number() -> None:
-    """Singular and the zero fallback, because the model reads this text.
+    """Singular and plural, because the model reads this text.
 
-    Zero registered tools is a real state — a server can be connected with
-    every tool filtered out by ``disabledTools`` — so it must not claim
-    "0 tools are available again"; the count-free phrasing stays honest about
-    the connection without promising callable tools.
+    The zero case is a different sentence entirely and is pinned separately
+    below; all this asserts here is that it never claims a count.
     """
     assert "1 tool is available again" in format_mcp_recovery_message("files", 1)
     assert "2 tools are available again" in format_mcp_recovery_message("files", 2)
+    assert "0 tool" not in format_mcp_recovery_message("files", 0)
+
+
+def test_recovery_text_promises_no_tools_when_none_are_enabled() -> None:
+    """Zero registered tools must not be told to "call them normally".
+
+    A server can be connected with every tool filtered out by
+    ``disabledTools``, so this is a reachable state and not a degenerate one.
+    The earlier count-free phrasing avoided "0 tools" but still said the tools
+    "are available again" and "are usable now" — false against an empty
+    inventory, and false in the expensive direction: the model spends a turn
+    looking for tools that do not exist (review round 1, R2).
+
+    What must survive is the SUPERSEDE clause. The model is still holding an
+    incident saying this server is unreachable, and that part is genuinely no
+    longer true, so the notice must still cancel it.
+    """
     zero = format_mcp_recovery_message("files", 0)
-    assert "its tools are available again" in zero
-    assert "0 tool" not in zero
+    assert "is connected again" in zero
+    assert "no enabled tools" in zero
+    assert "supersedes the earlier session incident" in zero
+    # The three over-claims the old zero branch made, none of which are true
+    # with an empty inventory.
+    assert "available again" not in zero
+    assert "usable now" not in zero
+    assert "call them normally" not in zero
 
 
 def test_recovery_is_not_an_incident_type() -> None:

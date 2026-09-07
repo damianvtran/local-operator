@@ -339,24 +339,37 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     (``len(McpManager.get_server_tools(server))``), not ``len(conn.tools)``:
     ``_register_tools`` filters by ``enabledTools``/``disabledTools``, so the
     raw list overstates what the model can actually call.
+
+    ZERO registered tools takes a different sentence, not a count-free variant
+    of the same one (review round 1, R2). It is a real state — a server can be
+    connected with every tool filtered out by ``disabledTools`` — and telling
+    the model its tools "are usable now, so call them normally" against an
+    empty inventory is false in the one direction that costs a wasted turn:
+    the model goes looking for tools that are not there. The connection is
+    still worth announcing, because it is what supersedes the incident and
+    stops the model reporting the server as down.
     """
+    if not tool_count:
+        # Honest about the CONNECTION and silent about callable tools: no
+        # "available again", no "call them normally". The supersede clause is
+        # still required — the model is holding an incident that says the
+        # server is unreachable, which is no longer true.
+        return (
+            f"[mcp recovery] MCP server '{server}' is connected again, but it "
+            "currently exposes no enabled tools. This supersedes the earlier "
+            "session incident about this server: the server itself is no "
+            "longer failing, so stop reporting it as unavailable — but do not "
+            "expect callable tools from it until some are enabled."
+        )
     # Verb agreement is spelled out rather than templated: the design's draft
     # formatter read "1 tool are available again", which is text the model
-    # actually reads. Zero registered tools still recovers honestly — the
-    # server may be connected with every tool filtered out by
-    # ``disabledTools`` — so it falls back to the count-free phrasing rather
-    # than claiming "0 tools".
-    if not tool_count:
-        tools = "its tools are available again"
-    elif tool_count == 1:
-        tools = "1 tool is available again"
-    else:
-        tools = f"{tool_count} tools are available again"
+    # actually reads.
+    tools = "1 tool is" if tool_count == 1 else f"{tool_count} tools are"
     return (
-        f"[mcp recovery] MCP server '{server}' is connected again and {tools}. "
-        "This supersedes the earlier session incident about this server: its "
-        "tools are usable now, so call them normally and stop reporting it as "
-        "unavailable."
+        f"[mcp recovery] MCP server '{server}' is connected again and {tools} "
+        "available again. This supersedes the earlier session incident about "
+        "this server: its tools are usable now, so call them normally and stop "
+        "reporting it as unavailable."
     )
 
 

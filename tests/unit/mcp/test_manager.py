@@ -2854,6 +2854,13 @@ class TestMcpRecoveryNotice:
         behind it, so there is no sink to fire. The connect must still succeed,
         and the server must still be disarmed so a later session-backed manager
         does not inherit a phantom arming.
+
+        Asserted through the SINK rather than through ``_incident_announced``
+        (review round 1, R4), which is what the rest of this class does: a sink
+        installed AFTER the sinkless reconnect must hear nothing, because that
+        reconnect already consumed the arming. It is the discard's placement
+        — unconditional, and ahead of the ``sink is None`` return — that makes
+        that true, so this fails if the discard is ever moved below the return.
         """
         manager = McpManager(str(project))
         manager.on_incident = lambda server, reason: None
@@ -2865,9 +2872,16 @@ class TestMcpRecoveryNotice:
         monkeypatch.setattr(manager, "_connect_server", good_connect)
         await manager.discover_and_connect()
         await self._trip_breaker(manager, "fast", monkeypatch)
-        assert "fast" in manager._incident_announced
 
+        # The sinkless reconnect: it must succeed rather than trip over the
+        # missing sink.
         monkeypatch.setattr(manager, "_connect_server", good_connect)
         assert await manager.reconnect_server("fast") is not None
-        assert "fast" not in manager._incident_announced
+
+        # Now a session-backed manager's sink arrives. The arming was consumed
+        # by the reconnect above, so this must stay silent.
+        recoveries: list[tuple[str, int]] = []
+        manager.on_recovery = lambda server, count: recoveries.append((server, count))
+        assert await manager.reconnect_server("fast") is not None
+        assert recoveries == [], "a sinkless connect left the server armed to re-announce"
         await manager.disconnect_all()

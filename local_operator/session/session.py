@@ -2238,6 +2238,26 @@ class Session:
         #: drain, pipeline exit, prompt entry, dispose) in the manner of
         #: ``_pending_shell_records``.
         self._pending_context_journal: list[CustomMessage] = []
+        #: Serialises the ASYNC journal notices so they reach the live context in
+        #: the order their hooks fired, not in the order they happen to finish.
+        #:
+        #: The two MCP notices do different amounts of work before their live
+        #: append — ``journal_incident`` awaits a transcript write,
+        #: ``journal_mcp_recovery`` persists nothing — and both are launched
+        #: fire-and-forget through ``_spawn_background``. Without this lock the
+        #: recovery completes on its FIRST scheduling step and overtakes the
+        #: incident it exists to supersede, leaving the model reading "its tools
+        #: are gone ... Do not call its tools" as the last word on a server that
+        #: is working (review round 1, R1; measured inverted at 0-5 loop ticks).
+        #:
+        #: A LOCK rather than a delay because ordering must not depend on how
+        #: many awaits either method happens to contain: ``asyncio.Lock``
+        #: acquires FIFO and its uncontended path does not yield, so the task
+        #: spawned first takes it first and the second waits. Do not "simplify"
+        #: this away — no current route reaches the inversion (every real
+        #: incident-to-recovery path crosses a connect round trip), but a cached
+        #: or in-process connect path makes it live, and the failure is silent.
+        self._journal_lock = asyncio.Lock()
         # (new_label, transient) of the last model switch made model-visible, so
         # the two edges that can both fire for one change (``set_model`` and a
         # route-settled event) do not double-announce. See journal_model_switch.
@@ -6956,6 +6976,11 @@ class Session:
         classified (rate-limit / auth / provider / network / context / MCP),
         appended to the LIVE context so the very next turn sees it, and
         persisted so ``--resume`` replays it.
+
+        Holds ``_journal_lock`` across the persist-then-append pair so a
+        notice fired immediately after cannot overtake it: this method awaits a
+        transcript write and :meth:`journal_mcp_recovery` awaits nothing, so
+        without the lock the SECOND notice lands FIRST (review round 1, R1).
         """
         from local_operator.incidents import format_incident_message
 
@@ -6968,8 +6993,9 @@ class Session:
             details={"text": text, "raw": raw[:1000]},
         )
         try:
-            await self._transcript.append_message(message)
-            self._append_or_park_journal(message)
+            async with self._journal_lock:
+                await self._transcript.append_message(message)
+                self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
 
@@ -7029,11 +7055,18 @@ class Session:
             },
         )
         try:
-            # Persist only when the record should survive a resume; a transient
-            # fallback is live-context-only (see _is_persistable_message).
-            if _is_persistable_message(message):
-                await self._transcript.append_message(message)
-            self._append_or_park_journal(message)
+            # Same ordering lock as the other async journal notices: this one
+            # persists CONDITIONALLY, so two switches (or a switch and an
+            # incident) fired together would otherwise reach the context in
+            # whichever order their awaits happened to settle rather than in
+            # fire order. See ``_journal_lock``.
+            async with self._journal_lock:
+                # Persist only when the record should survive a resume; a
+                # transient fallback is live-context-only (see
+                # _is_persistable_message).
+                if _is_persistable_message(message):
+                    await self._transcript.append_message(message)
+                self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal model switch", exc_info=True)
 
@@ -7134,6 +7167,14 @@ class Session:
         ``assistant(tool_use) -> user -> tool_result`` and bricking the
         session. Delivery is therefore at the next tool boundary of the running
         turn — before the next model call, not the next user turn.
+
+        Takes ``_journal_lock`` even though it has nothing to await, and that
+        is the entire point: this method would otherwise finish on its first
+        scheduling step while the incident it supersedes is still awaiting its
+        transcript write, so a recovery fired straight after an incident
+        reached the model FIRST and left the death notice as the last word
+        (review round 1, R1). The lock makes the order a property of which hook
+        fired first, not of how many awaits each method contains.
         """
         from local_operator.incidents import format_mcp_recovery_message
 
@@ -7145,7 +7186,8 @@ class Session:
             attribution="system",
             details={"text": text, "server": server, "tool_count": tool_count},
         )
-        self._append_or_park_journal(message)
+        async with self._journal_lock:
+            self._append_or_park_journal(message)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips): journal without blocking the

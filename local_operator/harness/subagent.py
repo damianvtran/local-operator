@@ -1297,11 +1297,13 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     ``set_on_tools_changed``: that is a single slot the parent already holds,
     so installing there would freeze the PARENT's inventory for the rest of the
     session. ``on_incident`` and ``on_recovery`` are the same shape and carry
-    the same prohibition \u2014 a child installing either would silently REPLACE the
-    parent's sink, and the parent would stop hearing about MCP failures and
-    recoveries for the rest of the session. This is already correct because
-    ``attach_mcp_dispose`` (which installs both) is never called for a child;
-    do not add them here. The cost is that a reconnect during the child's run leaves the
+    the same prohibition — a child installing either would silently REPLACE
+    the parent's sink, and the parent would stop hearing about MCP failures
+    and recoveries for the rest of the session. This is already correct
+    because ``attach_mcp_dispose`` (which installs both) is never called for a
+    child; do not add them here.
+
+    The cost is that a reconnect during the child's run leaves the
     child holding stale ``AgentTool`` objects, which is harmless — their
     execute closes over the manager plus the (server, tool) pair, so calls
     still route and still reconnect (``manager._execute_tool_call``); only a schema

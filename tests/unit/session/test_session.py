@@ -4757,3 +4757,58 @@ async def test_recovery_after_dispose_is_a_no_op(tmp_path):
         for m in session._context.messages
         if isinstance(m, CustomMessage) and m.custom_type == "session_mcp_recovery"
     ]
+
+
+async def _drain_journal_tasks(session: Session) -> None:
+    """Run every ``_spawn_background`` task to completion, oldest first.
+
+    Bounded and looped because a drained task can spawn another; a
+    self-respawning task fails the test instead of hanging it. Draining rather
+    than sleeping is what keeps the ordering assertion below a statement about
+    the code and not about the scheduler.
+    """
+    for _ in range(10):
+        pending = [task for task in list(session._background_tasks) if not task.done()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("background journal tasks never settled")
+
+
+@pytest.mark.asyncio
+async def test_incident_then_recovery_reaches_the_context_in_that_order(tmp_path):
+    """A recovery must never overtake the incident it exists to supersede.
+
+    Both hooks are fire-and-forget through ``_spawn_background``, and they do
+    different amounts of work: ``journal_incident`` awaits a transcript write
+    before its live append, ``journal_mcp_recovery`` persists nothing. Without
+    the shared ``_journal_lock`` the recovery therefore finishes on its FIRST
+    scheduling step and lands ahead of the incident, leaving the model reading
+    "its tools are gone ... Do not call its tools" as the LAST word on the
+    server — precisely the state this notice exists to clear, now with a
+    superseding message that arrived too early to supersede anything.
+
+    Fired with ZERO separation deliberately (review round 1, R1). The old code
+    inverted at 0, 1, 2, 3 and 5 loop ticks and only came right at 10; a test
+    that inserted any separation would pass against the defect, so the guard
+    would silently stop guarding. Ordering here is a property of the lock, not
+    of how many awaits either method happens to contain.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    session._on_mcp_incident("minerva-qa", "MCP authorization failed")
+    session._on_mcp_recovery("minerva-qa", 41)
+    await _drain_journal_tasks(session)
+
+    journal = [
+        m.custom_type
+        for m in session._context.messages
+        if isinstance(m, CustomMessage)
+        and m.custom_type in (SESSION_INCIDENT_MESSAGE_TYPE, "session_mcp_recovery")
+    ]
+    assert journal == [
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        "session_mcp_recovery",
+    ], f"the recovery overtook its own incident: {journal}"
+    await session.dispose()
