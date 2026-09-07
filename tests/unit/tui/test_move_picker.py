@@ -358,13 +358,18 @@ def test_tab_completes_into_the_tidy_label_not_a_raw_absolute_path(tmp_path: Pat
 @pytest.mark.parametrize(
     ("terminal_cols", "expect_tab"),
     [
-        # Measured against the REAL app, not computed: `_card_width` subtracts
-        # ten cells (screen padding 2 + PICKER_WIDTH_MARGIN 6 + card padding 4)
-        # before the footer sees anything, so the 73 cells that carry both
-        # hints need an 86-column TERMINAL.
+        # Measured against the REAL app, not computed: the card is TWELVE
+        # cells narrower than the terminal — `_screen_size()` is already inset
+        # by `Screen { padding: 1 }` (2), then `_card_width` subtracts
+        # PICKER_WIDTH_MARGIN (6) and its own padding (4). So the 73 cells that
+        # carry both hints need an 85-column TERMINAL. 84 and 85 are pinned as
+        # a PAIR so the boundary is guarded rather than straddled: an earlier
+        # version pinned 84 and 86 and named 86 as "first width with it", which
+        # is off by one (review MAJOR-4.3).
         (80, False),  # the standard terminal — documented to give `tab` up
         (84, False),  # last width without it
-        (86, True),  # first width with it
+        (85, True),  # THE BOUNDARY: 73 card cells, measured end to end
+        (86, True),
         (100, True),
     ],
 )

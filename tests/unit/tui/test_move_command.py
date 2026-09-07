@@ -39,6 +39,12 @@ class MovableSession(FakeSession):
         self._outcome = outcome
         self.moves: list[str] = []
         self.error: Exception | None = None
+        # ``FakeSession`` pins ``session_id`` to a constant, but the eval-latch
+        # guards need TWO distinguishable conversations to drive a real
+        # replacement through ``_adopt_session`` — one id for every double
+        # cannot express a swap. Overridden as a property (not a plain
+        # attribute) so it stays type-compatible with the base.
+        self._session_id = "sess"
         #: What ``is_cold`` reads. The app must NOT consult it to decide
         #: whether to narrate a move — a viewer with an engage in flight reads
         #: cold while its move joins that engage and then retires the runtime
@@ -59,6 +65,14 @@ class MovableSession(FakeSession):
         retires a runtime, which is exactly the move that makes the user wait.
         """
         return self._outcome == "rebound"
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self._session_id = value
 
     async def set_working_directory(self, cwd: str) -> str:
         self.moves.append(cwd)
@@ -487,25 +501,70 @@ async def test_the_eval_warning_survives_a_cleared_transcript(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_a_replaced_session_does_not_inherit_the_eval_latch(tmp_path: Path) -> None:
-    """The latch belongs to the session that ran `eval`.
+    """The eval warning belongs to the conversation that ran `eval`.
 
-    A successor has its own kernel, so carrying the flag across a session
-    swap would warn a NEW conversation about a namespace it never had — the
-    opposite error, and just as untrue.
+    DRIVES A REAL REPLACEMENT through `_adopt_session` — the funnel every
+    swap path reaches — instead of performing the reset itself. The previous
+    version of this guard assigned `_session_used_eval_latch = False` by hand
+    and then asserted `False` stayed `False`, so it passed with the production
+    reset deleted and was structurally unable to notice that two of the three
+    session-replacement paths never reset at all (review MAJOR-4.1/4.2).
+
+    That is why the leak shipped: `_reload_session` reset the flag, but
+    `_apply_sidebar_presentation` rebinds `_transcript` to the incoming view
+    and `_attach_or_refuse` adopts a successor, and a conversation that never
+    ran `eval` was told its namespace had been destroyed.
     """
-    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
-    app = OperatorApp(lambda: _factory(session))
+    session_a = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    session_a.session_id = "conversation-a"
+    app = OperatorApp(lambda: _factory(session_a))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
         for _ in range(3):
             await pilot.pause()
-        assert app._session_used_eval()
+        assert app._session_used_eval(), "the session that ran eval is not flagged"
 
-        # What `_reload_session` does when it drops the outgoing session.
-        app._session_used_eval_latch = False
+        # THE REAL SWAP: adopt a different conversation, exactly as every
+        # replacement path does, and give it its own empty transcript — which
+        # is what makes the transcript half unable to retract a leaked latch.
+        session_b = MovableSession(cwd=str(tmp_path), outcome="rebound")
+        session_b.session_id = "conversation-b"
+        app._adopt_session(session_b)
         app._transcript_view().clear_blocks()
         for _ in range(3):
             await pilot.pause()
 
-        assert not app._session_used_eval(), "a fresh session inherited the warning"
+        assert not app._session_used_eval(), (
+            "conversation B inherited A's eval latch and would be warned about "
+            "a namespace it never had"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_latch_answers_only_for_the_session_it_was_stamped_for(
+    tmp_path: Path,
+) -> None:
+    """The key, asserted directly rather than through a swap's side effects.
+
+    A latch left set against another session's id must be structurally unable
+    to answer for the current one — that is what makes a swap site added later
+    unable to reintroduce the leak by forgetting to clear.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    session.session_id = "the-current-one"
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._transcript_view().clear_blocks()
+        for _ in range(3):
+            await pilot.pause()
+
+        # Set, but stamped for somebody else: the shape a leak takes.
+        app._session_used_eval_latch = True
+        app._eval_latch_session_id = "a-conversation-the-user-left"
+        assert not app._session_used_eval(), "a stale-keyed latch answered"
+
+        # The same flag, correctly stamped, does answer.
+        app._eval_latch_session_id = "the-current-one"
+        assert app._session_used_eval()
