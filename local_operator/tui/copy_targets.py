@@ -104,6 +104,13 @@ class CopyTarget:
     children: tuple["CopyTarget", ...] = ()
     #: Ours, not the reference's. The answer was cut off before it finished.
     truncated: bool = False
+    #: An aggregate (`All N code blocks`) rather than something that exists in
+    #: the message. The picker paints it one ramp step down, which is the
+    #: quietest way to say "derived" without adding a glyph (design round 1,
+    #: D4). A FIELD rather than an `id.endswith(":all")` test in the renderer:
+    #: the id's shape is an identity detail, and a renderer that pattern-
+    #: matches on it turns every future id into a rendering decision.
+    derived: bool = False
 
 
 def extract_blocks(text: str) -> list[MessageBlock]:
@@ -226,8 +233,21 @@ def first_line(text: str) -> str:
     return _WHITESPACE_RUN_RE.sub(" ", text.strip())
 
 
+#: Hint for a block with nothing in it, in place of the ``0 lines`` a plain
+#: count produces. A closed-on-the-next-line fence is a real block of the
+#: message, so it keeps its row (``action_choose`` explains why removing it
+#: would make the remaining numbers disagree with what the user is reading) —
+#: but Enter REFUSES it, and refusing silently reads as a broken key. Saying
+#: ``empty`` in the hint column predicts the refusal in the frame, which is
+#: better than explaining it afterwards: a row visibly marked empty does not
+#: invite the Enter or the double-click in the first place. ``0 lines`` could
+#: not do that job — it is a statistic, and the column beside it is full of
+#: statistics.
+EMPTY_BLOCK_HINT = "empty"
+
+
 def _block_hint(block: MessageBlock) -> str:
-    lines = plural_lines(block.body)
+    lines = EMPTY_BLOCK_HINT if not block.body else plural_lines(block.body)
     return f"{block.lang} · {lines}" if block.lang else lines
 
 
@@ -275,43 +295,61 @@ def _message_target(text: str, rank: int, truncated: bool) -> CopyTarget:
     # message, not that block — so marking it would be a false claim about
     # what is on the clipboard. A genuinely half-written trailing fence never
     # becomes a block at all (see `extract_blocks`).
-    code_index = 0
-    quote_index = 0
-    for block in blocks:
-        if block.kind == "code":
-            children.append(
-                CopyTarget(
-                    id=f"{node_id}:code:{code_index}",
-                    label=f"Block {code_index + 1}",
-                    hint=_block_hint(block),
-                    preview=block.body,
-                    content=block.body,
-                    copy_message=f"Copied code block {code_index + 1} to clipboard",
-                    language=block.lang or None,
-                )
+    #
+    # Grouped BY KIND (every `Block`, then every `Quote`), not in document
+    # order. Document order interleaved them, so a message alternating fences
+    # and quotes drew `Block 1 / Quote 1 / Block 2 / Quote 2` above an
+    # `All 2 code blocks` row that covers the first and third of those — the
+    # aggregate's members were not adjacent to it and nothing in the frame
+    # said which rows it stood for. Grouping puts each aggregate directly
+    # under the run it summarises (design round 1, D4). The NUMBERING is
+    # unchanged: `Block N` still counts fences in document order, so the label
+    # keeps matching the order the user read them in.
+    for code_index, block in enumerate(code):
+        children.append(
+            CopyTarget(
+                id=f"{node_id}:code:{code_index}",
+                label=f"Block {code_index + 1}",
+                hint=_block_hint(block),
+                preview=block.body,
+                content=block.body,
+                copy_message=f"Copied code block {code_index + 1} to clipboard",
+                language=block.lang or None,
             )
-            code_index += 1
-        else:
-            children.append(
-                CopyTarget(
-                    id=f"{node_id}:quote:{quote_index}",
-                    label=f"Quote {quote_index + 1}",
-                    hint=plural_lines(block.body),
-                    preview=block.body,
-                    content=block.body,
-                    copy_message=f"Copied quote block {quote_index + 1} to clipboard",
-                )
+        )
+    for quote_index, block in enumerate(quotes):
+        children.append(
+            CopyTarget(
+                id=f"{node_id}:quote:{quote_index}",
+                label=f"Quote {quote_index + 1}",
+                # `_block_hint`, not a bare `plural_lines`: a quote whose body
+                # is empty must read `empty` for the same reason a fence does.
+                hint=_block_hint(block),
+                preview=block.body,
+                content=block.body,
+                copy_message=f"Copied quote block {quote_index + 1} to clipboard",
             )
-            quote_index += 1
+        )
 
     # "All N" only when there is more than one of a kind: with a single block
     # it would be a second row copying byte-for-byte what the first one does.
+    #
+    # The label names the KIND (`All 2 code blocks`, not `All 2 blocks`). The
+    # aggregate is built from `len(code)` alone, but it is drawn as the last
+    # sibling of a list that can also contain quotes, with the identical
+    # `├─`/`└─` connector treatment — so a frame reading
+    # `Block 1 / Block 2 / Quote 1 / All 2 blocks` says it copies the three
+    # rows above it, and it does not. That is the frame answering a
+    # correctness question wrongly, which is why the five cells are worth
+    # spending (design round 1, D4). The quote aggregate already named its
+    # kind; only the code one was under-specified.
     if len(code) > 1:
         combined = "\n\n".join(block.body for block in code)
         children.append(
             CopyTarget(
                 id=f"{node_id}:all",
-                label=f"All {len(code)} blocks",
+                label=f"All {len(code)} code blocks",
+                derived=True,
                 hint=plural_lines(combined),
                 preview=combined,
                 content=combined,
@@ -324,6 +362,7 @@ def _message_target(text: str, rank: int, truncated: bool) -> CopyTarget:
             CopyTarget(
                 id=f"{node_id}:all-quotes",
                 label=f"All {len(quotes)} quotes",
+                derived=True,
                 hint=plural_lines(combined),
                 preview=combined,
                 content=combined,
