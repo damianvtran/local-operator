@@ -786,6 +786,22 @@ RESUME_PAGE_MESSAGES = 60
 #: sees nothing arrive for a frame, and concludes the conversation starts there.
 RESUME_PAGE_TRIGGER_ROWS = 4
 
+#: How many older pages the initial resume may mount to make the first frame
+#: SCROLLABLE. A hard cap, not a target: the fill loop below stops the moment
+#: the content exceeds the viewport, and this only bounds the pathological
+#: case (a history of rows that each render to nothing measurable) so it
+#: cannot spin. Three pages is 180 messages on top of the initial bound, which
+#: is still inside the render budget's measured envelope.
+RESUME_FILL_MAX_PAGES = 3
+
+#: Rows of content beyond the viewport the initial fill aims for. A frame that
+#: is scrollable by one row technically has a scrollbar, but the reader has
+#: nothing to travel through and the page-back trigger
+#: (:data:`RESUME_PAGE_TRIGGER_ROWS`) sits at row 4 — so the fill would leave a
+#: transcript whose trigger is unreachable in practice. One trigger zone plus a
+#: margin is the smallest overshoot that makes "scroll up" a real gesture.
+RESUME_FILL_SLACK_ROWS = RESUME_PAGE_TRIGGER_ROWS + 4
+
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
 #: history was LOST — so the transcript says, in its own voice, that the older
@@ -796,6 +812,14 @@ RESUME_OLDER_NOTICE = "older messages above — scroll up to load"
 #: of the transcript states the conversation's real beginning rather than
 #: leaving a promise of more that will never arrive.
 RESUME_START_NOTICE = "start of conversation"
+
+#: Shown when older messages exist but this frame cannot be scrolled to reach
+#: them — the fill hit its cap, or the remaining rows measure to no height.
+#: Deliberately NOT "start of conversation" (which would be false) and not the
+#: "scroll up to load" instruction (which the reader cannot carry out): it
+#: states what is true, and names the key that still works, because `ctrl+home`
+#: reaches the page-back path without needing an offset to travel.
+RESUME_UNREACHABLE_NOTICE = "older messages above — press ctrl+home to load"
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -808,16 +832,39 @@ def _resume_tail_start(history: list[Any], bound: int) -> int:
     reply with no question, which reads as a broken resume rather than a
     bounded one.
 
-    Walk back from the naive cut to the nearest user (or wake/peer) row so the
-    viewport always opens on a turn boundary. The walk is bounded by ``bound``
-    itself: if the last ``bound`` messages contain no such row, the naive cut
-    stands, because inventing an earlier start would spend the budget we just
-    measured.
+    So the cut is snapped to a turn boundary — a user, wake or peer row. The
+    direction of that snap is the whole point, and it is BACKWARD, toward
+    older messages.
+
+    Snapping FORWARD is what this function used to do, and it silently
+    inverted the bound from a floor into a ceiling: the nearest boundary
+    *after* the naive cut can be arbitrarily far down the conversation, so the
+    frame rendered arbitrarily FEWER than ``bound`` messages. On the shape
+    this harness produces most — one prompt, then a long run of assistant and
+    tool rows, then a short recent follow-up — a 404-message history rendered
+    **4 blocks**. That is not merely a short frame: the content then fits
+    inside the viewport, Textual shows no scrollbar and pins ``scroll_y`` at
+    0, and the page-back trigger (which only fires on a scroll INTO the top
+    rows) can never be reached. The deferred head becomes permanently
+    unreachable while the transcript's first row promises the reader it is
+    one scroll away.
+
+    Walking backward cannot do that: the result is never later than the naive
+    cut, so the frame is always at least ``bound`` messages.
+
+    The walk is bounded by ``bound`` again, so the frame is at most ``2 *
+    bound`` messages. That ceiling is the render budget
+    (:data:`RESUME_RENDER_MESSAGES`) doing its job — 160 messages measured at
+    251 ms against 139 ms for 80 and 1022 ms for a whole 716-message session,
+    so overshooting by up to one budget stays far from the cost this bound
+    exists to remove. A conversation with no boundary within that window is
+    one long turn; the naive cut stands, and it still renders ``bound``.
     """
     naive = max(0, len(history) - bound)
     if naive == 0:
         return 0
-    for index in range(naive, len(history)):
+    floor = max(0, naive - bound)
+    for index in range(naive, floor - 1, -1):
         message = history[index]
         role = getattr(message, "role", None)
         custom = getattr(message, "custom_type", None)
@@ -5830,6 +5877,132 @@ class OperatorApp(App[None]):
         # first arrival at the top owes a page (see `_resume_in_zone`).
         self._resume_in_zone = True
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
+        # A message budget is a PROXY for height, and a poor one. Whether the
+        # first frame can be scrolled is a question about ROWS, and only the
+        # laid-out widgets can answer it — so ask them, once the mount has
+        # settled, and top up if the answer is "no".
+        self._transcript_view().call_after_refresh(self._fill_resume_until_scrollable)
+
+    def _fill_resume_until_scrollable(self, _attempt: int = 0) -> None:
+        """Mount older pages until the first resume frame is actually scrollable.
+
+        The render bound is counted in MESSAGES, but "can the reader scroll up
+        to reach the rest" is decided in ROWS: 80 one-line messages in a 60-row
+        terminal still fit inside the viewport, and a transcript whose content
+        fits has no scrollbar and no offset to travel. ``_check_resume_page``
+        only ever fires on a scroll INTO the trigger zone, so on such a frame
+        the deferred head and the server's ``history_before_token`` pages are
+        unreachable forever while the head notice tells the reader to scroll up
+        for them.
+
+        So the geometry is measured after the mount settles, and while the
+        content does not exceed the viewport AND more history exists, the next
+        older page is mounted. Recursive-by-refresh rather than a loop: each
+        page's blocks only author their real heights on a later layout pass
+        (``_set_authored_height``), so measuring again in the same frame would
+        read the extent this mount has not finished growing.
+
+        NOT A GESTURE. This runs outside the page-back latch entirely: it must
+        neither arm ``_resume_in_zone`` (which would hand a free page to the
+        reader's first real scroll) nor consume it (which would swallow that
+        scroll's legitimate page). It cooperates with ``_resume_paging`` only
+        as a mutex — if a genuine gesture is mid-mount, this stands down and
+        lets the gesture own the frame, because a reader who is already
+        scrolling does not need the fill.
+
+        ``RESUME_FILL_MAX_PAGES`` bounds it hard. The loop's own exit condition
+        is the geometry, which terminates on any real history; the cap is for
+        the case where it cannot — a head of rows that measure to zero height
+        would otherwise mount the entire conversation one page at a time,
+        which is the unbounded render cost the budget exists to remove.
+        """
+        if _attempt >= RESUME_FILL_MAX_PAGES:
+            self._reconcile_head_notice()
+            return
+        view = self._transcript_view()
+        if view.parent is None:
+            return
+        # A real gesture owns the mount seam right now. Stand down: the reader
+        # is scrolling, which is the condition this fill exists to make possible.
+        if self._resume_paging:
+            return
+        # Content already exceeds the viewport by enough for the trigger zone
+        # to be reachable — the frame is scrollable and the fill is done.
+        viewport = view.container_size.height or view.size.height
+        if not viewport:
+            return
+        if view.virtual_size.height > viewport + RESUME_FILL_SLACK_ROWS:
+            # Scrollable, so "scroll up to load" is a gesture the reader can
+            # actually perform. The notice keeps its promise.
+            return
+
+        session = self._session
+        if self._resume_pending_head:
+            self._mount_older_resume_page()
+            # Re-measure after the page has settled, not now: see the docstring.
+            view.call_after_refresh(self._fill_resume_until_scrollable, _attempt + 1)
+            return
+        if session is not None and getattr(session, "history_before_token", None):
+            # The remote/server-paged case: nothing is held locally, but the
+            # conversation continues on the server. Same gate, so this cannot
+            # race a gesture's own fetch.
+            #
+            # The continuation is chained to the WORKER, not to the next
+            # refresh: the fetch is a network round trip, so a refresh-scheduled
+            # re-measure would run while it is still in flight, see the gate
+            # held and stand down — leaving the fill one page short on exactly
+            # the sessions (remote, long) it is most needed for.
+            self._resume_paging = True
+
+            async def fetch_then_refill() -> None:
+                await self._fetch_older_display_page(self._interaction)
+                if self._transcript_view() is view:
+                    self._fill_resume_until_scrollable(_attempt + 1)
+
+            self.run_worker(
+                fetch_then_refill(),
+                group=self._interaction.worker_group("history-page"),
+            )
+            return
+        # No more history in either direction. The frame is as tall as the
+        # conversation allows.
+        self._reconcile_head_notice()
+
+    def _reconcile_head_notice(self) -> None:
+        """Never promise history the reader cannot actually reach.
+
+        "older messages above — scroll up to load" is an INSTRUCTION, and it is
+        only honest while scrolling up can carry it out. Two ways it can stop
+        being true, and both must be caught here because neither goes through
+        ``_mount_older_resume_page``'s own exhaustion branch:
+
+        * the head really is exhausted (the fill drained it), and the notice
+          should now state where the conversation begins rather than point at
+          nothing;
+        * the head is NOT exhausted but the transcript still does not exceed
+          its viewport — the fill hit its cap, or the remaining rows measure to
+          nothing. There is no offset to travel and no trigger to reach, so the
+          instruction cannot be followed. Saying "start of conversation" would
+          be a lie in the other direction, so the notice is restated to name
+          what is actually true: more exists, and it is not reachable by
+          scrolling here.
+
+        Idempotent, and safe to call from every fill exit.
+        """
+        notice = self._resume_head_notice
+        if notice is None:
+            return
+        view = self._transcript_view()
+        viewport = view.container_size.height or view.size.height
+        scrollable = bool(viewport) and view.virtual_size.height > viewport
+        session = self._session
+        more = bool(self._resume_pending_head) or bool(
+            session is not None and getattr(session, "history_before_token", None)
+        )
+        if not more:
+            notice.restate(RESUME_START_NOTICE, "info")
+        elif not scrollable:
+            notice.restate(RESUME_UNREACHABLE_NOTICE, "info")
 
     @staticmethod
     def _mark_pending_tool_rows(blocks: list[Any], session: Any) -> None:
