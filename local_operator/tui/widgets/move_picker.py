@@ -678,9 +678,7 @@ class MovePickerScreen(ModalScreen[str | None]):
             out.append(" of ", style=faint)
             out.append(f"{total:,}", style=dim)
             out.append("\n")
-        for index, (key, what) in enumerate(
-            _footer_hints(width, scrolls=counter is not None, empty=not rows)
-        ):
+        for index, (key, what) in enumerate(_footer_hints(width, empty=not rows)):
             if index:
                 out.append(" · ", style=faint)
             out.append(key, style=dim)
@@ -702,24 +700,29 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
     ("enter", "move"),
     ("esc", "cancel"),
 )
-#: ``type to filter or path`` sheds LATE, and that is the whole of design D2.
-#: It is the only thing anywhere on this card that says a second input mode
-#: exists, and path completion is the half of the feature that makes any
-#: directory on the machine reachable. Shedding it first meant the mode was
-#: advertised only to users who had already found it.
+#: ``pgup/pgdn`` sheds FIRST, and the two disclosures that nobody infers —
+#: ``type to filter or path`` and ``tab complete`` — both outlive it.
 #:
-#: Paging is inferable from a scrollbar-less list with a `showing N–M of T`
-#: counter; a hidden second input mode is not inferable from anything. So
-#: ``pgup/pgdn`` goes first in both orders and ``type`` outlives ``tab``.
+#: Paging is the one hint on this card a user does not need told: a
+#: ``showing N–M of T`` counter sits directly above it saying the list is
+#: paged, and PageUp/PageDown are the keys everyone already tries on a long
+#: list. The other two are discovered from nothing. ``type`` is the only
+#: statement anywhere that the input has two modes (design D2), and ``tab`` is
+#: the gesture that makes this a NAVIGATOR rather than a filter box — the
+#: subject of the module docstring, of the self-row that lets a walk
+#: terminate, and of the binding comment below.
+#:
+#: Shedding ``pgup/pgdn`` alone leaves 73 cells and keeps BOTH; shedding
+#: ``tab`` instead spends 75 to keep paging and lose completion, which is how
+#: the opening frame briefly lost ``tab complete`` at every width the picker
+#: opens at (design D7). Only the genuinely cramped 68-cell card has to give
+#: one up, and there ``tab`` goes because the header already names the mode
+#: the instant you type while nothing announces ``tab``.
+#:
+#: ONE order for both list shapes. A second constant existed to protect
+#: paging on a scrolling list, and paging is precisely what should shed first
+#: in either — so there is nothing left for it to say.
 _FOOTER_DROP_ORDER = ("pgup/pgdn", "tab", "type", "↑↓")
-
-#: Drop order for a list that SCROLLS — which a freshly opened picker almost
-#: always is: ``PAGE_ROWS_MAX`` is 10 and the default suggestion set runs to
-#: 11-12 rows, so this is the order the OPENING frame uses at every width.
-#: That is precisely why ``type`` may not lead it. ``pgup/pgdn`` is kept ahead
-#: of ``tab`` here (the reverse of the non-scrolling order) because paging is
-#: real on a scrolling list and is the fastest way through it.
-_FOOTER_DROP_ORDER_SCROLLING = ("tab", "pgup/pgdn", "type", "↑↓")
 
 
 #: The footer for a query that matched nothing. Movement, paging, completion
@@ -731,19 +734,21 @@ _FOOTER_DROP_ORDER_SCROLLING = ("tab", "pgup/pgdn", "type", "↑↓")
 _EMPTY_HINT: tuple[str, str] = ("backspace", "to widen")
 
 
-def _footer_hints(
-    width: int, *, scrolls: bool = False, empty: bool = False
-) -> list[tuple[str, str]]:
-    """The key hints that fit in ``width`` cells, dropping the least needed."""
+def _footer_hints(width: int, *, empty: bool = False) -> list[tuple[str, str]]:
+    """The key hints that fit in ``width`` cells, dropping the least needed.
+
+    Takes no ``scrolls`` flag, unlike ``session_picker``'s: this card sheds in
+    one order whether or not the list pages, because ``pgup/pgdn`` is the
+    first thing to go in both. A parameter with one reachable value reads as a
+    distinction the code still draws, and this one no longer does.
+    """
     if empty:
         # Offering movement and `enter move` for an empty list advertises
         # actions that do nothing, and `tab complete` promises to complete a
         # row that is not there. `esc` stays: leaving is still available and is
         # the other thing a user wants here.
         return _shed_to_width([_EMPTY_HINT, ("esc", "cancel")], (_EMPTY_HINT[0],), width)
-    hints = list(_FOOTER_HINTS)
-    drop_order = _FOOTER_DROP_ORDER_SCROLLING if scrolls else _FOOTER_DROP_ORDER
-    return _shed_to_width(hints, drop_order, width)
+    return _shed_to_width(list(_FOOTER_HINTS), _FOOTER_DROP_ORDER, width)
 
 
 def _shed_to_width(

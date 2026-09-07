@@ -509,6 +509,18 @@ def resolve_self(text: str, *, cwd: str | Path, home: Path | None = None) -> Mov
     path = os.path.normpath(str(candidate))
     if not _readable_dir(path):
         return None
+    # Walking or typing your way BACK to where you already are must read the
+    # same as arriving there from the suggestion list, or the one row whose
+    # job is to answer "where am I?" says something different depending on how
+    # you reached it (design D9). `current` also earns the note-pinning that
+    # `render_rows` gives that tier, which `typed` does not get.
+    if os.path.normpath(str(cwd)) == path:
+        return MoveTarget(
+            path=path,
+            label=format_label(path, home=root),
+            kind="current",
+            detail="current",
+        )
     return MoveTarget(
         path=path,
         label=format_label(path, home=root),

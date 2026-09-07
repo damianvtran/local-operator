@@ -354,14 +354,69 @@ def test_tab_completes_into_the_tidy_label_not_a_raw_absolute_path(tmp_path: Pat
     assert screen.filter_query == "~/scripts/"
 
 
-def test_the_mode_hint_survives_on_a_scrolling_card(tmp_path: Path) -> None:
-    """`type to filter or path` is the ONLY disclosure that a second input mode
-    exists, and it was shed FIRST when the list scrolls — which a freshly
-    opened picker almost always does (11-12 rows against PAGE_ROWS_MAX=10), so
-    the opening frame never carried it at any width (D2)."""
-    for width in (100, 80, 68):
-        hints = [key for key, _ in _footer_hints(width, scrolls=True)]
-        assert "type" in hints, f"the mode hint was shed at width={width}"
+def test_both_undiscoverable_hints_survive_on_the_opening_card() -> None:
+    """`type to filter or path` and `tab complete` are the two hints nobody
+    infers, and the card must not trade one for the other.
+
+    D2: `type` is the only statement that a second input mode exists, and it
+    was shed FIRST on a scrolling list — which a freshly opened picker almost
+    always is (11-12 rows against PAGE_ROWS_MAX=10), so the opening frame
+    never carried it. D7: fixing that by shedding `tab` instead swapped the
+    navigator's own gesture off the frame at every width the picker opens at,
+    which is a worse trade — `pgup/pgdn` fits in 73 cells and keeps both,
+    while dropping `tab` spends 75 to keep paging.
+
+    80 cells is the card at a 100- and 150-column terminal, i.e. the width the
+    picker actually opens at. Only the cramped 68-cell card gives one up.
+    """
+    hints = [key for key, _ in _footer_hints(80)]
+    assert "type" in hints, f"the mode hint was shed at the opening width: {hints}"
+    assert "tab" in hints, f"the navigator gesture was shed at the opening width: {hints}"
+    assert "pgup/pgdn" not in hints, "paging should shed before either disclosure"
+
+
+def test_the_footer_sheds_paging_first_and_tab_only_when_truly_cramped() -> None:
+    """The whole shed sequence, pinned at the measured boundaries.
+
+    The previous test pins the opening width; this one pins the ORDER, so a
+    future reorder cannot pass by happening to fit at 80. The numbers are
+    measured from `_shed_to_width`, not chosen: the full row is 90 cells,
+    dropping `pgup/pgdn` leaves 73, and dropping `tab` as well leaves 58 — so
+    73 is the widest card that must still carry everything but paging, and 72
+    is the first that has to give up `tab` (design D7).
+
+    `↑↓`, `enter` and `esc` are never shed while any label survives: between
+    them they are how the card is moved through, used and left.
+    """
+    assert [k for k, _ in _footer_hints(90)] == [
+        "↑↓",
+        "pgup/pgdn",
+        "type",
+        "tab",
+        "enter",
+        "esc",
+    ], "the full row must fit at its own measured width"
+    # The card at every terminal the picker realistically opens at.
+    for width in (89, 80, 73):
+        assert [k for k, _ in _footer_hints(width)] == [
+            "↑↓",
+            "type",
+            "tab",
+            "enter",
+            "esc",
+        ], f"paging must be the only thing shed at width={width}"
+    # The cramped card: `tab` goes, and only here. The header already names
+    # the mode the instant you type, while nothing else announces `tab`.
+    for width in (72, 68, 58):
+        assert [k for k, _ in _footer_hints(width)] == [
+            "↑↓",
+            "type",
+            "enter",
+            "esc",
+        ], f"`tab` should be the second and last disclosure shed, at width={width}"
+    # Narrower still: the mode hint goes, then the labels — never the three
+    # keys that make the card usable at all.
+    assert [k for k, _ in _footer_hints(40)] == ["↑↓", "enter", "esc"]
 
 
 def test_ctrl_w_backs_out_one_path_segment(tmp_path: Path) -> None:
