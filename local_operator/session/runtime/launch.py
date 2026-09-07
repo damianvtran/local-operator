@@ -29,9 +29,26 @@ an error (``process.py`` logs the loss and returns 0 for that reason).
    from the same caller cannot help — if the first is still constructing, (2)
    now covers it — and would just be another loser to reap.
 
-The backoff (``0.05 → ×1.7 → cap 1.0``) is shaped for step 2's wait: fast
-enough that a warm start feels immediate, and backing off to seconds so a
-30-second deadline does not become a spin.
+**What the parent's dead time is NOT.** Two other suspects were measured and
+acquitted, so nobody re-derives them. (1) The first ``find_owner_record``
+scan is a guaranteed miss for a freshly minted ``/new`` session, which looks
+like serialized latency ahead of the spawn — but in the warm parent that
+actually runs ``/new`` (a long-lived TUI) engage-entry to fork measures a
+median of 2.1 ms. The ~24 ms a cold process shows is function-local import
+cost the TUI has already paid, so skipping the scan would buy single-digit
+milliseconds while weakening the lease arbitration this module exists to
+protect. (2) The child's import graph is dominated by
+``local_operator.harness.jobs`` at 99 ms cumulative, but that is a SHARED
+subtree: given ``session_factory`` (the composition root the child imports
+regardless), its marginal cost is 2.2 ms. Deferring it would move ~2 ms.
+
+**The poll shape has two regimes, because the loop has two waits.** When a
+construction is KNOWN to be in flight — a candidate we spawned is still
+alive, or a contender holds the lease — we have a strong prior on when a
+record will appear (~0.4 s here, ~1.2 s for a full cold session), so the grid
+is DENSE and flat. When nothing is known to be constructing, the wait is
+open-ended and the exponential backoff takes over. See
+:func:`_poll_delay` for the measurements behind the constants.
 """
 
 from __future__ import annotations
@@ -56,10 +73,23 @@ logger = logging.getLogger(__name__)
 #: message went nowhere.
 DEFAULT_DEADLINE_S = 30.0
 
-#: Poll shape while waiting for a contender's runtime to publish its record.
+#: Poll shape for an OPEN-ENDED wait — nothing is known to be constructing, so
+#: there is no prior on when a record might appear and a spin would be pure
+#: waste against a 30-second deadline.
 _POLL_INITIAL_S = 0.05
 _POLL_FACTOR = 1.7
 _POLL_CAP_S = 1.0
+
+#: Poll interval while a construction is KNOWN to be in flight. Flat, not
+#: exponential: see :func:`_poll_delay` for why the two waits get two shapes.
+_CONSTRUCTING_POLL_S = 0.01
+
+#: How long the dense regime may last before the open-ended backoff takes over.
+#: A construction still unfinished after this is not "about to publish" — it is
+#: wedged, slow, or a contender doing something we cannot see — and continuing
+#: to poll it 100 times a second for the rest of a 30-second deadline would be
+#: a spin. Sized at ~2.5x the ~1.2 s a full cold session construction takes.
+_CONSTRUCTING_WINDOW_S = 3.0
 #: How many runtimes one engage may spawn before it stops trying. Only the
 #: FIRST spawn is ordinary; the rest are respawns after a candidate proved to
 #: have died during construction. Three is enough to ride out a transient
@@ -400,6 +430,10 @@ async def engage_runtime(
         work = type(work)(**{**_fields(work), "command_id": new_command_id()})
 
     deadline = time.monotonic() + deadline_s
+    # The open-ended wait's exponential state. ``delay`` is what we actually
+    # sleep on a given pass, which the dense regime overrides without
+    # disturbing ``backoff``.
+    backoff = _POLL_INITIAL_S
     delay = _POLL_INITIAL_S
     spawned = False
     # The Popen of the most recent candidate, so the respawn branch can tell
@@ -417,6 +451,11 @@ async def engage_runtime(
     # only the retries need a cap. See the respawn branch below.
     spawns = 0
     last_error: Exception | None = None
+    # When the current construction episode was first OBSERVED, which is what
+    # selects the dense poll regime (see ``_poll_delay``). Reset to None the
+    # moment nothing is known to be constructing, so a respawned candidate
+    # gets its own fresh dense window rather than inheriting a spent one.
+    constructing_since: float | None = None
     # Deferred materialisation is exactly the speculative case: a warm engage
     # must not create a session directory for a draft the user may abandon.
     # A wake engage is NOT speculative — the session already exists on disk.
@@ -444,6 +483,7 @@ async def engage_runtime(
                 last_error = exc
                 logger.debug("engage: dial failed for %s; retrying", session_id, exc_info=True)
 
+        holder: int | None = None
         if not spawned or spawns < _MAX_SPAWNS:
             holder = await asyncio.to_thread(_lease_holder, config_dir, session_id)
             if holder is not None:
@@ -525,14 +565,86 @@ async def engage_runtime(
                 actionable=spawn_actionable,
             ) from last_error
 
+        # Is a construction KNOWN to be in flight? Either a contender holds the
+        # lease, or the candidate we spawned is still alive — a live candidate
+        # is by definition still constructing (see the respawn branch above).
+        # Both mean a record is expected soon, which is what earns the dense
+        # poll regime; anything else is the open-ended wait.
+        constructing = holder is not None or (candidate is not None and candidate.poll() is None)
+        now = time.monotonic()
+        if constructing:
+            if constructing_since is None:
+                constructing_since = now
+        else:
+            constructing_since = None
+
+        delay, backoff = _poll_delay(
+            backoff, None if constructing_since is None else now - constructing_since
+        )
         await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-        delay = min(delay * _POLL_FACTOR, _POLL_CAP_S)
 
     if capture is not None:
         capture.unlink(missing_ok=True)
     raise TimeoutError(
         f"could not reach a runtime for session {session_id} within {deadline_s:.0f}s"
     ) from last_error
+
+
+def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float, float]:
+    """Pick the next poll interval, and the backoff to carry forward.
+
+    ``constructing_for_s`` is how long a construction has been KNOWN to be in
+    flight (a candidate we spawned is alive, or a contender holds the lease),
+    or ``None`` when nothing is known to be constructing. Returns
+    ``(sleep_for, next_backoff)``.
+
+    WHY TWO REGIMES
+    ===============
+    The single exponential grid this replaces served both of the loop's waits,
+    but they are not the same wait and the shape that suits one is wrong for
+    the other:
+
+    * **Known construction.** We have a live ``Popen`` (or a lease naming a
+      live pid) and a good prior on when the record lands — measured at
+      ~0.4 s on this machine for a deferred warm start, ~1.2 s for a full
+      cold session. The record's arrival is an EVENT we are already close to;
+      the only question is how soon after it we look. A flat, dense grid
+      answers within one interval.
+    * **Open-ended wait.** Nothing is known to be constructing. There is no
+      prior at all, the wait may run the whole 30-second deadline, and
+      polling it densely is a spin that buys nothing. That is the wait the
+      exponential backoff was written for, and it keeps it unchanged.
+
+    THE MEASUREMENT THAT FORCED THIS
+    ================================
+    Under one grid (``0.05 → ×1.7 → cap 1.0``) the polls fire at 50, 135,
+    280, 525, 943 ms. A warm ``/new`` child publishes its record at ~400 ms,
+    which falls between the 280 ms and 525 ms wakes — so the parent slept
+    ~145 ms past a runtime that was already serving, and a child landing just
+    after 525 ms waited until 943 ms. Measured over 7 isolated runs
+    (``scripts/bench_runtime_attach.py``): child ready at a median of 401 ms,
+    parent noticed at 538 ms, **144 ms median dead time and 318 ms at worst**.
+    The totals clustered bimodally at ~540 ms and ~990 ms precisely because
+    they were quantized to that grid.
+
+    WHY DENSE POLLING IS AFFORDABLE HERE
+    ====================================
+    The backoff was protecting against a cost that does not exist at these
+    timescales. One full poll iteration — ``find_owner_record`` (a miss scan
+    over a run directory holding 11 records), ``_lease_holder``, and
+    ``Popen.poll`` — measures a median of 339 µs. At 10 ms that is a 3.4%
+    duty cycle on one thread, for at most ``_CONSTRUCTING_WINDOW_S``, and only
+    while a session is genuinely starting. The dense window is bounded rather
+    than open-ended for exactly the reason the backoff exists: a construction
+    still unfinished after 3 s is not about to publish, so the loop stops
+    guessing and falls back to the open-ended shape.
+    """
+    if constructing_for_s is not None and constructing_for_s < _CONSTRUCTING_WINDOW_S:
+        # Hold the backoff where it is: if the dense window expires, the
+        # open-ended wait starts from the top rather than from a value that
+        # decayed while we were watching a healthy construction.
+        return _CONSTRUCTING_POLL_S, backoff
+    return backoff, min(backoff * _POLL_FACTOR, _POLL_CAP_S)
 
 
 def _fields(work: Errand) -> dict[str, Any]:
