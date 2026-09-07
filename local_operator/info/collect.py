@@ -59,15 +59,29 @@ T = TypeVar("T")
 MAX_TREE_DEPTH = 3
 
 #: Environment markers that identify the terminal multiplexer, most specific
-#: first. Names only — a marker's VALUE can carry a socket path or a workspace
-#: id, and this screen is pasted into issues.
+#: first. PRESENCE only — a marker's VALUE can carry a socket path or a
+#: workspace id, both identifying, and this screen is pasted into issues.
+#:
+#: Spelled as module-level constants rather than as string literals inside the
+#: tuple because ``tests/unit/test_ambient_env_isolation.py`` resolves env reads
+#: through the AST: it follows a ``NAME = "VAR"`` constant but cannot see a name
+#: buried in a tuple-of-tuples literal. Written the other way, three of these
+#: reads were invisible to the audit that exists to catch exactly that, so the
+#: names went unaccounted while looking accounted for (QA round 1, Q4).
+_ENV_CMUX_SOCKET_PATH = "CMUX_SOCKET_PATH"
+_ENV_CMUX_WORKSPACE_ID = "CMUX_WORKSPACE_ID"
+_ENV_TMUX = "TMUX"
+_ENV_STY = "STY"
+_ENV_ZELLIJ = "ZELLIJ"
+_ENV_WEZTERM_PANE = "WEZTERM_PANE"
+
 _MULTIPLEXER_MARKERS: tuple[tuple[str, str], ...] = (
-    ("CMUX_SOCKET_PATH", "cmux"),
-    ("CMUX_WORKSPACE_ID", "cmux"),
-    ("TMUX", "tmux"),
-    ("STY", "screen"),
-    ("ZELLIJ", "zellij"),
-    ("WEZTERM_PANE", "wezterm"),
+    (_ENV_CMUX_SOCKET_PATH, "cmux"),
+    (_ENV_CMUX_WORKSPACE_ID, "cmux"),
+    (_ENV_TMUX, "tmux"),
+    (_ENV_STY, "screen"),
+    (_ENV_ZELLIJ, "zellij"),
+    (_ENV_WEZTERM_PANE, "wezterm"),
 )
 
 
@@ -163,8 +177,11 @@ def collect_install(errors: list[tuple[str, str]]) -> InstallInfo:
         behind=update.is_behind(version, latest),
         python_version=platform.python_version(),
         python_implementation=platform.python_implementation(),
-        # 15 ms on its FIRST call and ~0 afterwards (it caches internally), so
-        # it is cheap insurance to keep it on the worker with everything else.
+        # ~15 ms, measured. CPython memoizes ``platform.uname()`` but NOT
+        # ``platform.platform()``, which re-formats on every call, so this is
+        # paid each time rather than once (review round 1, N4 — the earlier
+        # comment here asserted a caching behaviour that does not exist). Cheap
+        # either way on the worker thread.
         platform=_safe("install.platform", platform.platform, "", errors),
         machine=_safe("install.machine", platform.machine, "", errors),
     )
@@ -428,6 +445,34 @@ def build_subagent_tree(
             walk(job_id, depth + 1)
 
     walk(None, 0)
+
+    # A CYCLE reaches nothing from the root: every node's parent is present, so
+    # nothing buckets under ``None`` and the walk above iterates an empty list.
+    # The ``seen`` set stops the hang but does not restore the nodes, so the
+    # header said "2 running" over an empty tree — one screen contradicting
+    # itself, and by this function's own docstring the worst error it can make
+    # (review round 1, M1). Anything still unreached is emitted at depth 0, the
+    # same treatment an orphan gets: a malformed edge costs indentation, never
+    # existence.
+    for node in sorted(nodes, key=rank):
+        job_id = str(getattr(node, "job_id", "") or "")
+        if job_id in seen:
+            continue
+        seen.add(job_id)
+        rows.append(
+            SubagentLine(
+                job_id=job_id,
+                label=str(getattr(node, "label", "") or ""),
+                status=str(getattr(node, "status", "") or ""),
+                depth=0,
+                agent_role=str(getattr(node, "agent_role", "") or ""),
+                effort=str(getattr(node, "effort", "") or ""),
+                parent_job_id=getattr(node, "parent_job_id", None),
+                session_id=getattr(node, "session_id", None),
+                live=bool(getattr(node, "live", False)),
+            )
+        )
+
     return tuple(rows), deepest, below_cap
 
 
@@ -442,7 +487,11 @@ def collect_agents(live: "LiveState", errors: list[tuple[str, str]]) -> AgentsIn
     from local_operator.paths import config_dir
     from local_operator.teams import TeamRegistry
 
-    root = config_dir()
+    # Guarded like any other probe: `config_dir()` is `Path.home() / ...` and
+    # `Path.home()` RAISES when the home directory cannot be resolved, so a bare
+    # call here escaped the block and crashed the app (review round 1, B1).
+    # `_UNREADABLE_ROOT` rather than `Path(".")` — see `collect_env`.
+    root = _safe("agents.config_dir", config_dir, _UNREADABLE_ROOT, errors)
     return AgentsInfo(
         # 12.1 ms and 2.3 ms respectively on this host: filesystem walks, hence
         # the worker thread rather than the paint path.
@@ -473,7 +522,14 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
     from local_operator.guides.discovery import discover_guides
     from local_operator.paths import config_dir
 
-    root = config_dir()
+    # Same guard as `collect_agents`, for the same reason (review round 1, B1).
+    # The fallback is `_UNREADABLE_ROOT`, NOT `Path(".")`: `CredentialManager`
+    # CREATES its store on construction, so a relative fallback made this
+    # read-only diagnostic write a `credentials.env` into whatever directory the
+    # user happened to be in — observed for real while testing the B1 guard.
+    # A diagnostic that mutates the machine it is describing is the same class
+    # of fault as `check_latest()` rewriting the cache, which §2.1 bans.
+    root = _safe("env.config_dir", config_dir, _UNREADABLE_ROOT, errors)
 
     def browser() -> tuple[str, str, bool]:
         # The FILE classification (0.06 ms, cannot hang), not
@@ -499,8 +555,13 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         from local_operator.mobile import install as mobile_install
 
         installed = mobile_install.plist_path().exists()
-        port = mobile_install.DEFAULT_PORT
-        healthy = bool(installed and mobile_install.health(port))
+        # The port is only a MEASUREMENT when something is installed to listen
+        # on it. Publishing the module default regardless made an unconfigured
+        # host report a plausible number for a relay it does not run — the
+        # "absent is not a measured value" rule this screen inherits from
+        # ``/session`` (review round 1, N2).
+        port = mobile_install.DEFAULT_PORT if installed else None
+        healthy = bool(installed and port and mobile_install.health(port))
         return installed, healthy, port
 
     backend, browser_name, paired = _safe("env.browser", browser, ("none", "", False), errors)
@@ -535,19 +596,45 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         ),
         guides=_safe("env.guides", lambda: len(discover_guides()), 0, errors),
         skills=live.skills,
-        tools=live.tools,
     )
 
 
+#: Stand-in config root for when `config_dir()` itself cannot be resolved.
+#: Deliberately a path that cannot exist and cannot be created, so a probe whose
+#: constructor would otherwise MATERIALISE a store (``CredentialManager`` writes
+#: a ``credentials.env``) fails into `_safe` and is reported as degraded,
+#: instead of silently writing into the process's current directory. `/info`
+#: reads; it must never leave anything behind on the host it is describing.
+_UNREADABLE_ROOT = Path("/nonexistent/local-operator-info-unreadable-config-root")
+
+
 def _multiplexer() -> str:
-    """Which multiplexer this terminal is inside, by marker NAME only.
+    """Which multiplexer this terminal is inside, by marker PRESENCE only.
 
     A marker's value carries a socket path or a workspace id; neither is
-    diagnostic and both are identifying, so only the name is consulted.
+    diagnostic and both are identifying, so only presence is consulted and the
+    value is never read, never stored and never rendered.
+
+    Each read is spelled out rather than looped over
+    :data:`_MULTIPLEXER_MARKERS`, because the ambient-environment audit resolves
+    reads through the AST and cannot follow a loop variable — written as a loop,
+    these reads were invisible to the guard that exists to account for exactly
+    them (QA round 1, Q4). The tuple remains the ORDER of preference (most
+    specific first) and this function is checked against it by
+    ``test_every_multiplexer_marker_is_probed``, so the two cannot drift.
     """
-    for variable, name in _MULTIPLEXER_MARKERS:
-        if os.environ.get(variable) is not None:
-            return name
+    if os.environ.get(_ENV_CMUX_SOCKET_PATH) is not None:
+        return "cmux"
+    if os.environ.get(_ENV_CMUX_WORKSPACE_ID) is not None:
+        return "cmux"
+    if os.environ.get(_ENV_TMUX) is not None:
+        return "tmux"
+    if os.environ.get(_ENV_STY) is not None:
+        return "screen"
+    if os.environ.get(_ENV_ZELLIJ) is not None:
+        return "zellij"
+    if os.environ.get(_ENV_WEZTERM_PANE) is not None:
+        return "wezterm"
     return ""
 
 
@@ -587,7 +674,6 @@ class LiveState:
         "theme",
         "terminal_size",
         "skills",
-        "tools",
     )
 
     def __init__(self, **values: Any) -> None:
@@ -621,7 +707,6 @@ _LIVE_DEFAULTS: dict[str, Any] = {
     "theme": "",
     "terminal_size": None,
     "skills": 0,
-    "tools": 0,
 }
 
 
@@ -632,7 +717,6 @@ def collect_live(
     theme: str = "",
     size: tuple[int, int] | None = None,
     skills: int = 0,
-    tools: int = 0,
 ) -> LiveState:
     """Snapshot the live objects synchronously. Safe on the paint path.
 
@@ -700,7 +784,6 @@ def collect_live(
         theme=theme,
         terminal_size=tuple(size) if size else None,  # type: ignore[arg-type]
         skills=skills,
-        tools=tools,
     )
 
 
@@ -738,12 +821,26 @@ def collect_snapshot(live: LiveState, *, root: Path | None = None) -> InfoSnapsh
         errors,
     )
     self_line = next((line for line in sessions.lines if line.is_self), None)
+    # EVERY block call is wrapped, not just the probes inside them. The
+    # individual `_safe`s within each collector guard only what is inside their
+    # lambdas; a block function's own prologue — its function-local imports and
+    # its `config_dir()` call — was bare, so an unresolvable home
+    # (`Path.home()` raises `RuntimeError`) or a broken submodule propagated out
+    # of here. That is worse than an empty screen: `run_worker` defaults to
+    # `exit_on_error=True`, so the exception took the whole APP down, on exactly
+    # the broken host `/info` exists to describe (review round 1, B1). The
+    # fallbacks are all-defaults instances, which `model.py` guarantees render.
     return InfoSnapshot(
-        install=collect_install(errors),
-        process=collect_process(live, self_line=self_line, errors=errors, root=root),
+        install=_safe("install", lambda: collect_install(errors), InstallInfo(), errors),
+        process=_safe(
+            "process",
+            lambda: collect_process(live, self_line=self_line, errors=errors, root=root),
+            ProcessInfo(),
+            errors,
+        ),
         sessions=sessions,
-        agents=collect_agents(live, errors),
-        env=collect_env(live, errors),
+        agents=_safe("agents", lambda: collect_agents(live, errors), AgentsInfo(), errors),
+        env=_safe("env", lambda: collect_env(live, errors), EnvInfo(), errors),
         degraded=tuple(errors),
         captured_at=time.time(),
     )

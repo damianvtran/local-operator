@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 
+from local_operator.info.collect import LiveState
 from local_operator.info.model import (
     AgentsInfo,
     EnvInfo,
@@ -94,6 +95,27 @@ def _snapshot() -> InfoSnapshot:
             term="xterm-256color",
             browser_backend="extension",
             browser_name="Chrome",
+            # FREE TEXT carrying an absolute home path, which is the shape the
+            # real channels have: an MCP failure is `str(exc)` from a failed
+            # connect and routinely reads `command not found: <abs path>`. The
+            # fixture omitted both free-text channels, so the export's
+            # home-leak assertion below could only ever exercise the fields
+            # that were already safe — it passed while the two channels that
+            # actually leaked went untested (review round 1, B2).
+            mcp_configured=2,
+            mcp_connected=1,
+            mcp_failed=1,
+            mcp_failures=(("linear", f"command not found: {home}/clients/acme/bin/linear-mcp"),),
+        ),
+        # The other free-text channel: a degraded reason is
+        # `f"{type(exc).__name__}: {exc}"`, and an OSError message contains the
+        # filename it failed on.
+        degraded=(
+            (
+                "process.config_dir",
+                f"PermissionError: [Errno 13] Permission denied: "
+                f"'{home}/clients/acme-merger-diligence/.local-operator'",
+            ),
         ),
         captured_at=1_788_602_400.0,
     )
@@ -201,3 +223,103 @@ def test_export_never_claims_up_to_date_from_an_unknown_latest() -> None:
     text = build_export(_snapshot())
     assert "unknown (never checked)" in text
     assert "up to date" not in text
+
+
+def test_never_exported_is_enforced_rather_than_merely_documented() -> None:
+    """N1: a named tuple that looks like an allowlist must actually check one.
+
+    `NEVER_EXPORTED` read as though it gated the export and gated nothing —
+    the kind of constant a future reader trusts without verifying. It now has
+    exactly one job and this test is it: every name in it is absent from a
+    fully-populated export, and from the snapshot graph behind it.
+    """
+    from dataclasses import asdict
+
+    from local_operator.info.render import NEVER_EXPORTED, build_export
+
+    snapshot = _snapshot()
+    export = build_export(snapshot)
+    graph = repr(asdict(snapshot))
+
+    for name in NEVER_EXPORTED:
+        if name == "credential values":
+            # The values themselves never enter the model — only key NAMES do,
+            # which is the structural half of this guarantee.
+            assert snapshot.env.credential_keys
+            for key in snapshot.env.credential_keys:
+                assert key in export, "the NAME is the diagnostic part and is kept"
+            continue
+        assert name not in export, f"{name} reached the export"
+        assert name not in graph, f"{name} exists in the snapshot graph"
+
+
+def test_the_screen_and_the_export_agree_about_a_shadowed_install() -> None:
+    """N3/Q1: one predicate, so the two surfaces cannot reach opposite verdicts.
+
+    This is the defect class this PR itself produced: the screen excluded the
+    benign editable case and the export did not, so every contributor running an
+    editable checkout copied a bug report claiming their install was shadowed.
+    Both now call `is_shadowed_install`, and this pins the agreement rather than
+    the implementation.
+    """
+    from local_operator.info.model import is_shadowed_install
+    from local_operator.info.render import build_export
+    from local_operator.tui.widgets.info_panel import build_info_report
+
+    cases = [
+        ("uv-tool", True, True),  # the real trap
+        ("editable", True, False),  # expected: the checkout IS the install
+        ("pip", False, False),  # healthy
+    ]
+    for kind, foreign, expect_alarm in cases:
+        install = InstallInfo(
+            version="0.51.6",
+            kind=kind,
+            prefix="/opt/uv/tools/local-operator",
+            import_path="/tmp/checkout/local_operator",
+            import_path_foreign=foreign,
+        )
+        assert is_shadowed_install(install) is expect_alarm, kind
+        snapshot = InfoSnapshot(install=install)
+        screen = build_info_report(snapshot, LiveState(), 120).plain
+        export = build_export(snapshot)
+        assert ("shadowing the install" in screen) is expect_alarm, f"screen/{kind}"
+        assert ("a checkout is shadowing it" in export) is expect_alarm, f"export/{kind}"
+
+
+def test_both_surfaces_render_one_duration_and_one_memory_spelling() -> None:
+    """N3: the two copies agreed when measured — which is why they were shared.
+
+    Agreement today is not a property that maintains itself; it is the state
+    just before a divergence nobody notices. `format_duration`/`format_bytes`
+    now have one implementation, and this asserts both surfaces show its output.
+    """
+    from local_operator.info.model import format_bytes, format_duration
+    from local_operator.info.render import build_export
+    from local_operator.tui.widgets.info_panel import build_info_report
+
+    snapshot = InfoSnapshot(
+        install=InstallInfo(version="0.51.6", kind="pip", build_age_s=5_400.0),
+        process=ProcessInfo(session_id="a3f9c21b7e40", uptime_s=5_400.0),
+        sessions=SessionsInfo(
+            lines=(
+                SessionLine(
+                    pid=1,
+                    kind="daemon",
+                    state="live",
+                    conversation_name="Probe",
+                    uptime_s=5_400.0,
+                    rss_bytes=190_000_000,
+                ),
+            ),
+            total=1,
+            live=1,
+        ),
+    )
+    screen = build_info_report(snapshot, LiveState(), 120).plain
+    export = build_export(snapshot)
+    assert format_duration(5_400.0) == "1h 30m"
+    assert format_bytes(190_000_000) == "181 MB"
+    for surface, name in ((screen, "screen"), (export, "export")):
+        assert "1h 30m" in surface, name
+    assert "181 MB" in screen

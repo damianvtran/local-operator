@@ -724,3 +724,165 @@ def test_an_editable_checkout_gets_no_alarm_row() -> None:
     assert "expected for an editable checkout" in body
     assert "not under the install path above" not in body
     assert "Nothing will error" not in body
+
+
+class _StubApp:
+    """The app surface these actions touch. Not an `OperatorApp`.
+
+    The pilot tests below drive the real app; these three assert a decision the
+    action makes before it reaches the app, so a stub keeps them fast and makes
+    the assertion about the action rather than about the frame.
+    """
+
+    def __init__(
+        self,
+        refreshes: list[object],
+        notices: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self._refreshes = refreshes
+        self._notices = notices if notices is not None else []
+
+    def refresh_info_screen(self, screen: object) -> None:
+        self._refreshes.append(screen)
+
+    def _system_notice(self, message: str, kind: str = "info") -> None:
+        self._notices.append((message, kind))
+
+    def bell(self) -> None:
+        pass
+
+    def _put_on_clipboard(self, text: str, owner: object | None = None) -> None:
+        pass
+
+
+def test_currency_is_never_claimed_from_an_unreadable_installed_version() -> None:
+    """M3: the unknown moved to the INSTALLED side and the lie came back.
+
+    `is_behind("", latest)` is False by design, so a failed version probe beside
+    a cached NEWER release reported currency on both surfaces. The three-state
+    rule is about not collapsing "unknown" into "up to date" — it does not
+    matter which half of the comparison is the unknown one, and both halves fail
+    together on a broken install, which is the state /info is opened in.
+    """
+    from local_operator.info.render import build_export
+
+    broken = _snapshot(
+        install=InstallInfo(version="", kind="uv-tool", latest_known="0.52.0", latest_age_s=60.0)
+    )
+    body = _text(broken, width=120)
+    export = build_export(broken)
+
+    assert "unknown" in body
+    assert "unknown" in export
+    for surface, name in ((body, "screen"), (export, "export")):
+        assert "latest ·" not in surface, name
+        assert "up to date" not in surface, name
+
+
+@pytest.mark.asyncio
+async def test_refresh_returns_worker_filled_fields_to_the_loading_state() -> None:
+    """U2: `r` must acknowledge within a frame, not after the ~4 s probe.
+
+    Driven through the real app and the real binding: `Screen.app` is a
+    read-only property, so this cannot be asserted against a stub, and the
+    keypress is the thing under test anyway.
+    """
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/info")
+        screen = app.screen
+        assert isinstance(screen, InfoScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert screen.snapshot is not None
+
+        await pilot.press("r")
+        # Immediately after the keypress, BEFORE the worker can land.
+        assert screen.snapshot is None, "the screen must drop to `checking…` at once"
+        assert any("checking…" in line for line in screen.render_lines_for_test())
+
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert screen.snapshot is not None, "and refill when the probe returns"
+
+
+@pytest.mark.asyncio
+async def test_copying_before_the_probe_lands_says_so_rather_than_only_belling() -> None:
+    """U3: on a terminal with the bell off, the refusal was completely silent."""
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/info")
+        screen = app.screen
+        assert isinstance(screen, InfoScreen)
+        screen.snapshot = None  # the loading window, deterministically
+
+        copied: list[str] = []
+        app.copy_to_clipboard = lambda text: copied.append(text)  # type: ignore[assignment]
+        notices: list[str] = []
+        original = app._system_notice
+
+        def _record(message: str, kind: str = "info") -> None:
+            notices.append(message)
+
+        app._system_notice = _record  # type: ignore[assignment,method-assign]
+        try:
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+        finally:
+            app._system_notice = original  # type: ignore[assignment,misc]
+
+        assert not copied, "nothing to copy yet"
+        assert notices, "a silent refusal lets the user paste stale clipboard content"
+        assert "again" in notices[0]
+
+
+def test_the_shadow_label_sheds_whole_phrases_at_narrow_widths() -> None:
+    """U5: `! not und…` at 45 cells communicated nothing at all."""
+    shadowed = _snapshot(
+        install=InstallInfo(
+            version="0.51.6",
+            kind="uv-tool",
+            prefix="/opt/uv/tools/local-operator",
+            import_path="/Users/x/repos/local-operator/local_operator",
+            import_path_foreign=True,
+        )
+    )
+    for width in (45, 55, 65, 83, 120):
+        lines = _lines(shadowed, width=width)
+        row = next((line for line in lines if line.lstrip().startswith("!")), "")
+        if row:
+            # Whatever survives must be a WHOLE phrase, never a fragment.
+            assert "…" not in row, f"cropped mid-phrase at {width}: {row!r}"
+            assert "not" in row and ("install path" in row or "installed tree" in row), row
+        else:
+            # Below the shortest rung the row is dropped rather than cropped —
+            # `! not the…` says nothing. The consequence must still be on the
+            # screen, which is what makes dropping it acceptable rather than a
+            # silent loss of the warning.
+            # Measured threshold: the row survives at 70 (shorter rung) and 83
+            # (full phrase) and is dropped below 70, where the widest meta's
+            # reservation leaves the label under its shortest rung.
+            assert width < 70, f"the row should still fit at {width}"
+        body = "\n".join(lines)
+        assert "Nothing will error" in body, f"the consequence vanished at {width}"
+
+
+def test_the_terminal_row_says_checking_rather_than_unavailable_while_loading() -> None:
+    """U6: `—` means "we looked and could not tell" everywhere else here."""
+    loading = _text(None, width=100)
+    terminal_row = next(line for line in loading.split("\n") if "Terminal" in line)
+    assert "checking…" in terminal_row
+    assert "—" not in terminal_row
+
+
+def test_the_unavailable_sessions_advice_names_the_key_that_helps() -> None:
+    """U7: `r` re-runs these probes and is advertised two rows below."""
+    body = _text(_snapshot(sessions=SessionsInfo(available=False)), width=100)
+    assert "Press r to try again" in body
+    assert "Close and reopen" not in body

@@ -40,7 +40,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from local_operator.info.collect import LiveState
-from local_operator.info.model import InfoSnapshot
+from local_operator.info.model import (
+    InfoSnapshot,
+    format_bytes,
+    format_duration,
+    is_shadowed_install,
+)
 from local_operator.info.render import build_export
 from local_operator.tui.widgets.analytics_panel import (
     _NEST_INDENT,
@@ -136,26 +141,23 @@ _SUBAGENT_MARKS: dict[str, tuple[str, str]] = {
 }
 
 
-def _duration(seconds: float | None) -> str:
-    """``42s`` / ``14m`` / ``3h 12m`` / ``2d 4h``. One spelling on this screen."""
-    if seconds is None:
-        return "unknown"
-    total = int(max(0.0, seconds))
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        return f"{total // 60}m"
-    if total < 86400:
-        return f"{total // 3600}h {(total % 3600) // 60}m"
-    return f"{total // 86400}d {(total % 86400) // 3600}h"
+def _first_that_fits(rungs: Sequence[str], width: int) -> str:
+    """The first rung that fits, or the shortest one cropped.
 
-
-def _memory(value: int | None) -> str:
-    if value is None:
-        return "—"
-    if value >= 1 << 30:
-        return f"{value / (1 << 30):.1f} GB"
-    return f"{value / (1 << 20):.0f} MB"
+    The shed ladder used by ``kv``'s notes and ``marked``'s metas, extracted so
+    a FIXED label can use it too. Shedding a whole rung keeps a phrase readable
+    where ``truncate_cells`` would leave a fragment that says nothing.
+    """
+    for rung in rungs:
+        if cell_len(rung) <= width:
+            return rung
+    # NO fallback crop. Returning `truncate_cells(shortest)` here made the
+    # function always "succeed", so a caller checking whether anything fit could
+    # not tell — it received a cropped fragment whose width equalled the budget
+    # by construction. The empty string is the honest answer to "which of these
+    # fits?", and it lets the caller drop the row instead of painting
+    # `! not the…` (UX round 1, U5).
+    return ""
 
 
 def _path(value: str, width: int) -> str:
@@ -262,6 +264,7 @@ class _Body:
         indent: int = 0,
         *,
         metas: Sequence[str] = (),
+        labels: Sequence[str] = (),
     ) -> None:
         """A glyph-led row: session lines and subagent tree nodes.
 
@@ -281,7 +284,23 @@ class _Body:
         candidates = list(metas) or ([meta] if meta else [])
         widest = max((len(candidate) for candidate in candidates), default=0)
         label_budget = max(8, self.width - row.cell_len - (widest + 2 if widest else 0))
-        shown = truncate_cells(label, label_budget)
+        # A LABEL ladder, measured against the budget this method computes.
+        # Callers cannot size one themselves without duplicating the glyph,
+        # indent and meta arithmetic above — and when the caller tried, the
+        # rungs never fired and the label was still cropped to `! not und…`,
+        # which communicates nothing (UX round 1, U5).
+        if labels:
+            chosen = _first_that_fits(list(labels), label_budget)
+            if not chosen:
+                # Even the shortest rung does not fit. Drop the row ENTIRELY
+                # rather than paint a fragment: `! not the…` is not a shorter
+                # way of saying the thing, it is a way of saying nothing, and
+                # the explanatory paragraph below carries the whole consequence
+                # at every width (UX round 1, U5).
+                return
+            shown = chosen
+        else:
+            shown = truncate_cells(label, label_budget)
         row.append(shown, style=semantic_style("fg"))
         if candidates and self.width >= _NOTE_MIN:
             # Pad to the meta COLUMN, never to the card's right edge — see
@@ -372,13 +391,22 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
             # ink and the same glyph as the update row below, because it is the
             # same kind of statement — something is true that you would want to
             # act on — and this screen's whole job is to be believed.
-            value_style="warning" if install.import_path_foreign else "fg",
+            value_style="warning" if is_shadowed_install(install) else "fg",
         )
-        if install.import_path_foreign and install.kind != "editable":
+        if is_shadowed_install(install):
             body.marked(
                 NOTICE_GLYPHS["warning"],
                 "warning",
+                # LADDERED like the meta beside it: a fixed label was cropped to
+                # ``! not und…`` at 45 cells, so the one row built to survive
+                # narrow frames was the only one that did not (UX round 1, U5).
+                # The shortest rung still names the fault.
                 "not under the install path above",
+                labels=(
+                    "not under the install path above",
+                    "not under the install path",
+                    "not the installed tree",
+                ),
                 metas=(
                     "this runtime is executing a different tree",
                     "executing a different tree",
@@ -395,14 +423,14 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
     else:
         body.kv("Source", "PyPI wheel" if install.version else "unavailable")
     if install.build_age_s is not None:
-        body.kv("Built", f"{_duration(install.build_age_s)} ago")
+        body.kv("Built", f"{format_duration(install.build_age_s)} ago")
     body.kv(
         "Python",
         install.python_version or "unavailable",
         notes=_python_notes(install),
     )
     body.kv("Platform", install.platform or "unavailable", note=install.machine)
-    if install.import_path_foreign and install.kind != "editable":
+    if is_shadowed_install(install):
         # AFTER the table, not between two of its rows. A four-line wrapped
         # paragraph spliced into the middle of a kv block breaks the column
         # rhythm and reads as the end of the section, so the rows below it look
@@ -434,6 +462,13 @@ def _latest_notes(install: object) -> tuple[str, ...]:
     """
     from local_operator.update import TTL_S
 
+    if not getattr(install, "version", ""):
+        # The unknown is on the INSTALLED side, and the lie is the same one:
+        # `is_behind("", latest)` is False by design, so a failed version probe
+        # beside a cached NEWER release asserted currency. Both halves fail
+        # together on a broken install, which is the state /info is opened in
+        # (review round 1, M3).
+        return ("latest unknown (installed version unreadable)", "latest unknown", "unknown")
     latest = getattr(install, "latest_known", None)
     if latest is None:
         return ("latest unknown (never checked)", "latest unknown", "unknown")
@@ -444,8 +479,8 @@ def _latest_notes(install: object) -> tuple[str, ...]:
         return ("latest", "latest")
     stale = " (stale)" if age > TTL_S else ""
     return (
-        f"latest · checked {_duration(age)} ago{stale}",
-        f"checked {_duration(age)} ago",
+        f"latest · checked {format_duration(age)} ago{stale}",
+        f"checked {format_duration(age)} ago",
         "latest",
     )
 
@@ -550,7 +585,7 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
             _model(process.effective_model, body.value_cells),
             notes=("failover is in force", "failover"),
         )
-    body.kv("Started", f"{_duration(process.uptime_s)} ago" if process.uptime_s else "—")
+    body.kv("Started", f"{format_duration(process.uptime_s)} ago" if process.uptime_s else "—")
     body.kv("Working dir", _path(process.cwd, body.value_cells))
     body.kv(
         "Config dir",
@@ -599,7 +634,13 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # than annotating it — ``/session``'s proven ``Ledger unavailable``
         # shape. The prose says what failed and what to do, in one sentence.
         body.header("Sessions unavailable")
-        body.note("Could not scan the session registry. Close and reopen to try again.")
+        body.note(
+            # ``r`` re-runs exactly these probes and the footer advertises it two
+            # rows below this sentence; "close and reopen" sent the reader the
+            # long way round and quietly implied ``r`` would not help, which is
+            # the opposite of true (UX round 1, U7).
+            "Could not scan the session registry. Press r to try again."
+        )
         return
     meta = f"{sessions.live} live · {sessions.total} total"
     body.header("Sessions on this machine", meta, f"{sessions.live} live")
@@ -622,9 +663,9 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         bits = ["this session"] if line.is_self else []
         if line.state != "live":
             bits.append(line.state)
-        bits.append(_duration(line.uptime_s))
+        bits.append(format_duration(line.uptime_s))
         if sessions.usage_available:
-            bits.append(_memory(line.footprint_bytes or line.rss_bytes))
+            bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
             bits.append(f"needs {line.pending}")
         elif line.busy:
@@ -752,8 +793,15 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
     size = (env.terminal_size if env else live.terminal_size) or None
     body.kv(
         "Terminal",
-        (env.term if env else "") or "—",
+        # ``checking…`` while the worker is out, NOT ``—``: an em-dash means "we
+        # looked and could not tell" everywhere else on this screen, so a first
+        # frame using it for a value still arriving told the reader their TERM
+        # could not be determined — mildly alarming on the one screen about what
+        # is actually running, and three loading vocabularies on one frame is
+        # one too many (UX round 1, U6).
+        ((env.term or "—") if env else "checking…"),
         note=f"{size[0]}x{size[1]}" if size else "",
+        value_style="fg" if env else "dim",
     )
     body.kv("Theme", (env.theme if env else live.theme) or "—")
     approvals = (env.approval_mode if env else live.approval_mode) or ""
@@ -960,7 +1008,23 @@ class InfoScreen(ModalScreen[None]):
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)
         if body is not None and body.is_mounted and not self.presentation_cancelled:
+            # Was the reader pinned to the BOTTOM before this repaint? The body
+            # roughly doubles when the probe lands, so an `End` pressed during
+            # `checking…` left the viewport at its old absolute offset — two
+            # sections above the end the user asked for, moving under them for
+            # reasons they cannot see (UX round 1, U4). Only the pinned case is
+            # restored: a reader parked mid-document is deliberately left where
+            # they are, since re-anchoring that would be the same fault.
+            scroll = getattr(self, "_scroll", None)
+            was_at_end = bool(
+                scroll is not None
+                and scroll.is_mounted
+                and scroll.max_scroll_y > 0
+                and scroll.scroll_y >= scroll.max_scroll_y - 1
+            )
             body.update(self._report_text())
+            if was_at_end and scroll is not None:
+                self.call_after_refresh(scroll.scroll_end, animate=False)
             title = getattr(self, "_title", None)
             if title is not None and title.is_mounted:
                 title.update(self._title_text())
@@ -1012,14 +1076,34 @@ class InfoScreen(ModalScreen[None]):
         and a multiplexer and is never silent.
         """
         if self.snapshot is None:
+            # Keep the bell (something was refused) but SAY so: the footer has
+            # advertised `ctrl+r copy` since frame one, and on a terminal with
+            # the bell disabled -- common, and the default in several -- the
+            # refusal was completely silent. A user who believes the report is
+            # on their clipboard pastes whatever was there before into an issue,
+            # which is worse than waiting (UX round 1, U3).
             self.app.bell()
+            notice = getattr(self.app, "_system_notice", None)
+            if notice is not None:
+                notice("still reading this install — try ctrl+r again in a moment", "warning")
             return
         payload = build_export(self.snapshot)
         put = getattr(self.app, "_put_on_clipboard", None)
         if put is None:
             self.app.copy_to_clipboard(payload)
-            return
-        put(payload, self)
+        else:
+            put(payload, self)
+        # A SECOND receipt, on top of the shared clipboard one, because this
+        # payload has a property the user should be told exactly once and at
+        # exactly this moment: it was redacted. `render.py` and its tests do
+        # thorough work that nothing in the UI ever mentioned, and the moment
+        # the user is thinking about pasting into a public issue is when
+        # "paths are home-relativised, no credential values" is worth knowing
+        # (UX round 1, U10). The shared receipt stays generic — it is used by
+        # every other copy gesture and must not claim redaction for them.
+        notice = getattr(self.app, "_system_notice", None)
+        if notice is not None:
+            notice("/info report copied — paths relativised, no secrets included", "info")
 
     def action_refresh_report(self) -> None:
         """Re-run the probes on demand. NOT on a timer.
@@ -1028,10 +1112,21 @@ class InfoScreen(ModalScreen[None]):
         diagnosed, and ``/info`` is a snapshot rather than a monitor — so this
         is a manual gesture and the captured-at stamp says which moment is on
         screen.
+
+        The snapshot is cleared FIRST so the screen acknowledges the keypress
+        within a frame. Without it the probe took ~4 s during which the screen
+        was byte-identical to before the press — same rows, same footer, same
+        stamp — so the key read as dead and the natural response was to press it
+        again (UX round 1, U2). Dropping back to ``checking…`` reuses the
+        first-open vocabulary rather than inventing a second loading state, and
+        it is the honest picture: those fields are, once again, unread.
         """
         handler = getattr(self.app, "refresh_info_screen", None)
-        if handler is not None:
-            handler(self)
+        if handler is None:
+            return
+        self.snapshot = None
+        self._repaint()
+        handler(self)
 
     def action_scroll_up(self) -> None:
         self._scroll.scroll_up()

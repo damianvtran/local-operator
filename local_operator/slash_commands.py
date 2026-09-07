@@ -310,7 +310,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # it needs no `native_action` branch or `OWNER_COMMANDS` entry.
     SlashCommand(
         "info",
-        "Install, version, sessions and subagents on this machine",
+        # "running sessions", not "sessions": `/analytics` describes past
+        # CONVERSATIONS and this describes live PROCESSES, and both descriptions
+        # sit in one picker where the shared word read as the same thing (UX
+        # round 1, U9). One word buys the distinction.
+        "Install, version, and running sessions on this machine",
+        # A user who has just been asked "what version are you on?" reaches for
+        # the word they were asked, not for the name of our screen. Alias rows
+        # share a line in the picker, so this costs no space (UX round 1, U8).
+        aliases=("version", "about"),
     ),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an

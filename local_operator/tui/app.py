@@ -23017,6 +23017,13 @@ class OperatorApp(App[None]):
             thread=False,
             group="info",
             exclusive=True,
+            # Textual defaults this to True, which turns any escape from the
+            # probe into an application exit. `collect_snapshot` is now
+            # failure-isolated block by block, so nothing SHOULD escape — this
+            # is the second half of that belt-and-braces: the screen a user
+            # opens BECAUSE their install is broken must never be the thing that
+            # takes their session down (review round 1, B1).
+            exit_on_error=False,
         )
 
     def _capture_info_live(self) -> "LiveState":
@@ -23071,6 +23078,13 @@ class OperatorApp(App[None]):
             thread=False,
             group="info",
             exclusive=True,
+            # Textual defaults this to True, which turns any escape from the
+            # probe into an application exit. `collect_snapshot` is now
+            # failure-isolated block by block, so nothing SHOULD escape — this
+            # is the second half of that belt-and-braces: the screen a user
+            # opens BECAUSE their install is broken must never be the thing that
+            # takes their session down (review round 1, B1).
+            exit_on_error=False,
         )
 
     def _cmd_usage(self, arg: str, notice: NoticeFn) -> None:

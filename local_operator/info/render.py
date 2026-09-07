@@ -36,7 +36,14 @@ import os
 import time
 from pathlib import Path
 
-from local_operator.info.model import InfoSnapshot, SubagentLine
+from local_operator.info.model import (
+    UNKNOWN,
+    InfoSnapshot,
+    SubagentLine,
+    format_bytes,
+    format_duration,
+    is_shadowed_install,
+)
 
 #: Fields the export never prints, restated here as a NAME LIST purely so a
 #: reader of this module sees the rule without chasing three dataclasses. The
@@ -63,26 +70,48 @@ def relativise_home(path: str) -> str:
     return path
 
 
-def _duration(seconds: float | None) -> str:
-    """``4m`` / ``3h 12m`` / ``2d 4h`` — the export's one duration spelling."""
-    if seconds is None:
-        return "unknown"
-    total = int(max(0.0, seconds))
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        return f"{total // 60}m"
-    if total < 86400:
-        return f"{total // 3600}h {(total % 3600) // 60}m"
-    return f"{total // 86400}d {(total % 86400) // 3600}h"
+def _scrub(text: str) -> str:
+    """Home-relativise FREE TEXT before it reaches the export.
+
+    The explicit path fields were always relativised; two channels carrying
+    text this module does not compose were not. MCP failure messages are
+    ``str(exc)`` from a failed connect (typically ``command not found:
+    <absolute path>``) and a ``degraded`` reason is
+    ``f"{type(exc).__name__}: {exc}"``, where an ``OSError`` message contains
+    the filename it failed on. Both routinely carry ``$HOME`` — exactly the
+    disclosure this module's docstring says must never happen, in the artifact
+    built to be pasted publicly (review round 1, B2).
+
+    Applied per free-text channel AND again over the whole document by
+    :func:`build_export`, so a future field that forgets to call it is still
+    covered.
+    """
+    return relativise_home_everywhere(text)
 
 
-def _bytes(value: int | None) -> str:
-    if value is None:
-        return "—"
-    if value >= 1 << 30:
-        return f"{value / (1 << 30):.1f} GB"
-    return f"{value / (1 << 20):.0f} MB"
+def relativise_home_everywhere(text: str) -> str:
+    """Replace every occurrence of the home directory anywhere in ``text``.
+
+    Unlike :func:`relativise_home`, which anchors at the START of a path, this
+    rewrites a home path embedded mid-sentence — which is the shape a failure
+    message has.
+    """
+    if not text:
+        return text
+    home = str(Path.home())
+    return text.replace(home + os.sep, "~" + os.sep).replace(home, "~")
+
+
+def _value(text: str) -> str:
+    """A scalar for the export, with the SAME unknown spelling the screen uses.
+
+    The screen renders an unreadable value as ``UNKNOWN``; the export used to
+    interpolate the empty string, so one snapshot produced seven blank fields
+    and the two surfaces disagreed about what had been read. A blank in a
+    pasted report is indistinguishable from a rendering bug, which is the second
+    round trip this screen exists to remove (review round 1, M4).
+    """
+    return text or UNKNOWN
 
 
 def _latest_line(snapshot: InfoSnapshot) -> str:
@@ -93,6 +122,13 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
     over, printing the latter from the former is an outright lie.
     """
     install = snapshot.install
+    if not install.version:
+        # The unknown is on the INSTALLED side here rather than the latest side,
+        # but the lie is the same one: ``is_behind("", latest)`` is False by
+        # design, so a failed version probe beside a cached NEWER release
+        # reported currency. Both halves fail together on a broken install,
+        # which is the state /info is opened in (review round 1, M3).
+        return "unknown (installed version unreadable)"
     if install.latest_known is None:
         return "unknown (never checked)"
     from local_operator.update import TTL_S
@@ -101,7 +137,7 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
     if age is None:
         return install.latest_known
     stale = " (stale)" if age > TTL_S else ""
-    return f"{install.latest_known} · checked {_duration(age)} ago{stale}"
+    return f"{install.latest_known} · checked {format_duration(age)} ago{stale}"
 
 
 def _tree_lines(tree: tuple[SubagentLine, ...], deeper: int) -> list[str]:
@@ -141,48 +177,47 @@ def build_export(snapshot: InfoSnapshot) -> str:
         )
         if part
     )
-    stamp = (
-        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.captured_at))
-        if snapshot.captured_at
-        else "unknown"
-    )
-
-    lines: list[str] = [head, f"captured {stamp}", "", "## Install"]
+    lines: list[str] = ["## Install"]
     lines += [
-        f"  version           {install.version or '—'}",
+        f"  version           {_value(install.version)}",
         f"  latest known      {_latest_line(snapshot)}",
-        f"  install kind      {install.kind or '—'}",
-        f"  install path      {relativise_home(install.prefix)}",
-        f"  interpreter       {relativise_home(install.executable)}",
+        f"  install kind      {_value(install.kind)}",
+        f"  install path      {_value(relativise_home(install.prefix))}",
+        f"  interpreter       {_value(relativise_home(install.executable))}",
         # Included unconditionally, and marked when it diverges: a maintainer
         # reading a bug report needs to know the reporter's runtime was running
         # a checkout rather than the version the first line claims.
-        f"  running code      {relativise_home(install.import_path) or '—'}"
+        f"  running code      {_value(relativise_home(install.import_path))}"
         + (
             "  (NOT under the install path — a checkout is shadowing it)"
-            if install.import_path_foreign
-            else ""
+            if is_shadowed_install(install)
+            else "  (an editable checkout, as expected)" if install.import_path_foreign else ""
         ),
         f"  source            {'git snapshot' if install.is_git_snapshot else 'PyPI wheel'}"
         + (f" @ {install.source_ref[:12]}" if install.source_ref else ""),
-        f"  build age         {_duration(install.build_age_s)}",
-        f"  python            {install.python_version} ({install.python_implementation})",
-        f"  platform          {install.platform or '—'} · {install.machine or '—'}",
+        f"  build age         {format_duration(install.build_age_s)}",
+        "  python            "
+        + (
+            f"{install.python_version} ({install.python_implementation})"
+            if install.python_version and install.python_implementation
+            else _value(install.python_version or install.python_implementation)
+        ),
+        f"  platform          {_value(install.platform)} · {_value(install.machine)}",
         "",
         "## This session",
-        f"  session id        {process.session_id or '—'}",
-        f"  kind              {process.kind or '—'}",
+        f"  session id        {_value(process.session_id)}",
+        f"  kind              {_value(process.kind)}",
         f"  pid               {process.pid}",
-        f"  model             {process.model_label or '—'}",
-        f"  effective model   {process.effective_model or process.model_label or '—'}",
-        f"  uptime            {_duration(process.uptime_s)}",
-        f"  working dir       {relativise_home(process.cwd)}",
-        f"  config dir        {relativise_home(process.config_dir)}"
+        f"  model             {_value(process.model_label)}",
+        f"  effective model   {_value(process.effective_model or process.model_label)}",
+        f"  uptime            {format_duration(process.uptime_s)}",
+        f"  working dir       {_value(relativise_home(process.cwd))}",
+        f"  config dir        {_value(relativise_home(process.config_dir))}"
         + ("  (redirected)" if process.config_dir_redirected else ""),
-        f"  cache dir         {relativise_home(process.cache_dir)}",
-        f"  agent home        {relativise_home(process.agent_home)}"
+        f"  cache dir         {_value(relativise_home(process.cache_dir))}",
+        f"  agent home        {_value(relativise_home(process.agent_home))}"
         + ("  (redirected)" if process.agent_home_redirected else ""),
-        f"  log dir           {relativise_home(process.log_dir)}",
+        f"  log dir           {_value(relativise_home(process.log_dir))}",
         f"  control port      {process.control_port if process.control_port else '—'}",
         f"  protocol          {process.protocol if process.protocol else '—'}",
         "",
@@ -201,12 +236,12 @@ def build_export(snapshot: InfoSnapshot) -> str:
         for line in sessions.lines:
             mark = "*" if line.is_self else "-"
             name = line.conversation_name or line.session_id or str(line.pid)
-            memory = _bytes(line.footprint_bytes or line.rss_bytes)
+            memory = format_bytes(line.footprint_bytes or line.rss_bytes)
             extra = " · busy" if line.busy else ""
             extra += f" · needs {line.pending}" if line.pending else ""
             lines.append(
                 f"  {mark} [{line.state}] {name} · {line.kind} · pid {line.pid} · "
-                f"{_duration(line.uptime_s)} · {memory}{extra}"
+                f"{format_duration(line.uptime_s)} · {memory}{extra}"
             )
             lines.append(f"      {relativise_home(line.cwd)} · {line.model_label or '—'}")
 
@@ -258,10 +293,9 @@ def build_export(snapshot: InfoSnapshot) -> str:
     # servers that came up a second later.
     if env.mcp_failures and not env.mcp_settling:
         for name, message in env.mcp_failures:
-            lines.append(f"      {name}: {message}")
+            lines.append(f"      {name}: {_scrub(message)}")
     lines.append(f"  guides            {env.guides}")
     lines.append(f"  skills            {env.skills}")
-    lines.append(f"  tools             {env.tools}")
     # NAMES ONLY, and this is the line the redaction test reads.
     lines.append(
         f"  credentials       {len(env.credential_keys)} keys"
@@ -271,6 +305,37 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if snapshot.degraded:
         lines += ["", "## Could not read"]
         for name, reason in snapshot.degraded:
-            lines.append(f"  {name}: {reason}")
+            lines.append(f"  {name}: {_scrub(reason)}")
 
-    return "\n".join(lines) + "\n"
+    body = "\n".join(lines)
+    # A FINAL whole-document pass, on top of the per-channel `_scrub` above.
+    # Belt and braces deliberately: the per-site calls document intent at the
+    # two channels known to carry free text, and this one covers any field a
+    # later change adds without remembering to scrub it. Both are cheap string
+    # replacements over a ~50-line document (review round 1, B2).
+    body = relativise_home_everywhere(body)
+
+    # FENCED, reversing this module's original "no fence" position. The
+    # reasoning against a fence is sound for prose and does not survive contact
+    # with this payload: 43 of ~55 lines are `  label<spaces>value`, and GFM
+    # collapses space runs and folds them into one `<p>...<br>` paragraph — the
+    # two-space indent even reads as a list continuation, so a session block
+    # came out as an actual `<ul><li>`. Verified against GitHub's own /markdown
+    # API rather than assumed (UX round 1, U1). A user cannot "want it without a
+    # fence" because without one the alignment that makes it readable is gone,
+    # and the failure is invisible to the person pasting it.
+    #
+    # The triage header stays OUTSIDE the fence so it remains greppable and
+    # readable in a notification email, and the `<details>` wrapper keeps a
+    # 55-line block from burying the reporter's own words.
+    stamp = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.captured_at))
+        if snapshot.captured_at
+        else "unknown"
+    )
+    return (
+        f"{head}\n\n"
+        f"<details><summary>/info report — captured {stamp}</summary>\n\n"
+        f"```text\n{body}\n```\n\n"
+        "</details>\n"
+    )

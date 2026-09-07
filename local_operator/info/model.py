@@ -68,6 +68,11 @@ class InstallInfo:
     #: WARNING state, not an unavailable one: everything was read successfully,
     #: and what it says is that this runtime is executing code from somewhere
     #: other than the install it reports.
+    #:
+    #: Do NOT read this field directly to decide whether to warn — call
+    #: :func:`is_shadowed_install`, which also excludes the benign editable
+    #: case. QA round 1 (Q1) found the screen and the export reaching opposite
+    #: conclusions from one snapshot because each spelled the condition itself.
     import_path_foreign: bool = False
     is_git_snapshot: bool = False
     source_ref: str = ""
@@ -270,11 +275,76 @@ class EnvInfo:
     browser_paired: bool = False
     mobile_installed: bool = False
     mobile_healthy: bool = False
+    #: ``None`` when the relay is not installed. A port is only a measurement
+    #: when something is listening on it; publishing the module's DEFAULT_PORT
+    #: regardless made an unconfigured host report a plausible number, which is
+    #: the "absent is not a measured value" rule this screen inherits from
+    #: ``/session`` (review round 1, N2).
     mobile_port: int | None = None
     credential_keys: tuple[str, ...] = ()
     guides: int = 0
     skills: int = 0
-    tools: int = 0
+
+
+def format_duration(seconds: float | None) -> str:
+    """``42s`` / ``4m`` / ``3h 12m`` / ``2d 4h``. ONE spelling for both surfaces.
+
+    Lives here, beside the dataclasses, because both the screen and the export
+    render the same fields and a quantity that reads two ways across two halves
+    of one screen is a defect — this PR's own B2/Q1 finding was exactly that,
+    two surfaces reaching opposite conclusions from one snapshot. The two copies
+    happened to agree on every sampled value when they were measured, which is
+    the argument FOR sharing rather than against it: they agree today and
+    nothing made them keep agreeing.
+
+    ``model.py`` is the right home because it is the module both already import
+    and it is stdlib-only by contract, so sharing costs no new coupling.
+
+    ``None`` is "not measured" and says so; it is never a zero duration.
+    """
+    if seconds is None:
+        return "unknown"
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    if total < 86400:
+        return f"{total // 3600}h {(total % 3600) // 60}m"
+    return f"{total // 86400}d {(total % 86400) // 3600}h"
+
+
+def format_bytes(value: int | None) -> str:
+    """``181 MB`` / ``1.9 GB``, or :data:`UNKNOWN` when nothing was measured.
+
+    Shared for the same reason as :func:`format_duration`. ``None`` renders as
+    the unknown sentinel rather than ``0 MB``: a process whose memory could not
+    be read is not a process using no memory.
+    """
+    if value is None:
+        return UNKNOWN
+    if value >= 1 << 30:
+        return f"{value / (1 << 30):.1f} GB"
+    return f"{value / (1 << 20):.0f} MB"
+
+
+def is_shadowed_install(install: InstallInfo) -> bool:
+    """Whether the running code is a checkout SHADOWING the reported install.
+
+    **The single source of truth for that judgement**, called by the screen and
+    by the export. Both used to spell the condition themselves, and they drifted
+    exactly as you would expect: the screen excluded the editable case and the
+    export did not, so every contributor running an editable checkout — which is
+    every contributor to this repo — copied a bug report asserting their install
+    was shadowed, sending a maintainer after AGENTS.md's most-documented trap
+    while it was not occurring (QA round 1, Q1).
+
+    An editable install's package IS the checkout by design, so a divergence
+    there is expected rather than alarming. Every other kind diverging is the
+    ``runtime/launch.py`` trap: spawned with ``-m`` and no ``cwd=``, so the
+    launching session's directory precedes site-packages on ``sys.path``.
+    """
+    return install.import_path_foreign and install.kind != "editable"
 
 
 @dataclass(frozen=True)

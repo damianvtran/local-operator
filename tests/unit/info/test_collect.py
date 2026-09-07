@@ -23,6 +23,7 @@ import pytest
 from local_operator import update
 from local_operator.info import collect as collect_mod
 from local_operator.info.collect import (
+    LiveState,
     build_subagent_tree,
     collect_env,
     collect_install,
@@ -30,7 +31,7 @@ from local_operator.info.collect import (
     collect_sessions,
     collect_snapshot,
 )
-from local_operator.info.model import SessionsInfo
+from local_operator.info.model import InfoSnapshot, SessionsInfo
 
 #: Frozen stamp for fixtures whose durations must be constants.
 NOW_FIXTURE = 1_788_602_400.0
@@ -296,7 +297,15 @@ def test_tree_walk_is_cycle_safe() -> None:
     """
     nodes = [_Node("x", "X", parent_job_id="y"), _Node("y", "Y", parent_job_id="x")]
     tree, _deepest, _deeper = build_subagent_tree(nodes)
-    assert len(tree) <= 2
+    # `<= 2` PASSED VACUOUSLY AT 0, which is what it did before the fix: in a
+    # cycle every node's parent is present, so nothing buckets under `None`, the
+    # walk iterates an empty list and the tree comes back EMPTY while the header
+    # still says "2 running" — one screen contradicting itself, and by
+    # `build_subagent_tree`'s own docstring the worst error it can make (review
+    # round 1, M1). Assert the exact count: a malformed edge must cost
+    # indentation, never existence.
+    assert len(tree) == 2
+    assert {node.job_id for node in tree} == {"x", "y"}
     assert len({node.job_id for node in tree}) == len(tree)
 
 
@@ -505,3 +514,127 @@ def test_collect_sessions_against_a_record_captured_from_a_real_scan() -> None:
     # And the key present in the REAL record does not survive into the line.
     assert not hasattr(line, "control_key")
     assert "a" * 16 not in repr(line)
+
+
+def test_every_multiplexer_marker_is_probed() -> None:
+    """`_multiplexer` spells its reads out; the tuple stays the source of truth.
+
+    The reads are unrolled so the ambient-environment audit can resolve them
+    through the AST (QA round 1, Q4), which creates a second place the marker
+    list effectively lives. This pins them together: every marker in the tuple
+    must actually be probed, and must map to the label the tuple gives it.
+    """
+    import os
+
+    for variable, expected in collect_mod._MULTIPLEXER_MARKERS:
+        saved = {name: os.environ.pop(name, None) for name, _ in collect_mod._MULTIPLEXER_MARKERS}
+        try:
+            os.environ[variable] = "x"
+            assert collect_mod._multiplexer() == expected, variable
+        finally:
+            os.environ.pop(variable, None)
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
+
+
+def test_a_multiplexer_marker_value_is_never_read() -> None:
+    """Presence only: a socket path or workspace id must not reach the snapshot."""
+    import os
+
+    saved = {name: os.environ.pop(name, None) for name, _ in collect_mod._MULTIPLEXER_MARKERS}
+    try:
+        os.environ["CMUX_SOCKET_PATH"] = "/tmp/SENTINEL-SOCKET-VALUE/sock"
+        errors: list[tuple[str, str]] = []
+        env = collect_env(LiveState(), errors)
+        assert env.multiplexer == "cmux"
+        assert "SENTINEL-SOCKET-VALUE" not in repr(env)
+    finally:
+        os.environ.pop("CMUX_SOCKET_PATH", None)
+        for name, value in saved.items():
+            if value is not None:
+                os.environ[name] = value
+
+
+def test_a_failure_in_a_block_prologue_degrades_instead_of_escaping() -> None:
+    """B1: the prologue was outside every guard, and the escape KILLED the app.
+
+    `test_each_block_degrades_independently` makes the innermost probe raise,
+    which lands inside an existing `_safe`. Nothing exercised a failure in a
+    block function's own prologue — its function-local imports and its
+    `config_dir()` call — and `config_dir()` is `Path.home() / ...`, which
+    raises `RuntimeError` when the home cannot be resolved. Escaping
+    `collect_snapshot` meant escaping the worker, and `run_worker` defaults to
+    `exit_on_error=True`, so the diagnostic screen took the whole application
+    down on exactly the broken host it exists to describe (review round 1, B1).
+    """
+    import local_operator.paths as paths_mod
+
+    def boom(*args: object, **kwargs: object) -> Path:
+        raise OSError("home unreadable")
+
+    original = paths_mod.config_dir
+    paths_mod.config_dir = boom  # type: ignore[assignment]
+    try:
+        snapshot = collect_snapshot(LiveState())
+    finally:
+        paths_mod.config_dir = original  # type: ignore[assignment]
+
+    # It RETURNED rather than raising, and said what it could not read.
+    assert isinstance(snapshot, InfoSnapshot)
+    assert snapshot.degraded, "a prologue failure must be reported, not swallowed silently"
+    assert any("home unreadable" in reason for _name, reason in snapshot.degraded)
+
+
+def test_a_broken_submodule_degrades_instead_of_escaping() -> None:
+    """The other prologue hazard: a function-local import that cannot resolve.
+
+    This is the state `/info` is opened in often enough to matter — a partially
+    broken install — so it must render, not crash.
+    """
+    import sys
+
+    sentinel = object()
+    saved = sys.modules.get("local_operator.credentials", sentinel)
+    sys.modules["local_operator.credentials"] = None  # type: ignore[assignment]
+    try:
+        snapshot = collect_snapshot(LiveState())
+    finally:
+        if saved is sentinel:
+            sys.modules.pop("local_operator.credentials", None)
+        else:
+            sys.modules["local_operator.credentials"] = saved  # type: ignore[assignment]
+
+    assert isinstance(snapshot, InfoSnapshot)
+    assert snapshot.degraded
+
+
+def test_a_degraded_collect_writes_nothing_into_the_current_directory(tmp_path: Path) -> None:
+    """`/info` READS. It must never leave a file behind on the host.
+
+    Found for real: the B1 fallback was `Path(".")`, and `CredentialManager`
+    CREATES its store on construction, so probing a machine whose `config_dir()`
+    could not be resolved wrote a `credentials.env` into whatever directory the
+    user was standing in. A diagnostic that mutates the thing it describes is
+    the same fault as `check_latest()` rewriting the cache, which this module
+    bans outright.
+    """
+    import os
+
+    import local_operator.paths as paths_mod
+
+    def boom(*args: object, **kwargs: object) -> Path:
+        raise OSError("home unreadable")
+
+    original = paths_mod.config_dir
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    paths_mod.config_dir = boom  # type: ignore[assignment]
+    try:
+        snapshot = collect_snapshot(LiveState())
+    finally:
+        paths_mod.config_dir = original  # type: ignore[assignment]
+        os.chdir(cwd)
+
+    assert snapshot.degraded, "the failure is reported"
+    assert list(tmp_path.iterdir()) == [], f"wrote {[p.name for p in tmp_path.iterdir()]}"
