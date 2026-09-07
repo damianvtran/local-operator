@@ -50,7 +50,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyUrl
@@ -93,6 +93,41 @@ DEFAULT_CALLBACK_PATH = "/callback"
 #: token was issued. Not part of the SDK's ``OAuthToken`` — see
 #: :meth:`McpTokenStorage.stored_token_expiry` for why we have to record it.
 TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
+
+#: Payload key marking THIS row's refresh token as one the authorization server
+#: has already rejected with ``invalid_grant``. Set only by the parsed-body
+#: branch in :func:`_refresh_oauth_token_locked`; absence means "no such
+#: observation", never "known good".
+#:
+#: Why this exists: nothing used to record the rejection, so every process boot
+#: re-spent the same dead token (measured: 39 POSTs for one server, 87 for
+#: another, across 26 boots). For a provider running refresh-token REUSE
+#: DETECTION (Notion) that is not merely waste — re-presenting an already-rotated
+#: token revokes the ENTIRE token family, so a burst of session spawns turns one
+#: stale row into a fleet-wide logout.
+#:
+#: Why NO ttl: a dead grant is a CORRECTNESS fact that stays true until an
+#: interactive login replaces the grant, not a cost backoff. This is also why it
+#: is not stored in ``auth_credential_blocks``: ``block_credential`` clamps every
+#: block to ``MAX_CREDENTIAL_BLOCK_MS`` (1h), a ceiling that is load-bearing for
+#: provider quota backoff, so reusing that table would resume the storm — and the
+#: family revocation — every hour. That table is also keyed by integer
+#: ``credential_id`` plus a ``provider:type`` composite, where an MCP grant's
+#: identity is its ``server_url``. Wrong lifetime, wrong key.
+#:
+#: Living in the row payload makes it atomic with the grant it describes:
+#: :meth:`McpTokenStorage.clear` deletes it with the row, and
+#: :meth:`McpTokenStorage.set_tokens` clears it on any successful token write, so
+#: there is no way to leave a tombstone pointing at a token that no longer
+#: exists. It needs no migration — the payload already round-trips unknown keys.
+GRANT_DEAD_AT_KEY = "grant_dead_at"
+
+#: Outcome of one locked refresh attempt. Three-valued rather than ``bool``
+#: because the coordinator must tell a DEAD grant (never present this token
+#: again) from a merely FAILED one (transient; today's behaviour is correct).
+#: CAUTION: ``"failed"`` is a truthy string — every call site must compare
+#: against a member explicitly, never test truthiness.
+RefreshOutcome = Literal["refreshed", "failed", "dead"]
 
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
 #: starts with a token dying in ten seconds would otherwise open with a 401 and
@@ -499,7 +534,55 @@ class McpTokenStorage:
         creds = self._read() or {}
         creds["tokens"] = tokens.model_dump(mode="json")
         creds[TOKENS_OBTAINED_AT_KEY] = time.time()
+        # Clearing the dead-grant tombstone belongs HERE rather than in the
+        # ``/mcp login`` / ``/mcp reauth`` commands: this is the one funnel every
+        # path that obtains a working token already goes through (a completed
+        # browser grant, and a refresh that unexpectedly succeeds), so a login
+        # path added later cannot forget to un-stick a suppressed server.
+        creds.pop(GRANT_DEAD_AT_KEY, None)
         self._write(creds)
+
+    def grant_is_dead(self) -> bool:
+        """Whether this row's refresh token is a known-dead grant.
+
+        ``True`` only when :meth:`mark_grant_dead` recorded an ``invalid_grant``
+        rejection that no later :meth:`set_tokens` has cleared. Tolerates a
+        missing store, row, or key by returning ``False``, like every other read
+        here: an unreadable store must never suppress a refresh that might work.
+        """
+        creds = self._read()
+        if creds is None:
+            return False
+        marker = creds.get(GRANT_DEAD_AT_KEY)
+        return isinstance(marker, (int, float)) and not isinstance(marker, bool) and marker > 0
+
+    def mark_grant_dead(self) -> None:
+        """Record that this row's refresh token was rejected as ``invalid_grant``.
+
+        Best-effort read-modify-write: a store failure here must not break the
+        connect that is already failing over a dead grant, so it degrades to
+        today's behaviour (the storm) rather than raising. See
+        :data:`GRANT_DEAD_AT_KEY` for why this carries no expiry.
+
+        Known window, recorded because a FALSE tombstone is the worst failure
+        this marker can introduce: the read-modify-write is not inside
+        :func:`_oauth_refresh_lock`, so a sibling process that persists a
+        rotated token between our read and our write has that write overwritten
+        by our stale snapshot plus the marker, and a live grant then reads as
+        dead until an interactive login. The ordering makes it unlikely — we
+        only reach here after the server rejected the grant, under the lock on
+        the coordinator path — and it is a pre-existing property of the same
+        read-modify-write in :meth:`set_tokens`, so it is left as-is rather than
+        fixed here alone; closing it means giving both writers the lock.
+        """
+        try:
+            creds = self._read() or {}
+            creds[GRANT_DEAD_AT_KEY] = time.time()
+            self._write(creds)
+        except Exception:  # noqa: BLE001 — marking is an optimisation, never a gate
+            logger.debug(
+                "MCP dead-grant marker write failed for %s", self.credential_id, exc_info=True
+            )
 
     def stored_token_expiry(self) -> float | None:
         """Epoch seconds at which the stored access token expires, if knowable.
@@ -1888,10 +1971,16 @@ async def _refresh_oauth_token_locked(
     server_url: str,
     storage: McpTokenStorage,
     endpoints: DiscoveredOAuthEndpoints,
-) -> bool:
+) -> RefreshOutcome:
     """Spend the stored refresh token against the DISCOVERED token endpoint.
 
-    Returns ``True`` when a fresh access token was persisted. The caller holds
+    Returns ``"refreshed"`` when a fresh access token was persisted, ``"dead"``
+    when the authorization server rejected the grant with ``invalid_grant`` (a
+    tombstone is written and the token must never be presented again), and
+    ``"failed"`` for every other outcome, including "nothing to refresh".
+    Callers MUST compare against a member: ``"failed"`` is truthy.
+
+    The caller holds
     the cross-process refresh lock, so exactly one process performs this
     exchange even when several sessions start together. Mirrors the SDK's
     refresh request exactly (grant type, client auth methods, RFC 6749 §6
@@ -1907,7 +1996,9 @@ async def _refresh_oauth_token_locked(
     tokens = await storage.get_tokens()
     client_info = await storage.get_client_info()
     if tokens is None or not tokens.refresh_token or client_info is None:
-        return False
+        # Nothing to spend — a missing token is not evidence that the grant is
+        # dead, so this must never tombstone.
+        return "failed"
 
     token_endpoint = str(endpoints.oauth_metadata.token_endpoint)
     data: dict[str, str] = {
@@ -1966,7 +2057,7 @@ async def _refresh_oauth_token_locked(
         # does not cover); a refresh that overran its budget is simply a failed
         # refresh, handled exactly like a transport error.
         logger.debug("MCP token refresh request failed for %s", server_url, exc_info=True)
-        return False
+        return "failed"
     if response.status_code != 200:
         # A revoked-grant rejection is qualitatively different from a transient
         # one and must be logged as such: for a rotating provider that runs
@@ -1984,18 +2075,24 @@ async def _refresh_oauth_token_locked(
                 "MCP OAuth grant revoked for %s (invalid_grant); run /mcp login to restore it",
                 server_url,
             )
-            return False
+            # Tombstone from HERE and nowhere else: this is the only site that
+            # has proof (a PARSED ``invalid_grant`` body, never a bare HTTP 400)
+            # that the grant itself is gone rather than the server having a bad
+            # minute. Misclassifying a transient 400 would permanently suppress
+            # refresh on a live grant until the user ran an interactive login.
+            storage.mark_grant_dead()
+            return "dead"
         # Informational, not debug: a rejected refresh is the thing that turns
         # into a login prompt, so its cause belongs in the readable log.
         logger.info("MCP token refresh rejected for %s: HTTP %s", server_url, response.status_code)
-        return False
+        return "failed"
     try:
         new_tokens = OAuthToken.model_validate_json(response.content)
     except Exception:  # noqa: BLE001 — an unparseable token is a failed refresh
         logger.debug(
             "MCP token refresh returned an invalid token for %s", server_url, exc_info=True
         )
-        return False
+        return "failed"
 
     # RFC 6749 §6: a refresh response may omit ``scope`` (unchanged) and
     # ``refresh_token`` (not rotated). Carry both forward so the persisted row
@@ -2005,7 +2102,7 @@ async def _refresh_oauth_token_locked(
     if new_tokens.refresh_token is None:
         new_tokens.refresh_token = tokens.refresh_token
     await storage.set_tokens(new_tokens)
-    return True
+    return "refreshed"
 
 
 async def ensure_mcp_oauth_fresh(
@@ -2036,6 +2133,9 @@ async def ensure_mcp_oauth_fresh(
     already-running sessions can still race a rotation there; that path fails
     into the non-interactive handler (an actionable error, not a popup) and
     the next startup heals it here.
+
+    A grant previously rejected with ``invalid_grant`` short-circuits before the
+    lock is taken: see :data:`GRANT_DEAD_AT_KEY`.
     """
     del cfg  # reserved — see docstring
     storage = McpTokenStorage(server_url, store)
@@ -2049,6 +2149,29 @@ async def ensure_mcp_oauth_fresh(
         )
 
     if _still_good(storage.stored_token_expiry(), await storage.get_tokens()):
+        return endpoints
+
+    if storage.grant_is_dead():
+        # Suppress BEFORE the lock: a grant the server already rejected must
+        # cost neither a lock acquire nor a token POST. Re-spending it is what
+        # revokes the whole token family on a reuse-detecting provider (see
+        # GRANT_DEAD_AT_KEY). Endpoints are still returned so the connect
+        # proceeds to the point where it raises McpAuthRequiredError, which the
+        # manager renders as the actionable "run /mcp reauth" toast.
+        #
+        # Logged at INFO once per CONNECT, not once per process: this is reached
+        # from _connect_server, which also serves auto-reconnect and /mcp login,
+        # so a server that reconnects logs it again. That is bounded rather than
+        # a storm — _reconnect's McpAuthRequiredError arm abandons auto-reconnect
+        # instead of retrying — and INFO is deliberate: silence would read as
+        # "fixed" when it means "suppressed", and the operator still owes an
+        # interactive login. Plain logger.info also means it reaches CLI and
+        # headless hosts, not only the TUI's toast surface.
+        logger.info(
+            "MCP OAuth grant for %s is known-dead (invalid_grant); skipping refresh "
+            "-- run /mcp reauth to restore it",
+            server_url,
+        )
         return endpoints
 
     tokens = await storage.get_tokens()
@@ -2268,6 +2391,39 @@ def _make_refresh_coordinating_provider(
             # intercept precisely when it would refresh, and never otherwise.
             if ctx.is_token_valid() or not ctx.can_refresh_token():
                 return
+            if self._refresh_coord_storage.grant_is_dead():
+                # Same suppression as ensure_mcp_oauth_fresh, before the lock.
+                # Debug rather than info: the startup path already logged the
+                # actionable reauth line for this connect, and this site can run
+                # per request.
+                logger.debug(
+                    "MCP in-flight refresh skipped for %s: grant is known-dead",
+                    self._refresh_coord_server_url,
+                )
+                # STRIPPING HERE IS LOAD-BEARING, not a tidy-up: returning from
+                # this coroutine falls through to the SDK's own UNLOCKED
+                # _refresh_token, which reads ctx.current_tokens directly and
+                # would POST the very token the authorization server already
+                # rejected — the family-revoking request this whole subsystem
+                # exists to prevent. Suppressing OUR refresh without dropping
+                # the token therefore removes the harmless POSTs and keeps the
+                # harmful one, which is strictly worse than not suppressing at
+                # all, because it also looks fixed.
+                #
+                # This branch is the STEADY STATE: boot 1 writes the tombstone
+                # and takes the "dead" arm below (which strips for the same
+                # reason); every boot after it arrives here instead. Measured at
+                # the wire before this strip existed: 1 SDK POST on every one of
+                # 5 already-tombstoned boots.
+                #
+                # Dropping the in-memory refresh token makes can_refresh_token()
+                # read False, so the SDK skips its refresh branch and goes to
+                # the authorization branch, which our non-interactive redirect
+                # handler turns into an actionable McpAuthRequiredError.
+                with contextlib.suppress(Exception):
+                    if ctx.current_tokens is not None:
+                        ctx.current_tokens.refresh_token = None
+                return
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url) as locked:
                     # Re-read under the lock: a sibling process may have rotated
@@ -2307,13 +2463,31 @@ def _make_refresh_coordinating_provider(
                         # locked, re-reading refresh targets the same URL the
                         # unlocked path would have.
                         endpoints = _fallback_endpoints_for(self._refresh_coord_server_url)
-                    refreshed = await _refresh_oauth_token_locked(
+                    outcome = await _refresh_oauth_token_locked(
                         self._refresh_coord_server_url,
                         self._refresh_coord_storage,
                         endpoints,
                     )
-                    if refreshed:
+                    # Compare explicitly: ``"failed"`` is a truthy string, so a
+                    # ``if outcome:`` here would invert this branch silently and
+                    # pyright would not catch it.
+                    if outcome == "refreshed":
                         await self._resync_from_store(ctx)
+                    elif outcome == "dead":
+                        # The third POST of the per-boot triple, and the one that
+                        # actually revokes the token family. Returning here still
+                        # falls through to the SDK's own UNLOCKED _refresh_token,
+                        # which would spend the token the authorization server
+                        # just rejected. Dropping the in-memory refresh token
+                        # makes the SDK's can_refresh_token() read False, so it
+                        # skips its refresh branch entirely and goes to the
+                        # authorization branch — which our non-interactive
+                        # redirect handler already turns into an actionable
+                        # McpAuthRequiredError. Same user-visible outcome, one
+                        # fewer family-revoking POST.
+                        with contextlib.suppress(Exception):
+                            if ctx.current_tokens is not None:
+                                ctx.current_tokens.refresh_token = None
             except Exception:  # noqa: BLE001 — coordination is best-effort
                 # A failed re-read/refresh must never break the request. But we
                 # must NOT let the SDK's unlocked refresh then spend a stale
