@@ -1080,6 +1080,22 @@ the one the venv was installed from, and this checkout is deleted immediately.
 Never copy that line into a feature worktree — see "Every feature worktree
 owns its own venv".
 
+**The same hazard has an additive form: `git add -A` and `git commit -a`.**
+Every command named above takes something away, so the rule reads as being
+about destruction — and an agent who had read it walked into this anyway,
+because adding sounds safe. It is not: in a checkout other agents are working
+in, `-A` and `-a` are whole-tree operations in exactly the sense above, and
+they sweep whatever every peer has in flight into **your** commit under **your**
+authorship. Nothing in the output says so; the fabricated authorship surfaces
+only later, out of `git log`. Stage explicit pathspecs —
+`git add <the files you actually edited>`. Measured on `feat/move-command`
+(PR #727), where two sessions shared one worktree: `5b1de59e1` at 10:59:36
+swept a peer's in-progress `tests/unit/session/test_remote_move.py` into a
+`fix(tui):` commit, and `type-check` failed at `test_remote_move.py:368:37`
+(`CancelledError` not assignable to `Exception | None`) because the widening
+that makes that test type-check landed 3m24s later in the peer's own commit
+`06ee21d9e`. The PR's head was red for a defect its own change did not contain.
+
 Two stills side by side catch what a single "looks fine" never does. The
 usage-card round found a **pre-existing** bug this way: the after-frame had a
 scrollbar the before-frame did not, which turned out to be any tall overlay
