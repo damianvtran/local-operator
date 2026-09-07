@@ -88,6 +88,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Sequence
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
@@ -117,25 +118,83 @@ APP_NAME = "Local Operator"
 CONTEXT_COMPLETE = "Complete"
 CONTEXT_INPUT_REQUIRED = "Input required"
 CONTEXT_ATTENTION = "Needs attention"
+CONTEXT_INTERRUPTED = "Interrupted"
 BODY_COMPLETE = "Task complete"
 BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
+BODY_INTERRUPTED = "Stopped before finishing"
 
 #: Short state categories for notification surfaces with a title/subtitle/body
 #: split. Approval and ask intentionally share the category: both mean the turn
 #: cannot advance until the user returns, while the body says what it needs.
+#:
+#: ``interrupted`` is its OWN category, not a synonym for ``error``. The
+#: attention store constrains a completion's kind to exactly
+#: ``complete``/``error``/``interrupted``, and on the maintainer's real store
+#: those are 318 / 0 / 14 — so folding interrupted into error made EVERY
+#: non-success banner this feature can raise today assert that a session failed
+#: when it did not (design round 1, D3). A glyph may fold two states because it
+#: is a pointer that invites you to look; prose on a lock screen is an
+#: assertion read once, with nothing beside it to check it against.
 CONTEXTS: dict[str, str] = {
     "complete": CONTEXT_COMPLETE,
     "approval": CONTEXT_INPUT_REQUIRED,
     "ask": CONTEXT_INPUT_REQUIRED,
     "error": CONTEXT_ATTENTION,
+    "interrupted": CONTEXT_INTERRUPTED,
 }
+
+#: The digest's subtitle when the sessions it stands for did NOT all end the
+#: same way. Deliberately not an entry in :data:`CONTEXTS`: that maps one
+#: session's kind to its category, and "mixed" is a property of a SET, not a
+#: kind any session can have. Keeping it out means no call site can accidentally
+#: resolve a single completion to it.
+CONTEXT_MIXED = "Mixed outcomes"
+
+
+def digest_subtitle(kinds: Sequence[str]) -> str:
+    """The honest state category for a set of completions, or ``""``.
+
+    The digest speaks for whatever the per-tick cap held back, and the catalog
+    ranks by ``(tier, -mtime, id)`` — **not** by kind — so ``error`` and
+    ``interrupted`` rows land in the overflow as readily as ``complete`` ones.
+    The digest hardcoded :data:`CONTEXT_COMPLETE` regardless, so a remainder
+    that was entirely failures was announced as "Complete · 5 more sessions
+    finished" on a lock screen, with the sidebar's ``✗`` the only thing
+    contradicting it (design round 2, D8). That is design round 1's D3 —
+    ``interrupted`` folded into a state it is not — reappearing at the scale of
+    an arbitrary number of sessions rather than one.
+
+    So the rule is: SAY A STATE ONLY WHEN EVERY SESSION HELD BACK IS IN IT.
+    A uniform set gets its real category out of the house vocabulary
+    (:data:`CONTEXTS`), so the digest reads exactly like the row banners beside
+    it when it honestly can. A MIXED set gets :data:`CONTEXT_MIXED` — not the
+    majority's category and not the first row's, either of which would assert
+    an outcome about sessions that did not have it, which is the defect. Three
+    complete and two errors is neither "Complete" nor "Needs attention"; it is
+    mixed, and that is a fact about the set rather than a guess about it.
+
+    An unrecognised kind counts as its own value, so a future kind makes a set
+    mixed rather than silently inheriting "Complete" — the same default-to-quiet
+    discipline ``_BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES`` follows. An empty set
+    yields ``""``: no sessions is no claim, and both backends accept an empty
+    subtitle.
+
+    Pure, so the decision is testable without spawning or rendering anything.
+    """
+    distinct = set(kinds)
+    if not distinct:
+        return ""
+    if len(distinct) == 1:
+        return CONTEXTS.get(distinct.pop(), CONTEXT_MIXED)
+    return CONTEXT_MIXED
+
 
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
 #: separated — see :func:`urgency_for`.
-NotifyKind = Literal["complete", "approval", "ask", "error"]
+NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted"]
 
 #: Bodies keyed by kind, so a call site names the event rather than the prose.
 BODIES: dict[str, str] = {
@@ -143,7 +202,96 @@ BODIES: dict[str, str] = {
     "approval": BODY_APPROVAL,
     "ask": BODY_ASK,
     "error": BODY_ERROR,
+    "interrupted": BODY_INTERRUPTED,
 }
+
+#: Title for a background completion whose session has no STORED name, and the
+#: sentence the routing design specifies for exactly this case.
+#:
+#: Not :data:`APP_NAME`: macOS already attributes the banner to Local Operator
+#: by name and icon, so spending the title on the brand identifies nothing, and
+#: it rendered pixel-identical to the banner a user gets when they have opted
+#: OUT of session names — two different meanings in one frame (design round 1,
+#: D2). It also contradicted the sidebar, which paints these same rows as
+#: ``Untitled conversation``.
+BACKGROUND_FALLBACK_TITLE = "A session finished"
+
+
+def background_digest_title(total: int) -> str:
+    """``total`` sessions finished, as the DIGEST banner's title.
+
+    The digest is the one line standing in for the completions the per-tick cap
+    held back. A function rather than a constant because the count belongs in
+    the title, and this is the one place that decides so.
+
+    NOT :data:`BACKGROUND_FALLBACK_TITLE`, which it reused verbatim and which is
+    also the title every NAMELESS row banner carries. With a nameless over-cap
+    population — the overnight/agent-spawned case this feature exists for, 15 of
+    67 rows on the maintainer's store — that made the digest the fourth banner
+    in a stack of four with an IDENTICAL title AND subtitle, distinguished only
+    by the body, which is the line macOS truncates first (design round 2, D9).
+    At N=1 it also self-contradicted: "A session finished" over "1 more session
+    finished" describes two events in one frame.
+
+    THE COUNT MOVES INTO THE TITLE, and that is what makes the digest a
+    different KIND of object at a glance rather than a same-looking sibling.
+    macOS clips a title at ~43 characters and clips the body first, so the count
+    now sits in the line that survives; the string is 18-23 characters at every
+    count from 1 to 9999, far inside that clip.
+
+    It is also ABSOLUTE, not relative: "3 more" is only meaningful to a user who
+    noticed the three banners it counts from, which a lock screen or a coalesce
+    does not guarantee (design round 2, D11). The caller passes the TOTAL — the
+    whole tick, announced and held back alike, which is the same set the
+    subtitle beside it describes (round 3, D12).
+
+    THE SINGULAR IS DEFENSIVE, NOT REACHABLE. The digest fires only when the cap
+    held something back, which needs `_BACKGROUND_NOTIFY_MAX_PER_TICK` (3)
+    delivered banners first, so the smallest total production can reach is 4;
+    1-3 are test-only. Kept because a total is a count and a count that reads
+    "1 sessions" is wrong wherever it surfaces — but do not optimise the string
+    for a frame the user cannot receive (round 3, D13).
+
+    NAME-FREE BY CONSTRUCTION, like the body beside it — a digest is about
+    several sessions, so naming one would be wrong on its own terms, and nothing
+    on this leg consults :func:`session_names_in_notifications`.
+    """
+    return f"{total} sessions finished" if total != 1 else "1 session finished"
+
+
+#: The digest's body: where to go, since the banner itself cannot take you.
+#:
+#: The digest passes no ``session_id`` — it stands for several sessions, so
+#: there is no single transcript for a click to reopen — which makes it the one
+#: inert banner in a stack of otherwise-clickable ones, with nothing in the
+#: frame saying so (design round 2, D10). ``detached_notify``'s ``osascript``
+#: leg sets the precedent: it appends "— reopen with: lop --resume <id>" rather
+#: than letting a user learn by pressing (round 3, D14). This is that courtesy,
+#: pointed at the surface that CAN take them there — the docstring on
+#: ``_announce_background_digest`` already said the sidebar is where the user
+#: goes next; this is that sentence finally reaching the user.
+#:
+#: IT NAMES THE KEY because ``tui.sidebar_visible`` defaults to ``False``, so
+#: for a default-configured user the sentence otherwise pointed at a surface
+#: that is not on screen and did not say how to summon it (round 3, D14).
+#: ``Ctrl+B`` and not ``Cmd+B``: the latter is bound only on darwin and only
+#: when the terminal delivers Super, while ``ctrl+b`` is unconditional on every
+#: platform — a banner cannot know which terminal is reading it, so it names the
+#: route that always exists. 45 characters, inside the ~43-char title clip that
+#: matters for the TITLE; bodies wrap rather than clip in Notification Centre,
+#: and the rendered captures confirm it lands whole.
+BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
+
+#: The observer path's body line, keyed by ROUTE rather than by state — which
+#: is why it is a single constant and not another entry in :data:`BODIES`.
+#:
+#: The state already owns the subtitle (:data:`CONTEXTS`), so repeating it in
+#: the body spent the two most valuable lines under the title saying the same
+#: word twice — ``Complete`` over ``Task complete`` (design round 1, D5). What
+#: the body can say that the subtitle cannot is why this banner exists at all:
+#: the session that finished is not the one on screen. One string for all three
+#: kinds, because it describes the ROUTING decision, not the outcome.
+BODY_BACKGROUND = "You were in another session"
 
 #: BEL. Every terminal ever made honours it; it carries no text, but it is what
 #: raises tmux's ``monitor-bell``, Zellij's ``[!]`` flag and X11 urgency hints,
@@ -204,6 +352,27 @@ def notifications_enabled() -> bool:
     if os.environ.get(_ENV_DISABLE):
         return False
     return bool(settings_get("display.notifications", True))
+
+
+def session_names_in_notifications() -> bool:
+    """Whether a toast may be TITLED with the conversation's own name.
+
+    Separate from :func:`notifications_enabled` because it answers a different
+    question: not "may we interrupt" but "may we say what about". It exists for
+    the observer path, which announces a session the terminal is not currently
+    showing — so the name is the only thing distinguishing it, and it is also
+    the thing macOS repeats on a lock screen. Defaults to ``True``, which is
+    what every notification here has always done.
+
+    Governs BOTH notification legs — the observer path AND the attached
+    session's own :class:`Notifier` — so the promise the settings copy makes
+    ("a session's name appears on banners, including the lock screen") is true
+    of every banner and not merely of the newest one. Governing only the
+    observer path left the majority of a user's toasts still carrying the name
+    they had just opted out of showing, which is worse than a flag that is
+    clearly scoped, because the copy reads as a guarantee (review round 1, M2).
+    """
+    return bool(settings_get("display.notification_session_name", True))
 
 
 def sanitize_text(value: str | None, limit: int = MAX_TITLE_CHARS) -> str:
@@ -883,7 +1052,11 @@ class Notifier:
             return False
         if self._focused:
             return False
-        title = self._label or APP_NAME
+        # The privacy flag governs THIS leg too, not only the observer's. Read
+        # per send rather than cached at construction: `/settings` writes it
+        # live, and a notifier resolved once at boot would keep leaking the
+        # name for the rest of a session that had just turned it off.
+        title = (self._label if session_names_in_notifications() else "") or APP_NAME
         subtitle = CONTEXTS.get(kind, CONTEXT_COMPLETE)
         body = BODIES.get(kind, BODY_COMPLETE)
 

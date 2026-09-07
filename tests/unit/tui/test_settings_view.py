@@ -4996,3 +4996,53 @@ async def test_subagent_dock_row_renders_in_appearance_with_its_three_choices(
         await pilot.pause()
         assert _values(tmp_path)["display.dock"] == "hidden"
         assert "display" not in _values(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_session_name_row_is_inert_while_notifications_are_off() -> None:
+    """Design round 1, D4: the row must not read ``on`` for a toast that cannot fire.
+
+    ``display.notifications`` off means no notification of any kind is
+    delivered, so ``display.notification_session_name`` governs nothing — but
+    without a ``gated_by`` the row rendered its own ``on`` beside a master
+    reading ``off``, with a detail line explaining a behaviour that cannot
+    happen. That is the "page states something untrue about its own effect"
+    class this file already guards for the cleanup rows (#431).
+    """
+    from local_operator import settings_io
+    from local_operator.paths import config_dir
+    from local_operator.tui import theme as theme_mod
+
+    # Written through the SAME manager the page mounts (``ConfigManager(
+    # config_dir())``), not through ``tmp_path``: the suite already isolates
+    # HOME, so this is the isolated config the view actually reads. Writing
+    # elsewhere leaves the master at its ``True`` default and the row correctly
+    # renders as live — a test that would pass whether or not the gate exists.
+    #
+    # ``write_setting`` rather than ``update_config``: the registry owns the
+    # key's path, and it is the same writer the page's own toggle uses.
+    settings_io.write_setting(
+        ConfigManager(config_dir()), settings_io.BY_KEY["display.notifications"], False
+    )
+    dim = theme_mod.semantic_color("dim").lower()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        assert _value_ink(view, "display.notification_session_name") == dim
+        # The detail line describes the SELECTED row, so the clause is read
+        # with the cursor on the gated setting.
+        _select(view, "display.notification_session_name")
+        await pilot.pause()
+        assert "inert: Desktop notifications is off" in view.render_lines_for_test()[-1]
+        # Turning the master back ON must retract the clause, so the gate is a
+        # live reading of the master rather than a one-shot at mount. Asserted
+        # on the CLAUSE and not on the value ink: this child is still at its
+        # default, and a default renders dim whether or not it is gated — so an
+        # ink probe here would be measuring the wrong property.
+        _select(view, "display.notifications")
+        view.action_toggle_bool()
+        await pilot.pause()
+        _select(view, "display.notification_session_name")
+        await pilot.pause()
+        assert "inert:" not in view.render_lines_for_test()[-1]

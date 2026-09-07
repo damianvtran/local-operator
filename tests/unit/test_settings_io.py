@@ -155,6 +155,9 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.terminal_title": "tui/settings.py derives its defaults from this registry",
     "display.images": "tui/settings.py derives its defaults from this registry",
     "display.notifications": "tui/settings.py derives its defaults from this registry",
+    "display.notification_session_name": (
+        "tui/settings.py derives its defaults from this registry"
+    ),
     "display.dock": "tui/settings.py derives its defaults from this registry",
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",

@@ -371,6 +371,45 @@ async def main() -> None:
             await pilot.pause()
             save_capture(app, out.replace(".svg", ".offdefault.svg"))
             geometry += f" || off-default hints={view.rendered_hints()!r}"
+        elif state == "notify-name":
+            # THREE frames, because the `display.notification_session_name` row
+            # makes three different claims and no single still shows more than
+            # one of them (design round 1, D4/D6/D7):
+            #
+            #   OUT.svg            resting, with the master ON — the help line
+            #                      that must name the LOCK-SCREEN consequence
+            #                      rather than the toggle's mechanism (D6)
+            #   OUT.open.svg       expanded, where the two choice labels must
+            #                      agree with the help about what `off` does —
+            #                      "app name only" stopped being true once a
+            #                      nameless session got its own title (D7/D2)
+            #   OUT.master-off.svg the same row with `display.notifications`
+            #                      OFF, which used to render `on` beside a dead
+            #                      master with a detail line describing a
+            #                      banner that cannot fire (D4)
+            #
+            # The cursor is left ON the row in every frame: the detail line
+            # describes the SELECTED row, so a capture taken with the cursor
+            # elsewhere photographs a different setting's sentence.
+            settings_io.write_setting(view._manager, _require("display.notifications"), True)
+            view._manager.reload()
+            view._repaint()
+            _select(view, "display.notification_session_name")
+            await pilot.pause()
+            save_capture(app, out)
+            geometry = _geometry(app, view, state, size)
+            view.action_activate()
+            await pilot.pause()
+            save_capture(app, out.replace(".svg", ".open.svg"))
+            await pilot.press("escape")
+            await pilot.pause()
+            settings_io.write_setting(view._manager, _require("display.notifications"), False)
+            view._manager.reload()
+            view._repaint()
+            _select(view, "display.notification_session_name")
+            await pilot.pause()
+            save_capture(app, out.replace(".svg", ".master-off.svg"))
+            geometry += f" || master off detail={view.render_lines_for_test()[-1]!r}"
         elif state == "bool-open":
             # TWO frames, for the reason `theme` and `cascade-row` take two:
             # the change is in what ACTIVATION does, not in how the row rests.

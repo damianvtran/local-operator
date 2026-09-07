@@ -1949,10 +1949,12 @@ class OwnedSessionHandle(SessionHandle):
             return
         try:
             from local_operator.tui.notify import (
+                APP_NAME,
                 BODIES,
                 CONTEXTS,
                 detached_notify,
                 sanitize_text,
+                session_names_in_notifications,
             )
 
             # TITLE IS THE SESSION NAME ONLY. " needs you" used to be appended
@@ -1965,7 +1967,15 @@ class OwnedSessionHandle(SessionHandle):
             #
             # `sanitize_text` for the same reason every other path does it:
             # the name is model-written and reaches argv (D16).
-            name = sanitize_text(getattr(self._session, "conversation_name", "") or "lop")
+            #
+            # `display.notification_session_name` gates this leg too. The flag
+            # exists to keep a model-written name off a screen other people can
+            # see, and a detached runtime's gate toast reaches the same lock
+            # screen as every other banner — a flag that governed only some of
+            # them would make its own settings copy false (review round 1, M2).
+            name = APP_NAME
+            if session_names_in_notifications():
+                name = sanitize_text(getattr(self._session, "conversation_name", "") or "lop")
             # The body names the ACTION when there is one, and otherwise falls
             # back to the shared vocabulary — an `ask` with no text used to
             # render as the bare word "question" with no hint it was a
