@@ -38,7 +38,11 @@ def cold_session(tmp_path):
 class FakeClient:
     """The attach client's move-relevant surface, and nothing else."""
 
-    def __init__(self, answer: str = "retiring", error: Exception | None = None) -> None:
+    # ``BaseException``, not ``Exception``: the retire RPC can be CANCELLED as
+    # well as fail, and cancellation is the case the caller-level rollback got
+    # wrong (review MINOR-2). Typing this narrowly would make the defect
+    # unrepresentable in the double while remaining reachable in production.
+    def __init__(self, answer: str = "retiring", error: BaseException | None = None) -> None:
         self.answer = answer
         self.error = error
         self.ops: list[str] = []
