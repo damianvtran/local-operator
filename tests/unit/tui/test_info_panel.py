@@ -799,10 +799,28 @@ async def test_refresh_returns_worker_filled_fields_to_the_loading_state() -> No
         await pilot.pause()
         assert screen.snapshot is not None
 
-        await pilot.press("r")
-        # Immediately after the keypress, BEFORE the worker can land.
-        assert screen.snapshot is None, "the screen must drop to `checking…` at once"
-        assert any("checking…" in line for line in screen.render_lines_for_test())
+        # STRUCTURAL, not a race. The first version of this test pressed `r`
+        # and asserted `snapshot is None` on the next line; `pilot.press`
+        # awaits, so on a fast runner the worker had already published and CI
+        # went red on a green tree. The property under test is "the repaint
+        # happens BEFORE the handler is invoked", which is an ordering fact —
+        # so observe the ordering directly rather than trying to sample a
+        # window whose width is the machine's to decide (AGENTS.md: wait on the
+        # event, never on the clock).
+        observed: list[object] = []
+        original = app.refresh_info_screen
+
+        def _record(target: InfoScreen) -> None:
+            observed.append(target.snapshot)
+            original(target)
+
+        app.refresh_info_screen = _record  # type: ignore[assignment,method-assign]
+        try:
+            await pilot.press("r")
+        finally:
+            app.refresh_info_screen = original  # type: ignore[assignment,method-assign]
+
+        assert observed == [None], "the screen must be back to `checking…` before the re-probe"
 
         await app.workers.wait_for_complete()
         await pilot.pause()

@@ -315,10 +315,17 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # sit in one picker where the shared word read as the same thing (UX
         # round 1, U9). One word buys the distinction.
         "Install, version, and running sessions on this machine",
-        # A user who has just been asked "what version are you on?" reaches for
-        # the word they were asked, not for the name of our screen. Alias rows
-        # share a line in the picker, so this costs no space (UX round 1, U8).
-        aliases=("version", "about"),
+        # NO ALIASES, deliberately — `version`/`about` were added for UX round 1
+        # U8 and reverted the same round. The claim that alias rows "cost no
+        # space" is false here: the picker measures ONE name column across every
+        # row, so `/info  /version  /about` at 23 cells became the widest entry
+        # (previous max `/settings  /config`, 18) and took those 5 cells from
+        # every other command's description. Measured consequence at 80 columns:
+        # `/help`'s description collapsed to `List all co…`, and the `/model`
+        # and `ctrl+v` rows in `/help` wrapped. Discoverability for one command
+        # is not worth truncating the descriptions of all of them, and `/help`
+        # already lists this one. See `test_descriptions_come_back_above_the_
+        # collapse_width`, which is the guard that caught it.
     ),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
