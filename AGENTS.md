@@ -458,10 +458,11 @@ hour). Nobody holds a merge to make a window.
 **A PR that merges after the owner starts cutting does not reliably ride the
 next window — it may ride *this* one, unlisted.** The tag names a SHA and
 everything reachable from it ships, and the bump commit is not a barrier: in
-v0.51.4 the bump landed at 07:16 and #731 merged at 07:18 on an independent
-branch, so both were reachable from the tagged merge and #731 shipped while
-being absent from the notes. So: **if you merge while a window is open, send
-the owner your PR number and merge SHA at merge time**, not when you next
+v0.51.4 the bump landed at 07:16 on its own release branch and #731 merged to
+`main` at 07:18, so the two sat on divergent branches and both were reachable
+from the tagged merge. #731 was the ordinary merge to `main`, and it shipped
+while being absent from the notes. So: **if you merge while a window is open,
+send the owner your PR number and merge SHA at merge time**, not when you next
 happen to talk to them. The owner cannot poll continuously, and a peer who
 confirms a window list and then quietly merges into it has broken the protocol
 even though every individual step looked correct. The owner's matching duty —
