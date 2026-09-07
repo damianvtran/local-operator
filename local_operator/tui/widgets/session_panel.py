@@ -33,8 +33,10 @@ would attribute other sessions' spend to this one).
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Sequence
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -611,23 +613,61 @@ class _Body:
     def blank(self) -> None:
         self.lines.append(Text())
 
-    def kv(self, name: str, value: str, note: str = "") -> None:
-        """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly."""
+    def kv(self, name: str, value: str, note: str = "", *, notes: Sequence[str] = ()) -> None:
+        """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly.
+
+        ``notes`` is a ladder of progressively shorter spellings of the SAME
+        qualifier, widest first; the first one that fits the row uncropped is
+        drawn. It exists because the plain ``note`` path has exactly two
+        outcomes on a narrow frame and both are wrong for a load-bearing
+        qualifier: cropped mid-word above ``_NOTE_MIN``, or shed wholesale below
+        it (design D1 / QA Q1). A note that says WHICH QUESTION the value
+        answered is not sheddable chrome — dropping it leaves a correct figure
+        that looks like a wrong one, which is the defect this screen exists to
+        fix. Cropping a qualifier is fine; cropping the scope is not.
+
+        Callers with a purely decorative qualifier keep passing ``note`` and keep
+        the old shed-below-``_NOTE_MIN`` behaviour.
+        """
         row = Text()
         row.append(f"  {name:<22}", style=semantic_style("dim"))
         row.append(f"{value:<{_VALUE_CELL}}", style=semantic_style("fg"))
-        # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50 columns
-        # the note wraps onto its own unindented line and reads as a new record.
-        if note and self.width >= _NOTE_MIN:
+        if notes:
+            # Budget measured from the row as actually built, not from a
+            # restated literal: a change to _VALUE_CELL or the label column
+            # cannot silently reintroduce the crop this ladder removes.
+            budget = self.width - row.cell_len - 2
+            for candidate in notes:
+                if len(candidate) <= budget:
+                    row.append(f"  {candidate}", style=semantic_style("dim"))
+                    break
+        elif note and self.width >= _NOTE_MIN:
+            # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50
+            # columns the note wraps onto its own unindented line and reads as a
+            # new record.
             row.append(f"  {note}", style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
     def note(self, text: str) -> None:
-        """A dim footnote. Wrapped, not cropped — it is prose, not a table row."""
-        row = Text(overflow="fold")
-        row.append(f"  {text}", style=semantic_style("dim"))
-        self.lines.append(row)
+        """A dim footnote, wrapped — it is prose, not a table row.
+
+        Wrapped HERE, one emitted line per visual line, rather than handed to
+        the container's ``fold``: folding applies the ``"  "`` indent to the
+        first line only, so a continuation lands at column 0 and reads as a new
+        record in the middle of a block (design D2). The codebase already names
+        this failure mode in ``kv`` above and in ``header``; the panel sheds
+        columns elsewhere specifically to avoid it, so a footnote must not
+        reintroduce it. Indenting every line keeps a wrapped footnote visibly
+        subordinate to the block it belongs to.
+        """
+        # Guard the arithmetic rather than the caller: a pre-mount width can be
+        # small or absent, and textwrap raises on a non-positive width.
+        body_width = max(1, self.width - 2)
+        for line in textwrap.wrap(text, body_width) or [""]:
+            row = Text(no_wrap=True, overflow="crop")
+            row.append(f"  {line}", style=semantic_style("dim"))
+            self.lines.append(row)
 
     def header(self, title: str, meta: str = "", short: str = "") -> None:
         """A section header, shedding its meta to ``short`` on a narrow frame.
@@ -815,7 +855,14 @@ def _draw_recorded_usage(
     # session actually has subagents — on a childless session the two scopes are
     # identical and the distinction would be noise.
     scope = " · cost incl. subagents" if report.has_descendants else ""
-    body.header("Totals", meta + " · measured" + scope, meta)
+    # The scope rides the SHORT meta too, so a narrow frame sheds "measured"
+    # (a qualifier) and keeps "incl. subagents" (the scope). Before design D1
+    # the header's whole meta was replaced by ``meta`` below _NOTE_MIN, which
+    # dropped the scope label at exactly the widths where the Est. cost note had
+    # already gone — leaving a 70-column terminal with no statement anywhere
+    # that the figure covers subagents.
+    short = meta + (" · incl. subagents" if report.has_descendants else "")
+    body.header("Totals", meta + " · measured" + scope, short)
     body.kv(
         "Total billed",
         format_tokens(aggregate.total_tokens) + " tokens",
@@ -843,20 +890,40 @@ def _draw_recorded_usage(
     # verbatim when there are no children or the ledger could not be walked.
     subtree = report.subtree_aggregate
     if report.has_descendants:
-        note = (
-            f"{format_cost(aggregate)} own · "
-            f"{format_cost(report.descendants_aggregate or aggregate)} subagents"
+        own = format_cost(aggregate)
+        subs = format_cost(report.descendants_aggregate or aggregate)
+        # A LADDER of the same qualifier, widest first, because this note says
+        # which question the headline answered and must therefore never be
+        # cropped mid-word or shed wholesale (design D1 / QA Q1). The old single
+        # string needed a 66-cell card but ``_NOTE_MIN`` admitted it from 60, so
+        # 75-80 column terminals — including the canonical 80 — painted
+        # "$71.06 subagent", and below 75 the split vanished entirely, leaving a
+        # tree figure that looks like the own figure it replaced. Every rung
+        # still says the scope; the narrow ones trade the breakdown for it,
+        # which is the right thing to lose last.
+        body.kv(
+            "Est. cost",
+            format_cost(subtree),
+            notes=(
+                f"{own} own · {subs} subagents",
+                f"{own} + {subs} subagents",
+                "incl. subagents",
+            ),
+        )
+        # Kept under ~70 characters so it does not wrap at the common widths.
+        # The 103-character version wrapped at every width from 70 to ~128 and
+        # — because a folded continuation loses the body indent — dropped an
+        # orphan fragment at column 0 between the figure and the next section
+        # header, where it read as a stray row of the table (design D2).
+        # ``_Body.note`` now indents continuations too, so this is belt and
+        # braces: short enough not to wrap, and harmless if it does.
+        body.note(
+            f"Includes {len(report.descendant_ids)} subagent sessions; "
+            "other sections are this session only."
         )
     else:
         note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
-    body.kv("Est. cost", format_cost(subtree), note)
-    if report.has_descendants:
-        # Says which question the headline answered and how many children are in
-        # it, since the note above spends its width on the two figures.
-        body.note(
-            f"Est. cost is this session plus {len(report.descendant_ids)} subagent "
-            "sessions; every other section below is this session alone."
-        )
+        body.kv("Est. cost", format_cost(subtree), note)
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:

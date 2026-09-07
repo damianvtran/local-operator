@@ -180,7 +180,9 @@ def scope_needs_cost_legend(scope: "_CostLike") -> bool:
     return (scope.cost_is_partial and scope.cost_is_known) or not scope.cost_is_known
 
 
-def _needs_cost_legend(aggregate: "UsageAggregate") -> bool:
+def _needs_cost_legend(
+    aggregate: "UsageAggregate", forest: list["SessionNode"] | None = None
+) -> bool:
     """Whether any scope on screen shows a ``+`` (partial) or ``$—`` (unknown).
 
     The legend is drawn only when a mark actually appears — a fully-priced run
@@ -191,10 +193,17 @@ def _needs_cost_legend(aggregate: "UsageAggregate") -> bool:
     ``by_session`` covers the nested table's rows too — a row renders its
     subtree TOTAL, which can carry a ``+`` no individual session shows, so the
     rolled-up scopes are added rather than relying on their parts.
+
+    ``forest`` is the one ``build_report`` already built. Pass it: building a
+    second identical forest measured 3.1 ms against 16.9 ms for the whole report
+    (~18% of it, review F3), and two independent constructions of the structure
+    the table's correctness rests on can disagree. Defaulted for the callers
+    (tests, the desktop route) that have only an aggregate.
     """
-    forest = build_session_forest(
-        aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
-    )
+    if forest is None:
+        forest = build_session_forest(
+            aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
+        )
     scopes = [
         aggregate,
         *aggregate.by_provider.values(),
@@ -765,7 +774,7 @@ def build_report(
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    if _needs_cost_legend(aggregate):
+    if _needs_cost_legend(aggregate, forest):
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)
@@ -802,13 +811,20 @@ def _forest_rows(
     same here as anywhere else. In practice no child session carries a human
     name, so children render as bare 12-hex ids — which is exactly the noise
     this arrangement moves off the top level.
+
+    A child also carries a ``└`` glyph, not just the indent and the dim style
+    (design D4). 21% of ROOTS are themselves unnamed 12-hex ids, so an unnamed
+    root and a child differ by two leading spaces and a colour — and colour is
+    the cue that disappears under ``NO_COLOR``, a weak-dim theme, or low vision.
+    The glyph makes the hierarchy survive without it. ``/session``'s Tool
+    surface section already uses ``└`` for exactly this, so this is the
+    codebase's existing vocabulary rather than a new one.
     """
     rows: list[tuple[str, int, "UsageAggregate"]] = []
 
     def walk(node: "SessionNode", depth: int) -> None:
-        label = " " * (depth * _NEST_INDENT) + short_session_label(
-            node.session_id, names.get(node.session_id, "")
-        )
+        prefix = " " * ((depth - 1) * _NEST_INDENT) + "└ " if depth else ""
+        label = prefix + short_session_label(node.session_id, names.get(node.session_id, ""))
         rows.append((label, depth, node.total))
         for child in node.children:
             walk(child, depth + 1)
