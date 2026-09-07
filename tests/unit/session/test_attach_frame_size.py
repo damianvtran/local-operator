@@ -24,16 +24,21 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import ModelSpec, Usage
+from local_operator.harness.types import ModelSpec, ToolResult, Usage
 from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
+    LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
+    LIVE_EVENT_END_ROWS_MAX,
+    LIVE_EVENT_TEXT_FLOOR_CHARS,
+    LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS,
     MODEL_CATALOGUE_FLOOR_ROWS,
     USAGE_COMPONENT_CAP,
     FrontendSessionState,
     FrontendStateStore,
+    FrontendSync,
     FrontendUsage,
     JobState,
     McpServerState,
@@ -336,7 +341,16 @@ _BOUNDED_COLLECTION_FIELDS = {
     "context_breakdown": "one entry per tool; bounded by the tool inventory",
     "child_costs": "one float per job; O(1) bytes each",
     "queued_steering": "drains every turn",
-    "live_events": "explicitly bounded by _fold_live_event",
+    # Was "explicitly bounded by _fold_live_event", which stopped being true the
+    # moment a `tool_execution_end` began RETAINING its row instead of erasing
+    # it (so a viewer reconnecting mid-turn can settle a card for work that
+    # finished while it was away). The fold self-bounded only because completed
+    # calls left nothing behind; with the end retained the field accumulates one
+    # full tool result per call and measured 2 MB on a 1 MiB frame. Now bounded
+    # at the WIRE like `model_catalogue`: oldest ends evicted past
+    # LIVE_EVENT_END_ROWS_MAX, remaining result text clipped to a shared frame
+    # budget. Every retained row keeps the identity and outcome a card needs.
+    "live_events": "clipped at the wire: end rows capped newest-first, result text budgeted",
     "todos": "the user's own list, written by hand",
     "wakes": "the user's own schedules",
     "mcp_servers": "one row per configured server",
@@ -629,7 +643,53 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "child_costs": {f"job{index}": 1.25 for index in range(2_000)},
         "context_breakdown": {f"tool_{index}": 1_000 for index in range(2_000)},
         "queued_steering": [{"id": str(index), "text": "q" * 200} for index in range(200)],
-        "live_events": [{"type": "message_update", "text": "e" * 200} for index in range(200)],
+        # COMPLETED TOOL CALLS, not `message_update` rows. The old fixture used
+        # 200 `message_update`s, which `_fold_live_event` dedupes to a single
+        # row by phase — so it could never exercise the shape that actually
+        # accumulates, and the whole suite passed while `live_events` was
+        # contributing 2 MB to a 1 MiB frame. A retained `tool_execution_end`
+        # is the row that grows one-per-call with a full tool result attached;
+        # this fixture is what makes `assert_frame_fits` able to see it.
+        #
+        # Each row carries all THREE payload shapes a real turn produces, because
+        # a bound written against one of them silently misses the others. The
+        # first cut of this bound clipped `content[].text` and let both of the
+        # rest through: an image block keeps its base64 under `data` (one
+        # permitted image is ~1.4 MB encoded, over the whole line limit by
+        # itself) and `details` carries the MCP bridge's `server_result` dump
+        # (50 calls measured 2.6 MB). A fixture that only holds text can only
+        # ever catch the bug that was already fixed.
+        "live_events": [
+            row
+            for index in range(1_000)
+            for row in (
+                {
+                    "type": "tool_execution_start",
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "read",
+                },
+                {
+                    "type": "tool_execution_end",
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "read",
+                    "is_error": False,
+                    "result": {
+                        "tool_call_id": f"call-{index}",
+                        "tool_name": "read",
+                        "content": [
+                            {"type": "text", "text": "e" * 60_000},
+                            {
+                                "type": "image",
+                                "data": "A" * 1_400_000,
+                                "mime_type": "image/png",
+                            },
+                        ],
+                        "details": {"server_result": {"blob": "D" * 50_000}},
+                        "is_error": False,
+                    },
+                },
+            )
+        ],
         "todos": [
             TodoPhaseState(
                 name=f"phase {index}",
@@ -1384,6 +1444,21 @@ def _oversized_event_frame() -> dict[str, Any]:
     }
 
 
+def _live_end(call_id: str, *, text: str) -> dict[str, Any]:
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "text", "text": text}],
+            "is_error": False,
+        },
+    }
+
+
 def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
     """``event`` is guarded the way ``frontend_sync`` already was.
 
@@ -1513,3 +1588,330 @@ async def test_compaction_never_assembles_an_unreadable_frame() -> None:
     # against a compaction that keeps the first frame and discards 63 deltas.
     # The delta stream is append-only, so concatenating it must be unchanged.
     assert "".join(str(f["data"]["delta"]) for f in out) == before
+
+
+def _live_start(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_execution_start", "tool_call_id": call_id, "tool_name": "read"}
+
+
+def _bounded_live_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run rows through the real wire boundary and hand back what survived."""
+    state = FrontendSessionState(session_id="s1", epoch="e1", live_events=rows)
+    payload = sync_wire_payload(
+        FrontendSync(epoch=state.epoch, sequence=state.sequence, snapshot=state, live_cursor=None)
+    )
+    return payload["snapshot"]["live_events"]
+
+
+def test_a_retained_tool_end_keeps_what_settles_the_card() -> None:
+    """Truncation may take the payload, never the identity or the outcome.
+
+    The seed exists so a viewer that reconnects mid-turn can settle a card for
+    a call that finished while it was away. A bound that dropped ``is_error``
+    or the id would leave the card live and hand it back to the retirement
+    pass as ``⊘ interrupted`` — the artefact the retention removes.
+    """
+    survivors = _bounded_live_events([_live_start("c1"), _live_end("c1", text="R" * 500_000)])
+
+    ends = [row for row in survivors if row["type"] == "tool_execution_end"]
+    assert len(ends) == 1
+    assert ends[0]["tool_call_id"] == "c1"
+    assert ends[0]["is_error"] is False
+    text = ends[0]["result"]["content"][0]["text"]
+    assert text.endswith("…"), "a clipped preview must be marked as clipped"
+    # A lone row gets the WHOLE frame budget; the floor is the guarantee for a
+    # turn of many calls, not a ceiling for one.
+    assert len(text) <= LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
+    assert text.startswith("RRR"), "the surviving preview must be the head of the result"
+
+
+def test_the_text_floor_holds_when_a_turn_has_very_many_calls() -> None:
+    """Every retained end stays legible however many calls the turn ran.
+
+    A share divided by call count alone would shrink to nothing on a long
+    turn, leaving cards that settle with an empty result. The floor is what
+    keeps a clipped card readable rather than merely present.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(LIVE_EVENT_END_ROWS_MAX):
+        rows.append(_live_end(f"c{index}", text="y" * 50_000))
+
+    survivors = _bounded_live_events(rows)
+    lengths = [len(row["result"]["content"][0]["text"]) for row in survivors]
+
+    assert len(lengths) == LIVE_EVENT_END_ROWS_MAX
+    assert min(lengths) >= LIVE_EVENT_TEXT_FLOOR_CHARS
+
+
+def test_an_evicted_tool_end_takes_its_start_with_it() -> None:
+    """Never leave a start whose end was dropped: that is a stranded spinner.
+
+    Evicting the end alone would leave a card the viewer paints live and can
+    never settle, which is the same ``⊘ interrupted`` outcome by another route.
+    A start with NO end is a call still running and must always survive.
+    """
+    rows: list[dict[str, Any]] = []
+    for index in range(LIVE_EVENT_END_ROWS_MAX + 50):
+        rows.append(_live_start(f"done-{index}"))
+        rows.append(_live_end(f"done-{index}", text="x" * 100))
+    rows.append(_live_start("still-running"))
+
+    survivors = _bounded_live_events(rows)
+    ends = {row["tool_call_id"] for row in survivors if row["type"] == "tool_execution_end"}
+    starts = {row["tool_call_id"] for row in survivors if row["type"] == "tool_execution_start"}
+
+    assert len(ends) == LIVE_EVENT_END_ROWS_MAX
+    # Newest kept: those are the cards most likely still on screen unsettled.
+    assert "done-149" in ends and "done-0" not in ends
+    # No start outlives its own end...
+    assert starts - ends == {"still-running"}
+    # ...and the call that never ended keeps its card.
+    assert "still-running" in starts
+
+
+@pytest.mark.asyncio
+async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end over a real socket: a heavy in-flight seed still attaches.
+
+    The serialization tests above measure the frame; this one proves the claim
+    that matters. A viewer reconnecting into a long turn is the exact case the
+    retained ``tool_execution_end`` was added for, so it is the case that must
+    not be broken by the retention's own weight: without the wire bound this
+    ``frontend_sync`` runs to megabytes, the reader refuses the line, and the
+    connect degrades to the cold session the whole PR exists to prevent.
+
+    The surviving seed is asserted to be USABLE, not merely present — each end
+    keeps the id and outcome ``on_tool_ended`` needs to settle its card.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    seed: list[dict[str, Any]] = []
+    for index in range(600):
+        seed.append(_live_start(f"call-{index}"))
+        # Every payload shape a real turn produces, not just text: an image
+        # block alone is over the line limit, and `details` is what the MCP
+        # bridge fills. A seed of pure text cannot prove the socket survives.
+        end = _live_end(f"call-{index}", text="R" * 20_000)
+        end["result"]["content"].append(
+            {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+        )
+        end["result"]["details"] = {"server_result": {"blob": "D" * 50_000}}
+        seed.append(end)
+    handle._frontend.mutate(jobs=_jobs(200, 500), live_events=seed)
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        # Connecting at all is the assertion the bound exists to protect.
+        live = remote.frontend_state.live_events
+        ends = [row for row in live if row.get("type") == "tool_execution_end"]
+        assert 0 < len(ends) <= LIVE_EVENT_END_ROWS_MAX
+        # Newest survive: those are the cards still unsettled on screen.
+        assert ends[-1]["tool_call_id"] == "call-599"
+        # And every survivor can still settle its card.
+        assert all(row["tool_call_id"] and "is_error" in row for row in ends)
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+def _live_image_end(call_id: str, *, b64: str) -> dict[str, Any]:
+    """A completed `read` of a PNG — the shape with no ``text`` key at all."""
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "image", "data": b64, "mime_type": "image/png"}],
+            "is_error": False,
+        },
+    }
+
+
+def test_an_image_result_cannot_ride_the_seed_verbatim() -> None:
+    """A block with no ``text`` key must still be bounded.
+
+    ``ImageContent`` carries base64 under ``data``. One permitted image is
+    ~1.4 MB encoded — larger than the whole socket line limit on its own — so
+    a bound that inspects ``text`` does not merely clip it badly, it never
+    sees it. The row survives (it is what settles the card) and the block is
+    replaced by a marker rather than deleted, so the card does not read as a
+    tool that returned nothing.
+    """
+    survivors = _bounded_live_events([_live_image_end("img", b64="A" * 1_400_000)])
+
+    end = survivors[0]
+    assert end["tool_call_id"] == "img" and end["is_error"] is False
+    block = end["result"]["content"][0]
+    assert LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER in block["text"]
+    assert "A" * 1_000 not in json.dumps(end), "the base64 payload must not reach the wire"
+    assert len(json.dumps(end)) < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS
+
+
+def test_fat_result_details_cannot_ride_the_seed_verbatim() -> None:
+    """``result.details`` is bounded too — the MCP bridge fills it.
+
+    ``details`` holds the bridge's whole ``server_result`` dump and is not
+    rendered on the card, so it is the cheapest thing to shed and the first
+    thing dropped. 50 such calls measured 2.6 MB before this.
+    """
+    row = _live_end("mcp", text="ok")
+    row["result"]["details"] = {"server_result": {"blob": "D" * 500_000}}
+
+    end = _bounded_live_events([row])[0]
+
+    assert end["result"]["details"] is None
+    assert "D" * 1_000 not in json.dumps(end)
+    # The card still settles and still shows what the tool said.
+    assert end["result"]["content"][0]["text"] == "ok"
+
+
+def test_a_small_ordinary_result_is_left_exactly_alone() -> None:
+    """The bound is a ceiling, not a rewrite: the common row must be untouched.
+
+    Worth asserting because every other test here drives the clipping paths;
+    without this, a bound that mangled ordinary results would look correct.
+    """
+    row = _live_end("ok", text="3 files changed")
+    row["result"]["details"] = {"added": 3, "removed": 1}
+
+    end = _bounded_live_events([row])[0]
+
+    assert end["result"]["content"][0]["text"] == "3 files changed"
+    assert end["result"]["details"] == {"added": 3, "removed": 1}
+
+
+def test_the_headline_of_a_clipped_result_survives_beside_an_image() -> None:
+    """A mixed result keeps its text preview AND settles, in one row.
+
+    The realistic shape after a browser screenshot or an image ``read``: text
+    the user wants to read, plus a payload that cannot ride. Both paths run on
+    the same row here, which is what the round-3 defect got wrong.
+    """
+    row = _live_end("mixed", text="HEADLINE. " + "z" * 300_000)
+    row["result"]["content"].append(
+        {"type": "image", "data": "B" * 1_400_000, "mime_type": "image/png"}
+    )
+    row["result"]["details"] = {"server_result": {"blob": "D" * 200_000}}
+
+    end = _bounded_live_events([row])[0]
+    text_block, image_block = end["result"]["content"]
+
+    assert text_block["text"].startswith("HEADLINE. ")
+    assert text_block["text"].endswith("…")
+    assert LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER in image_block["text"]
+    assert end["result"]["details"] is None
+    assert len(json.dumps(end)) < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1_000
+
+
+def test_block_count_is_bounded_the_way_block_size_is() -> None:
+    """Many blocks in one result must not multiply the row's share.
+
+    The floor is a promise that the CARD stays legible, so it is spent once
+    per row. Granted per block it becomes an entitlement instead of a ceiling:
+    N blocks cost N x floor and the row has no bound at all. That regression
+    was introduced once by moving the floor one loop level inward during a
+    rewrite, and it measured 1,102,743 B at the 100-row cap against a
+    1,048,576-byte limit while the per-row form stayed flat.
+
+    Pinned here because ``content`` is typed ``list[dict[str, Any]]`` and this
+    module deliberately does not enumerate what rides in it — a producer that
+    starts emitting many blocks is a change in DATA, which no test of block
+    SIZE would catch.
+    """
+    row = _live_end("many", text="a" * 5_000)
+    row["result"]["content"] = [{"type": "text", "text": "a" * 5_000} for _ in range(200)]
+
+    end = _bounded_live_events([row])[0]
+    cost = len(json.dumps(end))
+
+    # The whole row lands within one share plus its own envelope — NOT within
+    # 200 shares. The exact ceiling is not the assertion; not scaling with
+    # block count is.
+    assert cost < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS * 2
+    # The TEXT the row carries is one share's worth in total, spent in order
+    # until it runs out. Asserting the sum rather than any per-block length is
+    # the point: the defect was that each block could re-claim the floor, so
+    # the total is what distinguishes a shared ceiling from N entitlements.
+    total_text = sum(len(block.get("text") or "") for block in end["result"]["content"])
+    assert total_text <= LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS
+    # Blocks past the budget are clipped to nothing rather than each keeping a
+    # floor's worth. Under the per-block floor all 200 sat at or above it.
+    starved = [
+        block
+        for block in end["result"]["content"]
+        if len(block.get("text") or "") < LIVE_EVENT_TEXT_FLOOR_CHARS
+    ]
+    assert len(starved) > 150, "the floor was granted per block, not per row"
+    # ...and the row still settles its card.
+    assert end["tool_call_id"] == "many" and end["is_error"] is False
+
+
+def test_the_row_cost_of_many_blocks_does_not_grow_with_their_number() -> None:
+    """The structural invariant behind the test above, stated as a comparison.
+
+    A ceiling that holds at 10 blocks and quietly scales at 2,000 is the
+    defect this pins; comparing the two is what distinguishes a real bound
+    from a number that merely happened to fit.
+    """
+    costs = []
+    for count in (10, 2_000):
+        row = _live_end(f"n{count}", text="a" * 5_000)
+        row["result"]["content"] = [{"type": "text", "text": "a" * 5_000} for _ in range(count)]
+        costs.append(len(json.dumps(_bounded_live_events([row])[0])))
+
+    ten, many = costs
+    # 200x the blocks must not mean anything like 200x the bytes. Only the
+    # extra blocks' fixed envelopes may grow; their TEXT comes out of the one
+    # shared budget, so the ratio stays near 1 rather than tracking the count.
+    # Under the per-block floor this grew without limit, which is why the
+    # COMPARISON is the assertion and neither number alone would serve.
+    assert many < ten * 3, f"row cost scaled with block count: {ten} -> {many}"
+
+
+def test_the_elided_marker_separates_itself_from_a_caption() -> None:
+    """The marker must not run into the text of the block before it.
+
+    ``ToolResult.text`` joins content blocks with ``""``, so a caption
+    followed by a shed image rendered as
+    ``screenshot of the page[dropped from the reconnect snapshot…]`` — the
+    marker read as part of what the tool said (round-4 Q4-2, caught in a
+    rendered frame). Asserted through the real ``ToolResult.text`` rather
+    than on the block dict, because the join is where the defect lived.
+    """
+    row = _live_end("shot", text="screenshot of the page")
+    row["result"]["content"].append(
+        {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+    )
+
+    end = _bounded_live_events([row])[0]
+    rendered = ToolResult.model_validate(end["result"]).text
+
+    assert "page\n[dropped" in rendered
+    assert "page[dropped" not in rendered
+
+
+def test_a_lone_elided_marker_does_not_open_with_a_blank_line() -> None:
+    """The separator is conditional: nothing before it means nothing to separate.
+
+    An unconditional leading newline would open the card with an empty row
+    for the common single-image result, trading one cosmetic defect for
+    another.
+    """
+    end = _bounded_live_events([_live_image_end("img", b64="A" * 1_400_000)])[0]
+    rendered = ToolResult.model_validate(end["result"]).text
+
+    assert rendered == LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+    assert not rendered.startswith("\n")

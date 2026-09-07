@@ -663,3 +663,369 @@ async def test_the_record_carries_the_source_ref_when_lop_update_recorded_one(
     finally:
         server.close()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """Test 23: a server-side drop mid-turn must not paint ``interrupted``.
+
+    The runtime keeps working; the viewer re-binds to the same pid; the
+    ledger never gains an aborted artefact; the turn then completes and
+    paints the assistant row once.
+    """
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from tests.e2e.harness import (
+        drain,
+        tool_call_turn,
+        transcript_text,
+        wait_for_adoption,
+    )
+
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def execute_hang(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        started.set()
+        await released.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="hang",
+            content=[TextContent(text="hung done")],
+        )
+
+    hang = AgentTool(
+        name="hang",
+        parameters={"type": "object", "properties": {}},
+        execute=execute_hang,
+        interruptible=True,
+    )
+    directory = headless_tui_env / "sessions" / "dropmidturn01"
+    directory.mkdir(parents=True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="Hanging now.",
+                tool_name="hang",
+                tool_call_id="e2e-hang-1",
+                arguments={},
+            ),
+            text_turn("The hang finished normally."),
+        ]
+    )
+    session = build_session(directory, stream, tools=[hang], cwd=workspace)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    import os
+
+    (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    viewer = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+        pid_before = viewer.runtime_pid
+
+        async def factory() -> RemoteSession:
+            assert viewer is not None
+            return viewer
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            owner_turn = asyncio.create_task(session.prompt("please hang"))
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if started.is_set() and list(app.query(ToolCard)):
+                    break
+                await asyncio.sleep(0.05)
+            assert started.is_set(), "the hang tool never started on the runtime"
+            painted = transcript_text(app)
+            assert "interrupted" not in painted.lower()
+
+            conns = [
+                conn
+                for conn in list(server._clients.values())
+                if conn.wants_events and conn.wants_frontend
+            ]
+            assert conns, "no full-TUI client to drop"
+            server._drop_client(conns[0], reason="test")
+
+            rebound = False
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if (
+                    viewer.runtime_pid == pid_before
+                    and viewer.runtime_pid is not None
+                    and not viewer._recovering
+                    and viewer._client is not None
+                    and viewer._client.connected
+                ):
+                    rebound = True
+                    break
+                await asyncio.sleep(0.05)
+            painted = transcript_text(app)
+            assert rebound, (
+                f"viewer never re-bound to pid {pid_before}; "
+                f"now pid={viewer.runtime_pid} recovering={viewer._recovering} "
+                f"streaming={viewer.is_streaming}"
+            )
+            assert "interrupted" not in painted.lower(), painted
+            assert "\u2298" not in painted, painted
+
+            released.set()
+            await asyncio.wait_for(owner_turn, timeout=15)
+            for _ in range(200):
+                await drain(pilot, cycles=2)
+                painted = transcript_text(app)
+                if "The hang finished normally." in painted:
+                    break
+                await asyncio.sleep(0.05)
+            painted = transcript_text(app)
+            assert "interrupted" not in painted.lower(), painted
+            assert painted.count("The hang finished normally.") == 1, painted
+            assert session.is_streaming is False
+    finally:
+        released.set()
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """Review round 1 MAJOR-1, deterministically: the gap's work is not lost.
+
+    ``_finish_sync`` once skipped the whole ``live_events`` seed on a
+    same-live-turn rebind, so a tool the runtime STARTED while the socket was
+    down never painted; its real ``tool_end`` then arrived orphaned and was
+    discarded unrendered at ``agent_end``, costing the user the card.
+
+    DETERMINISM, which is the point of this test — QA's equivalent cell raced
+    (``gap_tool_in_final`` flipped run to run) and so attributed nothing. Every
+    edge here is a happens-before on an ``asyncio.Event``, never a sleep:
+
+      1. ``first_running`` — tool A is executing, its card is painted LIVE.
+      2. the test drops the viewer's socket, then sets ``drop_done``.
+      3. tool A returns only after ``drop_done``, so the loop issues tool B
+         while the viewer is provably detached: B is a GAP tool by
+         construction, not by timing.
+      4. recovery is HELD OFF until B is running, by making the owner record
+         undiscoverable — the shape a viewer sees while a record is being
+         rewritten. Without this hold the viewer re-binds in ~100 ms, B
+         starts *after* the rebind, and the cell measures a completely
+         different path: that was the race that made QA's equivalent flip
+         run to run, and a probe confirmed it (B's start reached the viewer
+         neither live nor by seed, because the rebind had already happened).
+
+    So B's ``tool_execution_start`` is in ``live_events`` when the snapshot is
+    taken and can ONLY reach the viewer through the seed. If the seed is
+    skipped — the MAJOR-1 defect — B's card never exists.
+    """
+    import local_operator.session.remote as remote_module
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+    from local_operator.session.remote import RemoteSession
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from tests.e2e.harness import (
+        drain,
+        tool_call_turn,
+        transcript_text,
+        wait_for_adoption,
+    )
+
+    first_running = asyncio.Event()
+    drop_done = asyncio.Event()
+    second_running = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def execute_step(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> ToolResult:
+        if str(args.get("which")) == "first":
+            first_running.set()
+            # Hold the turn open until the socket is provably gone, so the
+            # NEXT call is issued into the gap rather than racing it.
+            await drop_done.wait()
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="step",
+                content=[TextContent(text="first done")],
+            )
+        second_running.set()
+        await release_second.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="step",
+            content=[TextContent(text="second done")],
+        )
+
+    step = AgentTool(
+        name="step",
+        parameters={
+            "type": "object",
+            "properties": {"which": {"type": "string"}},
+        },
+        execute=execute_step,
+        interruptible=True,
+    )
+    directory = headless_tui_env / "sessions" / "gaptool01"
+    directory.mkdir(parents=True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="First step.",
+                tool_name="step",
+                tool_call_id="gap-first",
+                arguments={"which": "first"},
+            ),
+            tool_call_turn(
+                text="Second step.",
+                tool_name="step",
+                tool_call_id="gap-second",
+                arguments={"which": "second"},
+            ),
+            text_turn("Both steps finished."),
+        ]
+    )
+    session = build_session(directory, stream, tools=[step], cwd=workspace)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    import os
+
+    (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    # The recovery hold (step 4). ``find_owner_record`` answering "no record
+    # yet" is a real transient the viewer already handles — the recovery loop
+    # polls until one appears — so this delays the rebind without touching the
+    # code under test.
+    real_find = remote_module.find_owner_record
+
+    def gated_find(*args: Any, **kwargs: Any) -> Any:
+        if not second_running.is_set():
+            return (None, None)
+        return real_find(*args, **kwargs)
+
+    viewer = None
+    try:
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+        pid_before = viewer.runtime_pid
+
+        async def factory() -> RemoteSession:
+            assert viewer is not None
+            return viewer
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            owner_turn = asyncio.create_task(session.prompt("run both steps"))
+
+            # (1) tool A live and painted.
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if first_running.is_set() and list(app.query(ToolCard)):
+                    break
+                await asyncio.sleep(0.05)
+            assert first_running.is_set(), "the first step never started"
+
+            # (2) drop the viewer's socket, then release A into the gap.
+            conns = [
+                conn
+                for conn in list(server._clients.values())
+                if conn.wants_events and conn.wants_frontend
+            ]
+            assert conns, "no full-TUI client to drop"
+            # Arm the hold BEFORE the drop, so the very first recovery poll
+            # already sees "no record yet".
+            remote_module.find_owner_record = gated_find
+            server._drop_client(conns[0], reason="test")
+            drop_done.set()
+
+            # (3)/(4) tool B starts while the viewer is detached.
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if second_running.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert second_running.is_set(), "the gap step never started"
+            # B's start is now in the owner's ``live_events``; releasing the
+            # hold lets recovery re-bind and take that snapshot.
+            remote_module.find_owner_record = real_find
+
+            # Let recovery rebind; B exists only in the snapshot seed.
+            rebound = False
+            for _ in range(400):
+                await drain(pilot, cycles=2)
+                if (
+                    viewer.runtime_pid == pid_before
+                    and not viewer._recovering
+                    and viewer._client is not None
+                    and viewer._client.connected
+                ):
+                    rebound = True
+                    break
+                await asyncio.sleep(0.05)
+            assert rebound, f"viewer never re-bound to pid {pid_before}"
+
+            card_ids = {card.tool_call_id for card in app.query(ToolCard)}
+            assert "gap-second" in card_ids, (
+                "the tool that started during the gap never painted — the "
+                f"live_events seed was dropped; cards on screen: {card_ids}"
+            )
+
+            release_second.set()
+            await asyncio.wait_for(owner_turn, timeout=20)
+            for _ in range(300):
+                await drain(pilot, cycles=2)
+                if "Both steps finished." in transcript_text(app):
+                    break
+                await asyncio.sleep(0.05)
+
+            painted = transcript_text(app)
+            assert "Both steps finished." in painted, painted
+            assert "interrupted" not in painted.lower(), painted
+            assert "\u2298" not in painted, painted
+            gap_cards = [card for card in app.query(ToolCard) if card.tool_call_id == "gap-second"]
+            assert gap_cards, "the gap tool's card vanished before the turn ended"
+            assert (
+                gap_cards[0]._state == "success"
+            ), f"the gap tool settled as {gap_cards[0]._state!r}, not success"
+    finally:
+        remote_module.find_owner_record = real_find
+        drop_done.set()
+        release_second.set()
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await handle.dispose()
