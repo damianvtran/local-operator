@@ -70,7 +70,15 @@ def fixture_children(monkeypatch):
     children = []
 
     async def spawn(*args, **kwargs):
-        assert args == (sys.executable, "-m", "local_operator.session.runtime.process")
+        # ``-P`` is part of the contract, not decoration: without it the child
+        # imports whatever checkout happens to be the cwd instead of the
+        # installed distribution (see local_operator.interpreter).
+        assert args == (
+            sys.executable,
+            "-P",
+            "-m",
+            "local_operator.session.runtime.process",
+        )
         assert kwargs["start_new_session"] is True
         assert "LOP_RUNTIME_DEFER_MATERIALISE" not in kwargs["env"]
         child = await actual_spawn(sys.executable, "-c", CHILD, **kwargs)

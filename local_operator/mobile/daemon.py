@@ -1692,8 +1692,7 @@ class MobileDaemon:
             # An observer daemon cannot adopt what it spawns (it never dials),
             # so a spawned child would be orphaned from its own control plane.
             raise RuntimeError("observer daemon cannot start sessions")
-        import sys
-
+        from local_operator.interpreter import python_argv
         from local_operator.mobile.attach_client import find_owner_record
         from local_operator.paths import config_dir
 
@@ -1726,9 +1725,13 @@ class MobileDaemon:
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "local_operator.session.runtime.process",
+            # ``python_argv``: this spawn passes no ``cwd=`` either, so without
+            # the isolation flag a daemon started from a checkout of this
+            # project would run that checkout instead of the install — the same
+            # defect as the viewer's spawn in ``session/runtime/launch.py``, and
+            # harder to notice here because nobody is watching a phone daemon's
+            # version. See :mod:`local_operator.interpreter`.
+            *python_argv("-m", "local_operator.session.runtime.process"),
             env=env,
             # Detached stdio: the child speaks through its record and socket;
             # a pipe back to the daemon would die with the daemon and take

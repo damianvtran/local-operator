@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from local_operator import update as update_mod
+from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.update import (
     TTL_S,
     InstallKind,
@@ -534,8 +535,12 @@ def test_refresh_restarts_via_new_distribution() -> None:
         result = refresh_mobile_after_upgrade()
     assert result == MobileRefresh(kind="restarted")
     run.assert_called_once()
+    # `SAFE_PATH_FLAG`, and BEFORE `-m`: this runs with no `cwd=`, so a bare
+    # `-m` would restart the daemon through a checkout that merely happened to
+    # be the update's working directory -- pre-upgrade code reporting success.
     assert run.call_args.args[0] == [
         sys.executable,
+        SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
@@ -634,8 +639,12 @@ def test_update_command_restarted_prints_phone_line(capsys: pytest.CaptureFixtur
     ):
         assert update_command(check=False) == 0
     captured = capsys.readouterr()
+    # See `test_refresh_restarts_via_new_distribution`: the isolation flag has
+    # to survive the `lop update` path too, which is one of the two callers
+    # that runs with a user cwd.
     assert run.call_args.args[0] == [
         sys.executable,
+        SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
@@ -715,18 +724,21 @@ def test_perform_upgrade_does_not_refresh() -> None:
     run.assert_not_called()
 
 
-def test_installed_version_prefers_whichever_source_is_newer() -> None:
-    """Neither the checkout file nor the install metadata is authoritative alone.
+def test_installed_version_trusts_a_verified_checkout_in_either_direction() -> None:
+    """A checkout that IS this install wins outright -- it is the running code.
 
-    Both are stale in opposite directions, so `installed_version` takes the
-    higher of the two:
+    This used to take the MAXIMUM of the two, which only ever protected against
+    a stray NEWER file. A stray OLDER one dragged the number DOWN, and no
+    direction of `max` covers both, because the defect was never the comparison
+    -- it was trusting a file whose relationship to the running code was
+    unestablished. `_editable_source_version` now proves identity, so ordering
+    is irrelevant and the source side is authoritative both ways:
 
-    * metadata never moves with the tree, which reported 0.46.23 for a checkout
-      at 0.49.0 -- the bug the checkout lookup was added for (QA Q3 / UX U13);
-    * a `pyproject.toml` naming this project but declaring an older version (a
-      fixture, a scratch tree, a hand-edited `version = "0.1.0"`) overrode
-      correct metadata and produced a spurious "update available" (review round
-      2, MINOR-2).
+    * forwards, the original bug: metadata never moves with the tree, so a
+      checkout at 0.49.0 reported the 0.46.23 it was installed at (QA Q3/UX U13);
+    * backwards, which `max` got wrong: an editable checkout deliberately moved
+      to an OLDER revision really is running older code, and reporting the newer
+      metadata would hide that.
     """
     with (
         patch.object(update_mod, "_editable_source_version", return_value="0.49.0"),
@@ -735,28 +747,19 @@ def test_installed_version_prefers_whichever_source_is_newer() -> None:
         assert update_mod.installed_version() == "0.49.0"
 
     with (
-        patch.object(update_mod, "_editable_source_version", return_value="0.1.0"),
-        patch.object(update_mod, "version", return_value="0.49.2"),
+        patch.object(update_mod, "_editable_source_version", return_value="0.46.23"),
+        patch.object(update_mod, "version", return_value="0.49.0"),
     ):
-        assert update_mod.installed_version() == "0.49.2"
+        assert update_mod.installed_version() == "0.46.23"
 
 
-def test_installed_version_falls_back_when_a_side_is_missing_or_unparseable() -> None:
-    """An unorderable side cannot win; the other one is the only defensible answer."""
-    with (
-        patch.object(update_mod, "_editable_source_version", return_value="0.28.0rc1"),
-        patch.object(update_mod, "version", return_value="0.49.2"),
-    ):
-        assert update_mod.installed_version() == "0.49.2"
+def test_installed_version_falls_back_to_metadata_without_a_verified_checkout() -> None:
+    """Nothing proven about the tree leaves metadata as the only real input.
 
-    with (
-        patch.object(update_mod, "_editable_source_version", return_value="0.49.2"),
-        patch.object(update_mod, "version", return_value="not-a-version"),
-    ):
-        assert update_mod.installed_version() == "0.49.2"
-
-    # No adjacent project file: a packaged install reports its metadata exactly
-    # as it always did.
+    This is the packaged-install case, and now also the case that broke: a
+    stray checkout in the working directory yields `""` from the source side
+    rather than overriding a correct install version.
+    """
     with (
         patch.object(update_mod, "_editable_source_version", return_value=""),
         patch.object(update_mod, "version", return_value="0.49.2"),
@@ -768,6 +771,196 @@ def test_installed_version_falls_back_when_a_side_is_missing_or_unparseable() ->
         patch.object(update_mod, "version", side_effect=update_mod.PackageNotFoundError),
     ):
         assert update_mod.installed_version() == "0.49.2"
+
+    # Neither side readable: empty, never an invented number.
+    with (
+        patch.object(update_mod, "_editable_source_version", return_value=""),
+        patch.object(update_mod, "version", side_effect=update_mod.PackageNotFoundError),
+    ):
+        assert update_mod.installed_version() == ""
+
+
+def test_editable_source_version_ignores_a_checkout_that_is_not_the_install(
+    tmp_path: Path,
+) -> None:
+    """The measured defect: adjacency is not identity.
+
+    The old implementation trusted any `pyproject.toml` beside the imported
+    package, arguing that a released build has no adjacent project file and so
+    could never read a stray one. That was false on a real install: a spawned
+    child whose cwd was a checkout of this project imported THAT checkout, so
+    `Path(__file__)` pointed into a tree the install had nothing to do with,
+    and a 0.51.5 install reported 0.51.0.
+
+    Here the module resolves inside `tmp_path` while the install's editable
+    origin is a different directory -- exactly that shape.
+    """
+    stray = tmp_path / "stray-checkout"
+    (stray / "local_operator").mkdir(parents=True)
+    (stray / "pyproject.toml").write_text(
+        '[project]\nname = "local-operator"\nversion = "0.9.9"\n', encoding="utf-8"
+    )
+    module = stray / "local_operator" / "update.py"
+    module.write_text("", encoding="utf-8")
+
+    with (
+        patch.object(update_mod, "__file__", str(module)),
+        patch.object(
+            update_mod, "_editable_install_root", return_value=tmp_path / "the-real-install"
+        ),
+    ):
+        assert update_mod._editable_source_version() == ""
+
+    # ... and the same tree IS trusted once it is the install's editable source.
+    with (
+        patch.object(update_mod, "__file__", str(module)),
+        patch.object(update_mod, "_editable_install_root", return_value=stray.resolve()),
+    ):
+        assert update_mod._editable_source_version() == "0.9.9"
+
+
+def test_editable_source_version_ignores_a_non_editable_install(tmp_path: Path) -> None:
+    """A packaged wheel has no editable `direct_url.json`, so no tree is trusted.
+
+    Covers the released-build case directly: `_editable_install_root` returns
+    `None`, and a `pyproject.toml` sitting next to the imported package -- which
+    is what a stray checkout looks like -- must not be read.
+    """
+    stray = tmp_path / "checkout"
+    (stray / "local_operator").mkdir(parents=True)
+    (stray / "pyproject.toml").write_text(
+        '[project]\nname = "local-operator"\nversion = "0.9.9"\n', encoding="utf-8"
+    )
+    with (
+        patch.object(update_mod, "__file__", str(stray / "local_operator" / "update.py")),
+        patch.object(update_mod, "_editable_install_root", return_value=None),
+    ):
+        assert update_mod._editable_source_version() == ""
+
+
+def test_editable_install_root_reads_pep610_direct_url() -> None:
+    """`dir_info.editable` plus a `file://` URL is the only accepted evidence."""
+    with patch.object(
+        update_mod,
+        "_direct_url_payload",
+        return_value={"url": "file:///tmp/checkout", "dir_info": {"editable": True}},
+    ):
+        assert update_mod._editable_install_root() == Path("/tmp/checkout").resolve()
+
+    # A non-editable install (a wheel built from a temp dir, as `lop-update`
+    # produces) names a path that is NOT the running tree; it must not qualify.
+    with patch.object(
+        update_mod,
+        "_direct_url_payload",
+        return_value={"url": "file:///tmp/build-dir", "dir_info": {}},
+    ):
+        assert update_mod._editable_install_root() is None
+
+    for payload in ({"dir_info": {"editable": True}}, {"url": "https://pypi.org/x"}, None):
+        with patch.object(update_mod, "_direct_url_payload", return_value=payload):
+            assert update_mod._editable_install_root() is None
+
+
+def test_editable_source_version_never_raises() -> None:
+    """ "Cheap and total": a version readout must degrade to `""`, never throw."""
+    with patch.object(update_mod, "_editable_install_root", side_effect=OSError("boom")):
+        assert update_mod._editable_source_version() == ""
+
+
+def _metadata_dir(root: Path, name: str, version: str, direct_url: str | None = None) -> Path:
+    """Write a real on-disk metadata directory `importlib.metadata` can discover."""
+    path = root / name
+    path.mkdir(parents=True)
+    key = "METADATA" if name.endswith(".dist-info") else "PKG-INFO"
+    (path / key).write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
+    )
+    if direct_url is not None:
+        (path / "direct_url.json").write_text(direct_url, encoding="utf-8")
+    return path
+
+
+def test_direct_url_payload_ignores_a_shadowing_egg_info(tmp_path: Path) -> None:
+    """A stale `*.egg-info` must not make a real editable install look absent.
+
+    THE REGRESSION THIS PINS. `local_operator.egg-info/` is a gitignored build
+    artifact that any `pip install -e` / `setup.py` run leaves in the checkout,
+    so it is present in real trees. Whenever the cwd is on `sys.path` it sorts
+    AHEAD of site-packages, and `distribution("local-operator")` -- which
+    returns the first name match in path order -- resolves to it. Egg-info
+    metadata predates PEP 610 and carries no `direct_url.json`, so reading the
+    marker through that single lookup answered "not an editable install" for an
+    install that plainly was one: `_editable_install_root()` returned `None`,
+    the identity check failed against its own tree, and `installed_version()`
+    fell through to the stale `PKG-INFO` number.
+
+    Measured on a genuine `uv pip install -e` with `pyproject.toml` at 0.51.7
+    and a leftover `PKG-INFO` at 0.46.23, that reported **0.46.23** -- the
+    Settings > Updates staleness (QA Q3 / UX U13) reintroduced by the shadow.
+
+    Real metadata directories on disk, not a patched payload: the ordering IS
+    the defect, so a fixture that hands over one distribution cannot observe it.
+    """
+    site = tmp_path / "site"
+    # Written egg-info first so it is the earlier entry in discovery order,
+    # which is the shape that shadowed the dist-info on a real checkout.
+    _metadata_dir(site, "local_operator.egg-info", "0.46.23")
+    _metadata_dir(
+        site,
+        "local_operator-0.51.7.dist-info",
+        "0.51.7",
+        direct_url='{"url": "file:///real/checkout", "dir_info": {"editable": true}}',
+    )
+
+    def _scan(*, name: str) -> list[object]:
+        from importlib.metadata import distributions
+
+        return list(distributions(name=name, path=[str(site)]))
+
+    with patch.object(update_mod, "distributions", _scan):
+        # The egg-info is found FIRST and has no marker; the dist-info's must
+        # still be the answer, or a real editable install reads as no install.
+        assert update_mod._direct_url_payload() == {
+            "url": "file:///real/checkout",
+            "dir_info": {"editable": True},
+        }
+        assert update_mod._editable_install_root() == Path("/real/checkout").resolve()
+
+
+def test_installed_version_survives_a_shadowing_egg_info(tmp_path: Path) -> None:
+    """End to end: the checkout's version wins over the shadowed stale number.
+
+    `_direct_url_payload` is the unit; this is the number the user actually
+    sees. `version("local-operator")` still resolves to the egg-info's stale
+    0.46.23 (that shadowing is `importlib.metadata`'s behaviour and not ours to
+    change), so this asserts the correction survives all the way out.
+    """
+    site = tmp_path / "site"
+    checkout = tmp_path / "checkout"
+    (checkout / "local_operator").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        '[project]\nname = "local-operator"\nversion = "0.51.7"\n', encoding="utf-8"
+    )
+    _metadata_dir(site, "local_operator.egg-info", "0.46.23")
+    _metadata_dir(
+        site,
+        "local_operator-0.51.7.dist-info",
+        "0.51.7",
+        direct_url=json.dumps({"url": checkout.resolve().as_uri(), "dir_info": {"editable": True}}),
+    )
+
+    def _scan(*, name: str) -> list[object]:
+        from importlib.metadata import distributions
+
+        return list(distributions(name=name, path=[str(site)]))
+
+    with (
+        patch.object(update_mod, "distributions", _scan),
+        patch.object(update_mod, "__file__", str(checkout / "local_operator" / "update.py")),
+        # The shadow the egg-info casts over the metadata channel, reproduced.
+        patch.object(update_mod, "version", return_value="0.46.23"),
+    ):
+        assert update_mod.installed_version() == "0.51.7"
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +1071,53 @@ def test_installed_version_rereads_disk_within_one_process(tmp_path: Path) -> No
         )
     finally:
         _sys.path.remove(str(site))
+
+
+def test_cli_version_flag_reports_the_running_build(tmp_path: Path) -> None:
+    """`--version` must answer from `installed_version()`, not raw metadata.
+
+    THE SURFACE THE USER CHECKS FIRST. Install metadata is written once and
+    never moves when the checkout's `pyproject.toml` does, so
+    `importlib.metadata.version("local-operator")` reports the version an
+    editable install was CREATED at rather than the one it is running — and a
+    leftover `*.egg-info` shadows the real dist-info downward on top of that.
+    `installed_version()` corrects both; `--version` used to bypass it, so the
+    one surface a user reads to answer "which build am I on?" was also the one
+    still answering from the stale channel. That was the reported symptom this
+    change ships with, so shipping it uncorrected invites a duplicate report of
+    the bug it fixes.
+
+    THE FIXTURE HAS TO CREATE THE DIVERGENCE, or the test is vacuous: in a
+    clean checkout both channels agree, so asserting they match passes just as
+    well on the bypassing form (verified — the first version of this test did).
+    So the editable source is pinned to a version the metadata does not have,
+    which is the ordinary state of any editable checkout after a release bump.
+
+    Driven as a REAL SUBPROCESS through the parser builder, because the value
+    is baked in at construction time by an `argparse` `action="version"`: an
+    in-process call reads whatever the already-imported `cli` module captured,
+    which is exactly what a stale `.pyc` would hide.
+    """
+    repo = Path(__file__).resolve().parents[2]
+    marker = "9.9.9"
+    # Force the two channels apart: `_editable_source_version` is the input
+    # `installed_version()` prefers, and no real metadata can report 9.9.9.
+    probe = (
+        "import local_operator.update as u;"
+        f"u._editable_source_version=lambda: {marker!r};"
+        "import local_operator.cli as c;"
+        "p=c.build_cli_parser();"
+        "a=[x for x in p._actions if '--version' in getattr(x,'option_strings',[])][0];"
+        "print(a.version)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(repo)
+    )
+    assert out.returncode == 0, f"probe failed:\n{out.stderr[-2000:]}"
+    printed = out.stdout.strip().splitlines()[-1]
+    assert printed == f"v{marker}", (
+        "`--version` did not read through installed_version(): "
+        f"got {printed!r}, expected 'v{marker}'. A raw "
+        "importlib.metadata.version() call reports the installed metadata and "
+        "cannot see the running checkout's version."
+    )
