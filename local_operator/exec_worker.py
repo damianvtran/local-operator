@@ -20,7 +20,6 @@ import inspect
 import os
 import signal
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -124,6 +123,7 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
     """
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
+    from local_operator.paths import config_dir
     from local_operator.session_factory import create_session
 
     session_args = argparse.Namespace(
@@ -135,13 +135,22 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
         train=bool(getattr(parsed, "train", False)),
         resume=parsed.resume,
     )
-    config_dir = Path.home() / ".local-operator"
-    config_manager = ConfigManager(config_dir)
-    credential_manager = CredentialManager(config_dir)
+    # config_dir(), not ``Path.home() / ".local-operator"``: a missed copy of the
+    # hardcoded root that ``exec_mode._make_default_session_factory`` already
+    # fixed for the foreground path (see the comment there). This is the
+    # BACKGROUND worker, which inherits the spawner's environment, so leaving it
+    # hardcoded made ``exec --background`` ignore LOCAL_OPERATOR_CONFIG_DIR while
+    # the foreground run honoured it — the same entry point resolving two
+    # different roots depending on a flag. It also reaches the analytics
+    # session-name backfill through ``create_session``'s store-maintenance pass,
+    # which writes to whatever root it is handed.
+    base_dir = config_dir()
+    config_manager = ConfigManager(base_dir)
+    credential_manager = CredentialManager(base_dir)
 
     from local_operator.agents import AgentRegistry  # lazy: heavy module
 
-    agent_registry = AgentRegistry(config_dir)
+    agent_registry = AgentRegistry(base_dir)
     return create_session(session_args, config_manager, credential_manager, agent_registry)
 
 

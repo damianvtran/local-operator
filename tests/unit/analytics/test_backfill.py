@@ -393,11 +393,45 @@ def test_the_production_config_dir_still_resolves_to_the_default_ledger(tmp_path
     """Deriving the store from ``config_dir`` must not move the real ledger.
 
     The production caller (``session_factory``'s store-maintenance pass) hands
-    this function the real config dir. The derived path must therefore be the
-    exact file ``default_db_path()`` names — otherwise the fix for the isolation
-    bug would silently strand months of the operator's own history.
+    this function the config dir ``paths.config_dir()`` resolves to, so the
+    sweep's write must land in the exact file ``default_db_path()`` names —
+    otherwise the fix for the isolation bug would silently strand months of the
+    operator's own history in a ledger nothing reads.
+
+    ASSERTED ON THE ACTUAL WRITE, never on a rebuilt path expression. The first
+    version of this test compared ``real_config_dir / "analytics.db"`` to
+    ``default_db_path()`` and never called the function under test at all: it
+    pinned ``default_db_path``'s own definition, and review demonstrated it
+    still PASSED when the production line was mutated to ``analytics2.db`` —
+    the exact stranding scenario this docstring claims to guard. So the unnamed
+    row is seeded in the file ``default_db_path()`` names and read back from
+    that same file, with no ``store`` argument so the sweep must resolve one
+    itself. A wrong filename now fails on both assertions below.
     """
     real_config_dir = tmp_path / "config"
+    real_config_dir.mkdir()
     monkeypatch.setenv(CONFIG_DIR_ENV, str(real_config_dir))
 
-    assert real_config_dir / "analytics.db" == default_db_path()
+    # Seed the worklist through default_db_path() — the ledger production reads
+    # — so a sweep resolving anywhere else finds nothing to do (returns 0) and a
+    # sweep WRITING anywhere else leaves this row unnamed.
+    ledger = default_db_path()
+    seeded = AnalyticsStore(ledger)
+    seeded.record_batch([_snap("aaaproduction")])
+    seeded.close()
+    _session(real_config_dir, "aaaproduction", "The operator's own history")
+
+    assert backfill_analytics_session_names(real_config_dir) == 1
+
+    reopened = AnalyticsStore(ledger)
+    named = _names(reopened)
+    reopened.close()
+    assert named.get("aaaproduction") == "The operator's own history", (
+        f"the sweep did not name the row in {ledger}, the file default_db_path() "
+        "resolves to for this config dir — production history would be stranded "
+        "in whatever ledger it wrote instead"
+    )
+
+    # And no SECOND ledger appeared beside it: a wrong filename in the same
+    # directory would otherwise slip past a check on the named row alone.
+    assert sorted(p.name for p in real_config_dir.glob("analytics*.db")) == ["analytics.db"]

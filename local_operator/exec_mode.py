@@ -231,11 +231,18 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
     from local_operator.session_factory import resolve_agent, resolve_hosting_model
 
-    config_dir = Path.home() / ".local-operator"
-    config_manager = ConfigManager(config_dir)
-    agent_registry = AgentRegistry(config_dir)
+    # config_dir(), not ``Path.home() / ".local-operator"``: the same missed copy
+    # fixed in ``_make_default_session_factory`` below. Preflight's whole purpose
+    # is to resolve hosting/model through the EXACT path the worker will use, so
+    # reading a different config root than the worker does defeats it — with
+    # LOCAL_OPERATOR_CONFIG_DIR set this validated against the developer's real
+    # agents and config and then spawned a worker that used the override's.
+    base_dir = config_dir()
+    config_manager = ConfigManager(base_dir)
+    agent_registry = AgentRegistry(base_dir)
     selector_args = argparse.Namespace(
         hosting=exec_args.hosting,
         model=exec_args.model,
