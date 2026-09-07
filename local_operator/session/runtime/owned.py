@@ -24,6 +24,7 @@ import asyncio
 import inspect
 import logging
 import secrets
+import time
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
@@ -62,6 +63,17 @@ logger = logging.getLogger(__name__)
 #: another await to that prelude. Turns, not seconds — see
 #: ``_admit_without_waiting_for_the_turn``.
 _ADMISSION_PRELUDE_TURNS = 3
+
+#: How long the ``abort`` op waits for cancelled children to actually go before
+#: it reports what is left. Cancellation is one fire-and-forget task per child,
+#: so a count taken at dispatch describes intent rather than outcome — the
+#: overstatement review round 1 (MAJOR-1) measured. A child normally settles in
+#: well under a tick, and the poll exits the moment the roster drains, so this
+#: is a CEILING for the wedged case rather than a cost every stop pays. Kept
+#: short because the caller (a phone, a supervisor) is blocked on the ack: a
+#: child that will not die must delay the receipt by a beat, never hold it.
+_ABORT_SETTLE_BUDGET_S = 1.0
+_ABORT_SETTLE_POLL_S = 0.02
 
 
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:
@@ -1343,11 +1355,156 @@ class OwnedSessionHandle(SessionHandle):
         return detail
 
     async def abort(self) -> str:
+        """Stop this session's turn AND its children, and say what was stopped.
+
+        THE CONTROL OP HAS NO SECOND RUNG. The keyboard's Esc ladder can afford
+        a narrow first press because a second press within
+        ``DOUBLE_STOP_WINDOW_S`` is right there, offered on screen, and stops
+        the children. Nothing on this path has that: the mobile relay, a
+        supervisor and ``lop`` peers all send ``abort`` once into a session
+        they cannot see, and there is no gesture that escalates. Reusing the
+        keyboard's narrow semantics here therefore gave callers a stop that
+        could NEVER reach a runaway — the operator sent ``abort``, was acked
+        ``stopping``, and watched 39 paid provider calls land in the next two
+        seconds while their children kept reporting in (QA Q-1). Escalating is
+        what makes "a user must always be able to halt a runaway" true on the
+        surface that has no ladder to climb.
+
+        THE RECEIPT MUST NOT OVERSTATE, AND IT IS COUNTED AFTER THE FACT.
+        It previously returned the literal ``"stopping"`` whatever survived,
+        which is how the operator was told the problem was handled while the
+        meter ran. Reporting ``cancel_subagents()``'s return value instead
+        would only move the lie: that number is ``len(running)`` sampled at
+        DISPATCH time, before any child has actually gone, and per-child
+        cancellation is fire-and-forget with failures swallowed by design. A
+        child that refuses to die was therefore counted as stopped — measured
+        with two of three cancels raising, the receipt still said "stopped 3
+        subagents" while two kept running and spending (review round 1,
+        MAJOR-1).
+
+        So the count is taken from the session's own live predicate once the
+        cancellations have had a chance to land, and anything still standing is
+        named as still running. Backgrounded ``bash`` jobs deliberately outlive
+        a stop (``background=true`` exists so a build survives the turn that
+        started it), so they are named too rather than implied stopped.
+        """
         self._check_loop_thread()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
+        # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
+        # result back to the parent, and a parent still accepting work would
+        # open a turn on it — so stopping the parent first is what makes the
+        # children's teardown quiet instead of one last round of arrivals.
         self._session.abort("stopped from mobile")
-        return "stopping"
+        before = self._running_children()
+        self._cancel_children("stopped from mobile")
+        remaining = await self._settled_children(before)
+        return self._abort_receipt(stopped=max(before - remaining, 0), still_running=remaining)
+
+    def _cancel_children(self, reason: str) -> int:
+        """Cancel this session's subagents, tolerating a host that has none.
+
+        ``getattr``-probed like every other optional capability in this file: a
+        reduced handle or a test double need not implement the subagent
+        protocol, and a stop must not fail because the thing it was asked to
+        stop does not exist.
+
+        The return is the DISPATCH count and must not be reported as an
+        outcome — see :meth:`abort`. Callers wanting the truth ask
+        :meth:`_running_children` after the cancellations have settled.
+        """
+        cancel = getattr(self._session, "cancel_subagents", None)
+        if not callable(cancel):
+            return 0
+        try:
+            return int(cast(int, cancel(reason)))
+        except Exception:  # noqa: BLE001 — a stop must never fail on its children
+            logger.warning("cancelling subagents during abort failed", exc_info=True)
+            return 0
+
+    def _running_children(self) -> int:
+        """Children still running RIGHT NOW, via the session's own predicate.
+
+        ``running_subagents`` is the one predicate the ladder and its counts
+        share, so the receipt cannot disagree with what a later Esc would
+        offer. Probed and non-raising for the same reasons as
+        :meth:`_cancel_children`.
+        """
+        counter = getattr(self._session, "running_subagents", None)
+        if not callable(counter):
+            return 0
+        try:
+            return int(cast(int, counter()))
+        except Exception:  # noqa: BLE001 — a stop must never fail on its count
+            logger.warning("counting subagents during abort failed", exc_info=True)
+            return 0
+
+    async def _settled_children(self, before: int) -> int:
+        """Wait briefly for the cancellations to land, then count what is left.
+
+        Cancellation is one fire-and-forget task per child, so the roster is
+        still full the instant after dispatch and an immediate count would
+        report every child as surviving — the mirror image of the overstatement
+        this exists to fix. Polling rather than awaiting the tasks because the
+        handle does not own them (the session tracks them for ``dispose``), and
+        the loop exits the moment the roster drains, so the healthy case costs
+        one tick rather than the whole budget.
+
+        BOUNDED, and short. This runs inside a kill switch whose caller is a
+        phone or a supervisor waiting on the ack: a child wedged in an
+        uninterruptible await must delay the receipt by a beat, never hold it.
+        Whatever has not gone by then is reported as still running, which is
+        the honest answer and the one that tells the user to escalate.
+        """
+        if before <= 0:
+            return 0
+        deadline = time.monotonic() + _ABORT_SETTLE_BUDGET_S
+        remaining = self._running_children()
+        while remaining > 0 and time.monotonic() < deadline:
+            await asyncio.sleep(_ABORT_SETTLE_POLL_S)
+            remaining = self._running_children()
+        return remaining
+
+    def _abort_receipt(self, *, stopped: int, still_running: int) -> str:
+        """What the abort actually did, including what it deliberately left.
+
+        Survivors are named only when there ARE any: unconditional, it is noise
+        on the overwhelmingly common stop that had nothing else running.
+        """
+        parts = ["stopping this turn"]
+        if stopped:
+            parts.append(f"stopped {stopped} subagent{'s' if stopped != 1 else ''}")
+        if still_running:
+            # The whole point of the change: a child that would not die is the
+            # one fact the user must have, and it names the stronger lever
+            # rather than leaving them to discover the meter still running.
+            parts.append(
+                f"{still_running} subagent{'s' if still_running != 1 else ''} "
+                "did NOT stop — lop stop ends the process"
+            )
+        spared = self._background_bash_jobs()
+        if spared:
+            plural = "s" if spared != 1 else ""
+            parts.append(f"{spared} background job{plural} still running — jobs cancel to stop")
+        return "; ".join(parts)
+
+    def _background_bash_jobs(self) -> int:
+        """Backgrounded ``bash`` jobs, which a stop never touches.
+
+        Deliberately spared (see ``Session.cancel_subagents``) and genuinely
+        surprising to someone who just asked for everything to stop, so the
+        receipt names them. Never raises: this runs inside a kill switch.
+        """
+        try:
+            jobs = self._session.jobs.list()
+        except Exception:  # noqa: BLE001 — an unreadable ledger must not break a stop
+            logger.warning("listing background jobs during abort failed", exc_info=True)
+            return 0
+        return sum(
+            1
+            for job in jobs
+            if getattr(job, "type", "") == "bash" and getattr(job, "status", "") == "running"
+        )
 
     async def cancel_gracefully(self, reason: str = "cancelled by supervisor") -> str:
         """Stop at the next post-tool boundary, leaving in-flight work intact.
