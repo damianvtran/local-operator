@@ -87,9 +87,9 @@ replaces the interpreter, the planted link keeps pointing at the OLD inode —
 uv preserves unknown files in ``bin/`` but does not refresh them — and the
 process would silently run a stale interpreter with a fresh site-packages.
 :func:`ensure_branded_interpreter` therefore re-checks three facts at every
-startup (a handful of stats plus one symlink resolution, tens of microseconds
-— measured ~180 µs here against a startup already north of a second) and
-re-plants when any fails. The
+startup (a handful of stats plus one symlink resolution — measured ~180 µs
+here, against a startup already north of a second) and re-plants when any
+fails. The
 inode is ground truth; there is deliberately **no version-stamp file**, because
 a stamp is a second source of truth that can itself go stale.
 
@@ -304,8 +304,8 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
     interpreter, one ``exists`` on the symlink, and one ``resolve()`` pair for
     the dylib-identity check below. ``resolve()`` ``lstat``s every path
     component, so the exact syscall count scales with how deep the venv sits
-    and is not worth pinning to a number here — the total is tens of
-    microseconds either way (~180 µs for the whole steady-state
+    and is not worth pinning to a number here — the total is a couple of
+    hundred microseconds either way (~180 µs for the whole steady-state
     ``ensure_branded_interpreter``, against a >1 s startup).
 
     Refresh when ANY of:

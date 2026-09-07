@@ -208,6 +208,14 @@ class TestStaleness:
         dylib.touch()
         walled.chmod(0o000)
         try:
+            # PRECONDITION, not decoration. `True` is ALSO reachable through the
+            # `resolve()` identity mismatch below, so asserting it alone would
+            # not prove this test exercised the `exists()` path it is named for
+            # — and on a host where `chmod 0o000` does not block (root, some
+            # container runtimes) it would stay green with the guard deleted.
+            # Review round 3, M3-2: the R2-1 failure mode in embryo.
+            with pytest.raises(PermissionError):
+                dylib.exists()
             assert (
                 procname._needs_replant(branded, Path(os.path.realpath(sys.executable)), dylib)
                 is True
