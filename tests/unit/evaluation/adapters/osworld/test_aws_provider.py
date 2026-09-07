@@ -37,6 +37,10 @@ from lop_osworld_v2_adapter.providers.aws import (
     _Clients,
     ttl_seconds_for,
 )
+from lop_osworld_v2_adapter.providers.base import (
+    GUEST_COMMAND_TIMEOUT_S,
+    guest_deadline_for,
+)
 
 from local_operator import computer_input
 from local_operator.evaluation.adapters.api import ScopedInfraValue
@@ -1351,11 +1355,25 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         await provider.execute([])
         # The statement crosses as base64 (see ``python_source_argv``), so assert
         # the endpoint contract and decode the payload rather than pinning a
-        # literal argv -- the literal shape is the argv exposure this encoding
+        # literal argv -- the literal shape is the argv exposure that encoding
         # exists to remove.
+        #
+        # The body also carries the guest's OWN subprocess deadline alongside
+        # the command. It is derived from -- and strictly inside -- the socket
+        # deadline, so a slow command expires on the guest and comes back as a
+        # definite answer instead of expiring on our socket with the command
+        # still running. ``test_guest_deadline.py`` pins the derivation.
+        #
+        # Both properties are asserted here because they are independent and
+        # were introduced by separate changes: encoding removes the argv
+        # exposure, the deadline makes a slow command answerable. Asserting the
+        # dict wholesale would re-pin the literal argv this encoding removes,
+        # so the command is decoded and the remaining keys are pinned exactly.
         assert len(stubs.guest_posts) == 1
         post = stubs.guest_posts[0]
         assert post["shell"] is False
+        assert post["timeout"] == guest_deadline_for(GUEST_COMMAND_TIMEOUT_S)
+        assert set(post) == {"command", "shell", "timeout"}
         command = post["command"]
         assert command[:3] == ["python", "-c", computer_input._SOURCE_BOOTSTRAP]
         assert base64.b64decode("".join(command[3:])).decode("utf-8") == (
