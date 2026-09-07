@@ -46,6 +46,37 @@ def isolated_sidebar(tmp_path, monkeypatch):
     monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
 
 
+def _quiesce_sidebar_refresh(app) -> None:
+    """Stop both catalog-refresh paths that opening the sidebar starts.
+
+    Every pilot test that hands the list its OWN rows needs this, or the real
+    catalog lands on top of them mid-test. `ctrl+b` starts two refreshes, and
+    closing one and missing the other is a mistake this file has now made twice
+    (code review rounds 2 and 3):
+
+    * ``app._sidebar_timer`` — the 2 s poll, resumed by ``_set_sidebar_open``.
+    * the ONE-SHOT worker ``_set_sidebar_open`` launches on the very next line.
+      Its ``set_entries`` is gated only on ``_sidebar_refresh_generation``, so
+      bumping the counter is what retires a read already in flight; there is no
+      worker handle to cancel.
+
+    What goes wrong differs by test, which is why this lives in one place
+    rather than being restated at each call site: a test that looks a row up by
+    name raises when the empty catalog replaces its rows, while a test that
+    only measures geometry sees the list's HEIGHT change under it and can read
+    a different ``virtual_size``. Both are the same cause.
+
+    **The bump retires the CURRENT read, not future ones** — ``_refresh_sidebar``
+    bumps the counter itself on entry, so anything that starts a refresh AFTER
+    this call (a second ``ctrl+b``, a re-open, an explicit ``_refresh_sidebar()``)
+    wins the gate and repaints. Call this after the last thing that could start
+    one.
+    """
+    assert app._sidebar_timer is not None
+    app._sidebar_timer.pause()
+    app._sidebar_refresh_generation += 1
+
+
 def test_urgency_ranking_keeps_gates_independent_of_acknowledgement():
     rows = [
         CatalogEntry(SessionRow("recent", 100, "Recent")),
@@ -1111,19 +1142,7 @@ async def test_the_measured_conversation_lane_matches_the_documented_guarantee()
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
-            # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
-            # hand-built rows below get replaced by the empty isolated catalog
-            # mid-test and the row lookup raises.
-            #
-            # The timer is the 2 s poll (code review round 2, M3). The
-            # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
-            # launches on the very next line after resuming that timer (round
-            # 3, M4): its `set_entries` is gated only on this counter, so
-            # pausing the timer alone leaves the identical race on the sibling
-            # path — reproduced by slowing the off-loop read.
-            assert app._sidebar_timer is not None
-            app._sidebar_timer.pause()
-            app._sidebar_refresh_generation += 1
+            _quiesce_sidebar_refresh(app)
             lane = app.query_one("#session-conversation").size.width
             assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
             assert app.screen.virtual_size == app.screen.size, width
@@ -1150,19 +1169,7 @@ async def test_a_wide_terminal_actually_shows_more_of_the_title():
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
-            # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
-            # hand-built rows below get replaced by the empty isolated catalog
-            # mid-test and the row lookup raises.
-            #
-            # The timer is the 2 s poll (code review round 2, M3). The
-            # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
-            # launches on the very next line after resuming that timer (round
-            # 3, M4): its `set_entries` is gated only on this counter, so
-            # pausing the timer alone leaves the identical race on the sibling
-            # path — reproduced by slowing the off-loop read.
-            assert app._sidebar_timer is not None
-            app._sidebar_timer.pause()
-            app._sidebar_refresh_generation += 1
+            _quiesce_sidebar_refresh(app)
             sidebar = app._session_sidebar
             sidebar.set_entries(entries)
             if sidebar._timer is not None:
@@ -1211,19 +1218,7 @@ async def test_the_grown_list_still_leaves_the_conversation_its_lane():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
-        # hand-built rows below get replaced by the empty isolated catalog
-        # mid-test and the row lookup raises.
-        #
-        # The timer is the 2 s poll (code review round 2, M3). The
-        # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
-        # launches on the very next line after resuming that timer (round
-        # 3, M4): its `set_entries` is gated only on this counter, so
-        # pausing the timer alone leaves the identical race on the sibling
-        # path — reproduced by slowing the off-loop read.
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
-        app._sidebar_refresh_generation += 1
+        _quiesce_sidebar_refresh(app)
         sidebar = app._session_sidebar
         assert sidebar.content_region.width > SIDEBAR_WIDTH - SIDEBAR_GUTTER
         assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_COMFORT_WIDTH
@@ -1383,19 +1378,7 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        # Quiesce BOTH catalog refresh paths that `ctrl+b` starts, or the
-        # hand-built rows below get replaced by the empty isolated catalog
-        # mid-test and the row lookup raises.
-        #
-        # The timer is the 2 s poll (code review round 2, M3). The
-        # generation bump retires the ONE-SHOT worker `_set_sidebar_open`
-        # launches on the very next line after resuming that timer (round
-        # 3, M4): its `set_entries` is gated only on this counter, so
-        # pausing the timer alone leaves the identical race on the sibling
-        # path — reproduced by slowing the off-loop read.
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
-        app._sidebar_refresh_generation += 1
+        _quiesce_sidebar_refresh(app)
         sidebar = app._session_sidebar
         for kind, glyph, words in cases:
             # An ARMED WAKE on the row is the case M2 names: without the
