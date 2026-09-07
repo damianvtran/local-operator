@@ -61,9 +61,12 @@ def _prepay_session_import_warmup() -> None:
     ``_construct_session`` → ``_warm_session_imports`` →
     ``asyncio.to_thread(warm_session_imports)`` before the factory is awaited.
     That warm-up imports ``mcp``, ``httpx``, ``httpcore``, ``truststore`` and
-    several ``local_operator`` modules — measured at 712 ms in a fresh test
-    process on this machine, matching the ~700 ms the app's own docstring
-    quotes.
+    several ``local_operator`` modules — hundreds of milliseconds in a fresh
+    test process, the same order as the ~700 ms the app's own docstring quotes.
+    The absolute figure is not stable enough to pin (samples on this machine
+    ranged from ~600 ms to ~1.6 s depending on load), and nothing here branches
+    on it. What matters, and what reproduces, is the RATIO in the next
+    paragraph.
 
     The tests that wait on the far side of a transition budget a fixed COUNT of
     event-loop turns (``_settle``'s ``tries``, ``MAX_PUMP_TURNS``), which is the
@@ -79,8 +82,10 @@ def _prepay_session_import_warmup() -> None:
 
     WHY PRE-PAYING RATHER THAN DISABLING. ``warm_session_imports`` is
     ``importlib.import_module`` over a fixed tuple, so it is idempotent against
-    ``sys.modules``: the first call in a process costs ~669 ms and every later
-    call costs ~0.01 ms (measured). The entire race is therefore the FIRST
+    ``sys.modules``: the first call in a process costs hundreds of milliseconds
+    and every later call costs ~0.01 ms — a ratio of four to five orders of
+    magnitude, which reproduced across machines and load levels even where the
+    absolute first-call figure did not. The entire race is therefore the FIRST
     construction in each process, and which test that is depends on collection
     order and on xdist sharding — a lottery, not a property of the two tests
     that happen to lose it today. Paying it here, in session setup, collapses
@@ -101,8 +106,9 @@ def _prepay_session_import_warmup() -> None:
     call ordering rather than this cache.
     """
     # Imported here, not at module scope: this conftest loads for every TUI
-    # test, and `session_factory` pulls ~154 ms of its own imports that only
-    # this fixture needs.
+    # test, and `session_factory` pulls a non-trivial import cost of its own
+    # (order of a hundred milliseconds, load-dependent) that only this fixture
+    # needs.
     from local_operator.session_factory import warm_session_imports
 
     # Never raises by contract — an optional extra that is not installed is the
