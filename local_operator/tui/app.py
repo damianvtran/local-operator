@@ -508,7 +508,7 @@ _BAND_SETTLE_PASSES = 3
 
 #: Background-completion banners one observer tick may SPAWN. Everything past
 #: the cap is still claimed — the arbitration is unchanged — and collapsed into
-#: a single "N more sessions finished" digest.
+#: a single "N sessions finished" digest carrying the tick's ABSOLUTE total.
 #:
 #: The no-flood baseline only covers the tick that CREATES the deliveries
 #: table. A store already migrated, with no observer running while background
@@ -13603,7 +13603,7 @@ class OperatorApp(App[None]):
 
         return conversation_identity(config_dir() / "sessions" / session_id)
 
-    def _announce_background_digest(self, count: int) -> bool:
+    def _announce_background_digest(self, kinds: Sequence[str], announced: int) -> bool:
         """One line standing in for the completions the per-tick cap held back.
 
         The cap exists to stop a backlog flooding the notification centre; on
@@ -13611,6 +13611,21 @@ class OperatorApp(App[None]):
         second defect rather than a fix. This says how many, so the count is
         never lost — the sidebar still carries every row's `✓`, and the user
         now knows to go and look at it.
+
+        TAKES THE KINDS, NOT A COUNT, and that is the whole of design round 2's
+        D8. The remainder is whatever the cap did not reach and the catalog
+        ranks by `(tier, -mtime, id)` rather than by kind, so this line was
+        asserting `Complete` over sets that were entirely errors. The caller
+        already holds each held-back row's `completion_kind` at no extra cost,
+        so the honest subtitle is a derivation rather than new mechanism — see
+        `digest_subtitle`, which says a state only when every session held back
+        is in it.
+
+        `announced` is the number of banners that DID go out this tick, so the
+        title can carry the absolute total. "N more" is relative to a cap the
+        user may never have seen — a lock screen or a coalesce loses the three
+        banners it counts from (D11) — while "27 sessions finished" stands on
+        its own.
 
         REPORTS WHETHER THE BANNER WENT OUT, exactly like
         `_deliver_background_completion` beside it, and for the same reason: the
@@ -13622,8 +13637,8 @@ class OperatorApp(App[None]):
         self-correcting; this is silent while the claim asserts delivery. The
         caller hands the claims back when this returns False.
 
-        NAME-FREE BY CONSTRUCTION, AND IT MUST STAY SO. The title is the
-        `BACKGROUND_FALLBACK_TITLE` constant and the body is a bare count, so
+        NAME-FREE BY CONSTRUCTION, AND IT MUST STAY SO. The title is a bare
+        count and the body is a fixed routing sentence, so
         `session_names_in_notifications()` is not consulted — not because the
         flag does not apply, but because there is nothing here for it to
         govern. A digest is ABOUT several sessions, so naming one of them would
@@ -13639,26 +13654,29 @@ class OperatorApp(App[None]):
         """
         from local_operator.proc import spawn_detached
         from local_operator.tui.notify import (
-            BACKGROUND_FALLBACK_TITLE,
-            CONTEXT_COMPLETE,
+            BODY_BACKGROUND_DIGEST,
+            background_digest_title,
             cmux_command,
             cmux_surface_id,
             detached_notify,
+            digest_subtitle,
         )
 
-        body = f"{count} more session{'s' if count != 1 else ''} finished"
+        # The TOTAL, not the remainder: the title is the line that survives
+        # macOS's clip, and an absolute count needs no knowledge of the cap.
+        title = background_digest_title(announced + len(kinds))
+        subtitle = digest_subtitle(kinds)
         try:
             surface = cmux_surface_id()
             if surface is not None:
                 return bool(
-                    spawn_detached(
-                        cmux_command(surface, BACKGROUND_FALLBACK_TITLE, CONTEXT_COMPLETE, body)
-                    )
+                    spawn_detached(cmux_command(surface, title, subtitle, BODY_BACKGROUND_DIGEST))
                 )
             # No `session_id`: a digest covers several sessions, so there is no
-            # single transcript for a click to reopen. The banner is
-            # informational and the sidebar is where the user goes next.
-            return detached_notify(BACKGROUND_FALLBACK_TITLE, body, subtitle=CONTEXT_COMPLETE)
+            # single transcript for a click to reopen — which is why the body
+            # names the sidebar rather than leaving the one inert banner in the
+            # stack silently inert (D10).
+            return detached_notify(title, BODY_BACKGROUND_DIGEST, subtitle=subtitle)
         except Exception:  # noqa: BLE001 — a toast must never affect the poll
             logger.debug("background completion digest failed", exc_info=True)
             # A RAISE IS A FAILED DELIVERY, not a swallowed one: this return is
@@ -13910,11 +13928,17 @@ class OperatorApp(App[None]):
             self._background_notify_revision = revision
             current = str(getattr(self._session, "session_id", "") or "")
             announced = 0
-            # The rows the cap held back, kept as `(identity, token)` rather
-            # than counted: their claims are already taken, so if the digest
-            # standing in for them fails to send they have to be handed BACK,
-            # and `release_delivery` needs both halves to do it (M1).
-            claimed_silently: list[tuple[str, str]] = []
+            # The rows the cap held back, kept as `(identity, token, kind)`
+            # rather than counted: their claims are already taken, so if the
+            # digest standing in for them fails to send they have to be handed
+            # BACK, and `release_delivery` needs both halves to do it (M1).
+            #
+            # The KIND rides along because the digest must not assert an
+            # outcome the remainder did not have — the catalog ranks by
+            # `(tier, -mtime, id)`, not by kind, so an over-cap set can be
+            # entirely errors (design round 2, D8). It is read here, where the
+            # entry is already in hand, rather than re-derived later.
+            claimed_silently: list[tuple[str, str, str]] = []
             released = False
             for entry in load_catalog(directory):
                 if (
@@ -13956,7 +13980,9 @@ class OperatorApp(App[None]):
                         # the count rather than silently dropping it.
                         identity = self._background_completion_identity(entry.id)
                         if store.claim_delivery(identity, entry.completion_token, "digest"):
-                            claimed_silently.append((identity, entry.completion_token))
+                            claimed_silently.append(
+                                (identity, entry.completion_token, entry.completion_kind)
+                            )
                         continue
                     if self._deliver_background_completion(
                         entry, self._background_completion_identity(entry.id)
@@ -13974,7 +14000,9 @@ class OperatorApp(App[None]):
                     # chrome; it may lose itself, never its siblings.
                     logger.debug("background completion row skipped", exc_info=True)
                     released = True
-            if claimed_silently and not self._announce_background_digest(len(claimed_silently)):
+            if claimed_silently and not self._announce_background_digest(
+                [kind for _, _, kind in claimed_silently], announced
+            ):
                 # THE DIGEST IS THE ONLY THING THAT WAS EVER GOING TO SPEAK FOR
                 # THESE ROWS. Each was claimed above with backend `"digest"`, so
                 # a failed digest leaves N completions delivered-but-unannounced
@@ -13983,7 +14011,7 @@ class OperatorApp(App[None]):
                 # one of them back, and let the `released` path below re-examine
                 # them: on the next tick they are unclaimed again, so whichever
                 # of them falls under the cap gets a real banner.
-                for identity, token in claimed_silently:
+                for identity, token, _ in claimed_silently:
                     try:
                         store.release_delivery(identity, token)
                     except Exception:  # noqa: BLE001 — per row, same rule as above

@@ -88,6 +88,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Sequence
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
@@ -144,6 +145,52 @@ CONTEXTS: dict[str, str] = {
     "interrupted": CONTEXT_INTERRUPTED,
 }
 
+#: The digest's subtitle when the sessions it stands for did NOT all end the
+#: same way. Deliberately not an entry in :data:`CONTEXTS`: that maps one
+#: session's kind to its category, and "mixed" is a property of a SET, not a
+#: kind any session can have. Keeping it out means no call site can accidentally
+#: resolve a single completion to it.
+CONTEXT_MIXED = "Mixed outcomes"
+
+
+def digest_subtitle(kinds: Sequence[str]) -> str:
+    """The honest state category for a set of completions, or ``""``.
+
+    The digest speaks for whatever the per-tick cap held back, and the catalog
+    ranks by ``(tier, -mtime, id)`` — **not** by kind — so ``error`` and
+    ``interrupted`` rows land in the overflow as readily as ``complete`` ones.
+    The digest hardcoded :data:`CONTEXT_COMPLETE` regardless, so a remainder
+    that was entirely failures was announced as "Complete · 5 more sessions
+    finished" on a lock screen, with the sidebar's ``✗`` the only thing
+    contradicting it (design round 2, D8). That is design round 1's D3 —
+    ``interrupted`` folded into a state it is not — reappearing at the scale of
+    an arbitrary number of sessions rather than one.
+
+    So the rule is: SAY A STATE ONLY WHEN EVERY SESSION HELD BACK IS IN IT.
+    A uniform set gets its real category out of the house vocabulary
+    (:data:`CONTEXTS`), so the digest reads exactly like the row banners beside
+    it when it honestly can. A MIXED set gets :data:`CONTEXT_MIXED` — not the
+    majority's category and not the first row's, either of which would assert
+    an outcome about sessions that did not have it, which is the defect. Three
+    complete and two errors is neither "Complete" nor "Needs attention"; it is
+    mixed, and that is a fact about the set rather than a guess about it.
+
+    An unrecognised kind counts as its own value, so a future kind makes a set
+    mixed rather than silently inheriting "Complete" — the same default-to-quiet
+    discipline ``_BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES`` follows. An empty set
+    yields ``""``: no sessions is no claim, and both backends accept an empty
+    subtitle.
+
+    Pure, so the decision is testable without spawning or rendering anything.
+    """
+    distinct = set(kinds)
+    if not distinct:
+        return ""
+    if len(distinct) == 1:
+        return CONTEXTS.get(distinct.pop(), CONTEXT_MIXED)
+    return CONTEXT_MIXED
+
+
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
 #: separated — see :func:`urgency_for`.
@@ -168,6 +215,53 @@ BODIES: dict[str, str] = {
 #: D2). It also contradicted the sidebar, which paints these same rows as
 #: ``Untitled conversation``.
 BACKGROUND_FALLBACK_TITLE = "A session finished"
+
+
+def background_digest_title(total: int) -> str:
+    """``total`` sessions finished, as the DIGEST banner's title.
+
+    The digest is the one line standing in for the completions the per-tick cap
+    held back. A function rather than a constant because the count belongs in
+    the title, and this is the one place that decides so.
+
+    NOT :data:`BACKGROUND_FALLBACK_TITLE`, which it reused verbatim and which is
+    also the title every NAMELESS row banner carries. With a nameless over-cap
+    population — the overnight/agent-spawned case this feature exists for, 15 of
+    67 rows on the maintainer's store — that made the digest the fourth banner
+    in a stack of four with an IDENTICAL title AND subtitle, distinguished only
+    by the body, which is the line macOS truncates first (design round 2, D9).
+    At N=1 it also self-contradicted: "A session finished" over "1 more session
+    finished" describes two events in one frame.
+
+    THE COUNT MOVES INTO THE TITLE, and that is what makes the digest a
+    different KIND of object at a glance rather than a same-looking sibling.
+    macOS clips a title at ~43 characters and clips the body first, so the count
+    now sits in the line that survives; the string is 18-23 characters at every
+    count from 1 to 9999, far inside that clip.
+
+    It is also ABSOLUTE, not relative: "3 more" is only meaningful to a user who
+    noticed the three banners it counts from, which a lock screen or a coalesce
+    does not guarantee (design round 2, D11). The caller passes the TOTAL.
+
+    NAME-FREE BY CONSTRUCTION, like the body beside it — a digest is about
+    several sessions, so naming one would be wrong on its own terms, and nothing
+    on this leg consults :func:`session_names_in_notifications`.
+    """
+    return f"{total} sessions finished" if total != 1 else "1 session finished"
+
+
+#: The digest's body: where to go, since the banner itself cannot take you.
+#:
+#: The digest passes no ``session_id`` — it stands for several sessions, so
+#: there is no single transcript for a click to reopen — which makes it the one
+#: inert banner in a stack of otherwise-clickable ones, with nothing in the
+#: frame saying so (design round 2, D10). ``detached_notify``'s ``osascript``
+#: leg sets the precedent: it appends "— reopen with: lop --resume <id>" rather
+#: than letting a user learn by pressing (round 3, D14). This is that courtesy,
+#: pointed at the surface that CAN take them there — the docstring on
+#: ``_announce_background_digest`` already said the sidebar is where the user
+#: goes next; this is that sentence finally reaching the user.
+BODY_BACKGROUND_DIGEST = "Open the session sidebar to see them"
 
 #: The observer path's body line, keyed by ROUTE rather than by state — which
 #: is why it is a single constant and not another entry in :data:`BODIES`.
