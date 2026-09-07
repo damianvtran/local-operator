@@ -163,11 +163,10 @@ def paste_text_source(text: str, keys: Sequence[str]) -> str:
 
 # The only program that ever reaches the guest's argv. It is a fixed constant:
 # it names no action, carries no agent text, and is byte-identical for every
-# statement we run, so nothing an agent writes can appear in it.
-_SOURCE_BOOTSTRAP = (
-    "import base64, sys; "
-    "exec(base64.b64decode(''.join(sys.argv[1:])).decode('utf-8'))"
-)
+# statement we run, so nothing an agent writes can appear in it. ``decode()``
+# takes no argument only because its default IS UTF-8, which is the encoding
+# ``python_source_argv`` encodes with; the two must not drift apart.
+_SOURCE_BOOTSTRAP = "import base64, sys; exec(base64.b64decode(''.join(sys.argv[1:])).decode())"
 
 # Linux caps a single argv entry at MAX_ARG_STRLEN (32 pages = 128KB). Base64 is
 # ASCII, so one character is one byte and this character bound IS the byte bound.
