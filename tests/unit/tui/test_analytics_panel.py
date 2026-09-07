@@ -9,18 +9,29 @@ it is the right way to pin what the screen SAYS and that it closes.
 
 from __future__ import annotations
 
+import copy
+
+from rich.cells import cell_len
+
 from local_operator.analytics.model import COMPONENT_KEYS, UsageAggregate, UsagePeriod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
+    _MAX_NAME_COL,
+    _MIN_NAME_COL,
+    _WIDE_TABLE_MIN,
     METRIC_COST,
     METRIC_TOKENS,
     AnalyticsScreen,
+    _forest_labels,
+    _row_overhead,
+    _row_prefix,
     build_report,
     format_cost,
     format_percent,
     format_tokens,
     proportion_bar,
 )
+from local_operator.tui.widgets.tool_card import truncate_cells
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -663,6 +674,389 @@ def test_toggle_hint_shown_only_with_series():
     asyncio.run(run())
 
 
+def _sub(cost_micro: int, calls: int = 1) -> UsageAggregate:
+    """A minimal per-session aggregate carrying a distinguishable cost."""
+    return UsageAggregate(
+        calls=calls,
+        input_tokens=1_000,
+        output_tokens=500,
+        context_tokens=1_500,
+        cost_micro=cost_micro,
+        cost_known_calls=calls,
+    )
+
+
+def test_sessions_sharing_a_rendered_label_each_get_their_own_row():
+    """N sessions with one label render N rows, not one (round-1 F1).
+
+    The table used to be a dict keyed by the RENDERED label, so a collision did
+    not merge rows — it dropped every row but the last, taking its tokens, calls
+    and cost off the screen. On the operator's ledger that hid 355 sessions and
+    $3,913. The label is display text; the row's identity is the session id.
+    """
+    agg = _agg()
+    spend = {"aa11bb22cc33": 900_000, "dd44ee55ff66": 500_000, "1122334455aa": 250_000}
+    agg.by_session = {sid: _sub(cost) for sid, cost in spend.items()}
+    # One shared name, exactly what the backfill mints for sibling subagents.
+    shared = "reviewer · Article-search-svc schema review"
+    setattr(agg, "session_names", {sid: shared for sid in spend})
+
+    lines = build_report(agg, width=140)
+    body = "\n".join(line.plain for line in lines)
+    session_block = body.split("By session", 1)[1]
+
+    # Every session is on screen, with ITS OWN cost — not one merged row.
+    for cost in spend.values():
+        assert f"${cost / 1_000_000:.2f}" in session_block, session_block
+    # ...and each row is separately addressable rather than three identical ones.
+    rows = [ln for ln in session_block.splitlines() if "tokens" in ln]
+    assert len(rows) == len(spend)
+    assert len({ln.strip() for ln in rows}) == len(spend), rows
+
+
+def test_a_unique_session_label_is_left_exactly_as_it_was():
+    """The disambiguator is paid only where it buys something."""
+    agg = _agg()
+    agg.by_session = {"aa11bb22cc33": _sub(900_000), "dd44ee55ff66": _sub(500_000)}
+    setattr(
+        agg,
+        "session_names",
+        {"aa11bb22cc33": "Fix the analytics rollup", "dd44ee55ff66": "Rename the sessions"},
+    )
+    body = "\n".join(line.plain for line in build_report(agg, width=140))
+    assert "Fix the analytics rollup " in body
+    assert "·" not in body.split("By session", 1)[1].split("Fix the analytics rollup")[1][:40]
+
+
+def _long_named_agg(count: int = 12) -> UsageAggregate:
+    """An aggregate whose session names are longer than any name column.
+
+    The shape design review D3 measured on the real ledger: once subagent
+    naming lands, composed ``<role> · <parent title>`` labels are the MAJORITY
+    of rows rather than the exception, so a name column that only pads is
+    ragged for most of the table instead of a few rows.
+    """
+    agg = _agg()
+    agg.by_session = {}
+    names = {}
+    for index in range(count):
+        sub = UsageAggregate(
+            calls=10 + index,
+            input_tokens=500_000,
+            output_tokens=120_000,
+            context_tokens=3_500_000,
+            cost_micro=4_200_000 + index,
+            cost_known_calls=10 + index,
+        )
+        sid = f"{index:012x}"
+        agg.by_session[sid] = sub
+        names[sid] = f"reviewer · Article-search-svc schema review number {index}"
+    setattr(agg, "session_names", names)
+    return agg
+
+
+def test_the_number_columns_line_up_however_long_the_names_are():
+    """Design D3: the name column must TRUNCATE, not only pad.
+
+    ``{name:<{name_col}}`` is a pad and nothing else, so a name wider than the
+    column pushed tokens/cost/calls right by however much it overran. The cost
+    column is the one thing this screen exists to let you scan straight down,
+    and on the real ledger 78% of rows overflowed at 100 columns.
+    """
+    agg = _long_named_agg()
+    for width in (71, 100, 140):
+        # A section is ONE ``Text`` carrying embedded newlines, so the rows have
+        # to be split back out of the rendered block rather than read off the
+        # returned list.
+        text = "\n".join(line.plain for line in build_report(agg, width))
+        block = text.split("By session", 1)[-1]
+        rows = [li for li in block.splitlines() if "calls" in li and " tokens" in li]
+        assert len(rows) == 12, (width, rows)
+        offsets = {li.index(" tokens") for li in rows}
+        assert len(offsets) == 1, (width, sorted(offsets), rows[:3])
+
+
+def test_a_wide_frame_spends_its_width_on_the_name():
+    """Design D2: the budget follows the frame.
+
+    At 140 columns the panel offers 48 cells, so a 43-character title must
+    arrive whole; at 71 it offers 30 and the same title is condensed. Composing
+    against a fixed 32 left 34 cells of dead right gutter on the wide frame.
+    """
+    agg = _agg()
+    title = "coder · Fix subagent effort levels per model"
+    agg.by_session = {"abc123": next(iter(agg.by_session.values()))}
+    setattr(agg, "session_names", {"abc123": title})
+
+    wide = "\n".join(line.plain for line in build_report(agg, 140))
+    narrow = "\n".join(line.plain for line in build_report(agg, 71))
+    assert title in wide, "a 43-char title fits the wide frame's 48-cell column"
+    assert title not in narrow
+    narrow_row = next(li for li in narrow.splitlines() if "coder · Fix" in li)
+    assert "…" in narrow_row, "a cut name must say it was cut"
+
+
+def test_no_content_width_overruns_its_box_and_clips_a_column():
+    """Design D8: no width band may lose a column off the right edge.
+
+    The bug this pins was a CLIFF, not a slope. ``name_cap`` was
+    ``30 if width < 96 else min(48, width - 40)``, so one extra cell of frame
+    bought 18 cells of label while the rest of the row still needed 51-55 —
+    the widest row jumped to 103 against a 96-cell box and terminal widths
+    114-120 clipped ``% cache`` off every row, silently, because a row ending
+    in ``cach`` still looks like a row.
+
+    So this sweeps the BAND rather than sampling it. The sibling test above
+    checks 71 and 140 and is blind to everything between them, which is exactly
+    how the regression shipped: sampling cannot catch a breakpoint it does not
+    happen to land on. Both cost profiles are swept because the cost column is
+    sized to the widest figure present, so the overhead the name budget has to
+    clear is itself a function of the data — a fixed allowance is wrong for one
+    of them whichever constant is chosen.
+
+    The sweep starts where the name budget is actually free to move. Below
+    ``_MIN_NAME_COL`` + the row overhead the FLOOR wins by design — a frame too
+    narrow to hold both a readable label and every column keeps the label and
+    lets the row overrun, which is the pre-existing narrow-width behaviour the
+    review confirmed as out of scope and which is byte-identical across this
+    fix. This pins the band the budget controls; it is not a claim that a
+    60-cell card fits.
+
+    SEVERAL sessions, deliberately. One row alone does not reproduce: the name
+    column is sized to the widest label present, so a lone long name is cut to
+    the cap and the row lands exactly ON the box edge. It takes a second row
+    holding the column at the full cap for the overrun to become visible —
+    which is the ordinary shape of this table and was the shape of the ledger
+    the review bisected.
+
+    The sweep covers DATA PROFILES as well as widths, which is design review
+    D11's structural lesson rather than an embellishment. The first version of
+    this test swept every width in the band and still shipped a real defect,
+    because it swept them all at ``calls=100``: the row overhead is a function
+    of the DATA, so a width sweep at a single data profile pins one slice
+    through a two-dimensional space and is blind along the other axis. Both
+    axes that size a row are varied here — the cost figure (2-8 cells) and the
+    call count (3-6 digits) — with magnitudes taken from the operator's real
+    ledger, whose largest session ran 25,445 calls and whose ``anthropic``
+    provider row ran 317,977. Against the hard-coded 4-cell calls allowance
+    those two profiles fail at 6 and 12 widths respectively while ``calls=100``
+    passes, which is exactly the blind spot that let D11 through a green test
+    and an exported frame at once.
+    """
+    names = {
+        "abc123def456": "Toggleable Sidebar for Session Switching in the TUI",
+        "bbb222ccc333": "coder · Improve Support for Local Model Provider",
+        "ccc333ddd444": "short one",
+    }
+    # (label, cost_micro, calls). 100 is the ordinary small-session case; the
+    # other two are the ledger's real largest session and largest provider row.
+    profiles = (
+        ("cheap", 4_200_000, 100),
+        ("expensive", 3_433_960_000, 100),
+        ("cheap/5-digit-calls", 4_200_000, 25_445),
+        ("expensive/5-digit-calls", 3_433_960_000, 25_445),
+        ("cheap/6-digit-calls", 4_200_000, 317_977),
+        ("expensive/6-digit-calls", 3_433_960_000, 317_977),
+    )
+    for label, cost_micro, calls in profiles:
+
+        def _build(width: int, cost_micro: int = cost_micro, calls: int = calls) -> UsageAggregate:
+            agg = _agg()
+            base = next(iter(agg.by_session.values()))
+            agg.by_session = {}
+            for sid in names:
+                scope = copy.copy(base)
+                scope.cost_micro = cost_micro
+                scope.calls = calls
+                scope.cost_known_calls = calls
+                agg.by_session[sid] = scope
+            setattr(agg, "session_names", dict(names))
+            return agg
+
+        floor = _MIN_NAME_COL + _row_overhead(
+            list(_build(_WIDE_TABLE_MIN).by_session.items()), _WIDE_TABLE_MIN
+        )
+        for width in range(floor, 161):
+            agg = _build(width)
+
+            text = "\n".join(line.plain for line in build_report(agg, width))
+            rows = [
+                li.rstrip()
+                for li in text.split("By session", 1)[-1].splitlines()
+                if " tokens" in li
+            ]
+            widest = max(cell_len(li) for li in rows)
+            assert widest <= width, (
+                f"{label} ledger at content width {width}: widest painted row is "
+                f"{widest} cells, so {widest - width} cells fall off the box and the "
+                f"rightmost column is clipped — {rows[0]!r}"
+            )
+            # State the consequence, not just the arithmetic. ``build_report``
+            # composes rows without cropping — the crop happens when the widget
+            # paints them into its content box — so a row that is too wide is
+            # not visibly damaged in this text and asserting on its tail here
+            # would prove nothing. Applying the box width is what turns the
+            # cell count into the thing the reader actually loses: at 96 the
+            # old rule painted 99 cells and the row ended in ``cach``.
+            assert truncate_cells(rows[0], width).endswith(" cache"), (
+                f"{label} ledger at content width {width}: the % cache column is "
+                f"cut off when the row is painted into the box — "
+                f"{truncate_cells(rows[0], width)!r}"
+            )
+
+
+def test_report_fits_the_box_the_scroll_container_actually_paints():
+    """Design D8, on the SCREEN rather than in the arithmetic.
+
+    The sweep above is a pure-function check: it compares composed row widths
+    against the width ``build_report`` was handed. That is necessary and not
+    sufficient, and the gap between the two is exactly where the first attempt
+    at this fix went wrong. ``#analytics-scroll`` sets ``scrollbar-gutter:
+    stable``, so the container reserves a column whether or not the bar is
+    drawn and paints into one cell LESS than the card. A report composed
+    against the full card width therefore passed every arithmetic assertion
+    while the rendered frame still ended in ``cach`` — the defect was one layer
+    below the one being measured.
+
+    So this drives the real ``OperatorApp`` and asserts against
+    ``scrollable_content_region``, the box Textual actually paints into. It
+    covers both frames the review asked for; 114 is the first width that
+    clipped and 120 is the ordinary terminal in the band.
+
+    The session rows carry the ledger's real call magnitude (design review D11).
+    At the fixture's original ``calls=100`` this test passed at both widths while
+    the operator's own data clipped at both — the two widths this test exists to
+    protect. A row's width is a function of its data, so a test that pins the
+    geometry has to carry data of the size that occurs.
+    """
+    import asyncio
+
+    async def run():
+        for width in (114, 120):
+            agg = _agg()
+            base = next(iter(agg.by_session.values()))
+            agg.by_session = {}
+            for sid, calls in (
+                ("abc123def456", 317_977),
+                ("bbb222ccc333", 25_445),
+                ("ccc333ddd444", 96),
+            ):
+                scope = copy.copy(base)
+                scope.calls = calls
+                scope.cost_known_calls = calls
+                agg.by_session[sid] = scope
+            setattr(
+                agg,
+                "session_names",
+                {
+                    "abc123def456": "Toggleable Sidebar for Session Switching in the TUI",
+                    "bbb222ccc333": "coder · Improve Support for Local Model Provider",
+                    "ccc333ddd444": "short one",
+                },
+            )
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(width, 40)) as pilot:
+                screen = await _push(pilot, app, agg)
+                painted = screen._scroll.scrollable_content_region.width
+                assert screen._card_width() <= painted, (
+                    f"at {width} columns the report is composed against "
+                    f"{screen._card_width()} cells but the scroll container paints "
+                    f"into {painted} — the rightmost column is cut"
+                )
+                text = "\n".join(line.plain for line in build_report(agg, screen._card_width()))
+                rows = [
+                    line.rstrip()
+                    for line in text.split("By session", 1)[-1].splitlines()
+                    if " tokens" in line
+                ]
+                for row in rows:
+                    assert truncate_cells(row, painted).endswith(" cache"), (
+                        f"at {width} columns the % cache column is cut off when the "
+                        f"row is painted: {truncate_cells(row, painted)!r}"
+                    )
+
+    asyncio.run(run())
+
+
+def test_calls_column_is_sized_by_the_data_not_by_a_constant():
+    """A 6-digit call count widens the calls column instead of overrunning it.
+
+    Design review D11. ``_row_overhead`` budgeted the calls column at a literal
+    4 cells while ``_group_section`` painted it with a ``:>4`` PAD \u2014 and a pad
+    grows rather than truncating, so a wider number pushed every column to its
+    right off the box. The operator's ledger has ``anthropic`` at 317,977 calls
+    and eight sessions past 9,999, which cost the ``% cache`` column on the 13
+    most expensive rows of both tables across terminals 104-123.
+
+    Two independent things are asserted, because the defect was a DISAGREEMENT
+    between them rather than a fault in either alone:
+
+    * the budget knows how wide the column will be (``_row_overhead`` grows with
+      the digits), and
+    * the paint agrees, so the column is aligned and the row still fits.
+
+    The alignment half matters on its own: a per-row pad left ``317977 calls``
+    and ``16 calls`` with their labels at different offsets, which defeats
+    reading the column straight down.
+    """
+    small = _scoped(calls=16)
+    large = _scoped(calls=317_977)
+
+    budget_small = _row_overhead([("ollama", small)], 120)
+    budget_large = _row_overhead([("anthropic", large)], 120)
+    assert budget_large - budget_small == len("317977") - len("9999"), (
+        "the row overhead must grow with the width of the call count; it read "
+        f"{budget_small} for 16 calls and {budget_large} for 317,977"
+    )
+
+    # Mixed magnitudes in ONE table: the column is sized to the widest count,
+    # every row is padded to that same width, and nothing overruns the box.
+    agg = _agg()
+    base = next(iter(agg.by_session.values()))
+    agg.by_session = {}
+    names = {}
+    for sid, name, calls in (
+        ("abc123def456", "Toggleable Sidebar for Session Switching in the TUI", 317_977),
+        ("bbb222ccc333", "coder \u00b7 Improve Support for Local Model Provider", 25_445),
+        ("ccc333ddd444", "short one", 16),
+    ):
+        scope = copy.copy(base)
+        scope.calls = calls
+        scope.cost_known_calls = calls
+        agg.by_session[sid] = scope
+        names[sid] = name
+    setattr(agg, "session_names", names)
+
+    for width in range(100, 141):
+        text = "\n".join(line.plain for line in build_report(agg, width))
+        rows = [
+            li.rstrip() for li in text.split("By session", 1)[-1].splitlines() if " tokens" in li
+        ]
+        widest = max(cell_len(li) for li in rows)
+        assert widest <= width, (
+            f"at content width {width} a 6-digit call count pushes the row to "
+            f"{widest} cells, clipping {widest - width} off the box: {rows[0]!r}"
+        )
+        offsets = {li.index(" calls") for li in rows}
+        assert len(offsets) == 1, (
+            "every row's ' calls' label must sit at the same offset for the column "
+            f"to be readable; at width {width} they sit at {sorted(offsets)}"
+        )
+
+
+def _scoped(*, calls: int) -> UsageAggregate:
+    """One per-provider/per-session scope with a given call count."""
+    return UsageAggregate(
+        calls=calls,
+        input_tokens=500_000,
+        output_tokens=120_000,
+        context_tokens=3_500_000,
+        cache_read_tokens=3_000_000,
+        cost_micro=4_200_000,
+        cost_known_calls=calls,
+    )
+
+
 def _nested_aggregate() -> UsageAggregate:
     """A root with two subagents and a grandchild, plus an unrelated session."""
 
@@ -791,3 +1185,155 @@ def test_legend_is_drawn_for_a_plus_that_only_the_rollup_produces():
     text = "\n".join(line.plain for line in build_report(agg, 120))
     assert "$1.00+" in text
     assert "lower bound" in text
+
+
+# -- convergence: the nesting and the label budget must both hold --------------
+# These pin the INTERACTION between two changes that landed from different
+# branches on the same table (#716 nested the rows; #717 budgeted their labels
+# and measured the columns). Each was verified against a fixture that did not
+# exercise the other, and the failure mode is invisible to both: a nested label
+# composed to the full budget and THEN given its ``└ `` prefix is over the
+# column it is padded into, so the paint cuts it back off without a marker.
+
+
+def _deep_named_aggregate(name: str = "Toggleable Sidebar for Session Switching in the TUI"):
+    """A root and a child that both carry LONG names, so the budget actually binds.
+
+    The nesting fixtures above name only the root, which is the real-ledger shape
+    but cannot see a prefix overrunning the budget — an unnamed child renders a
+    12-hex id that fits at any width.
+    """
+
+    def scope(micro, calls=1):
+        return UsageAggregate(
+            calls=calls,
+            ok_calls=calls,
+            context_tokens=micro,
+            cost_micro=micro,
+            cost_known_calls=calls,
+        )
+
+    agg = scope(6_000_000, calls=4)
+    agg.by_session = {
+        "rootsession": scope(1_000_000),
+        "kid1session": scope(2_000_000),
+        "grandkidses": scope(3_000_000),
+    }
+    setattr(
+        agg,
+        "session_names",
+        {"rootsession": name, "kid1session": f"reviewer · {name}", "grandkidses": f"qa · {name}"},
+    )
+    setattr(agg, "session_parents", {"kid1session": "rootsession", "grandkidses": "kid1session"})
+    return agg
+
+
+def test_a_nested_label_pays_for_its_own_indent():
+    """The child's ``└ `` prefix comes OUT of the label budget, not on top of it.
+
+    Asserted on ``prefix + label`` against the budget directly, because the
+    symptom is NOT a row that overruns the frame: ``name_col`` is sized to the
+    widest label present, so an over-budget nested label simply widens the
+    column and every row still fits. What is lost is a CHARACTER — the label was
+    composed to the full budget, the prefix pushed it past the column, and the
+    paint's truncation takes the tail back off without a marker. Measuring the
+    rendered row therefore cannot see this; measuring the label against the
+    budget it was promised can.
+
+    Verified to fail against the mutant (``budget = name_cap``): at a 48-cell cap
+    a depth-2 label renders 50 cells.
+    """
+    # The aggregate is irrelevant here — only the id and the depth decide a
+    # label's budget — but it is a real one so the row shape matches the paint.
+    scope = UsageAggregate(calls=1, ok_calls=1, context_tokens=1, cost_micro=1, cost_known_calls=1)
+    structure = [("rootsession", 0, scope), ("kid1session", 1, scope), ("grandkidses", 2, scope)]
+    long_name = "Toggleable Sidebar for Session Switching in the TUI"
+    names = {
+        "rootsession": long_name,
+        "kid1session": f"reviewer · {long_name}",
+        "grandkidses": f"qa · {long_name}",
+    }
+    for cap in range(_MIN_NAME_COL, _MAX_NAME_COL + 1):
+        labels = _forest_labels(structure, names, cap)
+        for sid, depth, _ in structure:
+            rendered = _row_prefix(depth) + labels[sid]
+            assert cell_len(rendered) <= cap, (
+                f"cap {cap}, depth {depth}: {rendered!r} is {cell_len(rendered)} cells — "
+                "the indent was not paid for out of the budget"
+            )
+
+
+def test_no_session_row_is_cut_without_a_marker_at_any_width():
+    """Every name the reader sees is either COMPLETE or ends in ``…``.
+
+    The third state is the defect: a name that is a strict prefix of the real
+    one with no marker, which reads as a complete title and is not. Nested rows
+    are the case that matters here, because their prefix is what pushes a label
+    over the column that then cuts it.
+    """
+    aggregate = _deep_named_aggregate()
+    known = set((getattr(aggregate, "session_names", {}) or {}).values())
+    for width in range(96, 161):
+        lines = [line.plain for line in build_report(aggregate, width)]
+        block = "\n".join(lines).split("By session", 1)[-1]
+        for row in (r.rstrip() for r in block.splitlines() if " tokens" in r):
+            # The name field is everything up to the run of spaces padding it to
+            # ``name_col``; strip the indent and glyph a nested row leads with.
+            name = row.strip().lstrip("└").strip().split("   ")[0].rstrip()
+            if name.endswith("…"):
+                continue  # a MARKED cut is exactly what this fix produces
+            assert name in known, (
+                f"width {width}: {name!r} is neither a complete name nor marked as cut "
+                f"— it is a silent fragment"
+            )
+
+
+def test_the_budget_is_measured_over_subtree_totals_not_own_spend():
+    """A root row paints its SUBTREE total, so that is what the columns must fit.
+
+    Budgeting against ``by_session``'s own aggregates understates the cost and
+    calls columns by however much the children add, which is the D8/D11 clipping
+    one rollup later.
+    """
+    aggregate = _deep_named_aggregate()
+    own = _row_overhead(list(aggregate.by_session.items()), 120)
+    # what the table actually paints: the root carries 1+2+3 == 6, not 1
+    rolled = _row_overhead([("rootsession", aggregate)], 120)
+    assert rolled >= own, "the subtree total cannot need LESS room than one part"
+    text = "\n".join(line.plain for line in build_report(aggregate, 120))
+    rows = [r.rstrip() for r in text.split("By session", 1)[-1].splitlines() if " tokens" in r]
+    assert all(truncate_cells(r, 120) == r for r in rows)
+
+
+def test_two_children_of_one_parent_never_render_the_same_label():
+    """Sibling subagents compose byte-identical names; the rows must still differ.
+
+    ``<role> · <parent title>`` is the real composed shape, so every sibling
+    delegated under one parent with one role collides by construction — the
+    operator's ledger has parents with 46, 29 and 24 such children. Nesting does
+    not excuse the collision: the indent says "child of the row above", not
+    "a different session from the one below".
+    """
+
+    def scope(micro):
+        return UsageAggregate(
+            calls=1, ok_calls=1, context_tokens=micro, cost_micro=micro, cost_known_calls=1
+        )
+
+    agg = scope(4_000_000)
+    kids = ["aa01000000c1", "aa02000000c2", "aa03000000c3"]
+    agg.by_session = {"rootsession": scope(1_000_000), **{k: scope(1_000_000) for k in kids}}
+    shared = "reviewer · Toggleable Sidebar for Session Switching"
+    setattr(agg, "session_names", {"rootsession": "Root", **{k: shared for k in kids}})
+    setattr(agg, "session_parents", {k: "rootsession" for k in kids})
+
+    text = "\n".join(line.plain for line in build_report(agg, 120))
+    rows = [r.rstrip() for r in text.split("By session", 1)[-1].splitlines() if " tokens" in r]
+    # The name field is everything before the run of spaces that pads it out to
+    # ``name_col``; a child row leads with its ``└ `` prefix, so strip that off
+    # first rather than splitting on it.
+    names = [
+        r.strip().lstrip("└").strip().split("   ")[0].strip() for r in rows if _is_child_row(r)
+    ]
+    assert len(names) == len(kids), names
+    assert len(set(names)) == len(names), f"sibling rows collide: {names}"

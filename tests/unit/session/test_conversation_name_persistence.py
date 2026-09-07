@@ -603,3 +603,63 @@ def test_a_loopless_spawn_leaves_no_unawaited_coroutine(tmp_path, recwarn) -> No
         and "_persist_conversation_name" not in str(w.message)
     ]
     assert unawaited == [], [str(w.message) for w in unawaited]
+
+
+def test_a_resumed_title_is_mirrored_to_the_analytics_ledger(tmp_path, monkeypatch):
+    """The RESUME gap: a restored title never reached ``/analytics``.
+
+    ``_load_conversation_name`` restores the title by writing the holder's
+    fields directly — deliberately, so a restore is not mistaken for a fresh
+    user action — which also bypassed the one place that mirrored a name into
+    the ledger. A session named in one process and resumed in another therefore
+    rendered as a bare 12-hex id in ``/analytics`` forever.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    recorder = reset_recorder_for_test(store)
+
+    first = _session(tmp_path)
+    first.set_conversation_name("Named in the first process", user_set=True)
+    asyncio.run(first.dispose())
+
+    # A fresh process opens the same directory: the title is RESTORED, not set.
+    resumed = _session(tmp_path)
+    assert resumed.conversation_name == "Named in the first process"
+    recorder.flush_for_test()
+
+    # Read the name table directly: ``aggregate`` only reports names for
+    # sessions that have CALL rows, and this session made no provider calls.
+    conn = store._connect()
+    assert conn is not None
+    row = conn.execute(
+        "SELECT name FROM session_names WHERE session_id = ?", (resumed.session_id,)
+    ).fetchone()
+    assert row is not None and row[0] == "Named in the first process"
+    asyncio.run(resumed.dispose())
+    recorder.close()
+
+
+def test_restoring_a_title_does_not_re_journal_it(tmp_path, monkeypatch):
+    """The mirror must not turn a restore into a rename.
+
+    Guards the reason ``_load_conversation_name`` writes the holder's fields
+    directly in the first place: a restore is the same name it already was, so
+    it appends no transcript entry and claims no fresh user action.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    recorder = reset_recorder_for_test(AnalyticsStore(tmp_path / "analytics.db"))
+
+    first = _session(tmp_path)
+    first.set_conversation_name("A stable title", user_set=True)
+    asyncio.run(first.dispose())
+    before = len(_name_entries(tmp_path))
+
+    resumed = _session(tmp_path)
+    asyncio.run(resumed.dispose())
+
+    assert len(_name_entries(tmp_path)) == before
+    recorder.close()

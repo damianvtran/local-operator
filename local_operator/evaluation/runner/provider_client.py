@@ -1452,6 +1452,49 @@ def _rejection_prompt(reason: str, observation: Observation) -> str:
     )
 
 
+def _note_eval_session_name(
+    session_id: str, *, route: RouteIdentity, episode_id: str, task_id: str = ""
+) -> None:
+    """Label this episode's ledger row ``eval <task or episode> · <model>``.
+
+    THE TASK ID IS PREFERRED over the episode id when the caller knows it.
+    ``episode_id`` defaults to ``ep-<12 hex>``, so a label built on it is still
+    a hex string with ``eval`` in front: design review D4 found it answers "is
+    this an eval?" but not "which task ran", which is the question the label
+    exists for. ``task_id`` is what a human recognises
+    (``eval osworld/chrome-0421 · claude-sonnet-4-6``) and the runner has had it
+    all along — it just was not threaded this far.
+
+    The episode id remains the fallback rather than being dropped: a caller that
+    genuinely has no task (an ad-hoc client built outside ``run_episode``) is
+    better served by an opaque-but-unique row than by a row labelled only with
+    its model, which every episode of that run would share.
+
+    Whichever identifier leads, IT COMES FIRST, because it is the only part that
+    differs between two rows of one benchmark run and the table truncates: with
+    the route first, every episode against one model rendered the identical
+    string ``eval anthropic/claude-sonnet-4-5`` and the half that says WHICH
+    episode spent the money — and links back to its evidence bundle — was
+    exactly the half truncated away.
+
+    The provider is dropped rather than abbreviated: a model id already implies
+    its provider for every route the harness runs, so it is the cheapest thing
+    to spend the remaining budget on.
+
+    Best-effort and import-local, like every other analytics touch: the
+    evaluation package is import-inert by contract, and an episode must never
+    fail because a diagnostic ledger could not be written.
+    """
+    try:
+        from local_operator.analytics import get_recorder
+
+        subject = (task_id or "").strip() or episode_id
+        label = f"eval {subject} · {route.model_id}"
+        get_recorder().note_session_name(session_id, label)
+    except Exception:  # noqa: BLE001 — analytics is never a dependency
+        logger.debug("analytics: eval session name failed", exc_info=True)
+
+
 def create_provider_model_client(
     *,
     auth_store: Any,
@@ -1460,6 +1503,7 @@ def create_provider_model_client(
     model_spec: Any,
     artifact_root: Path,
     episode_id: str,
+    task_id: str = "",
     fallback_policy: str = "forbid",
     keep_recent_frames: int = DEFAULT_KEEP_RECENT_FRAMES,
     rebuild_every_frames: int = DEFAULT_REBUILD_EVERY_FRAMES,
@@ -1495,6 +1539,24 @@ def create_provider_model_client(
         retry["modelFallback"] = False
         effective["retry"] = retry
     session_id = f"lop-eval-{episode_id}"
+    # Give the episode's spend a HUMAN label in the analytics ledger. An eval
+    # session never goes through the TUI's naming path — it has no conversation,
+    # no opening message and no model title — so before this every benchmark run
+    # rendered in ``/analytics`` as an anonymous ``lop-eval-ep-<hex>`` row and
+    # the operator could not tell a $5 OSWorld episode from an unnamed session
+    # that had gone wrong. The runner already knows exactly what the run IS, so
+    # the honest fix is to say so here rather than to teach the report to
+    # recognise an id prefix: a rendering rule would special-case the display of
+    # a name the harness could simply have supplied, and would still show
+    # nothing about WHICH task ran.
+    #
+    # Written at TITLE rank because it is a real, authoritative name — this is
+    # the eval equivalent of a user-set title, not a stand-in. ``task_id`` is
+    # optional and defaulted so this stays a pure addition for any caller that
+    # does not have one; the session id and the cache key are unaffected by it,
+    # since those must remain per-EPISODE (two episodes of one task are two
+    # runs and must not share a prompt cache prefix).
+    _note_eval_session_name(session_id, route=route, episode_id=episode_id, task_id=task_id)
     return ProviderModelClient(
         create_stream_fn(auth_store, effective, session_id=session_id),
         route=route,
