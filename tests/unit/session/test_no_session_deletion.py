@@ -312,6 +312,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "temp FILE -> runtime/<pid>.json",
     ),
+    # The viewer registry is the same staged-write shape as the session
+    # registry above, one directory over (run/viewers rather than run/mobile)
+    # and reaching sessions/ no more than that one does.
+    (
+        "local_operator/session/runtime/viewers.py::publish_viewer",
+        "os.replace",
+        "temp FILE -> run/viewers/<pid>.json",
+    ),
+    (
+        "local_operator/session/runtime/viewers.py::publish_viewer",
+        "os.unlink",
+        "temp FILE -> run/viewers/<pid>.json",
+    ),
     (
         "local_operator/session/runtime/inbox.py::_replace_remainder",
         "os.replace",
@@ -488,6 +501,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/runtime/registry.py::unpublish",
         "<path>.unlink",
         "own runtime/<pid>.json FILE",
+    ),
+    (
+        "local_operator/session/runtime/viewers.py::scan_viewers",
+        "<path>.unlink",
+        "stale or unparseable run/viewers/<pid>.json FILE",
+        2,
+    ),
+    (
+        "local_operator/session/runtime/viewers.py::unpublish_viewer",
+        "<path>.unlink",
+        "own run/viewers/<pid>.json FILE",
     ),
     (
         "local_operator/session/search_index.py::_save",
@@ -872,6 +896,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
+        "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
