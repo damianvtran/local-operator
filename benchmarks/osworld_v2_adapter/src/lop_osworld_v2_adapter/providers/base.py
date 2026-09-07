@@ -46,10 +46,20 @@ GUEST_COMMAND_TIMEOUT_S = 90.0
 # Putting the guest's deadline strictly INSIDE ours inverts the race so it
 # resolves the RIGHT way: the guest reaches its own deadline first and ANSWERS.
 # ``execute_command`` catches the resulting ``TimeoutExpired`` and returns an
-# HTTP 500 error body, so a command that outlives its budget becomes a definite,
-# attributable failure rather than an ambiguous silence. Converting an unknown
-# outcome into a known one is the entire point: the episode still fails, but it
-# fails legibly and without the no-retry policy having to assume the worst.
+# HTTP 500 error body.
+#
+# Be precise about what that buys, because it is less than it first appears.
+# ``http_post_json`` calls ``raise_for_status()``, so that 500 raises
+# ``HTTPError``, and ``execute``'s blanket ``except Exception`` still reports
+# "outcome is unknown" — the SAME branch a ``ReadTimeout`` produced, and the
+# no-retry policy still ends the episode. What the ordering actually changes is
+# WHEN and WHY the answer arrives: the guest gives up first and replies, so the
+# failure lands promptly and is attributable to the command outrunning its
+# budget, instead of our socket expiring while the command is still running and
+# leaving a half-applied batch nobody can characterise. Turning that into a
+# genuinely DEFINITE outcome needs the 500's timeout shape distinguished from a
+# transport error before the blanket handler; this module does not do that yet,
+# and claiming otherwise would misdescribe the code.
 #
 # The margin pays for the round trip that answer still has to make — request
 # transmission, the guest's Flask dispatch, and the error response coming back —
@@ -71,6 +81,18 @@ GUEST_TRANSPORT_MARGIN_S = 10.0
 _MIN_GUEST_DEADLINE_S = 1.0
 _SQUEEZED_DEADLINE_FRACTION = 0.5
 
+# The strictly positive floor under EVERY derived guest deadline. A body
+# ``timeout`` of 0 -- or a negative one -- is not "no deadline", it is
+# "kill immediately", which is the exact outcome this whole module exists to
+# prevent. The squeezed branch alone does not rule it out: a caller that has
+# already exhausted its budget can reach here with ``socket_timeout_s`` at or
+# below zero (``guest_disk`` samples its remaining budget at the guard and
+# again at the call, so a value positive at the guard can be ~0 by the call),
+# and a fraction of zero is still zero. Clamping keeps the guest's deadline
+# positive so a doomed-either-way call still gets a real, if tiny, chance to
+# run rather than a guaranteed instant kill.
+_ABSOLUTE_FLOOR_S = 0.05
+
 
 def guest_deadline_for(socket_timeout_s: float) -> float:
     """The guest's subprocess deadline for a command we wait ``socket_timeout_s`` on.
@@ -81,9 +103,17 @@ def guest_deadline_for(socket_timeout_s: float) -> float:
     applies. Expressing it as a function is what stops a second literal being
     written next to the first.
 
-    The result is ALWAYS strictly less than ``socket_timeout_s``, which is the
+    The result is ALWAYS strictly positive, and strictly less than
+    ``socket_timeout_s`` for every socket deadline large enough for the ordering
+    to mean anything (anything above ``_ABSOLUTE_FLOOR_S``). That ordering is the
     invariant the whole fix rests on — a guest deadline at or beyond ours
     restores the ambiguous ordering this function exists to prevent.
+
+    Below that floor the two properties genuinely conflict: a caller whose budget
+    is already spent cannot be given a deadline that is both inside its own and
+    positive. Positivity wins, because a non-positive body ``timeout`` is an
+    instant kill while a deadline marginally outside an already-exhausted socket
+    budget merely returns the pre-existing behaviour.
 
     Subtracting the margin is the normal case. A caller whose socket deadline is
     already at or under the margin (``guest_disk`` shrinks its own toward zero as
@@ -96,7 +126,8 @@ def guest_deadline_for(socket_timeout_s: float) -> float:
 
     inner = socket_timeout_s - GUEST_TRANSPORT_MARGIN_S
     if inner < _MIN_GUEST_DEADLINE_S:
-        return min(_MIN_GUEST_DEADLINE_S, socket_timeout_s * _SQUEEZED_DEADLINE_FRACTION)
+        squeezed = min(_MIN_GUEST_DEADLINE_S, socket_timeout_s * _SQUEEZED_DEADLINE_FRACTION)
+        return max(squeezed, _ABSOLUTE_FLOOR_S)
     return inner
 
 

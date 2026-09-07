@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -46,6 +47,9 @@ from lop_osworld_v2_adapter.providers.aws import (
     _exit_description,
 )
 from lop_osworld_v2_adapter.providers.base import (
+    _ABSOLUTE_FLOOR_S,
+    _MIN_GUEST_DEADLINE_S,
+    _SQUEEZED_DEADLINE_FRACTION,
     GUEST_COMMAND_TIMEOUT_S,
     GUEST_EXECUTE_TIMEOUT_S,
     GUEST_TRANSPORT_MARGIN_S,
@@ -69,7 +73,12 @@ from tests.unit.evaluation.adapters.osworld.test_aws_provider import (  # noqa: 
 # Socket deadlines a caller can realistically pass. The default is the common
 # case; ``guest_disk`` shrinks its own toward zero as its budget drains, which
 # is why the squeezed tail is covered rather than assumed away.
-SOCKET_DEADLINES = (90.0, 60.0, 30.0, 12.0, 10.0, 9.0, 5.0, 1.0, 0.5, 0.01)
+# Includes 0.0 and a negative value on purpose: ``guest_disk`` samples its
+# remaining budget at its guard and again at the call, so a caller CAN arrive
+# here with nothing left. The old tuple stopped at 0.01 and never reached the
+# boundary, which is how a derivation returning 0.0 and -2.5 passed a test named
+# for positivity.
+SOCKET_DEADLINES = (90.0, 60.0, 30.0, 12.0, 10.0, 9.0, 5.0, 1.0, 0.5, 0.01, 0.0, -5.0)
 
 
 # ----------------------------------------------------------------------------
@@ -114,8 +123,17 @@ def test_every_caller_socket_deadline_yields_a_positive_inner_deadline(
     """
 
     derived = guest_deadline_for(socket_timeout)
+
+    # Positivity holds for EVERY caller: a non-positive body ``timeout`` is an
+    # instant kill, never "no deadline".
     assert derived > 0.0
-    assert derived < socket_timeout
+
+    # Strict ordering holds wherever it is achievable. Below the absolute floor
+    # the two properties genuinely conflict -- a spent budget cannot yield a
+    # deadline both inside it and positive -- and positivity wins, because the
+    # alternative is a guaranteed instant kill.
+    if socket_timeout > _ABSOLUTE_FLOOR_S:
+        assert derived < socket_timeout
 
 
 def test_the_deadline_constants_are_pinned_so_either_moving_is_deliberate() -> None:
@@ -131,6 +149,13 @@ def test_the_deadline_constants_are_pinned_so_either_moving_is_deliberate() -> N
     assert GUEST_TRANSPORT_MARGIN_S == 10.0
     assert GUEST_EXECUTE_TIMEOUT_S == 80.0
 
+    # The squeezed branch governs the exhausted-budget tail, where the ordering
+    # invariant is weakest and a silent drift is hardest to notice. Pinned for
+    # the same reason as the pair above.
+    assert _MIN_GUEST_DEADLINE_S == 1.0
+    assert _SQUEEZED_DEADLINE_FRACTION == 0.5
+    assert _ABSOLUTE_FLOOR_S == 0.05
+
 
 def test_the_margin_leaves_room_for_the_measured_per_command_overhead() -> None:
     """The margin pays for transport, so it must exceed transport's real cost.
@@ -142,6 +167,13 @@ def test_the_margin_leaves_room_for_the_measured_per_command_overhead() -> None:
 
     measured_overhead_s = 3.6
     assert GUEST_TRANSPORT_MARGIN_S > measured_overhead_s
+
+    # Scope: this is a property of the SUBTRACT branch. In the squeezed tail the
+    # margin is whatever the caller had left -- ``guest_deadline_for(1.0)`` keeps
+    # 0.5 s, well under the measured overhead -- because a caller with a nearly
+    # spent budget has nothing to pay transport with. That call is close to
+    # doomed either way; the branch exists so it is not made CERTAINLY doomed.
+    assert guest_deadline_for(1.0) == 0.5
 
 
 # ----------------------------------------------------------------------------
@@ -227,14 +259,40 @@ def test_a_signal_death_is_named_and_an_ordinary_exit_is_unchanged(
     assert _exit_description(returncode) == expected
 
 
+def _unrecognised_signal_number() -> int | None:
+    """A signal number this platform does not name, or None if there is none.
+
+    Signal assignments differ per platform (64 is unassigned on macOS and
+    ``SIGRTMAX`` on Linux), so the fallback's test input must be discovered on
+    the host rather than hard-coded, or the test asserts a property of the
+    developer's laptop instead of the code.
+    """
+
+    for candidate in range(100, 128):
+        try:
+            signal.Signals(candidate)
+        except ValueError:
+            return candidate
+    return None
+
+
 def test_an_unrecognised_signal_number_still_reads_as_a_signal() -> None:
     """Signal numbers are platform-specific; an unknown one is still not an exit code.
 
-    Falling back to ``exit -64`` here would reintroduce exactly the confusion
+    Falling back to ``exit -100`` here would reintroduce exactly the confusion
     this function exists to remove.
+
+    The number matters. 64 is unassigned on macOS but IS ``SIGRTMAX`` on Linux,
+    so asserting it reads as "signal 64" passes on a developer's machine and
+    fails in CI \u2014 which is exactly what happened. 100 sits above the
+    real-time range on both, so the assertion tests the fallback rather than the
+    host it happens to run on. The guard below keeps it that way if a future
+    platform assigns it.
     """
 
-    assert _exit_description(-64) == "terminated by signal 64"
+    number = _unrecognised_signal_number()
+    assert number is not None, "no unassigned signal number found on this platform"
+    assert _exit_description(-number) == f"terminated by signal {number}"
 
 
 def test_the_diagnostic_does_not_assert_why_the_process_died() -> None:
