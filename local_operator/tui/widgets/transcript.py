@@ -262,6 +262,15 @@ class TranscriptBlock(Static):
     #: Grouping key for adaptive spacing. Blocks that share a kind stack
     #: tight while each stays one row; a change of kind always opens a gap.
     SPACING_KIND: ClassVar[str] = "block"
+    # Scroll identity is separate from completion receipts: every message may
+    # anchor a viewport, but only a rendered terminal completion may be read.
+    navigation_anchor_id: str = ""
+    navigation_anchor_part: int = 0
+    _navigation_visible: bool = True
+
+    def set_navigation_visible(self, visible: bool) -> None:
+        self._navigation_visible = visible
+
     completion_anchor_id: str = ""
     #: True for a block that always opens a gap above itself regardless of
     #: what preceded it — the turn boundary, not a content difference.
@@ -516,6 +525,11 @@ class TranscriptBlock(Static):
         return self._multirow_cache
 
     # -- text selection (TUI-021) -------------------------------------------
+    def retained_payloads(self) -> tuple[Any, ...] | None:
+        """Data a hidden view retains; unknown block kinds are not cacheable."""
+        text = getattr(self, "text", None)
+        return (text(),) if callable(text) else None
+
     def copy_gutter(self, index: int) -> int:
         """Leading CHARACTERS of rendered row ``index`` that are the block's
         own gutter — structure the block paints, never text the model or the
@@ -2120,6 +2134,17 @@ class WorkingBlock(TranscriptBlock):
             self._timer.stop()
         self._timer = self.set_interval(self._tick_ms / 1000, self._tick)
 
+    def set_navigation_visible(self, visible: bool) -> None:
+        super().set_navigation_visible(visible)
+        if self._timer is not None:
+            if visible:
+                self._sync_rate()
+                if self._timer is not None:
+                    self._timer.resume()
+                self._paint()
+            else:
+                self._timer.pause()
+
     def sync_animation_rate(self) -> None:
         """Re-rate after a focus change, and repaint so nothing reads stale.
 
@@ -2324,6 +2349,7 @@ class TranscriptView(ScrollableContainer):
         #: re-arms on a deliberate act at the top but not on a wheel notch
         #: clamped against it.
         self._on_user_scroll: UserScrollHook | None = None
+        self._on_tail_requested: Callable[[], None] | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2387,6 +2413,10 @@ class TranscriptView(ScrollableContainer):
         mount cannot re-acquire following for a reader who just left the tail.
         """
         self._on_user_scroll = hook
+
+    def set_on_tail_requested(self, callback: Callable[[], None] | None) -> None:
+        """Let a bounded history window materialize its latest rows on End."""
+        self._on_tail_requested = callback
 
     def pin_tail(self, block: TranscriptBlock) -> None:
         """Append ``block`` and hold it last as the transcript grows.
@@ -2964,6 +2994,39 @@ class TranscriptView(ScrollableContainer):
         """Whether growth currently carries the viewport with it."""
         return self._tail_anchor.following
 
+    def set_navigation_visible(self, visible: bool) -> None:
+        for block in self._blocks:
+            block.set_navigation_visible(visible)
+
+    def restore_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> bool:
+        """Restore the same message, not a stale screen-row offset after resize."""
+        anchor = next(
+            (
+                block
+                for block in self._blocks
+                if block.navigation_anchor_id == anchor_id and block.navigation_anchor_part == part
+            ),
+            None,
+        )
+        if anchor is None:
+            anchor = next(
+                (block for block in self._blocks if block.navigation_anchor_id == anchor_id), None
+            )
+        if anchor is None:
+            return False
+        self._tail_anchor.release()
+        y = (
+            self.scroll_y
+            + anchor.region.y
+            - self.content_region.y
+            + min(offset, max(0, anchor.region.height - 1))
+        )
+        with self._tail_anchor.programmatic_scroll():
+            # Disabled means no user input, not no restoration: staged views
+            # are non-interactive while their canonical anchor is laid out.
+            self.scroll_to(y=max(0, y), animate=False, immediate=True, force=True)
+        return True
+
     def follow_tail(self) -> None:
         """Go to the end and stay there — the caller is asking for the tail.
 
@@ -3056,7 +3119,7 @@ class TranscriptView(ScrollableContainer):
         short of the tail.
         """
         with self._tail_anchor.programmatic_scroll():
-            self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True)
+            self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True, force=True)
 
     def _size_updated(
         self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True
@@ -3135,6 +3198,8 @@ class TranscriptView(ScrollableContainer):
         short of the new end — where ``watch_scroll_y`` correctly concludes they
         are not at the bottom and releases the anchor they had just asked for.
         """
+        if self._on_tail_requested is not None:
+            self._on_tail_requested()
         self.follow_tail()
 
 

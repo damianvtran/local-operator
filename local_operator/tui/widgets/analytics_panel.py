@@ -43,10 +43,11 @@ from textual.widgets import Static
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
+    SessionNode,
     UsageAggregate,
     UsagePeriod,
+    build_session_forest,
     session_table_labels,
-    short_session_label,
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -181,15 +182,44 @@ def scope_needs_cost_legend(scope: "_CostLike") -> bool:
     return (scope.cost_is_partial and scope.cost_is_known) or not scope.cost_is_known
 
 
-def _needs_cost_legend(aggregate: "UsageAggregate") -> bool:
+def _needs_cost_legend(
+    aggregate: "UsageAggregate", forest: list["SessionNode"] | None = None
+) -> bool:
     """Whether any scope on screen shows a ``+`` (partial) or ``$—`` (unknown).
 
     The legend is drawn only when a mark actually appears — a fully-priced run
     needs no explaining, and a footnote for a symbol that is not on screen is
     noise.
+
+    INVARIANT: this must name every scope from which a ``$`` figure is drawn.
+    ``by_session`` covers the nested table's rows too — a row renders its
+    subtree TOTAL, which can carry a ``+`` no individual session shows, so the
+    rolled-up scopes are added rather than relying on their parts.
+
+    ``forest`` is the one ``build_report`` already built. Pass it: building a
+    second identical forest measured 3.1 ms against 16.9 ms for the whole report
+    (~18% of it, review F3), and two independent constructions of the structure
+    the table's correctness rests on can disagree. Defaulted for the callers
+    (tests, the desktop route) that have only an aggregate.
     """
-    scopes = [aggregate, *aggregate.by_provider.values(), *aggregate.by_session.values()]
+    if forest is None:
+        forest = build_session_forest(
+            aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
+        )
+    scopes = [
+        aggregate,
+        *aggregate.by_provider.values(),
+        *aggregate.by_session.values(),
+        *(node.total for node in _iter_nodes(forest)),
+    ]
     return any(scope_needs_cost_legend(s) for s in scopes)
+
+
+def _iter_nodes(forest: list["SessionNode"]):
+    """Every node in the forest, roots and nested children alike."""
+    for node in forest:
+        yield node
+        yield from _iter_nodes(list(node.children))
 
 
 def proportion_bar(fraction: float, width: int) -> str:
@@ -714,6 +744,23 @@ def build_report(
     # frame the shared column is allowed to grow (review D3) so the extra width
     # widens the content rather than leaving a dead right gutter.
     names = getattr(aggregate, "session_names", {}) or {}
+    # ROOTS carry their subtree's total and children hang beneath them, rather
+    # than every session being listed flat with its own spend. This is the only
+    # arrangement that both credits a parent with what its subagents spent AND
+    # keeps this column summing to the headline total above it: rolling up while
+    # still listing children at top level inflates the table by $8,077 (12.7%)
+    # on the operator's ledger. See ``build_session_forest``.
+    forest = build_session_forest(
+        aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
+    )
+    # STRUCTURE FIRST, LABELS SECOND. The walk yields ``(session_id, depth,
+    # subtree total)`` and nothing about how a row reads, because the label
+    # budget below cannot be computed until the numbers that share the row are
+    # known, and the numbers come from the forest. Composing labels inside the
+    # walk (as the nesting change first did) forces them to be built against a
+    # constant, which is exactly the defect the budgeting work removed.
+    structure = _forest_rows(forest)
+
     # The label budget is decided BEFORE the labels are composed, from the frame
     # this report is being rendered into (design review D2). Composing against a
     # fixed constant and then padding to a different column is what left 34
@@ -734,26 +781,31 @@ def build_report(
     # Both tables share one ``name_col``, so the budget must clear the WIDER of
     # the two overheads — the provider table's cost column is sized
     # independently of the session table's and either may be the wider row.
+    #
+    # The session side is measured over the SUBTREE TOTALS the forest produced,
+    # not over ``by_session``'s own aggregates. A root row paints what its whole
+    # subtree spent, so its cost and calls figures are strictly larger than its
+    # own — budgeting against the flat map would understate the very columns
+    # ``_row_overhead`` exists to measure and re-open the D8/D11 clipping one
+    # rollup later.
     overhead = max(
         _row_overhead(list(aggregate.by_provider.items()), width),
-        _row_overhead(list(aggregate.by_session.items()), width),
+        _row_overhead([(sid, agg) for sid, _, agg in structure], width),
     )
     name_cap = max(_MIN_NAME_COL, min(_MAX_NAME_COL, width - overhead))
+
     # Keyed by SESSION ID, never by the rendered label. Two sessions can render
     # the same string (identical names, or names agreeing within the budget),
     # and a label-keyed dict does not merge those rows — it silently keeps the
     # last one and drops the rest, taking their tokens, calls and cost off the
     # screen entirely. On the operator's ledger that hid 46 sessions before
     # subagent naming existed and 355 after it, so the table is built as
-    # (label, aggregate) pairs whose identity is the id.
-    session_labels = session_table_labels(
-        {sid: names.get(sid, "") for sid in aggregate.by_session}, name_cap
-    )
+    # (label, depth, aggregate) triples whose identity is the id.
+    session_labels = _forest_labels(structure, names, name_cap)
     session_rows = [
-        (session_labels.get(sid, short_session_label(sid, names.get(sid, ""), name_cap)), agg)
-        for sid, agg in aggregate.by_session.items()
+        (_row_prefix(depth) + session_labels[sid], depth, agg) for sid, depth, agg in structure
     ]
-    all_names = [n for n in aggregate.by_provider] + [label for label, _ in session_rows]
+    all_names = [n for n in aggregate.by_provider] + [label for label, _, _ in session_rows]
     if all_names:
         # Grow the name column with the frame: a wide card gets a roomier column
         # (up to 48) so its width is used; a narrow one stays compact (30).
@@ -766,11 +818,15 @@ def build_report(
         lines.append(Text())
 
     if session_rows:
-        lines.append(_group_section("By session", session_rows, width, name_col))
+        # Meta says the rollup happened, because a row whose figure exceeds its
+        # own spend must say why — and it is also what tells a reader the
+        # indented rows are already counted in the row above them.
+        meta = "totals include subagents" if any(depth for _, depth, _ in session_rows) else ""
+        lines.append(_session_section(session_rows, width, name_col, meta))
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    if _needs_cost_legend(aggregate):
+    if _needs_cost_legend(aggregate, forest):
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)
@@ -880,6 +936,162 @@ def _tokens_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
     outgrow silently.
     """
     return max(8, max((len(format_tokens(agg.total_tokens)) for _, agg in groups), default=0))
+
+
+#: One indent step per level of session nesting. Two cells: enough that a
+#: sub-row is unmistakably subordinate, small enough that it cannot be what
+#: pushes the table past ``_WIDE_TABLE_MIN`` and costs everyone the cache column.
+_NEST_INDENT = 2
+
+
+def _row_prefix(depth: int) -> str:
+    """The indent-and-glyph a row at ``depth`` carries before its label.
+
+    A child carries a ``└`` glyph, not just the indent and the dim style
+    (design D4). 21% of ROOTS are themselves unnamed 12-hex ids, so an unnamed
+    root and a child differ by two leading spaces and a colour — and colour is
+    the cue that disappears under ``NO_COLOR``, a weak-dim theme, or low vision.
+    The glyph makes the hierarchy survive without it. ``/session``'s Tool
+    surface section already uses ``└`` for exactly this, so this is the
+    codebase's existing vocabulary rather than a new one.
+
+    Split out from the walk because the prefix is width the LABEL cannot also
+    spend: it is prepended after condensing, so :func:`_forest_labels` has to
+    subtract exactly this many cells from a nested row's budget. One function
+    now defines the prefix for both the measurement and the paint, so the two
+    cannot drift — the same rule ``_calls_col`` follows for the calls column.
+    """
+    if not depth:
+        return ""
+    return " " * ((depth - 1) * _NEST_INDENT) + "└ "
+
+
+def _forest_rows(forest: list["SessionNode"]) -> list[tuple[str, int, "UsageAggregate"]]:
+    """Flatten the session forest to ``(session_id, depth, aggregate)`` rows.
+
+    Depth-first so a child sits directly under its parent, and each row carries
+    the TREE total (own plus descendants) — the same figure its label is sorted
+    by. A child row's dollars are therefore already counted in its parent's, and
+    the section meta says so; only the ROOT rows sum to the table total.
+
+    Yields the session ID rather than a rendered label, because a label cannot
+    be composed until the column budget is known and the budget is computed from
+    the aggregates this walk selects. Identity stays the id all the way to the
+    paint, which is what stops two rows that read alike from collapsing into
+    one; :func:`_forest_labels` turns these into display text.
+    """
+    rows: list[tuple[str, int, "UsageAggregate"]] = []
+
+    def walk(node: "SessionNode", depth: int) -> None:
+        rows.append((node.session_id, depth, node.total))
+        for child in node.children:
+            walk(child, depth + 1)
+
+    for root in forest:
+        walk(root, 0)
+    return rows
+
+
+def _forest_labels(
+    structure: "Sequence[tuple[str, int, UsageAggregate]]",
+    names: Mapping[str, str],
+    name_cap: int,
+) -> dict[str, str]:
+    """Budgeted, collision-free display labels for every row, keyed by id.
+
+    Rows are disambiguated per DEPTH, and that is sufficient for the rendered
+    labels to be globally unique: ``_row_prefix`` is strictly wider at each
+    level, so two rows at different depths already differ in the prefix the
+    reader sees, and two rows at the same depth are separated by
+    ``session_table_labels`` in the ordinary way. Depth is keyed here by the
+    budget it produces, which is the same partition (the prefix determines the
+    budget and the budget determines the prefix) expressed as the number each
+    group is actually composed against.
+
+    A nested row's budget is reduced by its own prefix (:func:`_row_prefix`).
+    Neither slice's arithmetic knew about the other's here: the nesting change
+    prepends the glyph AFTER the label is composed, and the budgeting change
+    sized labels to fill ``name_cap`` exactly — so a depth-1 label composed to
+    the full budget and then given a 2-cell prefix is 2 cells over the column
+    it is padded to, and ``_group_section``'s truncation cuts the tail back off.
+    That is a mid-word cut with no ellipsis at the exact widths where the label
+    already fits, which is the defect this slice exists to remove. Subtracting
+    the prefix first means the composed label plus its prefix is what
+    ``name_cap`` promised, and the ellipsis lands where the reader can see it.
+
+    Floored at ``_MIN_LABEL_CHARS`` by ``session_table_labels`` itself, so a
+    pathologically deep tree on a narrow frame degrades to short labels rather
+    than to empty ones.
+    """
+    labels: dict[str, str] = {}
+    # Group by the budget each row actually gets, so every disambiguation group
+    # is decided against the width its members will really be composed at.
+    by_budget: dict[int, dict[str, str]] = {}
+    for sid, depth, _ in structure:
+        budget = name_cap - cell_len(_row_prefix(depth))
+        by_budget.setdefault(budget, {})[sid] = names.get(sid, "")
+    for budget, group in by_budget.items():
+        labels.update(session_table_labels(group, budget))
+    return labels
+
+
+def _session_section(
+    rows: list[tuple[str, int, "UsageAggregate"]],
+    width: int,
+    name_col: int,
+    meta: str = "",
+) -> Text:
+    """The per-session table, pre-ordered and pre-indented by the forest walk.
+
+    Deliberately NOT ``_group_section``: that one sorts its own rows, which
+    would scatter a subtree across the table and destroy the nesting the walk
+    just built. Everything else — the column layout, the ``_WIDE_TABLE_MIN``
+    cache shed, the dimmed lower-bound ``+`` — is identical, because the two
+    tables sit one above the other and must read as the same table.
+
+    "Identical" is load-bearing rather than aspirational: the columns here are
+    sized through the SAME ``_tokens_col``/``_calls_col``/``truncate_cells``
+    helpers ``_group_section`` and ``_row_overhead`` use. This function forked
+    from ``_group_section`` before those existed, and a fork that keeps the
+    literal ``:>8``/``:>4`` pads is the D8/D11 defect preserved in a second
+    place — the budget would be measured through the helpers while the paint
+    used constants, so the two would disagree by exactly the amount the ledger
+    exceeds the fixture (``anthropic`` at 317,977 calls overruns ``:>4`` by two
+    cells and pushes ``% cache`` off the box). Sizing runs over the rows THIS
+    table paints, which carry subtree totals, so it matches what
+    ``build_report`` budgeted against.
+    """
+    fg = semantic_style("fg")
+    dim = semantic_style("dim")
+    block = section_header("By session", meta)
+    if not rows:
+        block.append("\n  (none)", style=dim)
+        return block
+
+    show_cache = width >= _WIDE_TABLE_MIN
+    pairs = [(label, agg) for label, _, agg in rows]
+    cost_col = max(len(format_cost(agg)) for _, agg in pairs)
+    tokens_col = _tokens_col(pairs)
+    calls_col = _calls_col(pairs)
+    for label, depth, agg in rows:
+        block.append("\n")
+        # A nested row is dimmed as well as indented: its dollars are already
+        # inside the root above it, so it must not compete visually with the
+        # rows that actually partition the total.
+        style = fg if depth == 0 else dim
+        # TRUNCATE as well as pad, in CELLS, exactly as ``_group_section`` does:
+        # a bare ``{label:<{name_col}}`` pushes every numeric column right by
+        # whatever the label overran, and the cost column is the one thing this
+        # screen exists to let you scan straight down. Labels arrive budgeted
+        # (prefix included), so this is a backstop rather than the mechanism.
+        block.append(f"  {truncate_cells(label, name_col):<{name_col}}", style=style)
+        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=style)
+        block.append("   ")
+        append_cost(block, agg, cost_col, style, dim)
+        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
+        if show_cache:
+            block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
+    return block
 
 
 def _group_section(

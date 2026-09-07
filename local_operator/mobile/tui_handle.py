@@ -243,9 +243,19 @@ class TuiSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients only."""
         return self._session().frontend_state
 
-    async def subscribe_frontend(self, on_update):  # type: ignore[no-untyped-def]
+    async def subscribe_frontend(
+        self, on_update, *, display_window=False
+    ):  # type: ignore[no-untyped-def]
         """Capture snapshot+subscription atomically on Textual's owner loop."""
-        return await self._on_app(lambda: self._session().subscribe_frontend(on_update))
+        return await self._on_app(
+            lambda: self._session().subscribe_frontend(on_update, display_window=display_window)
+        )
+
+    async def record_shell(self, command: str, result: Any) -> None:
+        await self._on_app(lambda: self._session().record_shell(command, result))
+
+    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+        return await self._on_app(lambda: self._session().history_page(before, anchor))
 
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the registrant's v4 relay.

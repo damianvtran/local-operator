@@ -1160,6 +1160,8 @@ class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
 
     type: Literal["history_delta"] = "history_delta"
     messages: list[AgentMessage] = Field(default_factory=list)
+    # A replay-changing generation cannot be appended to the old viewport.
+    reset: bool = False
 
 
 class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):

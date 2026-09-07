@@ -461,12 +461,13 @@ async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch)
 async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
     tmp_path, monkeypatch
 ) -> None:
-    """The common path: ``_on_disconnected`` already ended the turn, so the
-    go-cold end is a no-op rather than a second "interrupted" notice.
+    """A transient disconnect no longer synthesises an abort; go-cold does,
+    exactly once.
 
-    ``_end_turn_locally`` returns on ``not self._streaming``, which is what
-    makes the two callers safe to stack — pinned here so a later rewrite of
-    either does not turn one owner loss into two aborted ends on the app.
+    ``_on_disconnected`` marks the turn suspect and starts recovery. When
+    recovery gives up, ``_go_cold`` is the verdict that the runtime is
+    actually gone and emits the one aborted end. Stacking the two must not
+    produce a second "interrupted" notice.
     """
     from local_operator.harness.types import AgentEndEvent
 

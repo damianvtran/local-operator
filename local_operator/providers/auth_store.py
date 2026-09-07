@@ -19,11 +19,12 @@ Side effect preserved: session stickiness for a provider is cleared as soon
 as resolution LEAVES the OAuth tier (before the env tier), so identity
 lookups stop attributing OAuth accounts.
 
-Single-process limitation (PR-24): refresh single-flight is a per-process
-``asyncio.Lock``. Two local-operator processes racing a rotating OAuth
-refresh token can invalidate each other's new token; a guard with a
-cross-process ``auth_credential_refresh_leases`` table, which is deliberately
-deferred here.
+Refresh single-flight is a per-process ``asyncio.Lock`` PLUS a cross-process
+lease in ``auth_credential_refresh_leases`` (same atomic upsert as
+:meth:`UsageCacheStore.try_lease`). Two TUI+runtime processes racing a
+rotating OAuth refresh token used to invalidate each other's new token
+(PR-24); the loser now waits out the winner's write instead of POSTing a
+consumed token. Clients are still per-process — only the refresh is leased.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 import zlib
 from collections.abc import Iterable
 from pathlib import Path
@@ -58,6 +60,11 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
+
+#: How long a process may hold the cross-process refresh lease. Copied from
+#: usage (30 s): long enough for a slow IdP, short enough that a crashed
+#: holder cannot strand every sibling until they reboot.
+AUTH_REFRESH_LEASE_MS = 30_000
 
 #: Hard ceiling on ANY credential block, whatever computed it (a usage
 #: reset estimate, a provider Retry-After header, a caller's block_ms). A
@@ -131,6 +138,12 @@ CREATE TABLE IF NOT EXISTS auth_credential_blocks (
 );
 CREATE INDEX IF NOT EXISTS idx_auth_credential_blocks_expires
   ON auth_credential_blocks(blocked_until_ms);
+
+CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
+  credential_id INTEGER PRIMARY KEY,
+  holder TEXT NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+);
 """
 
 
@@ -291,8 +304,9 @@ class AuthStore:
     where refresh/network happens.
 
     .. note::
-        Single-process (PR-24): the refresh lock is a per-process
-        ``asyncio.Lock``; cross-process refresh leases are not implemented.
+        Refresh is single-flight per process (``asyncio.Lock``) and across
+        processes (``auth_credential_refresh_leases``, same upsert as usage).
+        HTTP clients stay per-process.
     """
 
     def __init__(
@@ -329,6 +343,9 @@ class AuthStore:
         # pool whose members are all equally valid.
         self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        #: Identity of this process in lease rows, so a release only frees a
+        #: lease THIS process took. Same shape as :class:`UsageCacheStore`.
+        self._refresh_holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         # The first-resolve account pick (``_usage_ranked_order``). ON by
         # default: a store built without a settings mapping (the CLI's login
         # surface, the server's per-job stores) should still spread load, and
@@ -814,6 +831,50 @@ class AuthStore:
             self._refresh_locks[credential_id] = lock
         return lock
 
+    def _try_refresh_lease(self, credential_id: int) -> bool:
+        """Take the cross-process refresh lease if it is free (or expired).
+
+        Copied from :meth:`UsageCacheStore.try_lease`: one atomic upsert,
+        judged by rowcount, because SELECT-then-INSERT is not atomic even
+        inside ``with conn`` (sqlite3 defers BEGIN until the first write).
+        True means THIS process POSTs. False means a peer already owns the
+        refresh; the caller re-reads the row instead of joining the fan-out.
+        A coordination failure returns True — efficiency depends on the lease,
+        correctness of a single refresher does not.
+        """
+        now = self._now_ms()
+        expires = now + AUTH_REFRESH_LEASE_MS
+        try:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO auth_credential_refresh_leases
+                    (credential_id, holder, expires_at_ms)
+                VALUES (?, ?, ?)
+                ON CONFLICT(credential_id) DO UPDATE SET
+                  holder = excluded.holder,
+                  expires_at_ms = excluded.expires_at_ms
+                WHERE auth_credential_refresh_leases.expires_at_ms <= ?
+                """,
+                (credential_id, self._refresh_holder, expires, now),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error:
+            logger.debug("auth refresh lease failed", exc_info=True)
+            return True
+
+    def _release_refresh_lease(self, credential_id: int) -> None:
+        """Free the lease if this process holds it (a refresh finished)."""
+        try:
+            self._conn.execute(
+                "DELETE FROM auth_credential_refresh_leases "
+                "WHERE credential_id = ? AND holder = ?",
+                (credential_id, self._refresh_holder),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            logger.debug("auth refresh lease release failed", exc_info=True)
+
     @staticmethod
     def _needs_refresh(creds: dict[str, Any], *, force: bool = False) -> bool:
         if force:
@@ -856,6 +917,25 @@ class AuthStore:
             fresh = dict(current.data)
             if not self._needs_refresh(fresh, force=force):
                 return fresh
+            if not self._try_refresh_lease(row.id):
+                # A peer holds the lease. Wait out a slice of it and re-read:
+                # POSTing the same rotating refresh token is how the loser
+                # used to earn a real invalid_grant against a live grant.
+                await asyncio.sleep(0.05)
+                now_row = self.get_credential(row.id)
+                if now_row is None or now_row.disabled_cause is not None:
+                    raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                now_data = dict(now_row.data)
+                if not self._needs_refresh(now_data, force=force):
+                    return now_data
+                # Peer still in flight or failed without writing. Fall through
+                # and try the lease again below only if force requires it;
+                # otherwise serve whatever they left. force=True still needs
+                # a live token, so we retry the lease once.
+                if not force:
+                    return now_data
+                if not self._try_refresh_lease(row.id):
+                    return now_data
             # Imported here, not at module scope: `callback_server` drags in
             # http.server/ssl/email (~138 ms, 150-odd modules), and three
             # separate comments in this codebase exist to stop anyone
@@ -866,6 +946,7 @@ class AuthStore:
             try:
                 refreshed = await refresh(fresh)
             except AuthStoreError:
+                self._release_refresh_lease(row.id)
                 raise
             except InvalidGrantError as exc:
                 # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
@@ -895,11 +976,14 @@ class AuthStore:
                         "process; keeping its token rather than declaring the grant dead",
                         row.id,
                     )
+                    self._release_refresh_lease(row.id)
                     return dict(now_row.data)
+                self._release_refresh_lease(row.id)
                 raise CredentialInvalidError(
                     f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
                 ) from exc
             except Exception as exc:
+                self._release_refresh_lease(row.id)
                 raise AuthStoreError(f"OAuth refresh failed for '{row.provider}': {exc}") from exc
             merged = dict(fresh)
             merged.update(refreshed)
@@ -923,12 +1007,14 @@ class AuthStore:
                     "refresh race on %s: another process refreshed first; " "keeping its token",
                     row.id,
                 )
+                self._release_refresh_lease(row.id)
                 return dict(now_row.data)
             self._conn.execute(
                 "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(merged), self._now_ms(), row.id),
             )
             self._conn.commit()
+            self._release_refresh_lease(row.id)
             return merged
 
     async def ensure_oauth_fresh(self, credential_id: int) -> dict[str, Any] | None:

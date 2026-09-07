@@ -43,7 +43,8 @@ Two things it does that no other picker in this app does:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -389,6 +390,18 @@ class _QuestionState:
     revealed: bool = False
 
 
+@dataclass
+class AskPickerSnapshot:
+    """Transient view data; never serialize a possibly secret unfinished answer."""
+
+    question_ids: tuple[str, ...]
+    states: list[_QuestionState] = field(repr=False)
+    answers: dict[str, list[str]] = field(repr=False)
+    index: int = 0
+    offset: int = 0
+    focused: bool = False
+
+
 @dataclass(frozen=True)
 class _CardLayout:
     """How one paint divides the card's rows, decided before anything is drawn.
@@ -656,6 +669,31 @@ class AskPickerScreen(Container):
     # names are already Textual's (``Widget.visible``, ``Widget._render``) and
     # shadowing them breaks focus, layout or paint from inside the screen, with
     # a traceback that points somewhere else entirely.
+    _restored_focus: bool | None = None
+    source_binding: tuple[Any, ...] | None = None
+
+    def snapshot_state(self) -> AskPickerSnapshot:
+        return AskPickerSnapshot(
+            tuple(question.id for question in self._questions),
+            [replace(state, checked=set(state.checked)) for state in self._states],
+            {key: list(values) for key, values in self._answers.items()},
+            self._index,
+            self._offset,
+            self.has_focus,
+        )
+
+    def restore_state(self, snapshot: AskPickerSnapshot) -> None:
+        if snapshot.question_ids != tuple(question.id for question in self._questions):
+            return
+        self._states = [replace(state, checked=set(state.checked)) for state in snapshot.states]
+        self._answers = {key: list(values) for key, values in snapshot.answers.items()}
+        self._index = snapshot.index
+        self._offset = snapshot.offset
+        self._restored_focus = snapshot.focused
+        self._invalidate_description_wraps()
+        if self.is_mounted:
+            self._repaint()
+
     @property
     def question(self) -> AskQuestion:
         return self._questions[self._index]
@@ -2159,7 +2197,9 @@ class AskPickerScreen(Container):
         """
         screen = self.screen
         self._restore_target = screen.focused if screen is not None else None
-        if not self._composer_has_draft():
+        if self._restored_focus is True or (
+            self._restored_focus is None and not self._composer_has_draft()
+        ):
             self.focus()
         self._repaint()
 

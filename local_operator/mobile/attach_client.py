@@ -149,6 +149,7 @@ class AttachClient:
         events: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
+        display_window: bool = False,
         locality: str = "local",
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
@@ -171,6 +172,7 @@ class AttachClient:
         self._events = events
         self._on_event = on_event
         self._frontend_state = frontend_state
+        self._display_window = display_window
         # Which action-carrying slash receipts THIS client renders itself (see
         # ``SLASH_ACTION_RECEIPTS``). Declaring them is what stops the runtime
         # from also submitting the request: a client that says nothing is
@@ -240,6 +242,8 @@ class AttachClient:
             auth["events"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
+        if self._display_window and "display-history-window-v1" in record.capabilities:
+            auth["display_window"] = True
         if self._slash_consumers is not None:
             # Additive and advisory, exactly the shape ``events`` and
             # ``frontend_state`` are: an older owner ignores the unknown auth
@@ -613,6 +617,17 @@ class AttachClient:
         the ordinary residency drain.
         """
         return await self._request("retire_if_pristine")
+
+    async def record_shell(self, command: str, result: dict[str, Any]) -> str:
+        return str(await self._request_payload("record_shell", command=command, result=result))
+
+    async def frontend_sync(self) -> Any:
+        """Refresh the canonical cut without abandoning admitted RPCs."""
+        return await self._request_payload("frontend_sync")
+
+    async def history_page(self, before: str, anchor: str = "") -> Any:
+        """Read a signed canonical display page on the authenticated socket."""
+        return await self._request_payload("history_page", before=before, anchor=anchor)
 
     async def request_refresh(self) -> str:
         """Ask a STALE owner to retire now if it is idle, so the next engage

@@ -88,6 +88,48 @@
  * composer — see `TranscriptView` for why that row is the transcript's.
  */
 
+#session-workspace {
+    width: 1fr;
+    height: 1fr;
+    layers: default sidebar;
+}
+
+#session-conversation {
+    width: 1fr;
+    height: 1fr;
+}
+
+/* Width and horizontal padding are set by `_sync_sidebar_layout`, not here:
+ * the gutter that separates the list from the conversation has to MIRROR with
+ * `tui.sidebar_position` (right edge when docked left, left edge when docked
+ * right), which a static rule cannot express. The values below are the
+ * left-docked resting state so the widget still renders sanely before the
+ * first layout pass. */
+SessionSidebar {
+    width: 33;
+    height: 1fr;
+    padding: 0 3 0 1;
+    background: $lo-bg;
+    color: $lo-fg;
+    overflow: hidden;
+    /* Every row is a click target that attaches that session, so the pointer
+     * says so before the click does — the same affordance `SubagentRow` and
+     * the subagent-view hints carry. Textual emits this as an OSC pointer
+     * shape; a terminal without the Kitty pointer-shape protocol ignores it
+     * and loses nothing, which is why the row's hover tint (painted in
+     * `render`, since rows are Text spans in ONE widget and cannot be reached
+     * by `:hover`) is the affordance that does not depend on it. */
+    pointer: pointer;
+}
+
+/* Small terminals keep the conversation's full line length. Each layer lays
+ * out independently, so the list overlays only the transcript; its height is
+ * bounded above the live input dock by the app. No frame or dividing rule. */
+.sidebar-overlay SessionSidebar {
+    layer: sidebar;
+    background: $lo-surface;
+}
+
 Screen {
     background: $lo-bg;
     color: $lo-fg;
@@ -369,7 +411,7 @@ ToolCard.tool-error {
 /* Mouse affordance: the whole row is the click target for expand/collapse,
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
-ToolCard:hover, WakeBlock:hover {
+ToolCard:hover, WakeBlock:hover, .interactive-notice:hover {
     background: $lo-overlay;
 }
 
@@ -386,7 +428,7 @@ ToolCard:hover, WakeBlock:hover {
  * Last rule in the block, so it wins over the state tints AND over :hover:
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
-ToolCard:focus, WakeBlock:focus {
+ToolCard:focus, WakeBlock:focus, .interactive-notice:focus {
     background: $lo-tint-select;
 }
 

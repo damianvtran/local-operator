@@ -72,6 +72,26 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    (
+        "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
+        "<path>.remove",
+        "Textual TranscriptView.remove unmounts a widget; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._prepare_sidebar_session",
+        "<path>.remove",
+        "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
+    ),
+    (
+        "local_operator/tui/session_drafts.py::SessionDraftStore._write",
+        "os.replace",
+        "Atomic file replacement inside this store's private tempfile directory, never sessions/",
+    ),
+    (
+        "local_operator/tui/session_drafts.py::SessionDraftStore._write",
+        "os.unlink",
+        "Removes only its named temporary draft file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",

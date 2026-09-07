@@ -125,6 +125,10 @@
       "custom",
       "provider-windowed"
     ],
+    "sidebar_shot.py": [
+      "base",
+      "wide"
+    ],
     "shot_login.py": [
       "prompt",
       "empty-submit",

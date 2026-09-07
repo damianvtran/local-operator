@@ -1012,3 +1012,18 @@ def test_a_fork_of_a_fork_is_stamped_with_its_own_id_at_every_hop() -> None:
     second_fork = FrontendStateStore.from_checkpoint(_owner_over("fork20000001", first_fork)).state
     assert second_fork.session_id == "fork20000001"
     assert second_fork.jobs == ()
+
+
+def test_agent_end_records_last_turn_outcome() -> None:
+    """A rebinding viewer needs the logical-turn outcome after live_events clear."""
+    store = FrontendStateStore(_state())
+    session = SimpleNamespace(effective_model=_spec())
+    store.observe_event(session, AgentStartEvent(generation=3))
+    store.observe_event(session, AgentEndEvent(messages=[Message.assistant("ok")]))
+    assert store.state.last_turn_outcome == "completed"
+    store.observe_event(session, AgentStartEvent(generation=4))
+    store.observe_event(session, AgentEndEvent(aborted=True))
+    assert store.state.last_turn_outcome == "aborted"
+    store.observe_event(session, AgentStartEvent(generation=5))
+    store.observe_event(session, AgentEndEvent(error="boom"))
+    assert store.state.last_turn_outcome == "error"

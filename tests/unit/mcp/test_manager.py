@@ -17,6 +17,7 @@ import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
+from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mcp.manager import (
     McpManager,
     ServerConnection,
@@ -24,7 +25,11 @@ from local_operator.mcp.manager import (
     build_stdio_argv,
     stdio_start_new_session,
 )
-from local_operator.mcp.tool_cache import McpToolCache
+from local_operator.mcp.tool_cache import McpToolCache, config_digest
+
+
+def _stdio_digest(command: str) -> str:
+    return config_digest(MCPStdioServerConfig(command=command))
 
 
 def _tool(name: str, schema: dict[str, Any] | None = None) -> Tool:
@@ -138,6 +143,7 @@ class TestFastStartupGate:
                     "inputSchema": {"type": "object"},
                 }
             ],
+            _stdio_digest("slow-cmd"),
         )
         manager = McpManager(str(project), tool_cache=cache)
 
@@ -436,7 +442,11 @@ class TestDeferredExecuteFailure:
         self, project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cache = McpToolCache(tmp_path / "cache.db")
-        cache.put("slow", [{"name": "search", "description": "", "inputSchema": {}}])
+        cache.put(
+            "slow",
+            [{"name": "search", "description": "", "inputSchema": {}}],
+            _stdio_digest("slow-cmd"),
+        )
         manager = McpManager(str(project), tool_cache=cache)
         release = asyncio.Event()
 
@@ -787,6 +797,7 @@ class TestBreakerTrippedCallsFailPromptly:
         cache.put(
             "fast",
             [{"name": "search", "description": "", "inputSchema": {"type": "object"}}],
+            _stdio_digest("fast-cmd"),
         )
         manager = McpManager(str(project), tool_cache=cache)
         state = {"fail": False}
@@ -832,7 +843,11 @@ class TestBreakerTrippedCallsFailPromptly:
         self, project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         cache = McpToolCache(tmp_path / "cache.db")
-        cache.put("slow", [{"name": "search", "description": "", "inputSchema": {}}])
+        cache.put(
+            "slow",
+            [{"name": "search", "description": "", "inputSchema": {}}],
+            _stdio_digest("slow-cmd"),
+        )
         manager = McpManager(str(project), tool_cache=cache)
         release = asyncio.Event()
 

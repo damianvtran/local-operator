@@ -177,6 +177,26 @@ def test_text_mode_is_a_receipt_with_dimensions(monkeypatch) -> None:
     assert "image attached (160x100)" in _plain(block)
 
 
+def test_parked_kitty_image_keeps_grid_without_protocol_writes(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "kitty")
+    written: list[str] = []
+    set_escape_writer(written.append)
+    block = ImageBlock(_png(1600, 1000), navigation_visible=False)
+    grid = block._grid()
+    assert not written and PLACEHOLDER not in _plain(block)
+    assert grid[0] > 0 and grid[1] > 0
+    block.set_navigation_visible(True)
+    block._repaint()
+    assert sum("a=t,i=" in seq for seq in written) == 1
+    assert sum("a=p,i=" in seq for seq in written) == 1
+    assert PLACEHOLDER in _plain(block)
+    writes = len(written)
+    block.set_navigation_visible(False)
+    block._repaint()
+    assert len(written) == writes and block._grid() == grid
+    assert PLACEHOLDER not in _plain(block)
+
+
 def test_kitty_mode_transmits_once_and_replaces_on_resize(monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "kitty")
     written: list[str] = []

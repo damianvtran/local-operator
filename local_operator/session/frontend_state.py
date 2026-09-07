@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -53,6 +53,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -130,8 +131,176 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: is bounded by roster COUNT alone at roughly 1,400 children. That is stated
 #: rather than engineered away: the deepest roster observed across every session
 #: on the reference machine is 19.
-JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
+#:
+#: Reduced from 120,000 by the 128 bytes that `history_generation` and its
+#: sibling window fields add to every frame. The socket line limit is fixed at
+#: 1 MiB, so a new session-level field has to be PAID FOR out of an elastic
+#: budget rather than shrinking the guard's margin: at the worst case the size
+#: guard asserts, the frame had 13 bytes of headroom and the new field costs
+#: 25. Per-row text is the right place to take it from — it is already shared,
+#: already floored at a legible preview, and 128 chars spread across a roster
+#: is invisible, whereas an over-limit frame cannot be sent at all.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
 JOB_TEXT_FLOOR_CHARS = 200
+
+#: Fields :meth:`FrontendStateStore.read_field` may serve without the
+#: whole-state deep copy — see that method for the measurement that motivates
+#: it.
+#:
+#: The membership test is the SAFETY ARGUMENT, not a convenience list, and the
+#: bar is DEEP IMMUTABILITY OF THE HANDED-OUT VALUE — not "the reducer replaces
+#: it".
+#:
+#: An earlier version of this set admitted `selected_model`, `effective_model`
+#: and `last_usage` on the reducer-replacement argument. That argument is
+#: wrong, and review round 2 (Q6/F4) demonstrated it: `ModelSpec` and `Usage`
+#: are ordinary NON-FROZEN pydantic models, so `read_field` handed out the
+#: store's own instance and a caller writing `spec.model_id = ...` or
+#: `usage.input_tokens += n` rewrote canonical session state in place. Nothing
+#: shipped did that — but this codebase accumulates `Usage` with `+=` in
+#: `harness/jobs.py` and `harness/subagent.py`, so it was one ordinary edit
+#: from silent corruption, and `state` DOES protect those fields by returning a
+#: fresh object per read. Admitting them removed an existing invariant.
+#:
+#: They are therefore back on the copying path. Freezing the two models was the
+#: alternative and was rejected here: 13 in-place mutation sites across the
+#: harness rely on them being writable, which is a refactor well outside the
+#: change that introduced this accessor. The measured saving is nearly all in
+#: the scalars regardless (a per-read `model_copy` costs ~0.0075 ms against
+#: ~0.0001 ms shared, versus ~0.15 ms for the whole-state clone at a 19-job
+#: roster), so the fast path keeps the reads that are genuinely free.
+#:
+#: What remains admitted satisfies both requirements:
+#:
+#: 1. DEEPLY IMMUTABLE. Every entry is a `str`, `bool`, `int`, `float` or
+#:    `None`. A caller cannot mutate any of them, so sharing the value cannot
+#:    reach the store at all.
+#: 2. NOT A MUTABLE CONTAINER. `jobs`, `usage_components`, `child_costs`,
+#:    `attention`, `context_breakdown` and `todos` are excluded even though
+#:    single-field readers exist for some: a `dict`/`list` handed out unguarded
+#:    can be mutated by its caller, which is exactly what `state`'s deep copy
+#:    exists to prevent. Those reads keep paying for it.
+#:
+#: `test_shareable_state_fields_are_real_and_immutable` asserts both properties
+#: against `model_fields`, so neither a renamed field nor a newly mutable type
+#: can silently re-enter this set.
+_SHAREABLE_STATE_FIELDS = frozenset(
+    {
+        "streaming",
+        "session_id",
+        "epoch",
+        "sequence",
+        "history_generation",
+        "conversation_title",
+        "goal",
+        "active_agent",
+        "active_team",
+        "context_tokens",
+        "context_window",
+        "context_is_estimate",
+        "cumulative_parent_cost",
+    }
+)
+#: Wire budget for the in-flight seed's retained tool results.
+#:
+#: ``live_events`` used to bound itself: every ``tool_execution_end`` ERASED its
+#: call's row, so a turn of completed calls left zero rows behind and the field
+#: could not grow. Retaining the end (so a viewer that reconnects mid-turn can
+#: settle a card for work that finished while it was away) removed that bound
+#: and made the field accumulate one whole tool result per completed call —
+#: measured at 2,028,680 B over 100 calls, putting the ``frontend_sync`` frame
+#: at 2,029,839 B against the socket's 1,048,576-byte line limit. Overflow
+#: began at ~18 completed calls returning 60 KB each, which is an ordinary
+#: heavy turn rather than a pathological one.
+#:
+#: This is the third instance of the shape :func:`sync_wire_payload` documents
+#: after trajectories and ``usage_components``, and the consequence is the one
+#: ``server.py`` records: an oversized sync is UNREADABLE rather than merely
+#: large, so the viewer waits out its sync timeout and degrades to a cold
+#: session with no roster and no todos.
+#:
+#: Bounded by TRUNCATING result text rather than by dropping rows, because the
+#: seed's job is to say WHICH calls ended and HOW — ``on_tool_ended`` needs
+#: ``tool_call_id``, ``is_error`` and a first line to settle the card, and
+#: dropping a row would strand the card live and re-open the very
+#: ``⊘ interrupted`` artefact the retention exists to close. The full result is
+#: never lost: it is in the durable transcript, and the live relay delivers it
+#: untouched to a viewer that stayed connected. Only the RECONNECT seed is
+#: clipped, and only its text.
+#:
+#: A shared frame budget rather than a per-row cap, for the reason
+#: :data:`JOB_TEXT_FRAME_BUDGET_CHARS` gives: "bounded per row, unbounded in
+#: total" is the same defect one level up, and call count per turn has no cap.
+#: The floor keeps every retained end legible — a card that says how it ended
+#: is what stops the retirement pass marking it interrupted.
+#:
+#: The budget is spent against each row's MEASURED serialized size, not against
+#: the length of the fields this module happens to know about. The first cut of
+#: this bound clipped ``content[].text`` and so was blind to every payload that
+#: carries no ``text`` key: an ``ImageContent`` block holds base64 in ``data``
+#: (one permitted image is ~1.4 MB encoded — larger than the whole line limit
+#: by itself, and 3 image ``read`` calls measured a 1,524,116-byte frame), and
+#: ``result.details`` holds the MCP bridge's full ``server_result`` dump (50
+#: calls measured 2,619,443 B). Both sailed through a bound that was looking at
+#: a different key. Measuring the row is what makes the NEXT payload-bearing
+#: field bounded on the day it is added rather than on the day it overflows.
+LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 60_000
+LIVE_EVENT_TEXT_FLOOR_CHARS = 200
+
+#: Placeholder for a result block too big to ride the reconnect seed.
+#:
+#: A dropped block still leaves the card settleable — ``on_tool_ended`` needs
+#: the id and outcome, not the payload — but a block that VANISHES reads as a
+#: tool that returned nothing. The stand-in keeps the block's own shape (a
+#: valid ``TextContent``) so the viewer renders it as an ordinary row, and says
+#: what happened, because "the reconnect dropped this" and "the tool returned
+#: nothing" are different facts and only one of them is about the tool.
+#:
+#: The full payload is never lost: it is in the durable transcript, and a
+#: viewer that stayed connected received it untouched over the live relay.
+#:
+#: ``ToolResult.text`` joins content blocks with ``""``
+#: (``harness/types.py``), so a marker following a caption renders as
+#: ``screenshot of the page[dropped from the reconnect snapshot…]`` — the two
+#: run together and the marker reads as part of what the tool said. The
+#: separator is therefore carried by the marker itself, prepended only when an
+#: earlier block already contributed text (see
+#: :data:`LIVE_EVENT_BLOCK_ELIDED_SEPARATOR`); as the first block it would
+#: otherwise open the card with a blank line.
+#:
+#: Fixed here rather than at the join because ``ToolResult.text`` is a shared
+#: API with other consumers, and widening its separator to suit this one
+#: caller would change how every existing multi-block result renders. A marker
+#: this module injects is this module's to make well-formed.
+LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER = "[dropped from the reconnect snapshot — see the transcript]"
+
+#: Separates the elided-block marker from a preceding block's text.
+LIVE_EVENT_BLOCK_ELIDED_SEPARATOR = "\n"
+
+#: Cap on retained ``tool_execution_end`` rows in the seed, newest kept.
+#:
+#: The text budget above bounds what a row COSTS; it does not bound how many
+#: rows there are, and "bounded per row, unbounded in total" is exactly the
+#: defect the budget exists to answer. The floor makes that gap reachable: at
+#: :data:`LIVE_EVENT_TEXT_FLOOR_CHARS` every row still costs ~500 B, and even
+#: stripped to bare identity a row is ~300 B, so 5,000 completed calls in one
+#: turn measured 2,528,943 B — back over the line limit with the text budget
+#: fully applied. A cap is the only thing that closes it.
+#:
+#: 100 holds the field's worst case to ~71 KB — the same order as
+#: ``usage_components`` (69 KB), and a fair share of a frame whose roster alone
+#: can run to 620 KB. The all-year fixture is what set the number, and it had
+#: to be set twice: at 400 the seed took 255 KB and at 150 it took 107 KB, both
+#: of which put the frame back over the limit once stacked on that roster. With
+#: every other field at its own maximum the fixture leaves ~99 KB here, so
+#: "bounded" is not sufficient on its own — the bound has to be small enough to
+#: COEXIST. A viewer needs the seed only for the CURRENT turn's unsettled
+#: cards, and 100 completed calls in one turn is already far beyond that.
+#:
+#: Dropping OLDEST-first is what makes the cap safe: the newest calls are the
+#: ones most likely to still be on screen unsettled, and a dropped row costs
+#: nothing durable — the transcript replay repaints those cards regardless.
+LIVE_EVENT_END_ROWS_MAX = 100
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
 #:
@@ -478,6 +647,10 @@ _FRONTEND_LOCAL_SLASHES = {
     "help",
     "exit",
     "clear",
+    # The terminal schedules source-bound iterations and owns sidebar focus;
+    # each iteration still submits through that conversation's real owner.
+    "loop",
+    "sidebar",
     # The clipboard is the machine the USER IS SITTING AT, and every part of
     # this command is already here: the transcript it reads is painted by this
     # frontend, the picker it opens is painted by this frontend, and the OSC 52
@@ -1364,6 +1537,14 @@ class FrontendSessionState(BaseModel):
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
     streaming: bool = False
     generation: int = 0
+    #: How the last logical turn ended, for a viewer that dropped mid-turn and
+    #: rebinds after it settled. ``live_events`` is emptied at ``agent_end``, so
+    #: the real end is not in the snapshot; without this a rebind cannot tell
+    #: aborted from completed and would synthesise ``aborted=True`` (today's
+    #: false "interrupted"). ``""`` is the wire default and the old-runtime
+    #: value — treat as aborted. Additive; extra="allow" keeps older readers
+    #: tolerant. One value per user prompt, not per compaction continuation.
+    last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
     activity_started_at: float | None = None
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
@@ -1398,6 +1579,7 @@ class FrontendSessionState(BaseModel):
     #: omitting hundreds of them.
     model_catalogue_truncated: bool = False
     history_cursor: str | None = None
+    history_generation: int = 0
     attachment_root: str | None = None
     # Durable receipts are independent of owner epoch and pending action gates.
     attention: dict[str, Any] = Field(default_factory=dict)
@@ -1492,6 +1674,7 @@ class FrontendSync(BaseModel):
     sequence: int
     snapshot: FrontendSessionState
     live_cursor: str | None = None
+    display_history: DisplayHistoryWindow | None = None
 
 
 class FrontendUpdate(BaseModel):
@@ -1566,6 +1749,12 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
       undercount money, while folding is lossless. See
       :func:`_folded_components`.
 
+    * ``snapshot.live_events`` — the in-flight seed. It bounded itself while a
+      ``tool_execution_end`` erased its call's row; once the end is RETAINED so
+      a reconnecting viewer can settle the card, one whole tool result per
+      completed call accumulates for the turn. See
+      :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS`.
+
     :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
     field appears.
     """
@@ -1575,6 +1764,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         components = snapshot.get("usage_components")
         if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
             snapshot["usage_components"] = _capped_components(components)
+        _bound_live_events_in_place(snapshot)
         jobs = snapshot.get("jobs")
         if isinstance(jobs, list):
             # Share one text budget across the roster so the frame does not grow
@@ -1678,6 +1868,192 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     budget for a line nobody sends.
     """
     return len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
+
+
+def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
+    """Clip the in-flight seed's retained tool results to their wire bound.
+
+    See :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` for why the seed grew a
+    bound at all and why it clips TEXT instead of dropping rows: every retained
+    end must survive as a row, because the row is what settles the card.
+
+    The budget is shared only across the rows that actually carry result text,
+    for the reason :func:`_bound_job_text_in_place` gives — the common row
+    contributes nothing, and dividing by it would starve the few that do. The
+    floor wins over an arithmetically smaller share so a turn with very many
+    calls still hands each card a legible line rather than an empty one; that
+    trades an exactly-proportional budget for a guarantee the card can settle,
+    which is the property this field exists to provide.
+
+    Truncation is marked with an ellipsis, as the neighbouring text bounds do
+    it, so a reader can tell a clipped preview from a tool that really did
+    return that little.
+    """
+    events = snapshot.get("live_events")
+    if not isinstance(events, list):
+        return
+    # Row COUNT first, then per-row text: see :data:`LIVE_EVENT_END_ROWS_MAX`
+    # for why the text budget alone leaves the frame reachable.
+    #
+    # An evicted end takes its START with it. Evicting the end alone would
+    # leave the start behind as a card the viewer paints LIVE and can never
+    # settle — a stranded spinner, and then an `⊘ interrupted` at retirement on
+    # a call that succeeded. That is the precise artefact this retention was
+    # added to remove, so the cap must not reintroduce it by the back door.
+    # A start with no end is a call still RUNNING and is always kept: that card
+    # is the one the viewer most needs.
+    end_positions = [
+        index
+        for index, item in enumerate(events)
+        if isinstance(item, dict) and item.get("type") == "tool_execution_end"
+    ]
+    if len(end_positions) > LIVE_EVENT_END_ROWS_MAX:
+        evicted_ends = end_positions[: len(end_positions) - LIVE_EVENT_END_ROWS_MAX]
+        evicted = set(evicted_ends)
+        settled = {
+            str(events[index].get("tool_call_id") or "")
+            for index in evicted_ends
+            if events[index].get("tool_call_id")
+        }
+        for index, item in enumerate(events):
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "tool_execution_start"
+                and str(item.get("tool_call_id") or "") in settled
+            ):
+                evicted.add(index)
+        events = [item for index, item in enumerate(events) if index not in evicted]
+        snapshot["live_events"] = events
+    # Only ``tool_execution_end`` retains a payload; starts and message rows
+    # are already small and are folded by phase, so they are not counted into
+    # the share they would otherwise dilute.
+    results = [
+        result
+        for item in events
+        if isinstance(item, dict) and item.get("type") == "tool_execution_end"
+        if isinstance(result := item.get("result"), dict)
+    ]
+    if not results:
+        return
+    share = max(LIVE_EVENT_TEXT_FLOOR_CHARS, LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS // len(results))
+    for result in results:
+        _bound_live_result_in_place(result, share=share)
+
+
+def _live_row_cost(value: Any) -> int:
+    """Serialized size of one payload, which is the only honest unit here.
+
+    ``len(str)`` was the round-3 defect: it measures the fields this module
+    thought to look at, so a payload under a different key was not "small", it
+    was UNMEASURED. Serializing is what makes the budget total.
+    """
+    try:
+        return len(json.dumps(value, default=str))
+    except Exception:  # noqa: BLE001 — see below; narrowing this reopens the hole
+        # A payload that will not serialize cannot be sized, so it is treated
+        # as too big to keep rather than waved through unmeasured — the exact
+        # mistake this function exists to stop making.
+        #
+        # Deliberately EVERY exception, not the `TypeError`/`ValueError` that
+        # `json.dumps` documents. `default=str` calls `str()` on whatever it
+        # does not recognise, so the failure mode is the payload's own
+        # `__str__`, which may raise anything at all; a narrower clause lets
+        # that propagate out of `sync_wire_payload` and fail the whole attach
+        # over one unmeasurable block. Unreachable today — rows are built from
+        # `event.model_dump(mode="json")` and are JSON-safe by construction —
+        # but this function's entire contract is that nothing passes it
+        # unmeasured, and a contract with a gap for "raised something
+        # unexpected" is not that contract (round-4 MINOR-1).
+        return LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
+
+
+def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
+    """Spend one retained end's share across everything it actually carries.
+
+    Driven by MEASURED cost rather than by key names, so a payload-bearing
+    field cannot escape by not being a string (see
+    :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` for the two that did).
+
+    Order matters and is deliberate. ``details`` goes first: it is machine
+    detail for a card the viewer is only settling, so it is the cheapest thing
+    to lose and dropping it often buys the whole share back. Text is clipped
+    next, because a clipped preview still tells the user what the tool said.
+    Whole blocks are dropped last and only when they still do not fit, since a
+    dropped block is the biggest loss of the three.
+
+    Every branch keeps the row itself, and the row is what settles the card —
+    dropping the row would strand the card live and re-open the
+    ``⊘ interrupted`` artefact this retention exists to close.
+    """
+    if _live_row_cost(result) <= share:
+        return
+    # ``details`` is not rendered on the card at all (``on_tool_ended`` reads
+    # it only for the write/edit counters), so an oversized one is pure weight
+    # on a frame that must fit. The MCP bridge's ``server_result`` dump reached
+    # 2.6 MB across 50 calls.
+    details = result.get("details")
+    if details is not None and _live_row_cost(details) > share // 4:
+        result["details"] = None
+    blocks = [block for block in (result.get("content") or []) if isinstance(block, dict)]
+    remaining = share
+    # Per ROW, not per block: a result of many blocks would otherwise multiply
+    # its own share and reinstate the unbounded shape one level further down.
+    # The floor is a promise that the CARD stays legible, so it is spent once —
+    # granting it to every block turns a shared ceiling into a per-block
+    # entitlement, and N blocks then cost N x floor with no ceiling at all.
+    # Measured when this guard was briefly lost in a rewrite: at the 100-row
+    # cap the crossover was 42 text blocks per row, 1,102,743 B against a
+    # 1,048,576 B limit, while the per-row form stays flat. ``content`` is
+    # typed ``list[dict[str, Any]]`` and this module deliberately does not
+    # enumerate what rides in it, so COUNT has to be bounded here for the same
+    # reason SIZE is — a producer emitting many blocks is a change in data,
+    # not a change in this file.
+    floor_spent = False
+    # Whether any block so far put text on the card, which is what a marker
+    # needs to know to separate itself from it.
+    emitted_text = False
+    for block in blocks:
+        cost = _live_row_cost(block)
+        if cost <= remaining:
+            remaining -= cost
+            # Tracked on the UNCLIPPED path too: the common shape is a small
+            # caption that fits, followed by an image that does not, and it is
+            # exactly that caption a marker must separate itself from.
+            emitted_text = emitted_text or bool(block.get("text"))
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            # Clip in CHARACTERS against the remaining budget, less the fixed
+            # overhead of the block's own envelope, so a clipped block lands
+            # under the share rather than merely smaller than it was.
+            envelope = cost - len(text)
+            allowance = remaining - envelope
+            if not floor_spent:
+                allowance = max(LIVE_EVENT_TEXT_FLOOR_CHARS, allowance)
+                floor_spent = True
+            allowance = max(0, allowance)
+            if len(text) > allowance:
+                block["text"] = text[:allowance] + "…"
+        else:
+            # No text to clip — an image's base64, or any future block whose
+            # payload lives under a key this function has never heard of. It is
+            # replaced rather than emptied so the row still reads as a block.
+            #
+            # The marker separates itself from whatever precedes it, because
+            # ``ToolResult.text`` concatenates blocks with no delimiter and a
+            # caption would otherwise run straight into it (round-4 Q4-2). Led
+            # by the text ALREADY EMITTED rather than by block position: a
+            # marker after an image-only block has nothing to separate from,
+            # and would open the card with a blank line.
+            block.clear()
+            block["type"] = "text"
+            block["text"] = (
+                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+                if emitted_text
+                else LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+            )
+        emitted_text = emitted_text or bool(block.get("text"))
+        remaining = max(0, remaining - _live_row_cost(block))
 
 
 def _bound_job_text_in_place(job: dict[str, Any], *, share: int) -> None:
@@ -2203,6 +2579,47 @@ class FrontendStateStore:
             update={"jobs": _FrozenSequence(_public_job(job) for job in self._state.jobs)}
         )
 
+    def read_field(self, name: str) -> Any:
+        """One field of the state, WITHOUT cloning the whole state.
+
+        The general sibling of :attr:`pending_gate`, and it exists for the same
+        measured reason: `state` deep-copies every job, usage component and
+        trajectory row so no caller can mutate the store's instance, and the
+        per-frame accessors that read a SINGLE field were paying that clone
+        each time. Profiling one cold sidebar navigation measured 37 `state`
+        reads and ~25,000 `deepcopy` calls, ~30 ms of a 135 ms frame, almost
+        all of it from single-field reads like `model_label` and
+        `effective_model`.
+
+        RESTRICTED TO DEEPLY IMMUTABLE FIELDS, and the restriction is enforced
+        rather than documented. The value is the store's OWN object, so the bar
+        is that a caller cannot mutate it at all — every admitted field is a
+        `str`/`bool`/`int`/`float`/`None`. Model-valued fields and mutable
+        collections are deliberately absent: reading those still goes through
+        `state` and still pays for the deep copy that protects them. See
+        :data:`_SHAREABLE_STATE_FIELDS` for why "the reducer replaces it" was
+        NOT a sufficient bar.
+        """
+        if name not in _SHAREABLE_STATE_FIELDS:
+            raise KeyError(
+                f"{name!r} is not a copy-free state field; read it through `state` "
+                "so the caller cannot mutate the store's own instance"
+            )
+        return getattr(self._state, name)
+
+    @property
+    def pending_gate(self) -> "PendingGateState | None":
+        """The pending gate alone, WITHOUT cloning the whole state.
+
+        ``state`` deep-copies every job, usage and trajectory row so no caller
+        can mutate the store's instance. A per-frame readiness check only needs
+        this one immutable field, and paying that clone on every display cost
+        ~23 ms of the cold sidebar frame — the single largest item in its
+        profile. ``PendingGateState`` is never mutated in place by the reducer
+        (it is replaced), so sharing the instance is safe here.
+        """
+        return self._state.pending_gate
+
     @property
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
@@ -2617,6 +3034,7 @@ class FrontendStateStore:
             cost_knowledge=knowledge,
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
+            last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
             activity_started_at=(
                 current.activity_started_at
                 if bool(getattr(session, "is_streaming", False))
@@ -2629,6 +3047,7 @@ class FrontendStateStore:
             mcp_servers=mcp_servers,
             mcp_startup=mcp_startup,
             history_cursor=history_cursor,
+            history_generation=int(getattr(transcript, "_history_generation", 0)),
             attachment_root=str(getattr(transcript, "directory", "") or "") or None,
             slash_capabilities=_slash_capabilities(),
         )
@@ -2757,7 +3176,18 @@ class FrontendStateStore:
             duration = state.active_duration_s
             if state.activity_started_at is not None:
                 duration += max(0.0, now - state.activity_started_at)
-            changes.update(streaming=False, activity_started_at=None, active_duration_s=duration)
+            if event.error:
+                outcome: Literal["completed", "aborted", "error", ""] = "error"
+            elif event.aborted:
+                outcome = "aborted"
+            else:
+                outcome = "completed"
+            changes.update(
+                streaming=False,
+                activity_started_at=None,
+                active_duration_s=duration,
+                last_turn_outcome=outcome,
+            )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
             usages = [
@@ -2891,7 +3321,16 @@ class FrontendStateStore:
             live.append(data)
         elif kind == "tool_execution_end":
             call_id = str(data.get("tool_call_id") or "")
+            # The END REPLACES the start rather than erasing the call. A
+            # frontend that joins mid-turn needs to learn the outcome of a
+            # call that finished while it was away: dropping the row left the
+            # viewer holding a card it had painted live with no way to settle
+            # it, so ``_retire_live_tool_cards`` marked it ``⊘ interrupted``
+            # at turn end — on a call that had SUCCEEDED (QA round 1, Q2).
+            # A joiner that never saw the start still renders correctly: the
+            # app buffers an unmatched end in ``_pending_tool_ends``.
             live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
+            live.append(data)
         # Shallow copy on purpose: this runs per streaming delta on the session
         # loop, and a deep copy re-clones a 500-event trajectory each token.
         # ``live`` is freshly built above, and every other field is replaced
@@ -3184,6 +3623,21 @@ def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:
             return None
         descendant += cost
     return (direct or 0.0) + descendant
+
+
+def _last_turn_outcome_from(session: Any, current: str) -> str:
+    """Prefer the session's published outcome; keep the store's if it has none.
+
+    ``observe_event`` writes ``last_turn_outcome`` onto the store from the
+    emitted ``AgentEndEvent``. ``refresh_from_session`` then copies the
+    session's fields over the store — and a reduced test double (or a
+    runtime that has not yet grown the attribute) would wipe a just-written
+    value back to ``""``, which a rebinding viewer treats as aborted.
+    """
+    if not hasattr(session, "_last_turn_outcome"):
+        return current if current in ("completed", "aborted", "error") else ""
+    raw = str(getattr(session, "_last_turn_outcome", "") or "")
+    return raw if raw in ("completed", "aborted", "error") else ""
 
 
 def _label(spec: Any) -> str:

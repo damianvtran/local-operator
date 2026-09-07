@@ -107,7 +107,6 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
-    ToolCall,
     ToolContext,
     ToolExecutionEndEvent,
     ToolResult,
@@ -253,6 +252,59 @@ _MAX_CONTINUATIONS = 8
 #: ``_pre_aborted_drops``) rather than once per drop, because N identical rows
 #: at sub-second cadence is the noise this replaced.
 _PRE_ABORT_DROP_NOTICE_AT = 3
+
+#: Arrivals that are the RESIDUE of work a stop was aimed at, not fresh intent.
+#:
+#: ``_prompt_messages`` clears a sticky abort for arriving work because a new
+#: unit of work is normally a new intent — a peer's message or the user's own
+#: wake genuinely means "do this now", and PR #709 made that clearing the cure
+#: for the paid-no-op loop. But a SUBAGENT reporting in is not a new intent: it
+#: is the echo of the very work the user just stopped. Letting it clear the
+#: abort is what kept the meter running after a stop acked — measured at 39
+#: paid provider calls in the 2 s after an abort, one per child report, because
+#: each report cleared the flag and bought a full turn (QA Q-1).
+#:
+#: These types are therefore held rather than run while a stop is pending: the
+#: message is still persisted and still reaches the model on the next real
+#: turn, so nothing is lost — only the model call the user already said to stop
+#: is skipped. A typed prompt, a peer message or a wake still clears the flag,
+#: which is what keeps a stopped session recoverable without a restart.
+#:
+#: ``job_result`` is in the set for both job kinds deliberately. A background
+#: job's completion is the finish of work the stopped turn launched, never a
+#: fresh instruction from the user, so it may not re-open a turn on a session
+#: that has been stopped. It is also the type that carries the fix in
+#: PRODUCTION: every live ``hub_message`` producer routes through
+#: :meth:`Session.queue_aside`, so ``HUB_MESSAGE_TYPE`` is defensive here
+#: rather than load-bearing (review round 1, MINOR-1) — kept because a future
+#: producer reaching ``_prompt_messages`` with one would otherwise reopen the
+#: money loop silently.
+#:
+#: THE BOUNDARY, STATED (review round 1, MAJOR-2). Everything NOT in this set
+#: — a typed prompt, a wake, a peer message, a resume catch-up — still clears a
+#: pending abort and may buy a turn on a stopped session. That is deliberate
+#: and it is what "stopped" means here: this session's own work is halted, but
+#: the session stays REACHABLE, so a human (or their own reminder) can revive
+#: it without restarting the process. Adding those types would make one Esc
+#: mean "ignore the user until they restart me", which is a worse failure than
+#: the one this set fixes.
+#:
+#: What keeps that carve-out safe is that none of it is a SELF-SUSTAINING loop
+#: the session can drive on its own:
+#:
+#: * a wake is rate-limited by ``MIN_WAKE_INTERVAL_MS`` (60 s), so the worst
+#:   case is a turn a minute from a schedule the user can see and cancel, not
+#:   an unbounded burn;
+#: * a peer message needs another session or a human to send it, and mailbox
+#:   mode (the default) spends nothing at all;
+#: * a typed prompt is the user asking for work.
+#:
+#: The residue types are the ones the STOPPED SESSION'S OWN CHILDREN generate,
+#: at whatever cadence they choose, with no floor and no human in the loop —
+#: which is exactly why they are the ones that must not clear a stop. A caller
+#: that needs everything to stop regardless has the stronger rung: the ``abort``
+#: control op cancels the children, and ``lop stop`` ends the process.
+_STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
 
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
@@ -1993,6 +2045,15 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        #: How the last logical turn ended, published on the canonical snapshot
+        #: as ``last_turn_outcome``. A viewer that dropped mid-turn and rebinds
+        #: after the turn settled cannot recover this from ``live_events``
+        #: (cleared at ``agent_end``); without it it would synthesise
+        #: ``aborted=True`` and paint a false "interrupted". ``""`` until the
+        #: first turn ends. Set from the emitted end, which is one value per
+        #: user prompt (compaction continuations hold the end until the
+        #: pipeline flushes).
+        self._last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
         # The loop's held end owns billing, but a later post-turn compaction owns
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
@@ -5079,6 +5140,16 @@ class Session:
         opens minutes later is the surprise this closes — see
         :meth:`cancel_fork`. The host reports it; ``abort`` returns nothing, so
         the caller asks the session what it cancelled.
+
+        SUBAGENTS ARE NOT STOPPED HERE, and that stays deliberate: the
+        keyboard's first press must not destroy a child minutes into useful
+        work (see :meth:`cancel_subagents`). What changed is that the first
+        rung is now CHEAP as well as narrow — a child reporting into a stopped
+        parent no longer clears the abort and buys a turn (see
+        ``_STOPPED_WORK_RESIDUE_TYPES``), so a stop that leaves children
+        running no longer leaves a meter running with them. A caller with no
+        second rung to offer must still reach the children itself, which is
+        what the ``abort`` control op now does.
         """
         self._abort_requested = True
         # Bumped on EVERY abort, before the signal fires. Work already queued
@@ -5528,7 +5599,25 @@ class Session:
         """Current canonical state for any full terminal frontend."""
         return self._frontend_state_store.state
 
-    def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
+    @property
+    def pending_gate(self):  # type: ignore[no-untyped-def]
+        """The pending gate without the full-state clone ``frontend_state`` pays.
+
+        For per-frame readiness checks only; see the store's own property.
+        """
+        return self._frontend_state_store.pending_gate
+
+    @property
+    def epoch(self):  # type: ignore[no-untyped-def]
+        """The owner epoch without the full-state clone.
+
+        Paired with :attr:`pending_gate`: gate identity is epoch plus gate, so
+        reading the epoch through ``frontend_state`` would restore the clone on
+        the same per-frame path.
+        """
+        return self._frontend_state_store.read_field("epoch")
+
+    def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
         """Atomically refresh, snapshot and subscribe on the session loop.
 
         The refresh must go through the PUBLISHING path: silently replacing
@@ -5538,7 +5627,60 @@ class Session:
         is reserved for store construction, before any subscriber exists.
         """
         self._frontend_state_store.refresh_from_session(self)
-        return self._frontend_state_store.subscribe(handler)
+        subscription = self._frontend_state_store.subscribe(handler)
+        if display_window:
+            from local_operator.session.history_window import (
+                display_window as capture_window,
+            )
+
+            sync = subscription.sync
+            try:
+                window = capture_window(
+                    self._transcript,
+                    conversation_id=sync.snapshot.session_id,
+                    owner_epoch=sync.epoch,
+                    through_id=sync.live_cursor,
+                )
+                window.durable_seed_ids = [
+                    str(event["message"]["id"])
+                    for event in sync.snapshot.live_events
+                    if isinstance(event.get("message"), dict)
+                    and self._transcript.has_entry(str(event["message"].get("id", "")))
+                ]
+                seed_tools = {
+                    str(event.get("tool_call_id", ""))
+                    for event in sync.snapshot.live_events
+                    if event.get("type") == "tool_execution_end"
+                }
+                if seed_tools:
+                    window.durable_seed_tool_ids = [
+                        str(message.tool_call_id)
+                        for message in self._transcript.build_llm_history(
+                            through_id=sync.live_cursor
+                        )
+                        if isinstance(message, Message)
+                        and message.role == "tool"
+                        and message.tool_call_id in seed_tools
+                    ]
+                sync.display_history = window
+            except BaseException:
+                subscription.unsubscribe()
+                raise
+        return subscription
+
+    def history_page(self, before: str, anchor: str = ""):  # type: ignore[no-untyped-def]
+        """Authenticated reads reuse the resident replay at the signed sync cut."""
+        from local_operator.session.history_window import display_window
+
+        state = self.frontend_state
+        return display_window(
+            self._transcript,
+            conversation_id=state.session_id,
+            owner_epoch=state.epoch,
+            through_id=state.history_cursor,
+            before=before,
+            anchor=anchor,
+        ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
         """Publish non-event source changes through the canonical contract.
@@ -5708,6 +5850,16 @@ class Session:
     async def _emit(self, event: AgentEvent) -> None:
         if isinstance(event, AgentEndEvent):
             self._attention_outcome = event
+            # The emitted end is the logical turn's outcome (held ends flush
+            # here from the pipeline finally; abort/error skip the hold and
+            # emit immediately). The canonical snapshot copies this field so a
+            # rebinding viewer can synthesise the matching AgentEndEvent.
+            if event.error:
+                self._last_turn_outcome = "error"
+            elif event.aborted:
+                self._last_turn_outcome = "aborted"
+            else:
+                self._last_turn_outcome = "completed"
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -5741,8 +5893,35 @@ class Session:
                 )
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
+        #
+        # ``_is_streaming`` is the third term, and it is what makes a RECONNECT
+        # work. A headless runtime has ``_has_ui=False``, so when its only
+        # viewer's socket drops the server unsubscribes and ``has_subscribers``
+        # goes False — the fold then stops, and everything the runtime does for
+        # the rest of the turn is absent from ``live_events``. The viewer
+        # re-binds moments later to a snapshot that has forgotten the tool the
+        # runtime started while it was away: the card never paints and its real
+        # ``tool_execution_end`` arrives orphaned, to be discarded unrendered at
+        # ``agent_end``. That is the whole point of the bounded seed ("a
+        # frontend that joins mid-turn"), and a mid-turn drop is exactly when a
+        # frontend joins. Bounded to a live turn, so a genuinely unobserved
+        # idle session still does no work.
+        #
+        # This does mean the fold now also runs for a session NO viewer has
+        # ever attached to — every subagent — which is a real cost and the
+        # reason ``live_events`` needed its own wire bound (see
+        # ``LIVE_EVENT_END_ROWS_MAX``). Kept deliberately: "has a viewer right
+        # now" is not knowable at fold time in any useful way, since the whole
+        # point is to have the seed ready for a viewer that has not arrived
+        # yet. Bounded retention is the cheaper guarantee.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (self._has_ui or store.has_subscribers):
+        if store is not None and (self._has_ui or store.has_subscribers or self._is_streaming):
+            # Replay-changing commits precede their public events. Publish the
+            # scalar first so retained viewers cannot select a stale tail after
+            # compaction, pruning, or a fold; unchanged events do no extra work.
+            replay_generation = self._transcript._history_generation
+            if store.state.history_generation != replay_generation:
+                store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
         for handler in list(self._handlers):
             try:
@@ -5765,6 +5944,28 @@ class Session:
         self._spawn_background(self._emit(event))
 
     # -- turn machinery --------------------------------------------------------
+
+    @staticmethod
+    def _is_stopped_work_residue(initial: list[AgentMessage]) -> bool:
+        """Whether this arrival is the echo of stopped work rather than new intent.
+
+        Read only while an abort is pending, to decide whether the arrival may
+        clear it (see ``_STOPPED_WORK_RESIDUE_TYPES`` for the reasoning and the
+        measured cost of getting it wrong).
+
+        ALL of the batch must be residue. A batch that mixes a child's report
+        with a real user-driven arrival contains fresh intent, and the safe
+        reading of a mixed batch is the one that still lets the user's work
+        through — holding it would be the "Esc broke my session" failure in
+        place of the money one.
+        """
+        if not initial:
+            return False
+        return all(
+            isinstance(message, CustomMessage)
+            and message.custom_type in _STOPPED_WORK_RESIDUE_TYPES
+            for message in initial
+        )
 
     async def _prompt_messages(self, initial: list[AgentMessage]) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
@@ -5819,7 +6020,17 @@ class Session:
             # the flag. Bumped means an abort landed while this sat in the
             # queue, aimed at the backlog it was in: leave the flag set and let
             # ``_run_turn`` hold the message instead of running it.
-            if self._abort_epoch == arrived_at_epoch:
+            #
+            # AND THE ARRIVAL MUST BE FRESH INTENT, NOT RESIDUE. The epoch test
+            # alone asks only "did the abort predate this work", which is the
+            # wrong question for a subagent still reporting in: its report
+            # always arrives after the stop, so it always looked fresh, cleared
+            # the flag and bought a turn. With children reporting at sub-second
+            # cadence that is an unstoppable meter — 39 paid calls in the 2 s
+            # after an acked abort (QA Q-1). See
+            # ``_STOPPED_WORK_RESIDUE_TYPES`` for why these types are the echo
+            # of the stopped work rather than a new instruction.
+            if self._abort_epoch == arrived_at_epoch and not self._is_stopped_work_residue(initial):
                 self._abort_requested = False
                 # ...and the boundary cancel, for the reason ``prompt()``
                 # gives: the request applied to the turn the caller was
@@ -9613,6 +9824,10 @@ class Session:
         the user can see disappear on resume. The lock owner flushes the FIFO at
         its safe boundary before another prompt can start.
         """
+        if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
+            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+        ):
+            return
         if self._is_streaming or self._turn_lock.locked():
             self._pending_shell_records.append((command, result))
             return
@@ -9633,13 +9848,11 @@ class Session:
         # TUI's resume replay already knows how to mount a ToolCard from a
         # call and its result, and a wall of stdout attributed to the user
         # would read as something they typed.
-        user = Message.user(f"! {command}")
-        assistant = Message.assistant("")
-        assistant.tool_calls = [
-            ToolCall(id=result.tool_call_id, name="bash", arguments={"command": command})
-        ]
-        tool = Message.tool_result(result)
-        messages = [user, assistant, tool]
+        from local_operator.session.shell_record import shell_record_messages
+
+        messages = shell_record_messages(command, result)
+        if self._transcript.has_entry(messages[-1].id):
+            return
         # The synthetic assistant/tool exchange is one fork-visible unit.
         await self._transcript.append_messages(messages)
         self._context.messages.extend(messages)
