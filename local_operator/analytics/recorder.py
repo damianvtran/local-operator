@@ -29,7 +29,7 @@ import threading
 import time
 
 from local_operator.analytics.model import CallSnapshot
-from local_operator.analytics.store import AnalyticsStore
+from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
 
 logger = logging.getLogger("local_operator.analytics.recorder")
 
@@ -45,11 +45,16 @@ class _NameTask:
     nothing and removes the race by construction.
     """
 
-    __slots__ = ("session_id", "name")
+    __slots__ = ("session_id", "name", "rank")
 
-    def __init__(self, session_id: str, name: str) -> None:
+    def __init__(self, session_id: str, name: str, rank: int) -> None:
         self.session_id = session_id
         self.name = name
+        #: Precedence of this name, one of ``store.SESSION_NAME_RANK_*``. Carried
+        #: on the task rather than resolved by the writer because only the
+        #: CALLER knows which kind of label it holds — a provisional stand-in and
+        #: a generated title reach this queue through the same method.
+        self.rank = rank
 
 
 #: Upper bound on queued-but-unwritten samples. A provider call takes seconds
@@ -163,7 +168,7 @@ class AnalyticsRecorder:
         if names:
             for task in names:
                 try:
-                    self._store.upsert_session_name(task.session_id, task.name)
+                    self._store.upsert_session_name(task.session_id, task.name, rank=task.rank)
                 except Exception:  # noqa: BLE001 — a bad name must not kill the writer
                     logger.debug("analytics: name upsert failed", exc_info=True)
         if not batch:
@@ -212,7 +217,9 @@ class AnalyticsRecorder:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: enqueue failed", exc_info=True)
 
-    def note_session_name(self, session_id: str, name: str) -> None:
+    def note_session_name(
+        self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
+    ) -> None:
         """Best-effort: record a session's human name off the hot path.
 
         Enqueues a name task the writer thread applies on its own connection,
@@ -220,12 +227,18 @@ class AnalyticsRecorder:
         SQLite and there is only ever ONE thread writing to the database. Like
         :meth:`record`, non-blocking and never raising: a full queue drops the
         name rather than stalling the session.
+
+        ``rank`` states what KIND of label this is (see the
+        ``SESSION_NAME_RANK_*`` constants). It defaults to a real title so the
+        original caller — ``Session.set_conversation_name`` — keeps its exact
+        previous behaviour; a stand-in label must pass the lower rank explicitly
+        so it can fill an empty row without ever displacing a real title.
         """
         if self._closed or not session_id or not name:
             return
         self._ensure_thread()
         try:
-            self._queue.put_nowait(_NameTask(session_id, name))
+            self._queue.put_nowait(_NameTask(session_id, name, rank))
         except queue.Full:
             logger.debug("analytics: queue full, dropped a session name")
         except Exception:  # noqa: BLE001 — naming is best-effort

@@ -1,0 +1,38 @@
+{
+  "source": "/private/tmp/lop-analytics-names",
+  "size": [
+    140,
+    45
+  ],
+  "screen": "AnalyticsScreen",
+  "session_rows_rendered": 11,
+  "session_rows_seeded": 11,
+  "distinct_rendered_rows": 11,
+  "colliding_group_size": 8,
+  "colliding_rows_on_screen": 8,
+  "ledger_unchanged": true,
+  "scroll": {
+    "size": [
+      120,
+      29
+    ],
+    "virtual_size": [
+      119,
+      35
+    ],
+    "max_y": 6
+  },
+  "rows": [
+    "OSWorld benchmark evaluation and   252.9k tokens    $3.4k      2 calls    58% cache",
+    "Article search service integrati   256.5k tokens      $3k      2 calls    57% cache",
+    "Revise Agent Risk Assessments PD   260.1k tokens      $3k      2 calls    56% cache",
+    "reviewer \u00b7 Article-search \u00b7 4fa0   263.7k tokens   $11.60      2 calls    56% cache",
+    "reviewer \u00b7 Article-search \u00b7 d677   267.3k tokens   $10.85      2 calls    55% cache",
+    "reviewer \u00b7 Article-search \u00b7 1a24   270.9k tokens    $7.47      2 calls    54% cache",
+    "reviewer \u00b7 Article-search \u00b7 2c39   274.5k tokens    $6.78      2 calls    53% cache",
+    "reviewer \u00b7 Article-search \u00b7 4a5e   278.1k tokens    $6.70      2 calls    53% cache",
+    "reviewer \u00b7 Article-search \u00b7 9b13   281.7k tokens    $5.94      2 calls    52% cache",
+    "reviewer \u00b7 Article-search \u00b7 c802   285.3k tokens    $5.31      2 calls    51% cache",
+    "reviewer \u00b7 Article-search \u00b7 71c9   288.9k tokens    $4.88      2 calls    51% cache"
+  ]
+}

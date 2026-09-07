@@ -29,8 +29,9 @@ it is the right way to pin what the screen SAYS.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
@@ -46,9 +47,10 @@ from local_operator.analytics.model import (
     UsageAggregate,
     UsagePeriod,
     build_session_forest,
-    short_session_label,
+    session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.tool_card import truncate_cells
 
 
 class _CostLike(Protocol):
@@ -751,13 +753,63 @@ def build_report(
     forest = build_session_forest(
         aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
     )
-    session_rows = _forest_rows(forest, names)
+    # STRUCTURE FIRST, LABELS SECOND. The walk yields ``(session_id, depth,
+    # subtree total)`` and nothing about how a row reads, because the label
+    # budget below cannot be computed until the numbers that share the row are
+    # known, and the numbers come from the forest. Composing labels inside the
+    # walk (as the nesting change first did) forces them to be built against a
+    # constant, which is exactly the defect the budgeting work removed.
+    structure = _forest_rows(forest)
+
+    # The label budget is decided BEFORE the labels are composed, from the frame
+    # this report is being rendered into (design review D2). Composing against a
+    # fixed constant and then padding to a different column is what left 34
+    # cells of dead gutter at 140 columns while simultaneously overrunning the
+    # 30-cell column at 71 — rows cut to fit a budget the frame was not
+    # enforcing. One number now drives both: the labels are built to it and the
+    # column is drawn at it.
+    # What the name may spend is what the frame has LEFT after the columns that
+    # are not negotiable (design review D8). The previous rule stepped 30 -> 48
+    # the instant ``width`` reached 96 against a flat ``- 40`` allowance, but the
+    # rest of a row measures 51-55 cells, so one extra cell of frame bought 18
+    # cells of label and the widest row overran the content box across terminal
+    # widths 114-120 — clipping ``% cache`` off every row, silently, because a
+    # row ending in ``cach`` still looks like a row. Measuring the remainder
+    # instead means no width can lose a column: the budget rises a cell at a
+    # time as the frame does, and the clamp only ever narrows it further.
+    #
+    # Both tables share one ``name_col``, so the budget must clear the WIDER of
+    # the two overheads — the provider table's cost column is sized
+    # independently of the session table's and either may be the wider row.
+    #
+    # The session side is measured over the SUBTREE TOTALS the forest produced,
+    # not over ``by_session``'s own aggregates. A root row paints what its whole
+    # subtree spent, so its cost and calls figures are strictly larger than its
+    # own — budgeting against the flat map would understate the very columns
+    # ``_row_overhead`` exists to measure and re-open the D8/D11 clipping one
+    # rollup later.
+    overhead = max(
+        _row_overhead(list(aggregate.by_provider.items()), width),
+        _row_overhead([(sid, agg) for sid, _, agg in structure], width),
+    )
+    name_cap = max(_MIN_NAME_COL, min(_MAX_NAME_COL, width - overhead))
+
+    # Keyed by SESSION ID, never by the rendered label. Two sessions can render
+    # the same string (identical names, or names agreeing within the budget),
+    # and a label-keyed dict does not merge those rows — it silently keeps the
+    # last one and drops the rest, taking their tokens, calls and cost off the
+    # screen entirely. On the operator's ledger that hid 46 sessions before
+    # subagent naming existed and 355 after it, so the table is built as
+    # (label, depth, aggregate) triples whose identity is the id.
+    session_labels = _forest_labels(structure, names, name_cap)
+    session_rows = [
+        (_row_prefix(depth) + session_labels[sid], depth, agg) for sid, depth, agg in structure
+    ]
     all_names = [n for n in aggregate.by_provider] + [label for label, _, _ in session_rows]
     if all_names:
         # Grow the name column with the frame: a wide card gets a roomier column
         # (up to 48) so its width is used; a narrow one stays compact (30).
-        name_cap = 30 if width < 96 else min(48, width - 40)
-        name_col = min(name_cap, max((len(n) for n in all_names), default=0) + 1)
+        name_col = min(name_cap, max((cell_len(n) for n in all_names), default=0) + 1)
     else:
         name_col = 0
 
@@ -790,6 +842,101 @@ def build_report(
 #: drop ladder.
 _WIDE_TABLE_MIN = 72
 
+#: Floor and ceiling on the session/provider name column. The floor keeps a
+#: label readable on a narrow frame even when the numbers would rather have the
+#: space (a 12-cell label is still a recognisable prefix); the ceiling is the
+#: point past which more name stops buying legibility and just spreads the row.
+_MIN_NAME_COL = 30
+_MAX_NAME_COL = 48
+
+#: Cells the scroll container reserves for its vertical scrollbar. The
+#: ``#analytics-scroll`` rule sets ``scrollbar-gutter: stable``, so the column is
+#: held whether or not the bar is drawn — a report composed against the full
+#: card width therefore paints one cell wider than the box that receives it, and
+#: the rightmost column is cut. Kept beside the width maths that spends it.
+_SCROLLBAR_GUTTER = 1
+
+
+def _row_overhead(groups: "Sequence[tuple[str, UsageAggregate]]", width: int) -> int:
+    """Cells one table row spends on everything that is NOT the name column.
+
+    Measured from the same pieces ``_group_section`` paints, in the same order,
+    rather than carried as a constant — that is the whole point. Design review
+    D8: ``name_cap`` was ``min(48, width - 40)``, and ``- 40`` understated the
+    real overhead by up to 15 cells. The budget therefore stepped 30 -> 48 the
+    instant the content box reached 96 while the rest of the row still needed
+    51-55, so the widest row jumped to 103 against a 96-cell box and terminal
+    widths 114-120 silently clipped the ``% cache`` column off every row. The
+    row still looked complete; it just ended in ``cach``.
+
+    A constant cannot fix that, because the overhead is not constant: the cost
+    column is sized to the widest figure actually present (``$4.20`` vs
+    ``$3.4k+``), the calls column to the widest call count, and the cache column
+    is dropped entirely below ``_WIDE_TABLE_MIN``. So it is computed from the
+    groups being rendered, and the caller subtracts it from the content box. The
+    arithmetic below mirrors the ``block.append`` sequence in
+    :func:`_group_section` line for line; the two must be changed together.
+
+    Design review D11 is the same error one column further along, and it is why
+    every term here is now measured rather than assumed. The calls column was
+    ``3 + 4 + len(" calls")`` — a 4-digit allowance chosen against a fixture
+    rendering ``16 calls``. On the operator's real ledger ``anthropic`` has
+    317,977 calls and eight sessions are past 9,999, so the pad ran two cells
+    over its allowance and pushed ``% cache`` off the box for the 13 most
+    expensive rows of both tables across terminals 104-123. The rule this
+    function now holds to: **no column width is assumed from a literal where the
+    data can size it**, because a constant that is right for the fixture is
+    wrong for the ledger, three times running.
+    """
+    if not groups:
+        return 0
+    # ``  {name}`` indent, then ``{tokens:>NN} tokens``.
+    overhead = 2 + _tokens_col(groups) + len(" tokens")
+    # ``   `` gap + the right-aligned cost cell, sized to the widest figure in
+    # this table exactly as ``_group_section`` sizes it.
+    overhead += 3 + max(len(format_cost(agg)) for _, agg in groups)
+    # ``   {calls:>NN} calls`` — likewise sized to the widest count present.
+    overhead += 3 + _calls_col(groups) + len(" calls")
+    # ``   {pct:>4} cache`` — only when the frame is wide enough to keep it.
+    # This 4 is the one literal that stays, because it is not an allowance: it
+    # is the exact maximum :func:`format_percent` can return. That function is
+    # total over its domain and its widest output is ``100%`` (``—`` is 1 cell,
+    # ``99%``/``73%`` are 3), so the pad can never be overrun by data the way
+    # the calls and cost pads could. Widen it if that formatter ever grows.
+    if width >= _WIDE_TABLE_MIN:
+        overhead += 3 + 4 + len(" cache")
+    return overhead
+
+
+def _calls_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
+    """Cells the ``calls`` column needs for the widest count in this table.
+
+    Floored at 4 so the ordinary small-ledger layout is unchanged (design review
+    D11 asked only that the column stop being *understated*, not that it shrink
+    on a fresh install), and measured above that so a six-digit provider total
+    widens the column instead of overrunning it.
+
+    Shared by :func:`_row_overhead` and :func:`_group_section` so the budget and
+    the paint agree by construction rather than by two literals happening to
+    match — the divergence between those two is precisely what D8 and D11 were.
+    """
+    return max(4, max((len(f"{agg.calls}") for _, agg in groups), default=0))
+
+
+def _tokens_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
+    """Cells the ``tokens`` column needs, floored at the historical 8.
+
+    Audited as part of D11 and included for the same reason: ``{…:>8}`` is a pad,
+    not a truncation, so it is the same latent defect as the calls column even
+    though no plausible ledger reaches it today. :func:`format_tokens` abbreviates
+    to a unit suffix, so 51B tokens (the operator's real total) is 3 cells and 8
+    is not exceeded until roughly 10**16 tokens. That makes this a guard rather
+    than a fix: it is a no-op on every real dataset and cannot narrow the column,
+    but it means no term in the row overhead is a bare constant that data can
+    outgrow silently.
+    """
+    return max(8, max((len(format_tokens(agg.total_tokens)) for _, agg in groups), default=0))
+
 
 #: One indent step per level of session nesting. Two cells: enough that a
 #: sub-row is unmistakably subordinate, small enough that it cannot be what
@@ -797,41 +944,95 @@ _WIDE_TABLE_MIN = 72
 _NEST_INDENT = 2
 
 
-def _forest_rows(
-    forest: list["SessionNode"], names: Mapping[str, str]
-) -> list[tuple[str, int, "UsageAggregate"]]:
-    """Flatten the session forest to ``(label, depth, aggregate)`` rows.
+def _row_prefix(depth: int) -> str:
+    """The indent-and-glyph a row at ``depth`` carries before its label.
 
-    Depth-first so a child sits directly under its parent, and each row carries
-    the TREE total (own plus descendants) — the same figure its label is sorted
-    by. A child row's dollars are therefore already counted in its parent's, and
-    the section meta says so; only the ROOT rows sum to the table total.
-
-    Labels come from the shared ``short_session_label`` so a session reads the
-    same here as anywhere else. In practice no child session carries a human
-    name, so children render as bare 12-hex ids — which is exactly the noise
-    this arrangement moves off the top level.
-
-    A child also carries a ``└`` glyph, not just the indent and the dim style
+    A child carries a ``└`` glyph, not just the indent and the dim style
     (design D4). 21% of ROOTS are themselves unnamed 12-hex ids, so an unnamed
     root and a child differ by two leading spaces and a colour — and colour is
     the cue that disappears under ``NO_COLOR``, a weak-dim theme, or low vision.
     The glyph makes the hierarchy survive without it. ``/session``'s Tool
     surface section already uses ``└`` for exactly this, so this is the
     codebase's existing vocabulary rather than a new one.
+
+    Split out from the walk because the prefix is width the LABEL cannot also
+    spend: it is prepended after condensing, so :func:`_forest_labels` has to
+    subtract exactly this many cells from a nested row's budget. One function
+    now defines the prefix for both the measurement and the paint, so the two
+    cannot drift — the same rule ``_calls_col`` follows for the calls column.
+    """
+    if not depth:
+        return ""
+    return " " * ((depth - 1) * _NEST_INDENT) + "└ "
+
+
+def _forest_rows(forest: list["SessionNode"]) -> list[tuple[str, int, "UsageAggregate"]]:
+    """Flatten the session forest to ``(session_id, depth, aggregate)`` rows.
+
+    Depth-first so a child sits directly under its parent, and each row carries
+    the TREE total (own plus descendants) — the same figure its label is sorted
+    by. A child row's dollars are therefore already counted in its parent's, and
+    the section meta says so; only the ROOT rows sum to the table total.
+
+    Yields the session ID rather than a rendered label, because a label cannot
+    be composed until the column budget is known and the budget is computed from
+    the aggregates this walk selects. Identity stays the id all the way to the
+    paint, which is what stops two rows that read alike from collapsing into
+    one; :func:`_forest_labels` turns these into display text.
     """
     rows: list[tuple[str, int, "UsageAggregate"]] = []
 
     def walk(node: "SessionNode", depth: int) -> None:
-        prefix = " " * ((depth - 1) * _NEST_INDENT) + "└ " if depth else ""
-        label = prefix + short_session_label(node.session_id, names.get(node.session_id, ""))
-        rows.append((label, depth, node.total))
+        rows.append((node.session_id, depth, node.total))
         for child in node.children:
             walk(child, depth + 1)
 
     for root in forest:
         walk(root, 0)
     return rows
+
+
+def _forest_labels(
+    structure: "Sequence[tuple[str, int, UsageAggregate]]",
+    names: Mapping[str, str],
+    name_cap: int,
+) -> dict[str, str]:
+    """Budgeted, collision-free display labels for every row, keyed by id.
+
+    Rows are disambiguated per DEPTH, and that is sufficient for the rendered
+    labels to be globally unique: ``_row_prefix`` is strictly wider at each
+    level, so two rows at different depths already differ in the prefix the
+    reader sees, and two rows at the same depth are separated by
+    ``session_table_labels`` in the ordinary way. Depth is keyed here by the
+    budget it produces, which is the same partition (the prefix determines the
+    budget and the budget determines the prefix) expressed as the number each
+    group is actually composed against.
+
+    A nested row's budget is reduced by its own prefix (:func:`_row_prefix`).
+    Neither slice's arithmetic knew about the other's here: the nesting change
+    prepends the glyph AFTER the label is composed, and the budgeting change
+    sized labels to fill ``name_cap`` exactly — so a depth-1 label composed to
+    the full budget and then given a 2-cell prefix is 2 cells over the column
+    it is padded to, and ``_group_section``'s truncation cuts the tail back off.
+    That is a mid-word cut with no ellipsis at the exact widths where the label
+    already fits, which is the defect this slice exists to remove. Subtracting
+    the prefix first means the composed label plus its prefix is what
+    ``name_cap`` promised, and the ellipsis lands where the reader can see it.
+
+    Floored at ``_MIN_LABEL_CHARS`` by ``session_table_labels`` itself, so a
+    pathologically deep tree on a narrow frame degrades to short labels rather
+    than to empty ones.
+    """
+    labels: dict[str, str] = {}
+    # Group by the budget each row actually gets, so every disambiguation group
+    # is decided against the width its members will really be composed at.
+    by_budget: dict[int, dict[str, str]] = {}
+    for sid, depth, _ in structure:
+        budget = name_cap - cell_len(_row_prefix(depth))
+        by_budget.setdefault(budget, {})[sid] = names.get(sid, "")
+    for budget, group in by_budget.items():
+        labels.update(session_table_labels(group, budget))
+    return labels
 
 
 def _session_section(
@@ -847,6 +1048,18 @@ def _session_section(
     just built. Everything else — the column layout, the ``_WIDE_TABLE_MIN``
     cache shed, the dimmed lower-bound ``+`` — is identical, because the two
     tables sit one above the other and must read as the same table.
+
+    "Identical" is load-bearing rather than aspirational: the columns here are
+    sized through the SAME ``_tokens_col``/``_calls_col``/``truncate_cells``
+    helpers ``_group_section`` and ``_row_overhead`` use. This function forked
+    from ``_group_section`` before those existed, and a fork that keeps the
+    literal ``:>8``/``:>4`` pads is the D8/D11 defect preserved in a second
+    place — the budget would be measured through the helpers while the paint
+    used constants, so the two would disagree by exactly the amount the ledger
+    exceeds the fixture (``anthropic`` at 317,977 calls overruns ``:>4`` by two
+    cells and pushes ``% cache`` off the box). Sizing runs over the rows THIS
+    table paints, which carry subtree totals, so it matches what
+    ``build_report`` budgeted against.
     """
     fg = semantic_style("fg")
     dim = semantic_style("dim")
@@ -856,18 +1069,26 @@ def _session_section(
         return block
 
     show_cache = width >= _WIDE_TABLE_MIN
-    cost_col = max(len(format_cost(agg)) for _, _, agg in rows)
+    pairs = [(label, agg) for label, _, agg in rows]
+    cost_col = max(len(format_cost(agg)) for _, agg in pairs)
+    tokens_col = _tokens_col(pairs)
+    calls_col = _calls_col(pairs)
     for label, depth, agg in rows:
         block.append("\n")
         # A nested row is dimmed as well as indented: its dollars are already
         # inside the root above it, so it must not compete visually with the
         # rows that actually partition the total.
         style = fg if depth == 0 else dim
-        block.append(f"  {label:<{name_col}}", style=style)
-        block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=style)
+        # TRUNCATE as well as pad, in CELLS, exactly as ``_group_section`` does:
+        # a bare ``{label:<{name_col}}`` pushes every numeric column right by
+        # whatever the label overran, and the cost column is the one thing this
+        # screen exists to let you scan straight down. Labels arrive budgeted
+        # (prefix included), so this is a backstop rather than the mechanism.
+        block.append(f"  {truncate_cells(label, name_col):<{name_col}}", style=style)
+        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=style)
         block.append("   ")
         append_cost(block, agg, cost_col, style, dim)
-        block.append(f"   {agg.calls:>4} calls", style=dim)
+        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
         if show_cache:
             block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
     return block
@@ -875,11 +1096,18 @@ def _session_section(
 
 def _group_section(
     title: str,
-    groups: dict[str, "UsageAggregate"],
+    groups: "Mapping[str, UsageAggregate] | Sequence[tuple[str, UsageAggregate]]",
     width: int,
     name_col: int,
 ) -> Text:
     """A per-provider or per-session table as one multi-line ``Text`` block.
+
+    Takes either a name->aggregate mapping (the provider table, whose keys are
+    genuinely unique) or a SEQUENCE of ``(label, aggregate)`` pairs (the session
+    table, whose labels are display text and may repeat). The pair form exists
+    because a dict keyed by a rendered label silently drops every row after the
+    first collision; rows are identified upstream by session id and arrive here
+    already labelled.
 
     Returned as a single ``Text`` with embedded newlines so the caller keeps a
     flat list of blocks; the screen splits on newlines only for the scroll
@@ -901,8 +1129,9 @@ def _group_section(
     # Sort by cost when any of these groups is priced, else by tokens. Keyed on
     # the tuple so an unpriced group sorts by tokens as a tiebreak rather than
     # collapsing to a single $0 bucket.
+    pairs = list(groups.items()) if isinstance(groups, Mapping) else list(groups)
     ordered = sorted(
-        groups.items(),
+        pairs,
         key=lambda kv: (kv[1].cost_micro, kv[1].total_tokens),
         reverse=True,
     )
@@ -912,16 +1141,32 @@ def _group_section(
 
     show_cache = width >= _WIDE_TABLE_MIN
     cost_col = max(len(format_cost(agg)) for _, agg in ordered)
+    # Sized from the data through the SAME helpers ``_row_overhead`` budgets
+    # with, so the space reserved and the space painted cannot drift apart.
+    # These were literal ``:>8``/``:>4`` pads; a per-row pad also left the
+    # column ragged once counts varied in width (``317977 calls`` beside
+    # ``16 calls`` put the two ``calls`` labels at different offsets), which
+    # defeats scanning the column straight down exactly as D3 described.
+    tokens_col = _tokens_col(ordered)
+    calls_col = _calls_col(ordered)
     for name, agg in ordered:
         block.append("\n")
-        block.append(f"  {name:<{name_col}}", style=fg)
-        block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
+        # TRUNCATE as well as pad (design review D3). ``{name:<{name_col}}``
+        # alone is a pad and nothing else, so any name wider than the column
+        # pushed tokens/cost/calls right by however much it overran and the
+        # numeric columns stopped lining up — the cost column is the one thing
+        # this screen exists to let you scan straight down. Provider names reach
+        # here uncondensed and session labels are already budgeted to
+        # ``name_col``, so this is a backstop for the former and a no-op for the
+        # latter; ``truncate_cells`` measures in CELLS, matching the pad.
+        block.append(f"  {truncate_cells(name, name_col):<{name_col}}", style=fg)
+        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=fg)
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.
         # The lower-bound ``+`` is dimmed by ``append_cost`` (review D1).
         block.append("   ")
         append_cost(block, agg, cost_col, fg, dim)
-        block.append(f"   {agg.calls:>4} calls", style=dim)
+        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
         if show_cache:
             block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
     return block
@@ -1006,12 +1251,20 @@ class AnalyticsScreen(ModalScreen[None]):
         # side, so the report's own column maths matches the width it is
         # actually painted into. The cap here mirrors the CSS cap; raising one
         # without the other either wastes the frame or overruns it.
+        #
+        # ``_SCROLLBAR_GUTTER`` comes off the top because ``#analytics-scroll``
+        # sets ``scrollbar-gutter: stable`` (see the stylesheet): the column is
+        # reserved whether or not the bar is currently drawn, so the body is
+        # ALWAYS painted one cell narrower than the card. Counting it here
+        # rather than at the call sites keeps one number describing "cells the
+        # report may paint into" — measured, not assumed: at a 114-column
+        # terminal the card is 96 and ``scrollable_content_region`` is 95.
         try:
             terminal = self.app.size.width
             card = min(140, int(terminal * 0.9))
-            return max(40, card - 6)
+            return max(40, card - 6 - _SCROLLBAR_GUTTER)
         except Exception:  # noqa: BLE001 — before mount, a sane default
-            return 88
+            return 88 - _SCROLLBAR_GUTTER
 
     def _title_text(self) -> Text:
         # ``fg`` bold, matching the ``/usage`` panel's title (and the app's list

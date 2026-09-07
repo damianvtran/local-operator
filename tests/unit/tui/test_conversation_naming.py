@@ -1179,3 +1179,92 @@ def test_a_multi_line_opener_is_collapsed_onto_one_row() -> None:
     label = naming.provisional_title("fix the parser\n\nit crashes on empty input")
     assert "\n" not in label
     assert label.startswith("Fix the parser it crashes")
+
+
+@pytest.mark.asyncio
+async def test_the_provisional_label_reaches_the_analytics_ledger() -> None:
+    """THE defence in depth: a naming outage must not cost a session its identity.
+
+    The band and the phone have always shown the opener-derived stand-in; only
+    ``/analytics`` was left rendering a bare 12-hex id, because its name row was
+    written exclusively by ``set_conversation_name`` and a stand-in deliberately
+    never reaches that path. Five sessions worth $1,312 were reported that way —
+    unreadable months later even though the band had shown a good label
+    throughout. The stand-in now lands in the ledger too.
+    """
+    import tempfile
+
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import (
+        SESSION_NAME_RANK_PROVISIONAL,
+        AnalyticsStore,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AnalyticsStore(f"{tmp}/analytics.db")
+        recorder = reset_recorder_for_test(store)
+        app, session = await _boot(title="")
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _ready(pilot, app)
+            app._show_provisional_name("fix the analytics session naming gap")
+            recorder.flush_for_test()
+
+            conn = store._connect()
+            assert conn is not None
+            row = conn.execute(
+                "SELECT name, rank FROM session_names WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            # The label the band is wearing, at the rank that cannot outrank a
+            # real title.
+            assert row == (
+                "Fix the analytics session naming gap",
+                SESSION_NAME_RANK_PROVISIONAL,
+            )
+            session.gate.set()
+        recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_the_apps_provisional_mirror_cannot_displace_a_stored_title() -> None:
+    """The app half of the precedence rule, at the app layer.
+
+    A resumed or already-named conversation has a real title in the ledger. The
+    band still paints a stand-in in some states (a reload, a second host), and
+    that push must never downgrade the row. The rank gate is what guarantees it,
+    so this drives the REAL app path rather than the store directly.
+
+    (The complementary half — a generated title overwriting a stand-in — is
+    owned by ``Session.set_conversation_name``, which the pilot's fake session
+    deliberately does not implement; it is covered in
+    ``tests/unit/session/test_conversation_name_persistence.py`` and
+    ``tests/unit/analytics/test_store.py``.)
+    """
+    import tempfile
+
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AnalyticsStore(f"{tmp}/analytics.db")
+        recorder = reset_recorder_for_test(store)
+        app, session = await _boot(title="")
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _ready(pilot, app)
+            # The session already earned a real title in an earlier process.
+            store.upsert_session_name(
+                session.session_id, "Reliable session naming", rank=SESSION_NAME_RANK_TITLE
+            )
+
+            app._show_provisional_name("why does naming keep failing")
+            recorder.flush_for_test()
+
+            conn = store._connect()
+            assert conn is not None
+            row = conn.execute(
+                "SELECT name, rank FROM session_names WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            assert row == ("Reliable session naming", SESSION_NAME_RANK_TITLE)
+            session.gate.set()
+        recorder.close()

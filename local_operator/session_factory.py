@@ -1448,6 +1448,7 @@ async def _run_store_maintenance(
     # Exit during this best-effort window is harmless; the next process retries.
     await _wait_for_store_maintenance_idle_window()
 
+    from local_operator.analytics.backfill import backfill_analytics_session_names
     from local_operator.resume import backfill_session_origins, backfill_session_titles
     from local_operator.session.cleanup import cleanup_from_config
     from local_operator.tools.group_reaper import sweep_orphan_groups
@@ -1481,6 +1482,16 @@ async def _run_store_maintenance(
         # session is findable by every name it has borne on the first launch
         # after upgrade rather than only after its next rename.
         ("session title backfill", lambda: backfill_session_titles(config_dir)),
+        # Name the analytics ledger's unnamed sessions from their transcripts,
+        # so ``/analytics`` stops rendering months of history as bare 12-hex
+        # ids. Ordered AFTER the title backfill on purpose: that pass writes the
+        # title sidecar this one reads through ``resume.session_name``, so a
+        # session whose title sits in the untouched middle of a large transcript
+        # is recovered on the same launch rather than the next one.
+        (
+            "analytics session-name backfill",
+            lambda: backfill_analytics_session_names(config_dir),
+        ),
     ]
 
     for label, work in passes:

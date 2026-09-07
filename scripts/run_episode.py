@@ -427,6 +427,7 @@ def _model_client(
     route: RouteIdentity,
     artifact_root: Path,
     episode_id: str,
+    task_id: str,
     keep_recent_frames: int,
 ) -> Any:
     from local_operator.evaluation.runner.provider_client import (
@@ -441,6 +442,9 @@ def _model_client(
         model_spec=build_model_spec(provider, model),
         artifact_root=artifact_root,
         episode_id=episode_id,
+        # The label this run wears in ``/analytics``. The task is what a human
+        # recognises; the episode id stays the fallback inside the client.
+        task_id=task_id,
         fallback_policy="forbid",
         keep_recent_frames=keep_recent_frames,
     )
@@ -709,6 +713,7 @@ async def run(args: argparse.Namespace) -> int:
             route=route,
             artifact_root=config.artifact_root,
             episode_id=episode_id,
+            task_id=args.task_id,
             keep_recent_frames=args.keep_recent_frames,
         )
 

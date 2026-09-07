@@ -1,0 +1,31 @@
+{
+  "source": "/private/tmp/r717/base",
+  "size": [
+    71,
+    30
+  ],
+  "screen": "AnalyticsScreen",
+  "session_rows_rendered": 4,
+  "session_rows_seeded": 11,
+  "distinct_rendered_rows": 4,
+  "colliding_group_size": 8,
+  "colliding_rows_on_screen": 1,
+  "ledger_unchanged": true,
+  "scroll": {
+    "size": [
+      58,
+      16
+    ],
+    "virtual_size": [
+      75,
+      28
+    ],
+    "max_y": 12
+  },
+  "rows": [
+    "OSWorld benchmark evaluation and  252.9k tokens    $3.4k      2 calls",
+    "Article search service integrati  256.5k tokens      $3k      2 calls",
+    "Revise Agent Risk Assessments PD  260.1k tokens      $3k      2 calls",
+    "reviewer \u00b7 Article-search-svc sc  267.3k tokens   $10.85      2 calls"
+  ]
+}
