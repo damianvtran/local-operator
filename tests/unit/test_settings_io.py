@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from local_operator import settings_io
+from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -118,6 +118,15 @@ def _consumer_defaults() -> dict[str, object]:
         "fork.mode": DEFAULT_FORK_MODE,
         "fork.cmux_placement": DEFAULT_FORK_CMUX_PLACEMENT,
     }
+    # The hotkeys have a REAL single-value consumer for the same reason the
+    # fork keys do, and a stricter one: `KeyAction.default` is what
+    # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to
+    # when the override is absent or unusable, so a registry default that
+    # disagreed with it would mean the page offering to reset a row to a key
+    # the app never binds. Derived rather than restated, so adding an action
+    # cannot leave this guard behind.
+    for action in keymap.KEY_ACTIONS:
+        consumers[action.id] = action.default
     for field in type(compaction).model_fields:
         consumers[f"compaction.{field}"] = getattr(compaction, field)
     for key, value in DEFAULT_WEB_SEARCH_CONFIG.items():

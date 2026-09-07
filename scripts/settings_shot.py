@@ -468,6 +468,59 @@ async def main() -> None:
             _select(view, "retry.baseDelayMs")
             await pilot.pause()
             save_capture(app, out.replace(".svg", ".default.svg"))
+        elif state.startswith("hotkeys"):
+            # The four capture states, each a frame of its own, because they
+            # are what the feature IS: a still of the resting row shows only
+            # that two rows exist. Driven through the real keys rather than by
+            # poking `_capture`, so the frame is one a user can actually
+            # produce — the same reason `cascade-corrupt` writes its wreckage
+            # through the real writer.
+            _select(view, "keymap.new_session")
+            await pilot.pause()
+            # `_scroll_to_selection` stops as soon as the CURSOR is visible,
+            # which lands the section on the bottom edge with its second row
+            # below the fold — a frame that cannot show that this is a section
+            # of two rows. Scroll one screenful further so both rows and the
+            # header are in view, the same problem `_scroll_to_show_group`
+            # solves for the cascade.
+            view._body.scroll_to(y=view._body.scroll_target_y + 4, animate=False)
+            await pilot.pause()
+            if state == "hotkeys":
+                # Resting. Both rows visible with their current keys.
+                save_capture(app, out)
+            else:
+                await pilot.press("enter")
+                await pilot.pause()
+                if state == "hotkeys-capturing":
+                    # LISTENING: the row says so and the detail row states the
+                    # only way out, which matters more here than anywhere else
+                    # on the page — while this is up the app has no hotkeys at
+                    # all, `ctrl+c` included.
+                    save_capture(app, out)
+                elif state == "hotkeys-pending":
+                    # A free key detected, awaiting the confirming `enter`.
+                    await pilot.press("f5")
+                    await pilot.pause()
+                    save_capture(app, out)
+                elif state == "hotkeys-conflict":
+                    # A SOFT conflict: allowed, with the victim named. `ctrl+t`
+                    # is the app's own todo toggle.
+                    await pilot.press("ctrl+t")
+                    await pilot.pause()
+                    save_capture(app, out)
+                elif state == "hotkeys-refused":
+                    # A HARD refusal, stating why. Capture stays open, so the
+                    # next press is still heard — a refusal that ended the mode
+                    # would read as the key having worked.
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+                    save_capture(app, out)
+                # Never leave the app with its bindings disarmed, even in a
+                # throwaway capture process: the geometry line below is read
+                # from a live app and a stuck gate would be a lie in the
+                # evidence itself.
+                await pilot.press("escape")
+                await pilot.pause()
         elif state == "retired":
             for _ in range(len(view._rows)):
                 view.action_jump(1)
