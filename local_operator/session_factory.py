@@ -2167,6 +2167,15 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     # Breaker incidents become session incidents: the model learns a server's
     # tools are gone instead of hammering them (MCP-07's observable half).
     manager.on_incident = session._on_mcp_incident
+    # ...and the RECOVERY half, installed here rather than in the TUI for the
+    # same reason the failure is: this is the composition root every host goes
+    # through, so a CLI, headless, exec or server session gets the notice too.
+    # A recovery bolted onto the TUI's ``/mcp login`` worker would cover one of
+    # the six routes back to a usable server and leave every other host holding
+    # a death notice for a server that came back \u2014 the asymmetry itself was
+    # the bug. Subagents deliberately do NOT reach this function (they BORROW
+    # the parent's manager), so a child never overwrites the parent's sink.
+    manager.on_recovery = session._on_mcp_recovery
 
 
 def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | None]:

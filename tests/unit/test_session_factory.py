@@ -830,6 +830,11 @@ class FakeMcpManager:
         self._settling = settling
         self._startup_failures = dict(startup_failures or {})
         self.on_startup_settled: Callable[[], None] | None = None
+        # Declared like the real manager's, so ``attach_mcp_dispose`` installing
+        # the incident/recovery sinks is type-checked here rather than silently
+        # creating attributes the production object also has.
+        self.on_incident: Callable[[str, str], None] | None = None
+        self.on_recovery: Callable[[str, int], None] | None = None
 
     def set_on_tools_changed(self, cb) -> None:
         self.callback = cb
@@ -3231,3 +3236,36 @@ async def test_new_admitted_user_refreshes_knowledge_but_tool_steps_reuse_it(tmp
     await transcript.append_message(Message.user("now inspect Python"))
     await provider()
     assert index.queries == ["inspect Slack", "now inspect Python"]
+
+
+@pytest.mark.asyncio
+async def test_attach_mcp_dispose_installs_the_recovery_sink() -> None:
+    """One line here is what makes every non-TUI host hear MCP recoveries.
+
+    The failure sink has always been installed at this composition root, which
+    is why a CLI, headless, exec or server session learns a server's tools are
+    gone. The recovery sink must be installed in the same place and not in the
+    TUI's ``/mcp login`` worker: that worker covers one of the six routes back
+    to a usable server, and bolting it on there would leave every other host
+    permanently holding the death notice — the asymmetry this fixes.
+    """
+    session = FakeSessionShell()
+    manager = FakeMcpManager()
+    recoveries: list[tuple[str, int]] = []
+
+    def record(server: str, tool_count: int) -> None:
+        recoveries.append((server, tool_count))
+
+    session._on_mcp_recovery = record
+
+    attach_mcp_dispose(session, cast("McpManager", manager))
+
+    # ``==`` not ``is``: a bound method is a fresh object on every attribute
+    # access, so identity would fail for the incident sink even when correct.
+    assert manager.on_recovery == session._on_mcp_recovery
+    assert manager.on_incident == session._on_mcp_incident
+    # And it is live: the manager firing it reaches the session's hook.
+    assert manager.on_recovery is not None
+    manager.on_recovery("minerva-qa", 41)
+    assert recoveries == [("minerva-qa", 41)]
+    await session.dispose()

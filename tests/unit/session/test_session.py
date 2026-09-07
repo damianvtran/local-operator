@@ -8,6 +8,7 @@ import base64
 import io
 import sys
 import types
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
@@ -4664,4 +4665,150 @@ async def test_a_held_message_is_still_persisted_only_once(tmp_path):
         if marker in str(getattr(message, "text", ""))
     ]
     assert len(replayed) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_is_not_persisted(tmp_path):
+    """The recovery reaches the LIVE context and never the transcript.
+
+    Mirror of the incident test above, inverted. An MCP connection is
+    process-scoped — ``McpManager._connections`` is instance state and
+    ``disconnect_all`` runs on dispose — so a resumed session re-runs discovery
+    from scratch. Replaying "its 3 tools are available to you now" into a
+    session that did NOT reconnect (an expired grant, a moved binary, an
+    offline machine — the likely cases for exactly the servers this feature is
+    about) would assert tools that are not in the inventory. Same class as the
+    credential record, which is why the type is absent from
+    ``_PERSISTABLE_CUSTOM_TYPES``.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.journal_mcp_recovery("files", 3)
+
+    live = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_mcp_recovery"
+    ]
+    assert live, "the recovery must reach the live context"
+    assert "[mcp recovery]" in live[-1].details["text"]
+    assert live[-1].details["server"] == "files"
+    assert live[-1].details["tool_count"] == 3
+
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert "session_mcp_recovery" not in dumped, (
+        "the recovery was persisted; a resumed session would replay a claim "
+        "about a connection it cannot re-verify"
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_renders_as_a_user_message(tmp_path):
+    """It must arrive on the same surface the INCIDENT arrived on.
+
+    The failure reaches the model as a ``user`` turn; a recovery that rendered
+    to nothing (or to a system aside) could not supersede it. This exercises
+    the render whitelist branch in ``_default_convert_to_llm``.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="one"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="two"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    await session.journal_mcp_recovery("minerva-qa", 41)
+    await session.prompt("continue")
+
+    rendered = [m for m in stream.requests[1].messages if getattr(m, "role", "") == "user"]
+    texts = "\n".join(getattr(m, "text", "") for m in rendered)
+    assert "[mcp recovery] MCP server 'minerva-qa'" in texts
+    assert "41 tools are available again" in texts
+    assert "supersedes the earlier session incident" in texts
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_dispose_is_a_no_op(tmp_path):
+    """A reconnect racing teardown must be silent, not noisy.
+
+    ``_on_mcp_recovery`` is fired from the manager's connect path, which can
+    land while the session is disposing (dispose calls ``disconnect_all``, and
+    an in-flight reconnect may still complete). ``_spawn_background`` closes
+    the coroutine after dispose, so this must neither raise nor leave an
+    un-awaited coroutine warning.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.dispose()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        session._on_mcp_recovery("files", 3)
+        await asyncio.sleep(0)
+
+    assert not [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_mcp_recovery"
+    ]
+
+
+async def _drain_journal_tasks(session: Session) -> None:
+    """Run every ``_spawn_background`` task to completion, oldest first.
+
+    Bounded and looped because a drained task can spawn another; a
+    self-respawning task fails the test instead of hanging it. Draining rather
+    than sleeping is what keeps the ordering assertion below a statement about
+    the code and not about the scheduler.
+    """
+    for _ in range(10):
+        pending = [task for task in list(session._background_tasks) if not task.done()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("background journal tasks never settled")
+
+
+@pytest.mark.asyncio
+async def test_incident_then_recovery_reaches_the_context_in_that_order(tmp_path):
+    """A recovery must never overtake the incident it exists to supersede.
+
+    Both hooks are fire-and-forget through ``_spawn_background``, and they do
+    different amounts of work: ``journal_incident`` awaits a transcript write
+    before its live append, ``journal_mcp_recovery`` persists nothing. Without
+    the shared ``_journal_lock`` the recovery therefore finishes on its FIRST
+    scheduling step and lands ahead of the incident, leaving the model reading
+    "its tools are gone ... Do not call its tools" as the LAST word on the
+    server — precisely the state this notice exists to clear, now with a
+    superseding message that arrived too early to supersede anything.
+
+    Fired with ZERO separation deliberately (review round 1, R1). The old code
+    inverted at 0, 1, 2, 3 and 5 loop ticks and only came right at 10; a test
+    that inserted any separation would pass against the defect, so the guard
+    would silently stop guarding. Ordering here is a property of the lock, not
+    of how many awaits either method happens to contain.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    session._on_mcp_incident("minerva-qa", "MCP authorization failed")
+    session._on_mcp_recovery("minerva-qa", 41)
+    await _drain_journal_tasks(session)
+
+    journal = [
+        m.custom_type
+        for m in session._context.messages
+        if isinstance(m, CustomMessage)
+        and m.custom_type in (SESSION_INCIDENT_MESSAGE_TYPE, "session_mcp_recovery")
+    ]
+    assert journal == [
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        "session_mcp_recovery",
+    ], f"the recovery overtook its own incident: {journal}"
     await session.dispose()

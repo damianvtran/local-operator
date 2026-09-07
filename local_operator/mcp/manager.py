@@ -1092,6 +1092,14 @@ class McpManager:
         self._on_tools_changed: ToolsChangedCallback | None = None
         # Session-installed sink for model-visible MCP breaker incidents.
         self.on_incident: Callable[[str, str], None] | None = None
+        # Session-installed sink for the RECOVERY half of the same pair: fired
+        # from ``_register_connection`` when a server the model was told was
+        # broken becomes usable again. Installed beside ``on_incident`` in
+        # ``session_factory.attach_mcp_dispose``, so every host that gets the
+        # failure gets the recovery — the asymmetry (failure model-visible,
+        # recovery TUI-toast-only) is the bug it fixes. Signature:
+        # (server_name, registered_tool_count).
+        self.on_recovery: Callable[[str, int], None] | None = None
         # UI-installed sink fired when a server needs an OAuth login. The
         # startup toast only covers failures that land INSIDE the 250 ms gate;
         # HTTP OAuth servers connect AFTER it, so their auth failures (and
@@ -1125,6 +1133,23 @@ class McpManager:
         # a tool call keeps retrying does not re-raise the toast on every
         # attempt. Cleared per server when it connects again.
         self._auth_toasted: set[str] = set()
+        # Servers whose failure was ANNOUNCED TO THE MODEL via ``on_incident``,
+        # and which therefore owe the model a recovery notice when they connect
+        # again. Deliberately its own set rather than a reuse of the three
+        # neighbours, none of which mean what this means:
+        #   * ``_auth_toasted`` is a UI/TOAST latch — it is only written when
+        #     ``on_auth_required`` is installed, so on a headless host it stays
+        #     EMPTY while ``on_incident`` fired normally, suppressing the
+        #     recovery on exactly the hosts this feature exists to serve;
+        #   * ``_reconnect_suspended`` is both a superset (written before the
+        #     sink decision, and by ``_reconnect_for_call``, which fires no
+        #     incident) and a subset (cleared by a login that then FAILS);
+        #   * ``_startup_failures`` is populated by the startup gate, which
+        #     fires NO incident — announcing from it would "recover" failures
+        #     the model was never told about.
+        # Armed only inside the ``if sink is not None`` branches at the three
+        # ``on_incident`` sites; disarmed in ``_register_connection``.
+        self._incident_announced: set[str] = set()
         # Tool-name collision state keyed by stable origin key (MCP-09):
         # (server name, original tool name), never registration order.
         self._tool_meta: dict[str, McpToolMeta] = {}
@@ -1317,6 +1342,14 @@ class McpManager:
             self._reconnect_history.pop(name, None)
             self._reconnect_suspended.discard(name)
             self._backoff_index.pop(name, None)
+            # A server that left the config must not carry its arming across a
+            # re-add: the model's incident is about the OLD entry, and a
+            # re-added server connecting for the first time would otherwise
+            # emit a recovery for a failure that is no longer the same server.
+            # Note ``reload()`` deliberately does NOT clear this wholesale — a
+            # server still broken after a reload keeps its arming so its
+            # EVENTUAL recovery still announces.
+            self._incident_announced.discard(name)
             future = self._connect_futures.pop(name, None)
             _settle_future_error(
                 future, McpConnectionError(f"MCP server {name!r} removed from config")
@@ -2225,6 +2258,15 @@ class McpManager:
                             "MCP authorization failed; "
                             f"{self._auth_failure_text(name, auth_exc)}",
                         )
+                        # Arm the recovery notice. This line MUST stay INSIDE
+                        # the ``if sink is not None`` branch and after a
+                        # successful ``sink(...)``: the gate means "the MODEL
+                        # was told this server is broken", so a host with no
+                        # incident sink must never be armed. Hoisting it out
+                        # while "tidying" re-creates the defect that rules out
+                        # ``_auth_toasted`` as the gate — a recovery announced
+                        # for a failure that was never announced.
+                        self._incident_announced.add(name)
                     except Exception:  # noqa: BLE001 — incidents must never break the manager
                         logger.debug("mcp incident sink raised", exc_info=True)
                 # The startup toast has already been dismissed by the time an
@@ -2289,12 +2331,54 @@ class McpManager:
         self._auth_toasted.discard(conn.name)
         self._log_first_connect_security(conn)
         self._register_tools(conn.name, conn.tools)
+        self._fire_recovery(conn.name)
         future = self._connect_futures.pop(conn.name, None)
         if future is not None and not future.done():
             future.set_result(conn)
         watcher = asyncio.get_running_loop().create_task(self._watch_connection(conn.name, conn))
         self._watchers.add(watcher)
         watcher.add_done_callback(self._watchers.discard)
+
+    def _fire_recovery(self, name: str) -> None:
+        """Tell the model a server it was told was BROKEN is usable again.
+
+        The symmetric half of the ``on_incident`` sink. It lives here, in
+        ``_register_connection``, because that is the single choke point every
+        route to a usable server passes through — ``/mcp login``,
+        ``/mcp reauth``, ``reload()``, the backoff reconnect, the after-gate
+        continuation, and the call-site retry. Bolting it onto the TUI's login
+        worker would cover one of those six and leave every headless, exec and
+        server host permanently holding the death notice, which is the
+        asymmetry this fixes.
+
+        Gated on :attr:`_incident_announced`, so it fires ONLY for a server
+        whose failure the model actually heard about. Without that gate a
+        ``reload()`` — which tears down and re-registers EVERY connection —
+        would emit one "is connected again" per healthy server: a notice storm
+        about servers that never broke.
+
+        The membership test comes FIRST and before any tool lookup: this runs
+        on every connect on every host, and ``get_server_tools`` sorts a list,
+        so the overwhelmingly common healthy case must cost one hash lookup and
+        nothing else. The discard is unconditional on the armed path and
+        happens BEFORE the sink call, so a raising or absent sink cannot leave
+        the server armed to re-announce on every later reconnect.
+
+        Must be called AFTER ``_register_tools``: the count reported is the
+        REGISTERED one, which ``enabledTools``/``disabledTools`` filtering has
+        already reduced, not the raw ``conn.tools`` length the model could not
+        actually call.
+        """
+        if name not in self._incident_announced:
+            return
+        self._incident_announced.discard(name)
+        sink = getattr(self, "on_recovery", None)
+        if sink is None:
+            return
+        try:
+            sink(name, len(self.get_server_tools(name)))
+        except Exception:  # noqa: BLE001 — recoveries must never break the manager
+            logger.debug("mcp recovery sink raised", exc_info=True)
 
     def _log_first_connect_security(self, conn: ServerConnection) -> None:
         """WARNING surface for project-sourced stdio servers (MCP-12).
@@ -2678,6 +2762,13 @@ class McpManager:
                         f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; its tools are "
                         "unavailable until a reconnect succeeds",
                     )
+                    # Arm the recovery notice — INSIDE the ``if sink is not
+                    # None`` branch, deliberately. The gate records that the
+                    # MODEL heard about this failure; a host with no incident
+                    # sink heard nothing and must get no recovery. This is the
+                    # route the incident text itself promises a recovery for
+                    # ("unavailable until a reconnect succeeds").
+                    self._incident_announced.add(name)
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
                     logger.debug("mcp incident sink raised", exc_info=True)
             self._abandon_reconnect(
@@ -2739,6 +2830,12 @@ class McpManager:
                         name,
                         f"MCP authorization failed; {self._auth_failure_text(name, exc)}",
                     )
+                    # Arm the recovery notice — INSIDE the ``if sink is not
+                    # None`` branch, deliberately: the gate means "the MODEL
+                    # was told", not "a failure happened". Moving it out arms
+                    # hosts that were never told, which is the defect that
+                    # rules out reusing ``_auth_toasted``.
+                    self._incident_announced.add(name)
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
                     logger.debug("mcp incident sink raised", exc_info=True)
             # Mid-session expiry happens long after the startup toast, so raise a
