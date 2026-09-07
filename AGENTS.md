@@ -308,8 +308,9 @@ systemd unit name.
 So a bridge test runs the daemon as a **plain subprocess on a non-default
 port** (`python -m local_operator.browser_bridge.daemon --port <port>`, as
 `docs/design/browser-extension-evidence.md` does) and never calls `install`.
-A per-root label is in flight in a separate PR; until it lands, `HOME`
-redirection is no protection here.
+Deriving the label per root would remove the hazard, but nothing has changed
+it yet: while `LABEL` is a module constant, `HOME` redirection is no protection
+here. Check that line rather than assuming a fix has landed.
 
 ### Read the committed ref, not the working tree
 
