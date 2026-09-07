@@ -89,8 +89,16 @@ class CatalogEntry:
             # Dormant: the schedule exists but the session was stopped, so it is
             # not going to fire. Named rather than hidden — a user who sees the
             # glyph needs to know why it is not going to act.
+            #
+            # "dormant" rather than a fresh adjective, because the stop receipt
+            # this state comes FROM already says "N wakes dormant until you
+            # reopen it" (``control.py`` / ``app.py``). Design review round 2
+            # (D5) flagged that an earlier draft here said "paused" and split
+            # the vocabulary for one fact across two surfaces; the receipt's
+            # word is the established one, so this follows it rather than
+            # asking the receipt to move.
             count = self.row.wakes
-            return f"Stopped ({count} wake{'s' if count != 1 else ''} paused)"
+            return f"Stopped ({count} wake{'s' if count != 1 else ''} dormant)"
         return "Recent"
 
 

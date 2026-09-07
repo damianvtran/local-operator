@@ -75,6 +75,17 @@ ROWS = [
     ("aaaaaaaaaaa5", "OSWorld benchmark evaluation (subagent)", 8, HOLDING_WORK, None, 0, False),
     ("aaaaaaaaaaa6", "Auto-update inactive session runtimes", 13, "idle", None, 2, False),
     ("aaaaaaaaaaa7", "Debugging session cost and naming drift", 43, "idle", None, 1, True),
+    # The two states the round-1 design findings were about. Neither was in the
+    # fixture when those findings were raised, so the frames could not show the
+    # bugs OR their fixes and the reviewer had to build a scratch harness to
+    # see them (round 2). A capture script that cannot frame the states it was
+    # reviewed for is the same defect as D3 in a different place.
+    #
+    #   attached + armed wake -> must draw the ATTACHED mark, not the wake (D2)
+    #   cold + dormant wake   -> draws the wake mark, so the words must follow
+    #                            it: "Stopped (N wakes paused)" (D1)
+    ("aaaaaaaaaab4", "Review provider onboarding copy", 7, "attached", None, 2, False),
+    ("aaaaaaaaaab5", "Stopped nightly catalogue refresh", 120, "", None, 1, True),
     ("aaaaaaaaaaa8", "Add Flavia's Adverse Media Case", 3, "idle", "approval", 0, False),
     ("aaaaaaaaaaa9", "Review and merge open provider MRs", 52, "wedged", None, 0, False),
     ("aaaaaaaaaab1", "Toggleable Sidebar for Session Switching", 49, "", None, 3, False),
@@ -132,12 +143,28 @@ async def main() -> None:
         sidebar.cursor_id = "aaaaaaaaaaa1"
         # Pin the animation: a capture is only comparable frame-to-frame if the
         # spinner is at a known phase in both.
+        #
+        # Pausing the timer is NOT enough, and a frame pinned that way was in
+        # fact unstable across runs (design review round 2, D6: six runs, two
+        # distinct glyphs). `_sync_animation()` runs from `set_entries` and from
+        # several other paths, and it RE-RESUMES the timer whenever any visible
+        # row is busy — so a tick can still land during the settling pauses
+        # below and advance `_frame` out from under the pin.
+        #
+        # Stopping the timer outright and clearing the handle is what actually
+        # holds: `_sync_animation` returns early when `_timer is None`, so
+        # nothing can restart it, and `_frame` stays exactly where it is put.
         if sidebar._timer is not None:
-            sidebar._timer.pause()
+            sidebar._timer.stop()
+            sidebar._timer = None
         sidebar._frame = 2
         sidebar.refresh()
         await pilot.pause()
         await pilot.pause()
+        # Assert the pin rather than trusting it: a capture script whose
+        # determinism claim is false silently poisons every future comparison
+        # captured from it.
+        assert sidebar._frame == 2, f"spinner phase drifted to {sidebar._frame}"
 
         save_capture(app, out)
         conversation = app.query_one("#session-conversation")

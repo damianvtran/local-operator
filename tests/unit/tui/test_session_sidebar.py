@@ -1111,6 +1111,13 @@ async def test_the_measured_conversation_lane_matches_the_documented_guarantee()
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
+            # Pause the 2 s catalog poll that `ctrl+b` resumes. Without this
+            # the poll fires mid-test, calls `set_entries` with the empty
+            # isolated catalog and wipes the hand-built rows below — a load
+            # -dependent flake, and a departure from every sibling pilot test
+            # in this file (code review round 2, M3).
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
             lane = app.query_one("#session-conversation").size.width
             assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
             assert app.screen.virtual_size == app.screen.size, width
@@ -1137,6 +1144,13 @@ async def test_a_wide_terminal_actually_shows_more_of_the_title():
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
+            # Pause the 2 s catalog poll that `ctrl+b` resumes. Without this
+            # the poll fires mid-test, calls `set_entries` with the empty
+            # isolated catalog and wipes the hand-built rows below — a load
+            # -dependent flake, and a departure from every sibling pilot test
+            # in this file (code review round 2, M3).
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()
             sidebar = app._session_sidebar
             sidebar.set_entries(entries)
             if sidebar._timer is not None:
@@ -1185,6 +1199,13 @@ async def test_the_grown_list_still_leaves_the_conversation_its_lane():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
+        # Pause the 2 s catalog poll that `ctrl+b` resumes. Without this
+        # the poll fires mid-test, calls `set_entries` with the empty
+        # isolated catalog and wipes the hand-built rows below — a load
+        # -dependent flake, and a departure from every sibling pilot test
+        # in this file (code review round 2, M3).
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
         sidebar = app._session_sidebar
         assert sidebar.content_region.width > SIDEBAR_WIDTH - SIDEBAR_GUTTER
         assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_COMFORT_WIDTH
@@ -1230,7 +1251,7 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
         SessionRow("dorm00000002", now, "cold+stopped", wakes=1, wakes_dormant=True)
     )
     assert row_state_mark(cold_dormant.row, 0)[0] == WAKE_MARKER
-    assert cold_dormant.status == "Stopped (1 wake paused)"
+    assert cold_dormant.status == "Stopped (1 wake dormant)"
 
     # Presence outranks an armed wake: "a terminal is watching this" answers
     # "where am I?", which bare residency does not (D2).
@@ -1344,6 +1365,13 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
+        # Pause the 2 s catalog poll that `ctrl+b` resumes. Without this
+        # the poll fires mid-test, calls `set_entries` with the empty
+        # isolated catalog and wipes the hand-built rows below — a load
+        # -dependent flake, and a departure from every sibling pilot test
+        # in this file (code review round 2, M3).
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
         sidebar = app._session_sidebar
         for kind, glyph, words in cases:
             # An ARMED WAKE on the row is the case M2 names: without the
