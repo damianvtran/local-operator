@@ -123,10 +123,16 @@ def _route_to_viewer(session_id: str) -> bool:
     """Ask an already-running viewer to display the session. True if one did.
 
     Every failure mode — no viewer, a wedged one, a refused socket, a viewer
-    that died between the scan and the dial — returns False and falls through
-    to the spawn, which is the path that works when nothing is running. The
-    dial is bounded end to end (``viewer_client``), so a wedged viewer costs a
-    second or two rather than the click.
+    that died between the scan and the dial, **and a viewer that took the
+    request but could not display the session** — returns False and falls
+    through to the spawn, which is the path that works when nothing is running.
+    That last one is why the viewer's ack resolves against the boot OUTCOME
+    rather than the dispatch: a "yes" for a session that failed to open would
+    suppress this fallback AND cost the user the conversation they were reading,
+    leaving them on an error splash with no window and no way back.
+
+    The dial is bounded end to end (``viewer_client``), so a wedged viewer costs
+    a second or two rather than the click.
 
     The import is local and stays that way: this module is reached from a
     detached click process where startup cost is the user's latency, and

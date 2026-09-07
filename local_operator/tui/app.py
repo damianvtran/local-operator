@@ -27,6 +27,7 @@ import inspect
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -4652,8 +4653,27 @@ class OperatorApp(App[None]):
                 self._set_sidebar_open(False)
             self._editor().focus()
             return
+        self._select_sidebar_session(message.session_id)
+
+    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None]:
+        """Start a sidebar navigation to ``session_id`` — the ONE way to switch.
+
+        Extracted so the notification-click path (:meth:`viewer_resume_session`)
+        starts a switch by literally the same code as the user's keystroke,
+        rather than by a second route that merely resembles it. That distinction
+        is not cosmetic: ``/resume`` looks equivalent and is not — it calls
+        ``_deny_queued_approvals``, so switching that way silently answers "no"
+        to an approval the user had parked in the session being left, which
+        ``docs/SESSION_SIDEBAR.md`` explicitly forbids of a switch. Sidebar
+        navigation instead *suspends* those gates (``_suspend_sidebar_gates``
+        snapshots the card and ``_restore_gate_draft`` puts it back on return).
+
+        Cancelling the outgoing session's worker group first is part of that
+        contract and not an optimisation: those workers still hold the
+        presentation the navigation is about to replace.
+        """
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
-        self._sidebar_navigation.select(message.session_id)
+        return self._sidebar_navigation.select(session_id)
 
     def _apply_sidebar_settings(self) -> None:
         settings = SidebarSettings.from_values(self._config_values())
@@ -15475,36 +15495,99 @@ class OperatorApp(App[None]):
     async def viewer_resume_session(self, session_id: str) -> str:
         """Display ``session_id`` here — the click's whole purpose.
 
-        Routed through the app's own ``/resume`` on Textual's thread, which is
-        the SAME path the user's sidebar keystroke takes. That is deliberate:
-        it inherits the sidebar's invariants wholesale (a switch never answers
-        a gate, never cancels a turn, never redirects its result) rather than
-        creating a second way to change which session is on screen.
+        THE SIDEBAR'S NAVIGATION, LITERALLY. This calls
+        :meth:`_select_sidebar_session`, the same function the user's sidebar
+        keystroke reaches, so the click inherits the sidebar's invariants by
+        construction rather than by resemblance. It used to run ``/resume``
+        instead, which *looks* equivalent and is not: ``/resume`` reloads
+        through ``_deny_queued_approvals``, so a click about session B silently
+        answered "no" to an approval the user had parked in session A and
+        rendered no receipt for it — measured, and forbidden in as many words by
+        ``docs/SESSION_SIDEBAR.md`` ("Switching does not answer a gate, cancel a
+        turn, or redirect its eventual result"). This docstring asserted that
+        inheritance while the code did not have it; a docstring outrunning its
+        code on this exact path is the defect this whole module was written to
+        fix, so it is now the same code rather than a matching promise.
 
-        Called on the viewer endpoint's own loop, so the hop to Textual is made
-        here and bounded — an app inside a modal's nested pump would otherwise
-        wedge this dispatch indefinitely, and the click's caller is waiting on
-        the ack to decide whether to spawn a window.
+        THE ACK MEANS DISPLAYED, NOT DISPATCHED. The click's caller skips its
+        spawn fallback on this ack, so returning success for a session that
+        failed to open cost the user both outcomes: no new window AND the loss
+        of the conversation they were reading. Resolution therefore waits for
+        the navigation task and then checks what is actually on screen. The
+        sidebar path helps twice here — it prepares off-screen and commits only
+        once the target is ready, so a failure leaves the outgoing conversation
+        exactly where it was, and this raises so ``switched`` stays False and
+        the spawn runs.
+
+        BOUNDED END TO END, and the bound is real this time. ``call_from_thread``
+        blocks its caller with no timeout of its own (textual 8.2.8 ends in a
+        bare ``future.result()``), so the previous ``wait_for`` sat *after* the
+        hazard it named and an app wedged in a nested pump ran past it
+        indefinitely — measured at 30 s against a 12 s outer bound. The blocking
+        call is now inside the ``wait_for`` via a worker thread. A timeout
+        strands that worker until Textual services the callback, which is
+        unavoidable (an enqueued ``call_from_thread`` cannot be recalled) and
+        acceptable: it is a pooled thread rather than this endpoint's loop, so
+        the endpoint keeps answering and the click falls back on time.
+
+        ``VIEWER_RESUME_TIMEOUT_S`` is shared with the client's ack deadline,
+        which is derived from it — see ``session/runtime/viewers``. The client
+        MUST outlast this bound; when it did not, a slow switch delivered the
+        switch *and* a duplicate window, which is the exact bug this feature
+        removes.
         """
         # The same set-once helper the mobile handle's app hop uses, imported
         # rather than re-declared: two spellings of "resolve this future unless
         # a cancellation already did" is exactly the duplication that lets one
         # of them drift into swallowing an error.
         from local_operator.mobile.tui_handle import _set_unless_done
+        from local_operator.session.runtime.viewers import VIEWER_RESUME_TIMEOUT_S
+
+        if threading.get_ident() == getattr(self, "_thread_id", None):
+            # Preserved from before the worker-thread hop below, which would
+            # otherwise make this reachable and self-deadlocking. The endpoint
+            # always calls from its own thread; anything calling from Textual's
+            # is a wiring mistake and should hear so rather than hang.
+            raise RuntimeError("viewer_resume_session must not run on the app's own thread")
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[None] = loop.create_future()
+        future: asyncio.Future[str] = loop.create_future()
 
         def apply() -> None:
+            """On Textual's thread: start the switch and report where it landed."""
             try:
-                self._run_slash_command(f"/resume {session_id}")
-                loop.call_soon_threadsafe(_set_unless_done, future, None, None)
+                task = self._select_sidebar_session(session_id)
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
+                return
 
-        self.call_from_thread(apply)
-        await asyncio.wait_for(future, timeout=10.0)
-        return f"displayed {session_id}"
+            def settled(_task: "asyncio.Task[None]") -> None:
+                # Still on Textual's thread, so reading the binding is safe.
+                # `SessionNavigation` reports failure through its `failed`
+                # callback and completes normally, so the task's own outcome
+                # cannot be trusted as the answer — what is on screen can.
+                current = getattr(self._session, "session_id", "") if self._session else ""
+                if current == session_id:
+                    loop.call_soon_threadsafe(
+                        _set_unless_done, future, f"displayed {session_id}", None
+                    )
+                else:
+                    error = _task.exception() if not _task.cancelled() else None
+                    loop.call_soon_threadsafe(
+                        _set_unless_done,
+                        future,
+                        None,
+                        error or RuntimeError(f"could not display {session_id}"),
+                    )
+
+            task.add_done_callback(settled)
+
+        async def hop_and_wait() -> str:
+            # `to_thread` is what puts the blocking enqueue INSIDE the bound.
+            await asyncio.to_thread(self.call_from_thread, apply)
+            return await future
+
+        return await asyncio.wait_for(hop_and_wait(), timeout=VIEWER_RESUME_TIMEOUT_S)
 
     async def viewer_focus_window(self) -> str:
         """Bring this window forward. Best-effort, bounded, off the event loop.

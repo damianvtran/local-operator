@@ -52,10 +52,12 @@ import logging
 import os
 import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol, cast
 
 from local_operator.session.runtime.viewers import (
+    FOCUS_WINDOW_CAPABILITY,
     VIEWER_HEARTBEAT_INTERVAL_S,
     ViewerRecord,
     publish_viewer,
@@ -73,11 +75,11 @@ _AUTH_TIMEOUT_S = 5.0
 #: magnitude against any real frame.
 _MAX_LINE_BYTES = 64 * 1024
 
-#: Advertised when the host can activate its own window. ``hasattr``-gated by
-#: the publisher exactly as ``SessionRecord.capabilities`` is: advertising a
-#: capability the host cannot honour is worse than omitting it, because the
-#: client then skips a fallback that would have worked.
-FOCUS_WINDOW_CAPABILITY = "focus-window-v1"
+#: Re-exported for the callers (and tests) that reach for it here, beside the
+#: endpoint that advertises it. It is DEFINED in ``viewers`` because the client
+#: reads it too, and a capability string spelled in two modules is a capability
+#: that will eventually be spelled two ways.
+__all__ = ["FOCUS_WINDOW_CAPABILITY", "ViewerHost", "ViewerServer"]
 
 
 class ViewerHost(Protocol):
@@ -143,6 +145,15 @@ class ViewerServer:
         session rather than a list of displayable ones — see ``ViewerRecord``,
         where the reasoning is that an enumerated list is a cache of something
         that changes without this process knowing.
+
+        **THIS RUNS ON TEXTUAL'S LOOP AND TOUCHES DISK.** ``_republish`` is
+        ``mkstemp`` + ``write`` + ``chmod`` + ``os.replace``, measured at
+        **0.808 ms per call** on this host. That is affordable only because of
+        the cadence: the early return below makes a repeat swap free, and the
+        other two callers are a focus gain and a 15 s heartbeat. A third caller
+        on a poll or a per-frame hook would put a synchronous disk write on the
+        event loop at UI cadence — the shape the sidebar-lag investigation
+        traced its stalls back to — and must hop to a thread instead.
         """
         if self._record.current_session == session_id:
             return
@@ -160,8 +171,6 @@ class ViewerServer:
         """
         if not focused:
             return
-        import time
-
         self._record.focused_at = time.time()
         self._republish()
 
@@ -289,7 +298,21 @@ class ViewerServer:
             return
         try:
             while not self._closed.is_set():
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError:
+                    # An over-limit line: `start_server(..., limit=...)` makes
+                    # `readline` raise `LimitOverrunError` (a `ValueError`)
+                    # WITHOUT consuming the buffer, so the same read would raise
+                    # forever. Uncaught it escaped `client_connected_cb`, skipped
+                    # the reply and logged an asyncio traceback while the client
+                    # waited out its ack timeout. `viewer_client._read_reply`
+                    # hand-rolls its framing to dodge this exact defect on its
+                    # side; closing the conversation is the server's equivalent —
+                    # the peer is authenticated, so this is a bug in a peer
+                    # rather than an attack, and it falls back correctly.
+                    logger.debug("viewer control: oversized frame, closing the conversation")
+                    return
                 if not line:
                     return
                 try:

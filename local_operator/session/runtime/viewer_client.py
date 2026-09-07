@@ -23,7 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.session.runtime.viewers import ViewerRecord
+from local_operator.session.runtime.viewers import (
+    FOCUS_WINDOW_CAPABILITY,
+    KNOWN_VIEWER_PROTOCOLS,
+    VIEWER_ACK_GRACE_S,
+    VIEWER_RESUME_TIMEOUT_S,
+    ViewerRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +40,19 @@ _DIAL_TIMEOUT_S = 1.0
 #: How long one op may take to be acknowledged. ``resume_session`` crosses to
 #: the application's loop and runs a real ``/resume``, which on a cold, long
 #: transcript is genuinely slow — the architect measured ``Transcript.__init__``
-#: at 3.9 s on this host's largest session. The ack is what tells us not to
-#: spawn a second window, so waiting a little longer here is strictly better
-#: than giving up and producing the exact duplicate window this feature exists
-#: to remove.
-_ACK_TIMEOUT_S = 8.0
+#: at 3.9 s on this host's largest session.
+#:
+#: DERIVED, NOT CHOSEN. It is the server's own bound on that work
+#: (``VIEWER_RESUME_TIMEOUT_S``, applied in ``viewer_resume_session``) plus
+#: enough slack for the round trip, so this side can never give up first. The
+#: ack is what tells us not to spawn a second window; a client that timed out
+#: while the server carried the switch to completion delivered BOTH — the
+#: session switched in the running window AND a duplicate terminal opened,
+#: which is the exact defect this feature exists to remove, reproduced at a
+#: measured 8.5 s ``/resume``. Waiting a little longer here is strictly better.
+#: Both terms live in ``viewers`` so neither side can be edited into an
+#: inversion on its own.
+_ACK_TIMEOUT_S = VIEWER_RESUME_TIMEOUT_S + VIEWER_ACK_GRACE_S
 
 #: ``focus_window`` is a bounded subprocess on the far side and nothing else.
 #: It gets a short leash because a failure to raise a window is cosmetic —
@@ -149,7 +163,12 @@ async def deliver_click(
             outcome.switched = True
             outcome.detail = "already displayed"
 
-        if want_focus:
+        if want_focus and FOCUS_WINDOW_CAPABILITY in record.capabilities:
+            # The capability is READ here, not merely published. A viewer that
+            # cannot raise its window (ssh, Linux, an unknown emulator) answers
+            # the unknown-op error, and waiting out a round trip for a refusal
+            # we were told about in the record is latency spent on the click
+            # path for nothing. The switch has already landed either way.
             req = 2
             writer.write(json.dumps({"op": "focus_window", "req": req}).encode() + b"\n")
             await writer.drain()
@@ -184,7 +203,17 @@ def needs_switch(record: ViewerRecord, session_id: str) -> bool:
 def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord | None:
     """Pick the viewer that should take this click, deterministically.
 
-    Precedence, and each rung is a reason rather than a preference:
+    Only viewers speaking a protocol this build knows are considered at all.
+    That filter is applied FIRST, before either rung below, because dialing a
+    socket whose frames we cannot predict is worse than not dialing it: the
+    click would spend its ack timeout on a conversation neither side
+    understands, when falling through to the spawn works against any build.
+    ``viewers.KNOWN_VIEWER_PROTOCOLS`` documented this refusal long before
+    anything performed it — the check is here now, because a contract that
+    exists only in prose is what shipped this module's original bug.
+
+    Precedence among the remainder, and each rung is a reason rather than a
+    preference:
 
     1. **A viewer already displaying the target.** Switching it is a no-op, so
        this is the cheapest and least disruptive outcome available.
@@ -205,11 +234,12 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     fall back to spawning a terminal — the behaviour that exists today and must
     keep working.
     """
-    for record in records:
+    speakable = [rec for rec in records if rec.protocol in KNOWN_VIEWER_PROTOCOLS]
+    for record in speakable:
         if record.current_session == session_id:
             return record
     switchable = sorted(
-        (rec for rec in records if rec.can_switch),
+        (rec for rec in speakable if rec.can_switch),
         key=lambda rec: (-rec.focused_at, rec.pid),
     )
     return switchable[0] if switchable else None
