@@ -413,6 +413,45 @@ input:disabled {
   color: var(--danger);
 }
 
+/* The pre-render placeholder holds the height of the state it most often
+ * resolves into, so the popup window does not jump as render() settles.
+ *
+ * A Chrome action popup auto-sizes to its content, so every difference in card
+ * height between the first painted frame and the settled one is a visible
+ * window resize. The placeholder's own content is two short lines (~170px),
+ * while the pairing form it usually becomes is 358px; left unpinned it traded
+ * the old "Not connected." flash for an equally visible 188px growth. Pinning
+ * it to the pairing form's height makes the common path (unpaired user opening
+ * the popup to pair) resolve with NO resize at all.
+ *
+ * The connected card is shorter (207px), so an already-paired user still sees
+ * the card settle downwards. That direction is accepted deliberately: pinning
+ * to the tallest state would leave a permanent band of empty card under the
+ * connected state, which every user would see on every open, to spare a resize
+ * that happens once per popup open and only while the daemon is slow. */
+#pending {
+  min-height: 237px;
+}
+
+/* The pairing error RESERVES its space instead of reflowing the card.
+ *
+ * A Chrome action popup auto-sizes to its content, so un-hiding this line grew
+ * the card by 66px (measured 289px -> 355px) and the popup WINDOW resized under
+ * the user's cursor at the exact moment they were re-reading a rejected code.
+ * The default mismatch copy wraps to three lines at 300px, so that is the
+ * height held open; the line is made invisible rather than display:none, which
+ * keeps `role="alert"` announcing the message when it appears (D7).
+ *
+ * Scoped to the pairing form's error only. `.error.hidden` elsewhere keeps the
+ * shared `display: none`, so no other state pays for blank reserved space. */
+#pair-error {
+  min-height: 54px;
+}
+#pair-error.hidden {
+  display: block !important;
+  visibility: hidden;
+}
+
 /* Footer link in the muted-dim register, above a hairline. */
 .foot {
   padding: 10px 16px;

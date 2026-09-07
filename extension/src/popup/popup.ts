@@ -26,7 +26,10 @@ type State =
   | "disconnected"
   | "incompatible"
   | "origin"
-  | "origin-ack";
+  | "origin-ack"
+  // The neutral pre-render placeholder. Never shown BY render() — it is the
+  // section popup.html ships visible, and every render path replaces it.
+  | "pending";
 const sections = [
   "connected",
   "paired",
@@ -35,6 +38,7 @@ const sections = [
   "incompatible",
   "origin",
   "origin-ack",
+  "pending",
 ].map((id) => document.getElementById(id));
 
 // True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
@@ -127,15 +131,35 @@ const TONE: Record<State, string> = {
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
   "origin-ack": "var(--hairline-strong)",
+  // The pre-render placeholder is transitional and asserts nothing, so it takes
+  // the same neutral hairline as the other transitional states.
+  pending: "var(--hairline-strong)",
 };
+
+// The pairing state the popup last PAINTED. `show("pairing")` may run on every
+// render (storage.onChanged re-enters render() on any connState write, which
+// the worker performs on every teardown and every hello_ack), and while
+// unpaired the worker idle-suspends and the ~1-minute alarm floor rewakes it —
+// so a user spending 30-90s reading the code out of the terminal gets several
+// renders. Focusing on each of them yanks the caret back from wherever they
+// had moved it. Focus belongs to a NEWLY-shown form only, mirroring the origin
+// prompt's `freshPrompt` rule a few lines down in render().
+let pairingShown = false;
 
 function show(state: State): void {
   for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
   document.getElementById("card")?.style.setProperty("--tone", TONE[state]);
   if (state === "pairing") {
     const input = document.getElementById("pair-code") as HTMLInputElement | null;
-    input?.focus();
+    // Only on a form the user has not been looking at, and never over a focus
+    // they already placed inside the form themselves: re-focusing an element
+    // that is already focused still collapses the selection to the caret, so
+    // an activeElement check is not redundant with `pairingShown`.
+    const form = document.getElementById("pair-form");
+    const alreadyInForm = form?.contains(document.activeElement) ?? false;
+    if (!pairingShown && !alreadyInForm) input?.focus();
   }
+  pairingShown = state === "pairing";
 }
 
 async function daemonHealth(): Promise<Health | null> {
@@ -149,7 +173,54 @@ async function daemonHealth(): Promise<Health | null> {
   }
 }
 
-async function render(): Promise<void> {
+// Renders are SERIALISED, never run concurrently.
+//
+// `render()` is async with two awaits before it paints (getSession, the real
+// /health fetch) and more on the connected path, and it is entered from six
+// sites: module load, storage.onChanged, both Retry buttons, the post-pairing
+// path, moveQueue() and decide(). Unserialised, a render that STARTS first can
+// FINISH last and repaint a state older than one already on screen. Measured in
+// real Chrome across a real pairing: the popup painted
+// pairing -> paired -> connected -> pairing -> connected, i.e. the form came
+// back over the connected card with no state change behind it.
+//
+// Serialising rather than discarding a late paint is deliberate. render()
+// mutates module state that six review rounds' worth of latch logic depends on
+// (decidedOrigin promotion, repeatAskByOrigin pruning, shownPromptId/Origin
+// capture, scopeBuiltForEntryId). Running each render alone, to completion, is
+// exactly the behaviour that logic was written and reviewed against — it only
+// removes the interleaving. A generation counter that abandoned a render
+// mid-flight would leave those mutations half-applied.
+//
+// Bounded at one running plus one queued: a caller arriving while a render is
+// already queued gets that queued render's promise, because a render that has
+// not started yet will observe state at least as new as the caller's. So a
+// burst of storage events costs two renders, not one per event, and every
+// awaited call still resolves only after a render that began after it was made.
+let renderRunning: Promise<void> | null = null;
+let renderQueued: Promise<void> | null = null;
+
+function render(): Promise<void> {
+  if (renderQueued) return renderQueued;
+  if (!renderRunning) {
+    renderRunning = renderOnce().finally(() => {
+      renderRunning = null;
+    });
+    return renderRunning;
+  }
+  renderQueued = renderRunning
+    .catch(() => {})
+    .then(() => {
+      renderQueued = null;
+      renderRunning = renderOnce().finally(() => {
+        renderRunning = null;
+      });
+      return renderRunning;
+    });
+  return renderQueued;
+}
+
+async function renderOnce(): Promise<void> {
   // A pending site decision wins the popup: it is the one thing the user must
   // act on (findings U2/D1). The daemon reports it in /health so the popup
   // shows it even after a worker restart.
@@ -335,7 +406,30 @@ function hostnameOf(origin: string | undefined): string {
 // (finding U6); the field is also autofocused when the pairing state renders.
 const codeInput = document.getElementById("pair-code") as HTMLInputElement | null;
 codeInput?.addEventListener("input", () => {
-  codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
+  // Only reassign when sanitising actually CHANGED the string, and put the
+  // caret back where the edit left it.
+  //
+  // Assigning `.value` collapses the selection to the end of the field. Chrome
+  // short-circuits an assignment of an identical string, so digit-only typing
+  // was already safe (verified with real keystrokes, not assumed) — but typing
+  // or pasting a non-digit mid-string genuinely changes the value, and the
+  // caret then jumped to the end, so the next character landed in the wrong
+  // place. Guarding the write keeps the common path identical and fixes the
+  // stripped-character path.
+  //
+  // The caret is restored to the same offset rather than shifted, because the
+  // rejected characters are removed from BEFORE it: `selectionStart` minus the
+  // number of characters stripped ahead of the caret is where the user's edit
+  // point actually is. maxlength="6" already bounds the length for both typing
+  // and paste, so no slice is needed here.
+  const raw = codeInput.value;
+  const clean = raw.replace(/\D/g, "");
+  if (clean === raw) return;
+  const caret = codeInput.selectionStart ?? raw.length;
+  const strippedBeforeCaret = raw.slice(0, caret).length - raw.slice(0, caret).replace(/\D/g, "").length;
+  codeInput.value = clean;
+  const next = Math.max(0, caret - strippedBeforeCaret);
+  codeInput.setSelectionRange(next, next);
 });
 
 // Lock the form for the duration of one submission: a second click while the
