@@ -119,7 +119,23 @@ def backfill_analytics_session_names(
     # (analytics may read resume; resume must never import analytics).
     from local_operator.resume import session_name
 
-    store = store if store is not None else AnalyticsStore()
+    # READS AND WRITES MUST SHARE ONE ROOT. The worklist, the session tree and
+    # the recovered names all come from ``config_dir``; a default-path store
+    # would take its ledger from ``default_db_path()`` instead, so a call with
+    # an isolated ``config_dir`` read transcripts out of the sandbox and wrote
+    # the resulting names into the operator's REAL ``~/.local-operator/
+    # analytics.db`` (observed: 612 rows written into a live ledger by a single
+    # test-shaped call with ``config_dir=/tmp/bfhome2``).
+    #
+    # The bug hid because the one production caller — ``session_factory``'s
+    # store-maintenance pass — passes the real config dir, where the two roots
+    # happen to agree. It fires only when ``config_dir`` is NOT the default,
+    # which is exactly what every isolated test, QA run and agent sandbox does,
+    # defeating the isolation those runs exist to guarantee. Deriving the path
+    # here keeps the production resolution byte-identical (``default_db_path``
+    # is itself ``config_dir() / "analytics.db"``) while making an isolated
+    # call actually isolated. Do not "simplify" this back to ``AnalyticsStore()``.
+    store = store if store is not None else AnalyticsStore(config_dir / "analytics.db")
     try:
         pending = store.sessions_missing_names()
     except Exception:  # noqa: BLE001 — an unreadable ledger is a no-op sweep
