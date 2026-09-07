@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.mobile.attach_client import AttachClient
 from local_operator.session import remote as remote_module
 from local_operator.session.frontend_state import FrontendSync
 from local_operator.session.remote import FRONTEND_SYNC_SETTLE_TURNS, RemoteSession
@@ -169,8 +170,10 @@ async def _stalled_viewer_scenario(
                 while not future.done() and turns < FRONTEND_SYNC_SETTLE_TURNS:
                     await asyncio.sleep(0)
                     turns += 1
-                return f"TimeoutError (frame present after {turns} turns)" if future.done() else (
-                    "TimeoutError (frame genuinely absent)"
+                return (
+                    f"TimeoutError (frame present after {turns} turns)"
+                    if future.done()
+                    else ("TimeoutError (frame genuinely absent)")
                 )
             except ConnectionError as error:
                 return f"ConnectionError: {error}"
@@ -212,7 +215,7 @@ async def test_a_frame_that_arrived_during_a_viewer_stall_is_not_reported_as_a_t
     viewer = _viewer(tmp_path)
     # A live socket keeps the wait in the "owner is reachable" regime. A dead
     # client is a different (fast-fail) path, covered below.
-    viewer._client = _LiveClientStub()
+    viewer._client = _live_client()
 
     verdict, future = await _stalled_viewer_scenario(viewer, deadline=0.2)
 
@@ -263,7 +266,7 @@ async def test_settling_is_bounded_so_a_silent_owner_still_fails(tmp_path: Path)
     """
     viewer = _viewer(tmp_path)
     future: asyncio.Future[FrontendSync] = asyncio.get_running_loop().create_future()
-    viewer._client = _LiveClientStub()
+    viewer._client = _live_client()
 
     with pytest.raises(ConnectionError) as caught:
         await viewer._await_frontend(future, timeout=0.01)
@@ -297,7 +300,7 @@ async def test_a_dead_socket_reports_the_pumps_reason_not_the_backstop(
     """
     future: asyncio.Future[FrontendSync] = asyncio.get_running_loop().create_future()
     viewer = _viewer(tmp_path)
-    viewer._client = _LiveClientStub()
+    viewer._client = _live_client()
 
     async def kill_it() -> None:
         await asyncio.sleep(0)
@@ -362,7 +365,7 @@ async def test_the_wait_uses_the_dials_own_future_not_the_current_attribute(
     loop = asyncio.get_running_loop()
     mine: asyncio.Future[FrontendSync] = loop.create_future()
     viewer._frontend_future = mine
-    viewer._client = _LiveClientStub()
+    viewer._client = _live_client()
     expected = _sync()
 
     waiting = loop.create_task(viewer._await_frontend(mine, timeout=30.0))
@@ -446,9 +449,7 @@ async def test_a_bind_that_fails_once_then_succeeds_leaves_one_connection(
 
 
 @pytest.mark.asyncio
-async def test_a_disposed_facade_stops_retrying_immediately(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monkeypatch) -> None:
     """Disposal mid-retry must end the loop, never bind a socket to a dead facade.
 
     `/new` or `/resume` typed during a retry disposes the facade. Binding
@@ -490,9 +491,7 @@ async def test_a_disposed_facade_stops_retrying_immediately(
 
 
 @pytest.mark.asyncio
-async def test_the_retry_rediscovers_the_record_each_attempt(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_the_retry_rediscovers_the_record_each_attempt(tmp_path: Path, monkeypatch) -> None:
     """A runtime that retires and respawns between attempts must be picked up.
 
     Reusing the first record would redial a dead pid for every remaining
@@ -521,9 +520,7 @@ async def test_the_retry_rediscovers_the_record_each_attempt(
             lookups += 1
             return record, None
 
-        monkeypatch.setattr(
-            "local_operator.mobile.attach_client.find_owner_record", counting_find
-        )
+        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", counting_find)
 
         async def always_fail(record, *, sync_timeout):
             raise ConnectionError(remote_module._SYNC_UNRESPONSIVE_REASON)
@@ -572,9 +569,7 @@ def test_a_foreground_bind_never_inherits_the_background_backstop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_foreground_default_is_the_short_envelope(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_the_foreground_default_is_the_short_envelope(tmp_path: Path, monkeypatch) -> None:
     """``_ensure_bound`` defaults to the SHORT envelope.
 
     The default matters more than the parameter: a caller that forgets to pass
@@ -619,21 +614,26 @@ async def test_the_foreground_default_is_the_short_envelope(
         with pytest.raises(ConnectionError):
             await viewer._ensure_bound(foreground=False)
         assert seen and max(seen) <= remote_module.FRONTEND_SYNC_BACKSTOP_S
-        assert min(seen) > remote_module.FRONTEND_SYNC_FOREGROUND_S, (
-            "a background bind must get the generous envelope, not the short one"
-        )
+        assert (
+            min(seen) > remote_module.FRONTEND_SYNC_FOREGROUND_S
+        ), "a background bind must get the generous envelope, not the short one"
         await viewer.dispose()
     finally:
         server.close()
 
 
-class _LiveClientStub:
-    """Just enough of ``AttachClient`` for the wait's liveness question."""
+def _live_client() -> AttachClient:
+    """A client that reports itself CONNECTED, without opening a socket.
 
-    connected = True
-
-    def close(self) -> None:  # pragma: no cover - not reached by these tests
-        pass
+    ``_await_frontend``'s liveness question is only ``client.connected``, so
+    the tests that are about the WAIT need no real transport. Built by
+    ``__new__`` and typed as the real class rather than a duck-typed stub: the
+    facade's ``_client`` is genuinely ``AttachClient | None``, and a stub
+    assigned there would need a cast at every use site.
+    """
+    client = AttachClient.__new__(AttachClient)
+    client._connected = True
+    return client
 
 
 async def _no_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):

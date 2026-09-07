@@ -667,9 +667,7 @@ class RemoteSession:
             # `lop --resume`), and this budget composes with the welcome ack
             # ahead of it. The generous backstop belongs to binds nobody is
             # watching, not to this one.
-            frontend = await self._await_frontend(
-                pending_sync, timeout=FRONTEND_SYNC_FOREGROUND_S
-            )
+            frontend = await self._await_frontend(pending_sync, timeout=FRONTEND_SYNC_FOREGROUND_S)
             self._install_frontend(frontend.snapshot)
             await self._load_frontend_history(frontend)
         except BaseException:
@@ -1321,9 +1319,7 @@ class RemoteSession:
             # and nothing written it exits in ~3 s and removes its directory.
             if self._disposed:
                 return
-            sync_timeout = (
-                FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
-            )
+            sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
             budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
             deadline = time.monotonic() + budget
             delay = _BIND_RETRY_INITIAL_S
