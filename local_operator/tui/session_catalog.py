@@ -64,12 +64,42 @@ class CatalogEntry:
             return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
             )
-        return {
-            "busy": "Working",
-            "idle": "Ready",
-            "attached": "Open",
-            "wedged": "Not responding",
-        }.get(self.row.live_state, "Recent")
+        if self.row.live_state == "wedged":
+            return "Not responding"
+        if self.row.live_state == "busy":
+            return "Working"
+        # Follows ``row_state_mark``'s precedence EXACTLY, so the tooltip can
+        # never name a different state from the glyph beside it. The glyph is a
+        # single character and the description is where a user finds out what it
+        # meant, so the two disagreeing is worse than either being terse.
+        #
+        # Every branch below mirrors one in ``row_state_mark``, in its order:
+        # attached outranks an armed wake, which outranks idle, and a DORMANT
+        # wake falls through to the cold case — where it is still the glyph, so
+        # it must still be the words (round 1, D1: a cold row with a stopped
+        # schedule drew the wake mark while the tooltip said "Recent").
+        if self.row.live_state == "attached":
+            return "Open"
+        if self.row.wakes and not self.row.wakes_dormant:
+            count = self.row.wakes
+            return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
+        if self.row.live_state == "idle":
+            return "Ready"
+        if self.row.wakes:
+            # Dormant: the schedule exists but the session was stopped, so it is
+            # not going to fire. Named rather than hidden — a user who sees the
+            # glyph needs to know why it is not going to act.
+            #
+            # "dormant" rather than a fresh adjective, because the stop receipt
+            # this state comes FROM already says "N wakes dormant until you
+            # reopen it" (``control.py`` / ``app.py``). Design review round 2
+            # (D5) flagged that an earlier draft here said "paused" and split
+            # the vocabulary for one fact across two surfaces; the receipt's
+            # word is the established one, so this follows it rather than
+            # asking the receipt to move.
+            count = self.row.wakes
+            return f"Stopped ({count} wake{'s' if count != 1 else ''} dormant)"
+        return "Recent"
 
 
 def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:

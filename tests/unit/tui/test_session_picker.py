@@ -1828,3 +1828,91 @@ def test_the_signature_names_only_real_row_fields() -> None:
     assert not unknown, f"signature names fields SessionRow does not have: {sorted(unknown)}"
     # Identity must be in it, or a pure reorder compares equal.
     assert "id" in SessionPickerScreen._SIGNATURE_FIELDS
+
+
+def test_an_armed_wake_outranks_idle_but_not_attached() -> None:
+    """The reported ask: "show the wake symbol if it's just scheduled wakes".
+
+    Under the original precedence the wake glyph was UNREACHABLE for any live
+    session: a session with a wake armed is by definition resident, so
+    `idle`/`attached` matched first and the wake was only ever visible on a
+    cold row — one with no runtime to fire it. That is backwards, because the
+    cold row is the one where the schedule means least.
+
+    `idle` is the least informative thing true of a row (every resident session
+    has it); "this will act on its own later" is a fact nothing else conveys.
+
+    `attached` is NOT that, and this test asserts the distinction because the
+    first cut of the change got it wrong (round 1, D2): `○` means *a terminal
+    is watching this session*, which on a list the user is scanning is the one
+    mark that answers "where am I?". A wake outranks bare residency and loses
+    to presence.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        WAKE_MARKER,
+        row_state_mark,
+    )
+
+    idle = _row("wake00000001", "armed")._replace(live_state="idle", wakes=2)
+    assert row_state_mark(idle, 0)[0] == WAKE_MARKER
+
+    watched = _row("wake00000003", "armed and watched")._replace(live_state="attached", wakes=2)
+    assert row_state_mark(watched, 0)[0] == ATTACHED_MARKER
+
+    # A cold row with an armed wake still shows it — that never regressed.
+    cold = _row("wake00000004", "cold armed")._replace(wakes=1)
+    assert row_state_mark(cold, 0)[0] == WAKE_MARKER
+
+    # And with no wake armed, presence still renders exactly as before.
+    plain = _row("idle00000002", "no wake")._replace(live_state="idle")
+    assert row_state_mark(plain, 0)[0] == IDLE_MARKER
+
+
+def test_a_dormant_wake_stays_below_presence() -> None:
+    """A stopped session's schedule is not going to fire, so it must not win.
+
+    Promoting it would advertise a future that is not coming over a runtime
+    that is genuinely here. On a COLD row it still renders, dimmed, because
+    there it is the last thing worth saying about the session.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        IDLE_MARKER,
+        WAKE_MARKER,
+        row_state_mark,
+    )
+
+    live = _row("dorm00000001", "stopped but resident")._replace(
+        live_state="idle", wakes=1, wakes_dormant=True
+    )
+    assert row_state_mark(live, 0)[0] == IDLE_MARKER
+
+    cold = _row("dorm00000002", "cold")._replace(wakes=1, wakes_dormant=True)
+    glyph, ink = row_state_mark(cold, 0)
+    assert glyph == WAKE_MARKER
+    assert ink == "dim", "a dormant wake must read as quieter than an armed one"
+
+
+def test_urgency_still_outranks_an_armed_wake() -> None:
+    """Promoting wakes must not have demoted anything above them.
+
+    A person waiting and a broken runtime are both more urgent than a schedule,
+    and a live turn is what the spinner exists for.
+    """
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        NEEDS_YOU_MARKER,
+        WEDGED_MARKER,
+        row_state_mark,
+    )
+
+    base = dict(wakes=3, wakes_dormant=False)
+    pending = _row("urg000000001", "waiting")._replace(pending="approval", **base)
+    assert row_state_mark(pending, 0)[0] == NEEDS_YOU_MARKER
+
+    wedged = _row("urg000000002", "broken")._replace(live_state="wedged", **base)
+    assert row_state_mark(wedged, 0)[0] == WEDGED_MARKER
+
+    busy = _row("urg000000003", "working")._replace(live_state="busy", **base)
+    assert row_state_mark(busy, 0)[0] in set(SPINNER_FRAMES)
