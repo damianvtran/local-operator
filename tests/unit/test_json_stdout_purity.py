@@ -104,16 +104,17 @@ def test_background_job_notices_go_to_stderr(tmp_path, monkeypatch) -> None:
     """--json and --background are independent flags, so the two 'Started
     background job' lines must not precede the event stream on stdout."""
     from local_operator import exec_mode
+    from local_operator.paths import CONFIG_DIR_ENV
 
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda _a: None)
-    monkeypatch.setattr(exec_mode, "_ensure_logs_dir", lambda: tmp_path)
     monkeypatch.setattr(exec_mode, "_append_job_record", lambda *a, **k: None)
-    # LOGS_DIR is resolved at IMPORT time from Path.home(), so patching only
-    # _ensure_logs_dir left the log path pointing at the real $HOME — the test
-    # passed on a machine that happened to have that directory and failed on a
-    # clean one. Both have to be redirected.
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", tmp_path)
-    monkeypatch.setattr(exec_mode, "JOBS_LEDGER", tmp_path / "jobs.jsonl", raising=False)
+    # ONE seam redirects the whole logs root, because ``exec_mode.logs_dir()``
+    # resolves through ``paths.config_dir()`` on every call. This previously
+    # needed two patches (``_ensure_logs_dir`` AND the import-time ``LOGS_DIR``
+    # constant): stubbing only the first left the log path on the real $HOME, so
+    # the test passed on a machine that happened to have that directory and
+    # failed on a clean one. A resolver has no second copy to forget.
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
 
     class FakeProc:
         pid = 4242

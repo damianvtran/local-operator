@@ -42,6 +42,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
+from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 
@@ -719,9 +720,24 @@ async def test_run_print_mode_runs_before_dispose_when_the_prompt_raises() -> No
 # --- exec_mode background --------------------------------------------------------
 
 
+def _redirect_logs_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point exec's logs/ledger root at ``tmp_path`` and return it.
+
+    Sets ``LOCAL_OPERATOR_CONFIG_DIR``, which is the ONLY seam now that
+    ``exec_mode.logs_dir()`` resolves through ``paths.config_dir()`` on every
+    call rather than freezing a module constant at import. That is deliberately
+    stricter than the ``monkeypatch.setattr(exec_mode, "LOGS_DIR", ...)`` these
+    tests used before: patching the constant redirected the ledger while every
+    OTHER root exec touches stayed on the real home, so a test could still reach
+    outside its sandbox through a path it was not thinking about.
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+    return root / "logs"
+
+
 def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
-    logs_dir = tmp_path / "logs"
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
 
     popen_mock = MagicMock()
@@ -808,9 +824,8 @@ def test_spawn_background_unconfigured_hosting_returns_one(
 
 def test_ledger_reader_tolerates_partial_line(tmp_path: Path, monkeypatch) -> None:
     """CL-11: a truncated trailing line (crash mid-write) never breaks reads."""
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    logs_dir.mkdir(parents=True)
     good = json.dumps({"id": "abc", "prompt": "ok"})
     (logs_dir / exec_mode.JOBS_FILE).write_text(
         good + "\n" + '{"id": "de", "prom', encoding="utf-8"
@@ -821,9 +836,8 @@ def test_ledger_reader_tolerates_partial_line(tmp_path: Path, monkeypatch) -> No
 
 
 def test_logs_dir_and_log_file_permissions(monkeypatch, tmp_path: Path) -> None:
-    """CL-10: LOGS_DIR is 0700 and job logs are created 0600."""
-    logs_dir = tmp_path / "logs"
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    """CL-10: the logs dir is 0700 and job logs are created 0600."""
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 1
@@ -841,8 +855,7 @@ def test_background_preflight_blocks_spawn(
 ) -> None:
     """CL-09: a failed hosting/model resolution returns non-zero WITHOUT
     spawning the worker or writing a log."""
-    logs_dir = tmp_path / "logs"
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
 
     def broken(args):
         raise ValueError("Model name is not configured.")
@@ -863,9 +876,8 @@ def test_background_preflight_blocks_spawn(
 
 def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> None:
     """CL-09: main() with --job-id appends finished_at + exit_code."""
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    monkeypatch.setattr(exec_mode, "LOGS_DIR", logs_dir)
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    logs_dir.mkdir(parents=True)
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "job1"])
     monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
 
@@ -1007,3 +1019,241 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
     assert proc.returncode == 130, f"stdout={stdout!r} stderr={stderr!r}"
     assert "EXIT 130" in stdout
     assert "Traceback" not in stderr
+
+
+# --- exec config-root resolution (#737 regression guards) -------------------------
+#
+# Both sites below hardcoded ``Path.home() / ".local-operator"`` and were fixed in
+# #737 to resolve through ``paths.config_dir()``. That fix shipped UNGUARDED: the
+# whole exec suite passed with either site reverted, because the only test that
+# reached ``_default_session_factory`` stubbed the managers with
+# ``lambda *a: object()`` and threw the directory away. These tests assert on the
+# ROOT THAT WAS ACTUALLY RESOLVED, so a revert to the hardcoded root fails them.
+#
+# ``LOCAL_OPERATOR_CONFIG_DIR`` is set with ``monkeypatch.setenv`` (the convention
+# everywhere else in the suite), which unsets it at teardown; the autouse
+# ``isolate_environment`` fixture in ``tests/conftest.py`` scrubs it and redirects
+# ``HOME`` to a scratch dir, so the "home root" a mutant would resolve is that
+# scratch dir and never the operator's real ``~/.local-operator``.
+
+
+def test_worker_session_factory_resolves_the_config_dir_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``exec --background``'s worker builds its managers under the override.
+
+    The BACKGROUND worker inherits the spawner's environment, so a hardcoded root
+    here made ``exec --background`` ignore ``LOCAL_OPERATOR_CONFIG_DIR`` while the
+    foreground run honoured it — one entry point resolving two different roots
+    depending on a flag. It also feeds the analytics session-name backfill through
+    ``create_session``'s store-maintenance pass, which writes to whatever root it
+    is handed, so a wrong root here strands names in a ledger nothing reads.
+
+    Asserted on the DIRECTORY EACH MANAGER RECEIVED, not on the fact that a call
+    happened: the pre-existing ``test_build_worker_argv_train_threaded_to_worker``
+    stubs the same three managers with ``lambda *a: object()`` and discards the
+    argument, which is exactly why the revert of this site passed 36/36.
+    """
+    override = tmp_path / "override-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+    home_root = Path.home() / ".local-operator"
+
+    seen: dict[str, Path] = {}
+
+    def capture(name: str) -> Callable[..., object]:
+        def factory(directory: Path, *_rest: object, **_kwargs: object) -> object:
+            seen[name] = Path(directory)
+            return object()
+
+        return factory
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", capture("config"))
+    monkeypatch.setattr("local_operator.credentials.CredentialManager", capture("credentials"))
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", capture("agents"))
+    monkeypatch.setattr(
+        "local_operator.session_factory.create_session", lambda *a, **k: None  # noqa: ARG005
+    )
+
+    parsed = exec_worker.build_parser().parse_args(["--prompt", "x"])
+    exec_worker._default_session_factory(parsed)
+
+    assert seen == {
+        "config": override,
+        "credentials": override,
+        "agents": override,
+    }, (
+        f"the worker built its managers under {sorted(set(map(str, seen.values())))} "
+        f"instead of the override {override}; the home root is {home_root}"
+    )
+
+
+def test_worker_session_factory_writes_nothing_outside_the_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same site, asserted on the SIDE EFFECTS of the real managers.
+
+    The stub test above pins the argument; this one pins where the bytes land,
+    with the genuine ``ConfigManager``/``CredentialManager``/``AgentRegistry``
+    constructed. That distinction is the whole lesson of #737's analytics half:
+    a redirected read path is not automatically a redirected WRITE path, and only
+    looking at the filesystem afterwards tells them apart. Constructing these
+    managers creates ``agents/`` and ``credentials.env``, so a hardcoded root
+    leaves that litter under ``HOME`` (the scratch ``HOME`` here — never the
+    operator's real one, which is what makes this safe to assert on).
+    """
+    override = tmp_path / "override-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+    home_root = Path.home() / ".local-operator"
+    assert not home_root.exists(), "the scratch HOME must start clean for this assertion"
+
+    monkeypatch.setattr(
+        "local_operator.session_factory.create_session", lambda *a, **k: None  # noqa: ARG005
+    )
+
+    parsed = exec_worker.build_parser().parse_args(["--prompt", "x"])
+    exec_worker._default_session_factory(parsed)
+
+    # Asserted FIRST because it is the actual harm: an isolated exec run laying
+    # down credentials and an agent registry in the operator's real home.
+    assert not home_root.exists(), (
+        f"the worker created {sorted(p.name for p in home_root.rglob('*'))} under the "
+        f"home root {home_root} while LOCAL_OPERATOR_CONFIG_DIR pointed at {override}"
+    )
+    assert override.is_dir(), f"nothing was created under the override {override}"
+
+
+def test_preflight_resolves_agents_and_config_from_the_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``resolve_hosting_model_dry`` reads the override's agents and config.
+
+    Preflight exists to resolve hosting/model through the EXACT path the worker
+    will use, so reading a different root than the worker defeats its purpose:
+    with the override set, the hardcoded root validated against the developer's
+    real agents and config and then spawned a worker that used the override's.
+
+    Both roots are populated with DIFFERENT, individually valid answers, so the
+    returned pair names which root was read — a test that only seeded the
+    override would pass on a mutant by failing to find anything at either root
+    for the wrong reason. The agent is seeded only in the override, so
+    ``--agent-id`` resolving at all is itself evidence of the root used.
+    """
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.config import ConfigManager
+
+    home_root = Path.home() / ".local-operator"
+    ConfigManager(home_root).update_config({"hosting": "openai", "model_name": "home-model"})
+
+    override = tmp_path / "override-config"
+    ConfigManager(override).update_config({"hosting": "anthropic", "model_name": "override-model"})
+    agent = AgentRegistry(override).create_agent(
+        AgentEditFields(
+            name="guarded",
+            security_prompt=None,
+            hosting="anthropic",
+            model="agent-model",
+            description=None,
+            last_message=None,
+            temperature=None,
+            tags=[],
+            categories=[],
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+
+    # No selector: the answer comes from the config file, so it names the root.
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs()) == (
+        "anthropic",
+        "override-model",
+    ), "preflight read the config file at the home root instead of the override"
+
+    # And the registry lookup: this id exists ONLY under the override, so a
+    # preflight reading the home root raises "No agent found with ID".
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs(agent_id=agent.id)) == (
+        "anthropic",
+        "agent-model",
+    ), "preflight read the agent registry at the home root instead of the override"
+
+
+def test_background_logs_and_ledger_follow_the_config_dir_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The jobs ledger and the job log live under the override, not the home root.
+
+    ``exec_mode.logs_dir()`` was a module constant hardcoding the home root — the
+    fourth copy of the expression #737 fixed at the other three sites in this file.
+    It split the jobs ledger away from the root the rest of exec mode honours: an
+    isolated ``exec --background`` built its config and agents under the override
+    and then wrote its log and its ledger into the operator's real home, which is
+    both the isolation defect #737 exists to prevent and litter nothing cleans up.
+
+    Asserted on the FILES THAT APPEAR, not on the resolver's return value: a
+    resolver can be correct while a caller keeps a stale copy of the old root, and
+    only looking at the filesystem afterwards tells those apart. The whole spawn
+    runs for real (``Popen`` alone is faked), so this covers the log path, the
+    0700 directory and the ledger write in one pass.
+    """
+    override = tmp_path / "override-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+    home_logs = Path.home() / ".local-operator" / "logs"
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 5150
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+
+    assert exec_mode.run_exec("isolated background task", ExecArgs(background=True)) == 0
+
+    # Asserted FIRST because it is the actual harm: a sandboxed run leaving its
+    # log and its job ledger in the operator's real home.
+    assert not home_logs.exists(), (
+        f"the spawn wrote {sorted(p.name for p in home_logs.rglob('*'))} into the home "
+        f"root {home_logs} while LOCAL_OPERATOR_CONFIG_DIR pointed at {override}"
+    )
+
+    logs_root = override / "logs"
+    assert [
+        p.name for p in logs_root.glob("exec-*.log")
+    ], f"no job log under the override's logs root {logs_root}"
+    assert (
+        logs_root / exec_mode.JOBS_FILE
+    ).exists(), f"the jobs ledger did not land under the override's logs root {logs_root}"
+    # The ledger is READ back through the same resolver, so a reader left on the
+    # old root would find nothing even though the write succeeded.
+    assert [r["pid"] for r in exec_mode.read_job_records()] == [5150]
+
+
+def test_worker_exit_record_follows_the_config_dir_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``update_job_exit`` writes the terminal record under the override too.
+
+    A separate entry point from the spawn: the detached worker calls this in its
+    own process at exit, inheriting the spawner's environment. With the root
+    hardcoded, the spawn record and the terminal record could land in two
+    different ledgers — the job would look permanently unfinished to any reader.
+    """
+    override = tmp_path / "override-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+    home_logs = Path.home() / ".local-operator" / "logs"
+
+    monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "jobx"])
+    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
+
+    assert exec_worker.main() == 0
+
+    assert not home_logs.exists(), (
+        f"the worker wrote its terminal record into the home root {home_logs} "
+        f"while LOCAL_OPERATOR_CONFIG_DIR pointed at {override}"
+    )
+    assert (override / "logs" / exec_mode.JOBS_FILE).exists()
+    records = exec_mode.read_job_records()
+    assert any(r["id"] == "jobx" and r["exit_code"] == 0 for r in records)
