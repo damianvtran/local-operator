@@ -877,11 +877,11 @@ upstream also touched.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,
-such as a design fix after a terminal code round — make it stale, and
-"everything else is green" is exactly when that lapses. The narrow exception
-is the one the freshness rules already name: changes that are exclusively
-non-conflicting fixes from parallel approved streams.
-
+such as a design fix after a terminal code round — make it stale, and the
+merge gate needs a fresh round on the current head. "Everything else is green"
+is exactly when that lapses. The one narrow exception: changes since the
+review that are exclusively non-conflicting fixes from parallel approved
+streams — a docs or nit commit from another round — leave it fresh.
 
 ## Security advisories
 
