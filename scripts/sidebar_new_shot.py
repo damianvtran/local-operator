@@ -3,7 +3,7 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/sidebar_new_shot.py OUT.svg [splash|band|return|notice] [COLSxROWS]
+        scripts/sidebar_new_shot.py OUT.svg [splash|band|return|notice|toast] [COLSxROWS]
 
 Every frame here is only reachable through the sidebar's prepare/commit pair,
 which is why this drives that pair rather than `/new` alone: plain `/new` was
@@ -24,6 +24,13 @@ the conversation it left instead of retiring it:
   returns, and drives the `refresh_info()` repaint that used to take the row
   away — so the captured frame is the one AFTER the poll that exposed the loss,
   not the stale frame that survived the switch.
+* ``toast`` stops HALFWAY through ``notice``'s journey, on the session switched
+  TO, which is where the notice's toast used to follow the user (design round 2,
+  D2). The notice and the toast are raised together and have opposite lifetimes:
+  the splash ROW is the parked conversation's own empty-state content and must
+  come back, the TOAST is a transient overlay about the conversation being LEFT
+  and must not travel. This frame is the second half of that pair — read it
+  beside ``notice``, which shows the row surviving the return.
 """
 
 from __future__ import annotations
@@ -105,7 +112,19 @@ async def main() -> None:
             for _ in range(20):
                 await pilot.pause()
 
-            if which == "notice":
+            if which == "toast":
+                # Same setup as `notice`, captured one leg earlier: the toast is
+                # still up when the conversation is parked, so the frame shows
+                # what the session switched TO is wearing.
+                app._announce_on_splash(
+                    "/login openai to get started - no provider configured.", "warning"
+                )
+                for _ in range(10):
+                    await pilot.pause()
+                await _switch(app, pilot, busy)
+                for _ in range(20):
+                    await pilot.pause()
+            elif which == "notice":
                 # The warning belongs to the conversation being PARKED, so it is
                 # raised before the switch and read back after the return.
                 app._announce_on_splash(
@@ -168,6 +187,12 @@ async def main() -> None:
             started = getattr(view, "conversation_started", None)
             print(f"conversation_started={started() if started else 'n/a'}")
             print(f"splash_notice={app._splash_notice!r}")
+            # Counted from `display`, not from the owner tag: what the user sees
+            # is a card on screen, and a hidden toast still holding a tag is
+            # invisible. This is the D2 measurement.
+            from local_operator.tui.widgets.toast import Toast
+
+            print(f"live_toasts={len([t for t in app.query(Toast) if t.display])}")
             print(f"screen size={tuple(app.screen.size)} virtual={tuple(app.screen.virtual_size)}")
             print(f"scrollbar={app.screen.show_vertical_scrollbar}")
             save_capture(app, out)
