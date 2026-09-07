@@ -65,9 +65,7 @@ PKGS_PREFIX = "import pyautogui; import time; import platform; {command}"
 
 def _guest_argv_for(typed_text: str) -> list[str]:
     """The argv our provider would hand the guest for one ``type`` action."""
-    statement = actions.compile_action(
-        TypeAction(observation_id="o", text=typed_text), _geo()
-    )
+    statement = actions.compile_action(TypeAction(observation_id="o", text=typed_text), _geo())
     assert statement is not None
     return python_source_argv(PKGS_PREFIX.format(command=statement))
 
@@ -130,9 +128,7 @@ def test_a_pkill_shaped_payload_no_longer_matches_our_own_live_process() -> None
         else:
             pytest.fail("the guest-exec stand-in never became visible to pgrep")
 
-        matched = subprocess.run(
-            ["pgrep", "-f", FATAL_PATTERN], capture_output=True, text=True
-        )
+        matched = subprocess.run(["pgrep", "-f", FATAL_PATTERN], capture_output=True, text=True)
         pids = {int(pid) for pid in matched.stdout.split() if pid.isdigit()}
         assert process.pid not in pids
     finally:
