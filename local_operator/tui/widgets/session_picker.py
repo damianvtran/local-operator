@@ -242,6 +242,39 @@ IDLE_MARKER = "●"
 #: remedy differs: a wedged session is one to `lop stop`, not to reopen.
 WEDGED_MARKER = "✗"
 
+#: An unacknowledged completion, by kind. The sidebar paints these over the
+#: live-state glyph for a row whose last turn finished unread; they live here
+#: beside the other markers so one module owns the list's whole glyph
+#: vocabulary and a future author can see at a glance which cells are taken.
+#:
+#: ``⊘`` for interrupted is NOT a new invention — it is the glyph this
+#: codebase ALREADY uses for that exact state everywhere else it renders an
+#: outcome: ``tool_card.ICON_INTERRUPTED``, the subagent panel's
+#: ``⊘ cancelled`` and ``session_presentation``'s "shut `interrupted ⊘` row".
+#: The sidebar was the lone surface collapsing interrupted into ``✗``, so this
+#: removes a second vocabulary rather than adding one. ``tool_card``'s contract
+#: — "``✓``/``✗``/``⊘`` separate success, failure and interruption without a
+#: single colour" — is the reason the fix is a SHAPE and not a tint: a design
+#: round on the neighbouring markers measured `muted` against `dim` at 1.90:1
+#: and rejected distinguishing two states by ink alone, and an interruption
+#: against a failure is exactly that comparison.
+#:
+#: One cell each, like every marker above: ``STATE_COL_CELLS`` reserves glyph
+#: plus separator, and a two-cell glyph eats the separator (the ⏰ regression
+#: ``WAKE_MARKER`` records). Verified with ``rich.cells.cell_len``.
+COMPLETION_MARKERS: dict[str, tuple[str, str]] = {
+    # `complete` and `error` keep the ink they had. `interrupted` takes
+    # `warning` rather than `danger`: an interrupted turn is unfinished work,
+    # not a failure, and `danger` is the ramp's "something broke" hue — the
+    # exact false alarm the operator reported when seven interrupted sessions
+    # read as seven errors. `warning` is also the ink `NEEDS_YOU_MARKER`
+    # already carries for "this needs you to do something", which is precisely
+    # what an interrupted turn is asking for: somebody to resume it.
+    "complete": ("✓", "success"),
+    "error": ("✗", "danger"),
+    "interrupted": ("⊘", "warning"),
+}
+
 #: Cells reserved for the live-state column when ANY row in the result set
 #: carries state. One cell for the state glyph plus its separating space; the
 #: spinner frames, the wake glyph and the markers above are all one cell wide.

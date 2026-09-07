@@ -66,17 +66,62 @@ class CatalogEntry:
         return tier, -self.row.mtime, self.id
 
     @property
+    def shows_completion_mark(self) -> bool:
+        """Does an unread completion win the glyph, or does live state?
+
+        THE single arbiter for that question: the sidebar reads it to decide
+        whether to override :func:`row_state_mark`, and :attr:`status` reads it
+        to decide whether to say "Unseen …". They used to make the decision
+        separately, in matching order, held together by a comment asking the
+        next author to keep them in step. That is what broke — and the pairing
+        invariant this file already treats as load-bearing deserves a predicate
+        rather than a promise.
+
+        ``unseen`` is a LEVEL, not an edge: it is true from the moment a turn
+        completes until somebody READS that session, and resuming a session
+        does not acknowledge it. So the mark alone cannot be allowed to win —
+        it says what the session did LAST, and the states below say what it is
+        doing NOW:
+
+        * ``pending`` — a parked gate. Already outranked unseen, and still
+          does: a person is blocked on this row right now.
+        * ``wedged`` — broken NOW. A stale mark from a turn that did finish
+          must not hide a runtime that has since stopped answering.
+        * ``busy`` — the reported bug. The session is working; painting the
+          previous turn's outcome over its own spinner made seven resumed,
+          healthy sessions read as seven failures.
+
+        Everything BELOW stays outranked by the mark, deliberately. ``attached``,
+        an armed wake and ``idle`` are all facts about residency — true of a
+        session that is merely sitting there — while "this finished and you
+        have not read it" is a fact about work that is waiting for the
+        operator. An unseen completion on a now-idle session is exactly the
+        information the sidebar exists to keep, so it is kept.
+
+        Note this changes the GLYPH only, never :attr:`rank`: the row stays in
+        its unseen tier and keeps its place in "Active Sessions". Ranking
+        answers "how far up the list", which the completion still earns; this
+        answers "what is it doing", which the spinner owns while it runs.
+        """
+        return (
+            self.unseen and not self.row.pending and self.row.live_state not in ("wedged", "busy")
+        )
+
+    @property
     def status(self) -> str:
         if self.row.pending:
             return "Approval needed" if self.row.pending == "approval" else "Answer needed"
-        if self.unseen:
-            return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
-                self.completion_kind, "Unseen completion"
-            )
+        # BEFORE the unseen branch, and mirrored by `shows_completion_mark`,
+        # which is what the sidebar suppresses the mark on. A row that is
+        # wedged or busy describes itself by what it is doing now.
         if self.row.live_state == "wedged":
             return "Not responding"
         if self.row.live_state == "busy":
             return "Working"
+        if self.shows_completion_mark:
+            return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
+                self.completion_kind, "Unseen completion"
+            )
         # Follows ``row_state_mark``'s precedence EXACTLY, so the tooltip can
         # never name a different state from the glyph beside it. The glyph is a
         # single character and the description is where a user finds out what it

@@ -25,7 +25,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
-from local_operator.tui.widgets.session_picker import row_state_mark
+from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS, row_state_mark
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
@@ -725,11 +725,23 @@ class SessionSidebar(Widget, can_focus=True):
                 # notice gets a spinner ON THE ROW, where the eye is. The
                 # footer "Opening…" stays as the textual counterpart.
                 mark, ink = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)], "accent"
-            elif entry.unseen and not entry.row.pending:
-                mark, ink = (
-                    ("✗", "danger")
-                    if entry.completion_kind in ("error", "interrupted")
-                    else ("✓", "success")
+            elif entry.shows_completion_mark:
+                # `shows_completion_mark`, not `unseen`, is the test: an unread
+                # completion says what the session did LAST, and a busy or
+                # wedged row is saying what it is doing NOW. The old condition
+                # was `unseen and not pending`, which let a resumed session
+                # paint its previous turn's mark over its own spinner —
+                # `unseen` only clears on acknowledgement, and resuming does
+                # not acknowledge. That predicate is shared with
+                # `CatalogEntry.status` so this glyph and that tooltip cannot
+                # disagree; see its docstring for the whole ordering argument.
+                #
+                # `interrupted` no longer borrows the error glyph. It is the
+                # commonest of the three in practice — the operator's store
+                # held 41 interrupted and zero errors — so the shared `✗` meant
+                # the failure mark had, in practice, only ever been wrong.
+                mark, ink = COMPLETION_MARKERS.get(
+                    entry.completion_kind, COMPLETION_MARKERS["complete"]
                 )
             line.append(f"{mark or ' '} ", style=theme_mod.semantic_color(ink))
             age = (
