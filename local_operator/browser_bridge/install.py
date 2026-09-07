@@ -157,6 +157,14 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
 MIN_SYSTEMD_APPEND_VERSION = 240
 
 
+class _Detect:
+    """Sentinel type: "detect the version" as distinct from "it is unknown"."""
+
+
+#: Default for ``render_systemd(version=...)``. See the note at its use site.
+_DETECT = _Detect()
+
+
 def systemd_version() -> int | None:
     """Major version of the running systemd, or ``None`` if it cannot be read.
 
@@ -176,7 +184,7 @@ def systemd_version() -> int | None:
     return int(match.group(1)) if match else None
 
 
-def render_systemd(port: int = DEFAULT_PORT, *, version: int | None = None) -> str:
+def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = _DETECT) -> str:
     """The user unit.
 
     ``StandardOutput``/``StandardError`` are the reason this takes a version.
@@ -190,7 +198,13 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None = None) -> s
     ``No such file or directory`` while the output sat in the journal.
     """
     command = f"{sys.executable} -m local_operator.browser_bridge.daemon --port {port}"
-    resolved = systemd_version() if version is None else version
+    # ``_DETECT`` and not ``None`` as the default: ``None`` is a MEANINGFUL
+    # version value here ("systemd is present but its version could not be
+    # read"), so overloading it to also mean "caller did not pass one" would
+    # make that branch unreachable — and untestable — on any machine where
+    # detection happens to succeed. Caught by CI, whose Linux runners detect a
+    # modern systemd and so silently took the redirect path.
+    resolved = systemd_version() if isinstance(version, _Detect) else version
     redirect = ""
     if resolved is not None and resolved >= MIN_SYSTEMD_APPEND_VERSION:
         redirect = f"StandardOutput=append:{log_path()}\nStandardError=append:{log_path()}\n"
